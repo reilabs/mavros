@@ -236,7 +236,7 @@ impl WitnessToRef {
                                         let pure_refed = function.fresh_value();
                                         new_instructions.push(OpCode::PureToWitnessRef {
                                             result: pure_refed,
-                                            value: wit,
+                                            value: pure,
                                             result_annotation: ConstantTaint::Witness,
                                         });
                                         new_instructions.push(OpCode::BinaryArithOp {
@@ -260,7 +260,7 @@ impl WitnessToRef {
                                         let pure_refed = function.fresh_value();
                                         new_instructions.push(OpCode::PureToWitnessRef {
                                             result: pure_refed,
-                                            value: wit,
+                                            value: pure,
                                             result_annotation: ConstantTaint::Witness,
                                         });
                                         let a = if a == wit { wit } else { pure_refed };

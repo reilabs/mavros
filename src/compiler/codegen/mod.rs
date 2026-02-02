@@ -495,8 +495,13 @@ impl CodeGen {
                 ssa::OpCode::Cast {
                     result: r,
                     value: v,
-                    target: _tgt,
+                    target: tgt,
                 } => {
+                    if *tgt == ssa::CastTarget::Nop {
+                        let pos = layouter.variables[v];
+                        layouter.variables.insert(*r, pos);
+                        continue;
+                    }
                     let result = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
