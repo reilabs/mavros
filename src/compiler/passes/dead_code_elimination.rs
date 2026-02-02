@@ -209,6 +209,9 @@ impl DCE {
                             result_type: _,
                         }
                         | OpCode::MkTuple { .. } => {},
+                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                        }
                     }
                 }
 

@@ -109,9 +109,11 @@ impl WitnessWriteToFresh {
                         | OpCode::Lookup { .. }
                         | OpCode::DLookup { .. }
                         | OpCode::ReadGlobal { .. }
-                        | OpCode::Todo { .. } 
-                        | OpCode::TupleProj { .. } 
-                        | OpCode::MkTuple { .. } 
+                        | OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. }
+                        | OpCode::Todo { .. }
+                        | OpCode::TupleProj { .. }
+                        | OpCode::MkTuple { .. }
                         => instruction.clone(),
                     };
                     *instruction = new_instruction;

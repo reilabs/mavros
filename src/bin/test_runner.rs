@@ -117,7 +117,7 @@ fn run_single(root: PathBuf) {
 
     // 5. Run witgen  (depends on WITGEN_COMPILE)
     let had_witgen_binary = witgen_binary.is_some();
-    let witgen_result = witgen_binary.and_then(|mut binary| {
+    let witgen_result = witgen_binary.and_then(|(mut binary, global_frame_size)| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref()?;
@@ -126,6 +126,7 @@ fn run_single(root: PathBuf) {
             r1cs.witness_layout,
             r1cs.constraints_layout,
             params,
+            global_frame_size,
         );
         emit("END:WITGEN_RUN:ok");
         Some(result)
@@ -157,7 +158,7 @@ fn run_single(root: PathBuf) {
     }
 
     // 8. Run AD  (depends on AD_COMPILE, independent of witgen)
-    let ad_result = ad_binary.and_then(|mut binary| {
+    let ad_result = ad_binary.and_then(|(mut binary, global_frame_size)| {
         emit("START:AD_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -169,6 +170,7 @@ fn run_single(root: PathBuf) {
             &ad_coeffs,
             r1cs.witness_layout,
             r1cs.constraints_layout,
+            global_frame_size,
         );
         emit("END:AD_RUN:ok");
         Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))

@@ -369,6 +369,8 @@ impl UntaintControlFlow {
                         results,
                         result_types: result_types.iter().map(|tp| self.pure_taint_for_type(tp.clone())).collect(),
                     },
+                    OpCode::InitGlobal { global, value } => OpCode::InitGlobal { global, value },
+                    OpCode::DropGlobal { global } => OpCode::DropGlobal { global },
                 };
                 new_instructions.push(new);
             }
@@ -620,7 +622,10 @@ impl UntaintControlFlow {
                     
                     OpCode::TupleProj {..} => {
                         new_instructions.push(instruction);
-                    } 
+                    }
+                    OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                        new_instructions.push(instruction);
+                    }
                     _ => {
                         panic!("Unhandled instruction {:?}", instruction);
                     }

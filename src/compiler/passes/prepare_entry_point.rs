@@ -1,4 +1,4 @@
-use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, BlockId, CastTarget, Function, OpCode, SeqType, TupleIdx, ValueId, SSA}};
+use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, BlockId, CastTarget, Const, Function, GlobalDef, OpCode, SeqType, TupleIdx, ValueId, SSA}};
 
 pub struct PrepareEntryPoint {}
 
@@ -31,6 +31,9 @@ impl PrepareEntryPoint {
         let param_types = original_main.get_param_types();
         let return_types = original_main.get_returns().to_vec();
 
+        // Collect globals info before borrowing ssa mutably
+        let globals: Vec<GlobalDef> = ssa.get_globals().to_vec();
+
         ssa.get_main_mut().set_name("original_main".to_string());
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
@@ -49,6 +52,42 @@ impl PrepareEntryPoint {
             return_input_values.push(val);
         }
 
+        // Emit InitGlobal for each global before the call
+        for (i, global) in globals.iter().enumerate() {
+            match global {
+                GlobalDef::Const(Const::Field(f)) => {
+                    let value = wrapper.push_field_const(f.clone());
+                    wrapper.push_init_global(entry_block, i, value);
+                }
+                GlobalDef::Const(Const::U(s, v)) => {
+                    let value = wrapper.push_u_const(*s, *v);
+                    wrapper.push_init_global(entry_block, i, value);
+                }
+                GlobalDef::Const(Const::WitnessRef(_)) => {
+                    todo!("WitnessRef globals not yet supported in InitGlobal");
+                }
+                GlobalDef::Array(indices, elem_type) => {
+                    // Each index refers to an already-initialized global
+                    let elems: Vec<ValueId> = indices
+                        .iter()
+                        .map(|idx| {
+                            let global_type = Self::global_type(&globals[*idx]);
+                            wrapper.push_read_global(entry_block, *idx as u64, global_type)
+                        })
+                        .collect();
+                    let mk_seq_result = wrapper.fresh_value();
+                    let block = wrapper.get_block_mut(entry_block);
+                    block.push_instruction(OpCode::MkSeq {
+                        result: mk_seq_result,
+                        elems,
+                        seq_type: SeqType::Array(indices.len()),
+                        elem_type: elem_type.clone(),
+                    });
+                    wrapper.push_init_global(entry_block, i, mk_seq_result);
+                }
+            }
+        }
+
         let results = wrapper.push_call(
             entry_block,
             original_main_id,
@@ -58,9 +97,36 @@ impl PrepareEntryPoint {
         for ((result, public_input), return_type) in results.iter().zip(return_input_values.iter()).zip(return_types.iter()) {
             Self::assert_eq_deep(wrapper, entry_block, *result, *public_input, return_type);
         }
+
+        // Emit DropGlobal in reverse for globals that need RC (arrays, tuples)
+        for i in (0..globals.len()).rev() {
+            if Self::global_needs_drop(&globals[i]) {
+                wrapper.push_drop_global(entry_block, i);
+            }
+        }
+
         wrapper.terminate_block_with_return(entry_block, vec![]);
 
         ssa.set_entry_point(wrapper_id);
+    }
+
+    fn global_type(global: &GlobalDef) -> Type<Empty> {
+        match global {
+            GlobalDef::Const(Const::Field(_)) => Type::field(Empty),
+            GlobalDef::Const(Const::U(s, _)) => Type::u(*s, Empty),
+            GlobalDef::Const(Const::WitnessRef(_)) => Type::witness_ref(Empty),
+            GlobalDef::Array(indices, elem_type) => {
+                elem_type.clone().array_of(indices.len(), Empty)
+            }
+        }
+    }
+
+    fn global_needs_drop(global: &GlobalDef) -> bool {
+        match global {
+            GlobalDef::Const(Const::Field(_)) | GlobalDef::Const(Const::U(_, _)) => false,
+            GlobalDef::Const(Const::WitnessRef(_)) => true,
+            GlobalDef::Array(_, _) => true,
+        }
     }
 
     fn assert_eq_deep(

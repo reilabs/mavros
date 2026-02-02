@@ -5,7 +5,7 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     ir::r#type::{CommutativeMonoid, Type},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, GlobalDef, LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator
     },
 };
 
@@ -130,35 +130,9 @@ impl SymbolicExecutor {
         Ctx: Context<V, T>,
         T: Clone + CommutativeMonoid,
     {
-        let mut globals = vec![];
+        let mut globals: Vec<Option<V>> = vec![None; ssa.get_globals().len()];
 
-        for global in ssa.get_globals().iter() {
-            match global {
-                GlobalDef::Const(Const::U(s, v)) => {
-                    globals.push(V::of_u(*s, *v, context));
-                }
-                GlobalDef::Const(Const::Field(f)) => {
-                    globals.push(V::of_field(f.clone(), context));
-                }
-                GlobalDef::Const(Const::WitnessRef(_)) => {
-                    todo!()
-                }
-                GlobalDef::Array(items, typ) => {
-                    let items = items
-                        .iter()
-                        .map(|id| globals[*id].clone())
-                        .collect::<Vec<_>>();
-                    globals.push(V::mk_array(
-                        items.clone(),
-                        context,
-                        SeqType::Array(items.len()),
-                        &typ.as_pure(),
-                    ));
-                }
-            }
-        }
-
-        self.run_fn(ssa, type_info, entry_point, params, &globals, context);
+        self.run_fn(ssa, type_info, entry_point, params, &mut globals, context);
     }
 
     #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
@@ -168,7 +142,7 @@ impl SymbolicExecutor {
         type_info: &TypeInfo<T>,
         fn_id: FunctionId,
         mut inputs: Vec<V>,
-        globals: &[V],
+        globals: &mut Vec<Option<V>>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
@@ -473,8 +447,21 @@ impl SymbolicExecutor {
                         offset,
                         result_type: _,
                     } => {
-                        let r = globals[*offset as usize].clone();
+                        let r = globals[*offset as usize].as_ref()
+                            .expect("ReadGlobal: global slot not initialized")
+                            .clone();
                         scope[result.0 as usize] = Some(r);
+                    }
+                    crate::compiler::ssa::OpCode::InitGlobal {
+                        global,
+                        value,
+                    } => {
+                        globals[*global] = Some(scope[value.0 as usize].as_ref().unwrap().clone());
+                    }
+                    crate::compiler::ssa::OpCode::DropGlobal {
+                        global,
+                    } => {
+                        globals[*global] = None;
                     }
                     crate::compiler::ssa::OpCode::Lookup {
                         target,

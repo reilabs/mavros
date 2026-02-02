@@ -106,13 +106,14 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let inputs = format.parse(&inputs, driver.abi()).unwrap();
     let ordered_params = abi_helpers::ordered_params_from_btreemap(driver.abi(), &inputs);
 
-    let mut binary = driver.compile_witgen().unwrap();
+    let (mut binary, global_frame_size) = driver.compile_witgen().unwrap();
 
     let witgen_result = interpreter::run(
         &mut binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
         &ordered_params,
+        global_frame_size,
     );
 
     let correct = r1cs.check_witgen_output(
@@ -178,7 +179,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     )
     .unwrap();
 
-    let mut ad_binary = driver.compile_ad().unwrap();
+    let (mut ad_binary, ad_global_frame_size) = driver.compile_ad().unwrap();
 
     let mut ad_coeffs: Vec<Field> = vec![];
     for _ in 0..r1cs.constraints.len() {
@@ -190,6 +191,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         &ad_coeffs,
         r1cs.witness_layout,
         r1cs.constraints_layout,
+        ad_global_frame_size,
     );
 
     let leftover_memory =

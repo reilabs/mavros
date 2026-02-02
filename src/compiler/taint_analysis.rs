@@ -923,7 +923,9 @@ impl TaintAnalysis {
                         keys: _,
                         results: _,
                     }
-                    | OpCode::Todo { .. } => {
+                    | OpCode::Todo { .. }
+                    | OpCode::InitGlobal { .. }
+                    | OpCode::DropGlobal { .. } => {
                         panic!("Should not be present at this stage {:?}", instruction);
                     }
                     OpCode::TupleProj {

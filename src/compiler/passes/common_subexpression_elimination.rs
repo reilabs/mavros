@@ -432,7 +432,9 @@ impl CSE {
                     | OpCode::ToRadix { .. }
                     | OpCode::Lookup { target: _, keys: _, results: _ }
                     | OpCode::DLookup { target: _, keys: _, results: _ }
-                    | OpCode::Todo { .. } => {}
+                    | OpCode::Todo { .. }
+                    | OpCode::InitGlobal { .. }
+                    | OpCode::DropGlobal { .. } => {}
                      OpCode::PureToWitnessRef { result: _, value: _, result_annotation: _ }
                     | OpCode::UnboxField { result: _, value: _ }
                     | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
