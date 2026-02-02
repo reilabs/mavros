@@ -1,4 +1,4 @@
-use std::{fmt::Display, fs, path::PathBuf};
+use std::{fmt::{Debug, Display}, fs, path::PathBuf};
 
 use crate::compiler::{
     analysis::{
@@ -15,7 +15,7 @@ use crate::compiler::{
 /// Trait for type-specific pass manager behavior.
 /// This allows sharing the common pass manager logic while customizing
 /// constraint instrumentation support per type.
-pub trait PassManagerExt: CommutativeMonoid + Display + Eq + Clone {
+pub trait PassManagerExt: CommutativeMonoid + Display + Eq + Clone + Debug {
     fn initialize_constraint_instrumentation(
         pm: &mut PassManager<Self>,
         ssa: &mut SSA<Self>,

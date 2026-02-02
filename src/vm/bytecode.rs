@@ -752,7 +752,7 @@ mod def {
     }
 
     #[opcode]
-    fn boxed_field_alloc(#[out] res: *mut BoxedValue, data: Field, vm: &mut VM) {
+    fn witness_ref_alloc(#[out] res: *mut BoxedValue, data: Field, vm: &mut VM) {
         let val = BoxedValue::alloc(BoxedLayout::ad_const(), vm);
         let d = val.as_ad_const();
         unsafe {
@@ -801,7 +801,7 @@ mod def {
     }
 
     #[opcode]
-    fn box_field(#[out] res: *mut BoxedValue, #[frame] v: Field, vm: &mut VM) {
+    fn pure_to_witness_ref(#[out] res: *mut BoxedValue, #[frame] v: Field, vm: &mut VM) {
         let val = BoxedValue::alloc(BoxedLayout::ad_const(), vm);
         let d = val.as_ad_const();
         unsafe {

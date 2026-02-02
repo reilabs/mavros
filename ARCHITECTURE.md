@@ -107,7 +107,7 @@ This means we can compute row linear combinations by running the constraint eval
 
 ### Lazy Gradient Accumulation
 
-The `BoxFields` pass (`passes/box_fields.rs`) optimizes AD by wrapping field values in heap-allocated boxes that accumulate their derivatives.
+The `PureToWitnessRefs` pass (`passes/box_fields.rs`) optimizes AD by wrapping field values in heap-allocated boxes that accumulate their derivatives.
 
 **Problem**: If the expression `(a + b)` appears in multiple constraints with coefficients `c1, c2`, naive AD propagates separately:
 - Add `c1` to `a`'s gradient, add `c1` to `b`'s gradient

@@ -481,7 +481,7 @@ impl FunctionConverter {
                     }
 
                     NoirInstruction::MakeArray { elements, typ } => {
-                        let elements_converted = elements
+                        let elements_converted: Vec<ValueId> = elements
                             .iter()
                             .map(|e| {
                                 self.convert_value(
@@ -500,9 +500,28 @@ impl FunctionConverter {
                             TypeExpr::Slice(inner) => (SeqType::Slice, inner),
                             _ => panic!("Unexpected type in array conversion: {:?}", converted_typ),
                         };
+
+                        // If the element type is a tuple, group flat elements into MkTuple instructions
+                        let final_elements = match &tp.expr {
+                            TypeExpr::Tuple(field_types) => {
+                                let chunk_size = field_types.len();
+                                elements_converted
+                                    .chunks(chunk_size)
+                                    .map(|chunk| {
+                                        custom_function.push_mk_tuple(
+                                            custom_block_id,
+                                            chunk.to_vec(),
+                                            field_types.clone(),
+                                        )
+                                    })
+                                    .collect()
+                            }
+                            _ => elements_converted,
+                        };
+
                         let result_converted = custom_function.push_mk_array(
                             custom_block_id,
-                            elements_converted,
+                            final_elements,
                             stp,
                             *tp,
                         );

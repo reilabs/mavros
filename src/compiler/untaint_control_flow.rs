@@ -263,11 +263,11 @@ impl UntaintControlFlow {
                         kind: kind,
                         value: value,
                     },
-                    OpCode::BoxField {
+                    OpCode::PureToWitnessRef {
                         result: r,
                         value: l,
                         result_annotation: _c,
-                    } => OpCode::BoxField {
+                    } => OpCode::PureToWitnessRef {
                         result: r,
                         value: l,
                         result_annotation: function_taint
@@ -830,8 +830,8 @@ impl UntaintControlFlow {
                 expr: TypeExpr::Ref(Box::new(self.pure_taint_for_type(*inner))),
                 annotation: ConstantTaint::Pure,
             },
-            TypeExpr::BoxedField => Type {
-                expr: TypeExpr::BoxedField,
+            TypeExpr::WitnessRef => Type {
+                expr: TypeExpr::WitnessRef,
                 annotation: ConstantTaint::Pure,
             },
             TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}

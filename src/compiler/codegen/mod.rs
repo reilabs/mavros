@@ -69,7 +69,7 @@ impl FrameLayouter {
             }
             TypeExpr::Array(_, _) => 1, // Ptr
             TypeExpr::Slice(_) => 1,    // Ptr
-            TypeExpr::BoxedField => 1,  // Ptr
+            TypeExpr::WitnessRef => 1,  // Ptr
             TypeExpr::Tuple(_) => 1, // Ptr
             _ => todo!(),
         }
@@ -214,8 +214,8 @@ impl CodeGen {
                         })
                     }
                 }
-                Const::BoxedField(v) => {
-                    emitter.push_op(bytecode::OpCode::BoxedFieldAlloc {
+                Const::WitnessRef(v) => {
+                    emitter.push_op(bytecode::OpCode::WitnessRefAlloc {
                         res: layouter.alloc_ptr(*val),
                         data: *v,
                     });
@@ -327,7 +327,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::BoxedField => {
+                    TypeExpr::WitnessRef => {
                         let result = layouter.alloc_ptr(*val);
                         emitter.push_op(bytecode::OpCode::AddBoxed {
                             res: result,
@@ -495,8 +495,13 @@ impl CodeGen {
                 ssa::OpCode::Cast {
                     result: r,
                     value: v,
-                    target: _tgt,
+                    target: tgt,
                 } => {
+                    if *tgt == ssa::CastTarget::Nop {
+                        let pos = layouter.variables[v];
+                        layouter.variables.insert(*r, pos);
+                        continue;
+                    }
                     let result = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
@@ -786,17 +791,17 @@ impl CodeGen {
                     result: r,
                     result_type: tp,
                 } => {
-                    assert!(matches!(tp.expr, TypeExpr::BoxedField));
+                    assert!(matches!(tp.expr, TypeExpr::WitnessRef));
                     emitter.push_op(bytecode::OpCode::FreshWitness {
                         res: layouter.alloc_ptr(*r),
                     });
                 }
-                ssa::OpCode::BoxField {
+                ssa::OpCode::PureToWitnessRef {
                     result: r,
                     value: v,
                     result_annotation: _,
                 } => {
-                    emitter.push_op(bytecode::OpCode::BoxField {
+                    emitter.push_op(bytecode::OpCode::PureToWitnessRef {
                         res: layouter.alloc_ptr(*r),
                         v: layouter.get_value(*v),
                     });
@@ -849,7 +854,7 @@ impl CodeGen {
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
-                    assert!(type_info.get_value_type(keys[0]).is_boxed_field());
+                    assert!(type_info.get_value_type(keys[0]).is_witness_ref());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
                         val: layouter.get_value(keys[0]),
                     });

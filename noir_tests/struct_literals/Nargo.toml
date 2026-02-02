@@ -1,0 +1,6 @@
+[package]
+name = "struct_literals"
+type = "bin"
+authors = [""]
+
+[dependencies]

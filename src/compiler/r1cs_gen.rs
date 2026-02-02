@@ -5,7 +5,7 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    ir::r#type::{CommutativeMonoid, Type},
+    ir::r#type::{CommutativeMonoid, Type, TypeExpr},
     ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, MemOp, Radix, SSA, SliceOpDir},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
@@ -108,10 +108,55 @@ impl Value {
         }
     }
 
+    pub fn expect_u1(&self) -> bool {
+        match self {
+            Value::Const(c) => {
+                let v: u128 = c.into_bigint().to_string().parse()
+                    .unwrap_or_else(|e| panic!("expected u1, but field value is {}: {e}", c.into_bigint()));
+                assert!(v <= 1, "expected u1, but value is {v}");
+                v == 1
+            }
+            r => panic!("expected u1, got {:?}", r),
+        }
+    }
+
+    pub fn expect_u8(&self) -> u8 {
+        match self {
+            Value::Const(c) => {
+                let s = c.into_bigint().to_string();
+                s.parse().unwrap_or_else(|e| panic!("expected u8, but field value is {s}: {e}"))
+            }
+            r => panic!("expected u8, got {:?}", r),
+        }
+    }
+
     pub fn expect_u32(&self) -> u32 {
         match self {
-            Value::Const(c) => c.into_bigint().to_string().parse().unwrap(),
+            Value::Const(c) => {
+                let s = c.into_bigint().to_string();
+                s.parse().unwrap_or_else(|e| panic!("expected u32, but field value is {s}: {e}"))
+            }
             r => panic!("expected u32, got {:?}", r),
+        }
+    }
+
+    pub fn expect_u64(&self) -> u64 {
+        match self {
+            Value::Const(c) => {
+                let s = c.into_bigint().to_string();
+                s.parse().unwrap_or_else(|e| panic!("expected u64, but field value is {s}: {e}"))
+            }
+            r => panic!("expected u64, got {:?}", r),
+        }
+    }
+
+    pub fn expect_u128(&self) -> u128 {
+        match self {
+            Value::Const(c) => {
+                let s = c.into_bigint().to_string();
+                s.parse().unwrap_or_else(|e| panic!("expected u128, but field value is {s}: {e}"))
+            }
+            r => panic!("expected u128, got {:?}", r),
         }
     }
 
@@ -387,19 +432,83 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         &self,
         b: &Self,
         binary_arith_op_kind: BinaryArithOpKind,
-        _out_type: &Type<V>,
+        out_type: &Type<V>,
         _ctx: &mut R1CGen,
     ) -> Self {
-        match binary_arith_op_kind {
-            BinaryArithOpKind::Add => self.add(b),
-            BinaryArithOpKind::Sub => self.sub(b),
-            BinaryArithOpKind::Mul => self.mul(b),
-            BinaryArithOpKind::Div => self.div(b),
-            BinaryArithOpKind::And => {
+        match &out_type.expr {
+            TypeExpr::U(1) => {
+                let a = self.expect_u1();
+                let b = b.expect_u1();
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => (a as u32) + (b as u32),
+                    BinaryArithOpKind::Sub => (a as u32) - (b as u32),
+                    BinaryArithOpKind::Mul => (a as u32) * (b as u32),
+                    BinaryArithOpKind::Div => (a as u32) / (b as u32),
+                    BinaryArithOpKind::And => (a & b) as u32,
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::U(8) => {
+                let a = self.expect_u8();
+                let b = b.expect_u8();
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => (a + b) as u32,
+                    BinaryArithOpKind::Sub => (a - b) as u32,
+                    BinaryArithOpKind::Mul => (a * b) as u32,
+                    BinaryArithOpKind::Div => (a / b) as u32,
+                    BinaryArithOpKind::And => (a & b) as u32,
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::U(32) => {
                 let a = self.expect_u32();
                 let b = b.expect_u32();
-                Value::Const(ark_bn254::Fr::from(a & b))
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => a + b,
+                    BinaryArithOpKind::Sub => a - b,
+                    BinaryArithOpKind::Mul => a * b,
+                    BinaryArithOpKind::Div => a / b,
+                    BinaryArithOpKind::And => a & b,
+                };
+                Value::Const(ark_bn254::Fr::from(result))
             }
+            TypeExpr::U(64) => {
+                let a = self.expect_u64();
+                let b = b.expect_u64();
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => a + b,
+                    BinaryArithOpKind::Sub => a - b,
+                    BinaryArithOpKind::Mul => a * b,
+                    BinaryArithOpKind::Div => a / b,
+                    BinaryArithOpKind::And => a & b,
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::U(128) => {
+                let a = self.expect_u128();
+                let b = b.expect_u128();
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => a + b,
+                    BinaryArithOpKind::Sub => a - b,
+                    BinaryArithOpKind::Mul => a * b,
+                    BinaryArithOpKind::Div => a / b,
+                    BinaryArithOpKind::And => a & b,
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::U(size) => {
+                panic!("Unsupported unsigned integer size in R1CS arith: u{size}")
+            }
+            TypeExpr::Field | TypeExpr::WitnessRef => match binary_arith_op_kind {
+                BinaryArithOpKind::Add => self.add(b),
+                BinaryArithOpKind::Sub => self.sub(b),
+                BinaryArithOpKind::Mul => self.mul(b),
+                BinaryArithOpKind::Div => self.div(b),
+                BinaryArithOpKind::And => {
+                    panic!("Bitwise AND is not supported on field elements")
+                }
+            },
+            _ => panic!("Unsupported type in R1CS arith"),
         }
     }
 

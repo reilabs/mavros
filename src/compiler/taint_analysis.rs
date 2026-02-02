@@ -899,7 +899,7 @@ impl TaintAnalysis {
                         sensitivity: _,
                     }
                     | OpCode::NextDCoeff { result: _ }
-                    | OpCode::BoxField {
+                    | OpCode::PureToWitnessRef {
                         result: _,
                         value: _,
                         result_annotation: _,
@@ -1106,7 +1106,7 @@ impl TaintAnalysis {
                 Taint::Variable(self.fresh_ty_var()),
                 Box::new(self.construct_free_taint_for_type(i)),
             ),
-            TypeExpr::BoxedField => {
+            TypeExpr::WitnessRef => {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
             TypeExpr::Tuple(elements) => TaintType::Tuple(
@@ -1136,7 +1136,7 @@ impl TaintAnalysis {
                 Taint::Constant(ConstantTaint::Pure),
                 Box::new(self.construct_pure_taint_for_type(i)),
             ),
-            TypeExpr::BoxedField => {
+            TypeExpr::WitnessRef => {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
             TypeExpr::Tuple(elements) => TaintType::Tuple(

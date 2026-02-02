@@ -28,7 +28,7 @@ impl Display for Empty {
 pub enum TypeExpr<V> {
     Field,
     U(usize),
-    BoxedField,
+    WitnessRef,
     Array(Box<Type<V>>, usize),
     Slice(Box<Type<V>>),
     Ref(Box<Type<V>>),
@@ -47,7 +47,7 @@ impl<V> TypeExpr<V> {
                 inner1.equal_up_to_annotation(inner2)
             }
             (TypeExpr::Ref(inner1), TypeExpr::Ref(inner2)) => inner1.equal_up_to_annotation(inner2),
-            (TypeExpr::BoxedField, TypeExpr::BoxedField) => true,
+            (TypeExpr::WitnessRef, TypeExpr::WitnessRef) => true,
             _ => false,
         }
     }
@@ -56,7 +56,7 @@ impl<V> TypeExpr<V> {
         match self {
             TypeExpr::Field => TypeExpr::Field,
             TypeExpr::U(size) => TypeExpr::U(*size),
-            TypeExpr::BoxedField => TypeExpr::BoxedField,
+            TypeExpr::WitnessRef => TypeExpr::WitnessRef,
             TypeExpr::Array(inner, size) => TypeExpr::Array(Box::new(inner.as_pure()), *size),
             TypeExpr::Slice(inner) => TypeExpr::Slice(Box::new(inner.as_pure())),
             TypeExpr::Ref(inner) => TypeExpr::Ref(Box::new(inner.as_pure())),
@@ -98,7 +98,7 @@ impl<V: Display> Display for Type<V> {
             TypeExpr::Ref(inner) => {
                 write!(f, "Ref{}<{}>", format_annotation(&self.annotation), inner)
             }
-            TypeExpr::BoxedField => write!(f, "BoxedField{}", format_annotation(&self.annotation)),
+            TypeExpr::WitnessRef => write!(f, "WitnessRef{}", format_annotation(&self.annotation)),
             TypeExpr::Tuple(elements) => write!(
                 f, "Tuple{}<{}>", format_annotation(&self.annotation), elements.iter().map(|e| format!("{}", e)).collect::<Vec<_>>().join(", ")
             ),
@@ -115,8 +115,8 @@ impl<V: CommutativeMonoid + Display> Type<V> {
             (TypeExpr::U(size1), TypeExpr::U(size2)) => {
                 Type::u(*size1.max(size2), self.annotation.op(&other.annotation))
             }
-            (TypeExpr::BoxedField, _) | (_, TypeExpr::BoxedField) => {
-                Type::boxed_field(self.annotation.op(&other.annotation))
+            (TypeExpr::WitnessRef, _) | (_, TypeExpr::WitnessRef) => {
+                Type::witness_ref(self.annotation.op(&other.annotation))
             }
             _ => panic!("Cannot perform arithmetic on types {} and {}", self, other),
         }
@@ -136,7 +136,7 @@ impl<V: CommutativeMonoid + Display> Type<V> {
             TypeExpr::Slice(inner) => inner.contains_ptrs(),
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
-            TypeExpr::BoxedField => false,
+            TypeExpr::WitnessRef => false,
             TypeExpr::Tuple(elements) => {
                 for elem in elements {
                     if elem.contains_ptrs() {
@@ -206,9 +206,9 @@ impl<V> Type<V> {
         }
     }
 
-    pub fn boxed_field(annotation: V) -> Self {
+    pub fn witness_ref(annotation: V) -> Self {
         Type {
-            expr: TypeExpr::BoxedField,
+            expr: TypeExpr::WitnessRef,
             annotation,
         }
     }
@@ -265,8 +265,8 @@ impl<V> Type<V> {
         matches!(self.expr, TypeExpr::Array(_, _) | TypeExpr::Slice(_))
     }
 
-    pub fn is_boxed_field(&self) -> bool {
-        matches!(self.expr, TypeExpr::BoxedField)
+    pub fn is_witness_ref(&self) -> bool {
+        matches!(self.expr, TypeExpr::WitnessRef)
     }
 
     pub fn is_u(&self) -> bool {
@@ -278,7 +278,7 @@ impl<V> Type<V> {
     }
 
     pub fn is_heap_allocated(&self) -> bool {
-        matches!(self.expr, TypeExpr::BoxedField | TypeExpr::Array(_, _) | TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_))
+        matches!(self.expr, TypeExpr::WitnessRef | TypeExpr::Array(_, _) | TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_))
     }
 
     pub fn has_eq(&self) -> bool {

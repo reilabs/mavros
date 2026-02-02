@@ -184,7 +184,7 @@ impl<V: Display + Clone> SSA<V> {
 pub enum Const {
     U(usize, u128),
     Field(ark_bn254::Fr),
-    BoxedField(ark_bn254::Fr),
+    WitnessRef(ark_bn254::Fr),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -322,6 +322,13 @@ impl<V: Clone> Function<V> {
         let block = Block::empty();
         self.blocks.insert(new_id, block);
         new_id
+    }
+
+    pub fn next_virtual_block(&mut self) -> (BlockId, Block<V>) {
+        let new_id = BlockId(self.next_block);
+        self.next_block += 1;
+        let block = Block::empty();
+        (new_id, block)
     }
 
     pub fn add_return_type(&mut self, typ: Type<V>) {
@@ -1119,6 +1126,7 @@ pub enum SeqType {
 pub enum CastTarget {
     Field,
     U(usize),
+    Nop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1138,6 +1146,7 @@ impl Display for CastTarget {
         match self {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::U(size) => write!(f, "u{}", size),
+            CastTarget::Nop => write!(f, "Nop"),
         }
     }
 }
@@ -1335,7 +1344,7 @@ pub enum OpCode<V> {
         keys: Vec<ValueId>,
         results: Vec<ValueId>,
     },
-    BoxField {
+    PureToWitnessRef {
         result: ValueId,
         value: ValueId,
         result_annotation: V,
@@ -1726,7 +1735,7 @@ impl<V: Display + Clone> OpCode<V> {
                 };
                 format!("{}(v{})", name, value.0)
             }
-            OpCode::BoxField {
+            OpCode::PureToWitnessRef {
                 result,
                 value,
                 result_annotation: annotation,
@@ -1870,7 +1879,7 @@ impl<V> OpCode<V> {
                 value: b,
                 target: _,
             }
-            | Self::BoxField {
+            | Self::PureToWitnessRef {
                 result: a,
                 value: b,
                 result_annotation: _,
@@ -2103,7 +2112,7 @@ impl<V> OpCode<V> {
                 value: c,
                 target: _,
             }
-            | Self::BoxField {
+            | Self::PureToWitnessRef {
                 result: _,
                 value: c,
                 result_annotation: _,
@@ -2283,7 +2292,7 @@ impl<V> OpCode<V> {
                 value: c,
                 target: _,
             }
-            | Self::BoxField {
+            | Self::PureToWitnessRef {
                 result: _,
                 value: c,
                 result_annotation: _,
@@ -2473,7 +2482,7 @@ impl<V> OpCode<V> {
                 const_val: _,
                 var: _,
             }
-            | Self::BoxField {
+            | Self::PureToWitnessRef {
                 result: r,
                 value: _,
                 result_annotation: _,

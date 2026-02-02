@@ -140,7 +140,7 @@ impl SymbolicExecutor {
                 GlobalDef::Const(Const::Field(f)) => {
                     globals.push(V::of_field(f.clone(), context));
                 }
-                GlobalDef::Const(Const::BoxedField(_)) => {
+                GlobalDef::Const(Const::WitnessRef(_)) => {
                     todo!()
                 }
                 GlobalDef::Array(items, typ) => {
@@ -185,7 +185,7 @@ impl SymbolicExecutor {
             let v = match cst {
                 Const::U(s, v) => V::of_u(*s, *v, ctx),
                 Const::Field(f) => V::of_field(f.clone(), ctx),
-                Const::BoxedField(_) => todo!(),
+                Const::WitnessRef(_) => todo!(),
             };
             scope[val.0 as usize] = Some(v);
         }
@@ -444,7 +444,7 @@ impl SymbolicExecutor {
                     } => {
                         todo!()
                     }
-                    crate::compiler::ssa::OpCode::BoxField {
+                    crate::compiler::ssa::OpCode::PureToWitnessRef {
                         result: _,
                         value: _,
                         result_annotation: _,

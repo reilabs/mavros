@@ -11,7 +11,7 @@ use crate::compiler::{
     flow_analysis::CFG,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass, PassInfo, PassManager},
-    ssa::{Function, MemOp, OpCode, SSA, Terminator, ValueId},
+    ssa::{CastTarget, Function, MemOp, OpCode, SSA, Terminator, ValueId},
 };
 
 pub struct RCInsertion {}
@@ -155,9 +155,9 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
                     }
-                    OpCode::BoxField { result: r, value: _, result_annotation: _ } => {
+                    OpCode::PureToWitnessRef { result: r, value: _, result_annotation: _ } => {
                         if !currently_live.contains(r) {
-                            panic!("ICE: Result of BoxField is immediately dropped. This is a bug.")
+                            panic!("ICE: Result of PureToWitnessRef is immediately dropped. This is a bug.")
                         }
                         new_instructions.push(instruction.clone());
                     }
@@ -194,6 +194,24 @@ impl RCInsertion {
                         }
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*tuple);
+                    }
+                    OpCode::Cast { result: r, value: v, target: CastTarget::Nop } => {
+                        // Nop cast aliases result to input in codegen (same frame position).
+                        if self.needs_rc(type_info, v) {
+                            if !currently_live.contains(r) {
+                                panic!("ICE: Result of Cast::Nop is immediately dropped. This is a bug.");
+                            }
+                            if currently_live.contains(v) {
+                                // Both input and output are live — two refs to the same boxed value.
+                                new_instructions.push(OpCode::MemOp {
+                                    kind: MemOp::Bump(1),
+                                    value: *v
+                                });
+                            }
+                            // If only result is live (input dead), no RC op needed — single alias.
+                        }
+                        currently_live.insert(*v);
+                        new_instructions.push(instruction);
                     }
                     // These need to mark their inputs as live, but do not need to bump RCs
                     OpCode::AssertEq { lhs: _, rhs: _ }
@@ -619,7 +637,7 @@ impl RCInsertion {
             TypeExpr::Slice(_) => true,
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
-            TypeExpr::BoxedField => true,
+            TypeExpr::WitnessRef => true,
             TypeExpr::Tuple(_) => true,
         }
     }

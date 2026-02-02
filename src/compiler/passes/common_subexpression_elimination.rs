@@ -283,7 +283,7 @@ impl CSE {
             match const_ {
                 Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
                 Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
-                Const::BoxedField(_) => todo!(),
+                Const::WitnessRef(_) => todo!(),
             };
         }
 
@@ -433,7 +433,7 @@ impl CSE {
                     | OpCode::Lookup { target: _, keys: _, results: _ }
                     | OpCode::DLookup { target: _, keys: _, results: _ }
                     | OpCode::Todo { .. } => {}
-                     OpCode::BoxField { result: _, value: _, result_annotation: _ }
+                     OpCode::PureToWitnessRef { result: _, value: _, result_annotation: _ }
                     | OpCode::UnboxField { result: _, value: _ }
                     | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
                     OpCode::Not { result: r, value } => {

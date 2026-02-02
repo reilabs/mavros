@@ -265,8 +265,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 // Field is represented as [4 x i64] in Montgomery form
                 self.runtime.const_field(field_val)
             }
-            Const::BoxedField(_) => {
-                todo!("BoxedField constants not yet supported in LLVM codegen")
+            Const::WitnessRef(_) => {
+                todo!("WitnessRef constants not yet supported in LLVM codegen")
             }
         }
     }

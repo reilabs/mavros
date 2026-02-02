@@ -101,7 +101,7 @@ impl WitnessWriteToFresh {
                         | OpCode::FreshWitness { .. }
                         | OpCode::Constrain { .. }
                         | OpCode::NextDCoeff { .. }
-                        | OpCode::BoxField { .. }
+                        | OpCode::PureToWitnessRef { .. }
                         | OpCode::UnboxField { .. }
                         | OpCode::MulConst { .. }
                         | OpCode::BumpD { .. }

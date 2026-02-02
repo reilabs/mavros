@@ -189,7 +189,7 @@ impl DCE {
                         | OpCode::Cast { .. }
                         | OpCode::Truncate { .. }
                         | OpCode::Not { .. }
-                        | OpCode::BoxField {
+                        | OpCode::PureToWitnessRef {
                             result: _,
                             value: _,
                             result_annotation: _,
