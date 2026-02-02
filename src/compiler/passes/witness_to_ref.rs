@@ -81,7 +81,6 @@ impl WitnessToRef {
                             target: t,
                         } => {
                             let v_type = type_info.get_value_type(v);
-                            // Otherwise becomes witness ref -> witness ref cast, so we can skip it
                             if v_type.get_annotation().is_witness() {
                                 new_instructions.push(OpCode::Cast {
                                     result: r,
