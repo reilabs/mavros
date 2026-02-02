@@ -704,6 +704,8 @@ impl TaintAnalysis {
                     }
                     OpCode::AssertEq { lhs: _, rhs: _ } => {}
                     OpCode::AssertR1C { a: _, b: _, c: _ } => {}
+                    OpCode::InitGlobal { .. } => {}
+                    OpCode::DropGlobal { .. } => {}
                     OpCode::ArrayGet {
                         result: r,
                         array: arr,
@@ -924,8 +926,7 @@ impl TaintAnalysis {
                         results: _,
                     }
                     | OpCode::Todo { .. }
-                    | OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. } => {
+                    => {
                         panic!("Should not be present at this stage {:?}", instruction);
                     }
                     OpCode::TupleProj {
