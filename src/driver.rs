@@ -302,7 +302,7 @@ impl Driver {
         Ok(r1cs)
     }
 
-    pub fn compile_witgen(&mut self) -> Result<(Vec<u64>, usize), Error> {
+    pub fn compile_witgen(&mut self) -> Result<Vec<u64>, Error> {
         self.prepare_base_witgen_ssa();
         let ssa = self.base_witgen_ssa.as_ref().unwrap();
 
@@ -317,15 +317,14 @@ impl Driver {
         )
         .unwrap();
 
-        let global_frame_size = program.global_frame_size;
         let binary = program.to_binary();
 
         info!(message = %"Witgen binary generated", binary_size = binary.len() * 8);
 
-        Ok((binary, global_frame_size))
+        Ok(binary)
     }
 
-    pub fn compile_ad(&self) -> Result<(Vec<u64>, usize), Error> {
+    pub fn compile_ad(&self) -> Result<Vec<u64>, Error> {
         let mut ssa = self.r1cs_ssa.clone().unwrap();
         let mut ad_pm = PassManager::<ConstantTaint>::new(
             "ad".to_string(),
@@ -348,12 +347,11 @@ impl Driver {
             format!("{}", program),
         )
         .unwrap();
-        let global_frame_size = program.global_frame_size;
         let binary = program.to_binary();
 
         info!(message = %"AD binary generated", binary_size = binary.len() * 8);
 
-        Ok((binary, global_frame_size))
+        Ok(binary)
     }
 
     pub fn abi(&self) -> &noirc_abi::Abi {

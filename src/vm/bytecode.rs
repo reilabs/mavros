@@ -1117,6 +1117,7 @@ impl Display for Program {
 impl Program {
     pub fn to_binary(&self) -> Vec<u64> {
         let mut binary = Vec::new();
+        binary.push(self.global_frame_size as u64);
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
 
