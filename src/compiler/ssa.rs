@@ -884,6 +884,22 @@ impl<V: Clone> Function<V> {
             .push(OpCode::Todo { payload, results, result_types });
     }
 
+    pub fn push_init_global(&mut self, block_id: BlockId, global: usize, value: ValueId) {
+        self.blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .instructions
+            .push(OpCode::InitGlobal { global, value });
+    }
+
+    pub fn push_drop_global(&mut self, block_id: BlockId, global: usize) {
+        self.blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .instructions
+            .push(OpCode::DropGlobal { global });
+    }
+
     // pub fn push_constrain(&mut self, block_id: BlockId, a: ValueId, b: ValueId, c: ValueId) {
     //     self.blocks
     //         .get_mut(&block_id)
@@ -1382,6 +1398,13 @@ pub enum OpCode<V> {
         results: Vec<ValueId>,
         result_types: Vec<Type<V>>,
     },
+    InitGlobal {
+        global: usize,
+        value: ValueId,
+    },
+    DropGlobal {
+        global: usize,
+    },
 }
 
 impl<V: Display + Clone> OpCode<V> {
@@ -1834,6 +1857,12 @@ impl<V: Display + Clone> OpCode<V> {
                     .join(", ");
                 format!("todo(\"{}\", [{}])", payload, results_str)
             }
+            OpCode::InitGlobal { global, value } => {
+                format!("init_global({}, v{})", global, value.0)
+            }
+            OpCode::DropGlobal { global } => {
+                format!("drop_global({})", global)
+            }
         }
     }
 }
@@ -2036,6 +2065,8 @@ impl<V> OpCode<V> {
                 let ret_vec: Vec<&mut ValueId> = results.iter_mut().collect();
                 ret_vec.into_iter()
             },
+            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
 
@@ -2217,6 +2248,8 @@ impl<V> OpCode<V> {
                 idx: _,
             } => vec![tuple].into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
+            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
 
@@ -2400,12 +2433,14 @@ impl<V> OpCode<V> {
                     }
                 }
             },
-            OpCode::MkTuple { 
-                result: _, 
-                elems: e, 
+            OpCode::MkTuple {
+                result: _,
+                elems: e,
                 element_types: _,
             } => e.iter().collect::<Vec<_>>().into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
+            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
 
@@ -2558,6 +2593,8 @@ impl<V> OpCode<V> {
                 let ret_vec: Vec<&ValueId> = results.iter().collect();
                 ret_vec.into_iter()
             },
+            Self::InitGlobal { global: _, value: _ } => vec![].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
 }

@@ -617,6 +617,9 @@ impl ExplicitWitness {
                                 panic!("Dynamic tuple indexing should not appear here");
                             }
                         },
+                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                            new_instructions.push(instruction);
+                        }
                     }
                 }
                 block.put_instructions(new_instructions);

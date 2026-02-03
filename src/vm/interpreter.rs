@@ -145,7 +145,8 @@ impl Frame {
 }
 
 fn prepare_dispatch(program: &mut [u64]) {
-    let mut current_offset = 0;
+    // Skip the global_frame_size header at index 0
+    let mut current_offset = 1;
     while current_offset < program.len() {
         let opcode = program[current_offset];
         if opcode == u64::MAX {
@@ -221,6 +222,7 @@ pub fn run(
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
 ) -> WitgenResult {
+    let global_frame_size = program[0] as usize;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
     let mut out_b = vec![Field::ZERO; constraints_layout.size()];
     let mut out_c = vec![Field::ZERO; constraints_layout.size()];
@@ -231,6 +233,7 @@ pub fn run(
         out_wit_pre_comm[1 + i] = flat_inputs[i];
     }
     let mut out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
+    let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
         out_a.as_mut_ptr(),
         out_b.as_mut_ptr(),
@@ -257,10 +260,11 @@ pub fn run(
         },
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
+        global_frame.as_mut_ptr(),
     );
 
     let frame = Frame::push(
-        program[1],
+        program[2],
         Frame {
             data: std::ptr::null_mut(),
         },
@@ -274,7 +278,7 @@ pub fn run(
     let mut program = program.to_vec();
     prepare_dispatch(&mut program);
 
-    let pc = unsafe { program.as_mut_ptr().offset(2) };
+    let pc = unsafe { program.as_mut_ptr().offset(3) };
 
     dispatch(pc, frame, &mut vm);
 
@@ -388,9 +392,11 @@ pub fn run_ad(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> (Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter) {
+    let global_frame_size = program[0] as usize;
     let mut out_da = vec![Field::ZERO; witness_layout.size()];
     let mut out_db = vec![Field::ZERO; witness_layout.size()];
     let mut out_dc = vec![Field::ZERO; witness_layout.size()];
+    let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_ad(
         out_da.as_mut_ptr(),
         out_db.as_mut_ptr(),
@@ -398,24 +404,21 @@ pub fn run_ad(
         coeffs.as_ptr(),
         witness_layout,
         constraints_layout,
+        global_frame.as_mut_ptr(),
     );
 
     let frame = Frame::push(
-        program[1],
+        program[2],
         Frame {
             data: std::ptr::null_mut(),
         },
         &mut vm,
     );
 
-    // for (i, el) in bytecode::DISPATCH.iter().enumerate() {
-    //     println!("{}: {:?}", i, el);
-    // }
-
     let mut program = program.to_vec();
     prepare_dispatch(&mut program);
 
-    let pc = unsafe { program.as_mut_ptr().offset(2) };
+    let pc = unsafe { program.as_mut_ptr().offset(3) };
 
     dispatch(pc, frame, &mut vm);
 

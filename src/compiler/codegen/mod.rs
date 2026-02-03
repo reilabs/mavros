@@ -6,7 +6,7 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function, FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId
+            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function, FunctionId, GlobalDef, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId
         },
         taint_analysis::ConstantTaint,
     },
@@ -116,6 +116,48 @@ impl EmitterState {
     }
 }
 
+struct GlobalFrameLayouter {
+    offsets: Vec<usize>,
+    sizes: Vec<usize>,
+    total_size: usize,
+}
+
+impl GlobalFrameLayouter {
+    fn new(ssa: &SSA<ConstantTaint>) -> Self {
+        let globals = ssa.get_globals();
+        let mut offsets = Vec::new();
+        let mut sizes = Vec::new();
+        let mut next_free = 0usize;
+        for global in globals.iter() {
+            let size = match global {
+                ssa::GlobalDef::Const(ssa::Const::Field(_)) => bytecode::LIMBS,
+                ssa::GlobalDef::Const(ssa::Const::U(bits, _)) => {
+                    assert!(*bits <= 64);
+                    1
+                }
+                ssa::GlobalDef::Const(ssa::Const::WitnessRef(_)) => 1,
+                ssa::GlobalDef::Array(_, _) => 1, // Ptr (BoxedValue)
+            };
+            offsets.push(next_free);
+            sizes.push(size);
+            next_free += size;
+        }
+        GlobalFrameLayouter {
+            offsets,
+            sizes,
+            total_size: next_free,
+        }
+    }
+
+    fn get_offset(&self, global: usize) -> usize {
+        self.offsets[global]
+    }
+
+    fn get_size(&self, global: usize) -> usize {
+        self.sizes[global]
+    }
+}
+
 pub struct CodeGen {}
 
 impl CodeGen {
@@ -129,11 +171,14 @@ impl CodeGen {
         cfg: &FlowAnalysis,
         type_info: &TypeInfo<ConstantTaint>,
     ) -> bytecode::Program {
+        let global_layouter = GlobalFrameLayouter::new(ssa);
+
         let function = ssa.get_main();
         let function = self.run_function(
             function,
             cfg.get_function_cfg(ssa.get_main_id()),
             type_info.get_function(ssa.get_main_id()),
+            &global_layouter,
         );
 
         let mut functions = vec![function];
@@ -151,6 +196,7 @@ impl CodeGen {
                 function,
                 cfg.get_function_cfg(*function_id),
                 type_info.get_function(*function_id),
+                &global_layouter,
             );
             function_ids.insert(*function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
@@ -179,6 +225,7 @@ impl CodeGen {
 
         bytecode::Program {
             functions: functions,
+            global_frame_size: global_layouter.total_size,
         }
     }
 
@@ -187,6 +234,7 @@ impl CodeGen {
         function: &Function<ConstantTaint>,
         cfg: &CFG,
         type_info: &FunctionTypeInfo<ConstantTaint>,
+        global_layouter: &GlobalFrameLayouter,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
@@ -230,6 +278,7 @@ impl CodeGen {
             type_info,
             &mut layouter,
             &mut emitter,
+            global_layouter,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -247,6 +296,7 @@ impl CodeGen {
                 type_info,
                 &mut layouter,
                 &mut emitter,
+                global_layouter,
             );
         }
 
@@ -301,6 +351,7 @@ impl CodeGen {
         type_info: &FunctionTypeInfo<ConstantTaint>,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
+        global_layouter: &GlobalFrameLayouter,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -861,6 +912,27 @@ impl CodeGen {
                 }
                 ssa::OpCode::Todo { payload, .. } => {
                     panic!("Todo opcode encountered in Codegen: {}", payload);
+                }
+                ssa::OpCode::InitGlobal { global, value } => {
+                    emitter.push_op(bytecode::OpCode::InitGlobal {
+                        src: layouter.get_value(*value),
+                        global_offset: global_layouter.get_offset(*global),
+                        size: global_layouter.get_size(*global),
+                    });
+                }
+                ssa::OpCode::DropGlobal { global } => {
+                    emitter.push_op(bytecode::OpCode::DropGlobal {
+                        global_offset: global_layouter.get_offset(*global),
+                    });
+                }
+                ssa::OpCode::ReadGlobal { result: r, offset, result_type: _ } => {
+                    let global_idx = *offset as usize;
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    emitter.push_op(bytecode::OpCode::ReadGlobal {
+                        res,
+                        global_offset: global_layouter.get_offset(global_idx),
+                        size: global_layouter.get_size(global_idx),
+                    });
                 }
                 other => panic!("Unsupported instruction: {:?}", other),
             }

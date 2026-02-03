@@ -477,6 +477,23 @@ impl RCInsertion {
                         live_vals.extend(values.iter().copied());
                         currently_live.extend(live_vals);
                     }
+                    OpCode::InitGlobal { global: _, value: v } => {
+                        // InitGlobal stores value into a global slot.
+                        // If the value needs RC, bump it since the global now holds a reference.
+                        let v = *v;
+                        if self.needs_rc(type_info, &v) && currently_live.contains(&v) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Bump(1),
+                                value: v,
+                            });
+                        }
+                        new_instructions.push(instruction);
+                        currently_live.insert(v);
+                    }
+                    OpCode::DropGlobal { global: _ } => {
+                        // DropGlobal IS the RC drop itself, just pass through.
+                        new_instructions.push(instruction);
+                    }
                     OpCode::Select { result: _, cond: _, if_t: v1, if_f: v2 } => {
                         if self.needs_rc(type_info, v1) || self.needs_rc(type_info, v2) {
                             panic!("Unsupported yet");

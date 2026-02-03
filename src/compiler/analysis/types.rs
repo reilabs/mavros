@@ -406,6 +406,8 @@ impl Types {
                 }
                 Ok(())
             }
+            OpCode::InitGlobal { global: _, value: _ } => Ok(()),
+            OpCode::DropGlobal { global: _ } => Ok(()),
         }
     }
 }

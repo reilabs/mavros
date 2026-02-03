@@ -362,6 +362,8 @@ impl WitnessToRef {
                         | OpCode::MulConst { .. }
                         | OpCode::Rangecheck { .. }
                         | OpCode::ReadGlobal { .. }
+                        | OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. } => {
                             new_instructions.push(instruction);
