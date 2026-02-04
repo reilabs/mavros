@@ -6,7 +6,7 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{CommutativeMonoid, Type},
-    ssa::{CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
+    ssa::{CallTarget, CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
 };
 
 pub struct TypeInfo<V> {
@@ -172,33 +172,40 @@ impl Types {
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function: fn_id, args } => {
-                let (param_types, return_types) = function_types
-                    .get(fn_id)
-                    .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
+            OpCode::Call { results: result, function, args } => {
+                match function {
+                    CallTarget::Static(fn_id) => {
+                        let (param_types, return_types) = function_types
+                            .get(fn_id)
+                            .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
 
-                if args.len() != param_types.len() {
-                    return Err(format!(
-                        "Function {:?} expects {} arguments, got {}",
-                        fn_id,
-                        param_types.len(),
-                        args.len()
-                    ));
-                }
+                        if args.len() != param_types.len() {
+                            return Err(format!(
+                                "Function {:?} expects {} arguments, got {}",
+                                fn_id,
+                                param_types.len(),
+                                args.len()
+                            ));
+                        }
 
-                if result.len() != return_types.len() {
-                    return Err(format!(
-                        "Function {:?} expects {} return values, got {}",
-                        fn_id,
-                        return_types.len(),
-                        result.len()
-                    ));
-                }
+                        if result.len() != return_types.len() {
+                            return Err(format!(
+                                "Function {:?} expects {} return values, got {}",
+                                fn_id,
+                                return_types.len(),
+                                result.len()
+                            ));
+                        }
 
-                for (ret, ret_type) in result.iter().zip(return_types.iter()) {
-                    function_info.values.insert(*ret, ret_type.clone());
+                        for (ret, ret_type) in result.iter().zip(return_types.iter()) {
+                            function_info.values.insert(*ret, ret_type.clone());
+                        }
+                        Ok(())
+                    }
+                    CallTarget::Dynamic(_fn_ptr) => {
+                        panic!("Dynamic call targets are not supported in type checking")
+                    }
                 }
-                Ok(())
             }
             OpCode::ArrayGet { result, array, index: _ } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {

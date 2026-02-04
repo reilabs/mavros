@@ -194,6 +194,12 @@ pub enum TupleIdx<V>
   Dynamic(ValueId, Type<V>),
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CallTarget {
+    Static(FunctionId),
+    Dynamic(ValueId),
+}
+
 #[derive(Clone)]
 pub struct Function<V> {
     entry_block: BlockId,
@@ -598,7 +604,7 @@ impl<V: Clone> Function<V> {
             .instructions
             .push(OpCode::Call {
                 results: return_values.clone(),
-                function: fn_id,
+                function: CallTarget::Static(fn_id),
                 args: args,
             });
         return_values
@@ -1281,7 +1287,7 @@ pub enum OpCode<V> {
     },
     Call {
         results: Vec<ValueId>,
-        function: FunctionId,
+        function: CallTarget,
         args: Vec<ValueId>,
     },
     ArrayGet {
@@ -1494,7 +1500,7 @@ impl<V: Display + Clone> OpCode<V> {
             }
             OpCode::Call {
                 results: result,
-                function: fn_id,
+                function,
                 args,
             } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
@@ -1502,13 +1508,25 @@ impl<V: Display + Clone> OpCode<V> {
                     .iter()
                     .map(|v| format!("v{}{}", v.0, annotate(value_annotator, *v)))
                     .join(", ");
-                format!(
-                    "{} = call {}@{}({})",
-                    result_str,
-                    ssa.get_function(*fn_id).get_name(),
-                    fn_id.0,
-                    args_str
-                )
+                match function {
+                    CallTarget::Static(fn_id) => {
+                        format!(
+                            "{} = call {}@{}({})",
+                            result_str,
+                            ssa.get_function(*fn_id).get_name(),
+                            fn_id.0,
+                            args_str
+                        )
+                    }
+                    CallTarget::Dynamic(fn_ptr) => {
+                        format!(
+                            "{} = call_indirect v{}({})",
+                            result_str,
+                            fn_ptr.0,
+                            args_str
+                        )
+                    }
+                }
             }
             OpCode::ArrayGet {
                 result,
@@ -1964,10 +1982,13 @@ impl<V> OpCode<V> {
             }
             Self::Call {
                 results: r,
-                function: _,
+                function,
                 args: a,
             } => {
                 let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
                 let args_vec = a.iter_mut().collect::<Vec<_>>();
                 ret_vec.extend(args_vec);
                 ret_vec.into_iter()
@@ -2160,9 +2181,16 @@ impl<V> OpCode<V> {
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
-                function: _,
+                function,
                 args: a,
-            } => a.iter_mut().collect::<Vec<_>>().into_iter(),
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter_mut());
+                ret_vec.into_iter()
+            }
             Self::MkSeq {
                 result: _,
                 elems: inputs,
@@ -2342,9 +2370,16 @@ impl<V> OpCode<V> {
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
-                function: _,
+                function,
                 args: a,
-            } => a.iter().collect::<Vec<_>>().into_iter(),
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter());
+                ret_vec.into_iter()
+            }
             Self::MkSeq {
                 result: _,
                 elems: inputs,

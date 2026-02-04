@@ -272,7 +272,7 @@ impl SymbolicExecutor {
                     }
                     crate::compiler::ssa::OpCode::Call {
                         results: returns,
-                        function: function_id,
+                        function: crate::compiler::ssa::CallTarget::Static(function_id),
                         args: arguments,
                     } => {
                         let params = arguments
@@ -284,6 +284,12 @@ impl SymbolicExecutor {
                         for (i, val) in returns.iter().enumerate() {
                             scope[val.0 as usize] = Some(outputs[i].clone());
                         }
+                    }
+                    crate::compiler::ssa::OpCode::Call {
+                        function: crate::compiler::ssa::CallTarget::Dynamic(_),
+                        ..
+                    } => {
+                        panic!("Dynamic call targets are not supported in symbolic execution")
                     }
                     crate::compiler::ssa::OpCode::ArrayGet {
                         result: r,

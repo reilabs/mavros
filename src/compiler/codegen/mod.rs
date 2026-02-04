@@ -737,7 +737,7 @@ impl CodeGen {
                 }
                 ssa::OpCode::Call {
                     results: r,
-                    function: fnid,
+                    function: ssa::CallTarget::Static(fnid),
                     args: params,
                 } => {
                     let r = layouter.alloc_many_contiguous(
@@ -759,6 +759,12 @@ impl CodeGen {
                         args: args,
                         ret: r,
                     });
+                }
+                ssa::OpCode::Call {
+                    function: ssa::CallTarget::Dynamic(_),
+                    ..
+                } => {
+                    panic!("Dynamic call targets are not supported in codegen")
                 }
                 ssa::OpCode::MemOp {
                     kind: MemOp::Drop,

@@ -283,7 +283,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         instruction: &crate::compiler::ssa::OpCode<ConstantTaint>,
         type_info: &FunctionTypeInfo<ConstantTaint>,
     ) {
-        use crate::compiler::ssa::OpCode;
+        use crate::compiler::ssa::{CallTarget, OpCode};
 
         match instruction {
             OpCode::BinaryArithOp {
@@ -357,7 +357,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             }
 
-            OpCode::Call { results, function, args } => {
+            OpCode::Call { results, function: CallTarget::Static(function), args } => {
                 let callee = self.function_map[function];
                 let vm_ptr = self.vm_ptr.unwrap();
 
@@ -387,6 +387,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         self.value_map.insert(*result_id, val.into());
                     }
                 }
+            }
+
+            OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                panic!("Dynamic call targets are not supported in LLVM codegen")
             }
 
             // All other opcodes are not yet supported
