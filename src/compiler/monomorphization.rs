@@ -80,7 +80,7 @@ impl Monomorphization {
             for (block_id, block) in func.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
-                        OpCode::Call { results: returns, function: func_id, args } => {
+                        OpCode::Call { results: returns, function: func_id, args, is_unconstrained: _ } => {
                             let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
                             let args_taints = args.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
                             let ret_taints = returns.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();

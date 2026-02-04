@@ -585,6 +585,7 @@ impl<V: Clone> Function<V> {
         fn_id: FunctionId,
         args: Vec<ValueId>,
         return_size: usize,
+        is_unconstrained: bool,
     ) -> Vec<ValueId> {
         let mut return_values = Vec::new();
         for _ in 0..return_size {
@@ -600,6 +601,7 @@ impl<V: Clone> Function<V> {
                 results: return_values.clone(),
                 function: fn_id,
                 args: args,
+                is_unconstrained,
             });
         return_values
     }
@@ -1283,6 +1285,7 @@ pub enum OpCode<V> {
         results: Vec<ValueId>,
         function: FunctionId,
         args: Vec<ValueId>,
+        is_unconstrained: bool,
     },
     ArrayGet {
         result: ValueId,
@@ -1496,6 +1499,7 @@ impl<V: Display + Clone> OpCode<V> {
                 results: result,
                 function: fn_id,
                 args,
+                is_unconstrained: _,
             } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
@@ -1966,6 +1970,7 @@ impl<V> OpCode<V> {
                 results: r,
                 function: _,
                 args: a,
+                is_unconstrained: _,
             } => {
                 let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
                 let args_vec = a.iter_mut().collect::<Vec<_>>();
@@ -2162,6 +2167,7 @@ impl<V> OpCode<V> {
                 results: _,
                 function: _,
                 args: a,
+                is_unconstrained: _,
             } => a.iter_mut().collect::<Vec<_>>().into_iter(),
             Self::MkSeq {
                 result: _,
@@ -2344,6 +2350,7 @@ impl<V> OpCode<V> {
                 results: _,
                 function: _,
                 args: a,
+                is_unconstrained: _,
             } => a.iter().collect::<Vec<_>>().into_iter(),
             Self::MkSeq {
                 result: _,
@@ -2551,6 +2558,7 @@ impl<V> OpCode<V> {
                 results: r,
                 function: _,
                 args: _,
+                is_unconstrained: _,
             } => r.iter().collect::<Vec<_>>().into_iter(),
             Self::Constrain { .. }
             | Self::BumpD {

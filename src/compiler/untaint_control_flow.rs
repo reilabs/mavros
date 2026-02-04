@@ -140,10 +140,12 @@ impl UntaintControlFlow {
                         results: r,
                         function: l,
                         args: h,
+                        is_unconstrained,
                     } => OpCode::Call {
                         results: r,
                         function: l,
                         args: h,
+                        is_unconstrained,
                     },
                     OpCode::AssertEq { lhs: r, rhs: l } => OpCode::AssertEq { lhs: r, rhs: l },
                     OpCode::AssertR1C { a: r, b: l, c: h } => {
@@ -598,6 +600,7 @@ impl UntaintControlFlow {
                         results: ret,
                         function: tgt,
                         mut args,
+                        is_unconstrained,
                     } => {
                         match block_taint {
                             Some(arg) => {
@@ -609,6 +612,7 @@ impl UntaintControlFlow {
                             results: ret,
                             function: tgt,
                             args: args,
+                            is_unconstrained: todo!(),
                         });
                     }
 

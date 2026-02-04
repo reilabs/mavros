@@ -302,7 +302,7 @@ impl RCInsertion {
                     OpCode::Alloc { result: _, elem_type: _, result_annotation: _ } => todo!(),
                     OpCode::Store { ptr: _, value: _ } => todo!(),
                     OpCode::Load { result: _, ptr: _ } => todo!(),
-                    OpCode::Call { results: returns, function: _, args: params } => {
+                    OpCode::Call { results: returns, function: _, args: params, is_unconstrained: _ } => {
                         // Functions take parameters with the correct RC counter
                         // and return results with the correct RC counter.
                         // That means we need to give a bump to each param before the call

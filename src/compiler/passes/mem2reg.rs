@@ -293,7 +293,7 @@ impl Mem2Reg {
                             return false;
                         }
                     }
-                    OpCode::Call { results: rets, function: _, args } => {
+                    OpCode::Call { results: rets, function: _, args, is_unconstrained: _ } => {
                         for v in rets.iter().chain(args.iter()) {
                             let vtyp = type_info.get_value_type(*v);
                             if self.type_contains_ptr(vtyp) {

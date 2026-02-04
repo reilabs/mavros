@@ -739,6 +739,7 @@ impl CodeGen {
                     results: r,
                     function: fnid,
                     args: params,
+                    is_unconstrained: _,
                 } => {
                     let r = layouter.alloc_many_contiguous(
                         r.iter()

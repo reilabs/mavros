@@ -778,6 +778,7 @@ impl TaintAnalysis {
                         results: outputs,
                         function: func,
                         args: inputs,
+                        is_unconstrained: _,
                     } => {
                         let return_types = ssa.get_function(*func).get_returns();
                         for (output, typ) in outputs.iter().zip(return_types.iter()) {

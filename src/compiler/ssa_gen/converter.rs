@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::FunctionConverter;
 use crate::compiler::ir::r#type::Empty;
@@ -97,6 +97,13 @@ impl SsaConverter {
     pub fn convert_noir_ssa(&mut self, noir_ssa: &NoirSsa) -> SSA<Empty> {
         let mut custom_ssa = SSA::new();
 
+        let brillig_functions: HashSet<NoirFunctionId> = noir_ssa
+            .functions
+            .iter()
+            .filter(|(_, f)| f.to_string().starts_with("brillig"))
+            .map(|(id, _)| *id)
+            .collect();
+
         for (noir_function_id, _) in noir_ssa.functions.iter() {
             if *noir_function_id == noir_ssa.main_id {
                 self.function_mapper
@@ -124,7 +131,7 @@ impl SsaConverter {
 
             let mut function_converter = FunctionConverter::new(self.global_value_mapper.clone());
             let custom_function =
-                function_converter.convert_function(noir_function, &self.function_mapper);
+                function_converter.convert_function(noir_function, &self.function_mapper, &brillig_functions);
             let function_id = self.function_mapper.get(noir_function_id).unwrap();
             *custom_ssa.get_function_mut(*function_id) = custom_function;
         }

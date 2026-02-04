@@ -172,7 +172,7 @@ impl Types {
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function: fn_id, args } => {
+            OpCode::Call { results: result, function: fn_id, args, is_unconstrained: _ } => {
                 let (param_types, return_types) = function_types
                     .get(fn_id)
                     .ok_or_else(|| format!("Function {:?} not found", fn_id))?;

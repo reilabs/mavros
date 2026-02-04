@@ -93,6 +93,7 @@ impl PrepareEntryPoint {
             original_main_id,
             arg_values,
             return_types.len(),
+            false, // assuming main is never unconstrained 
         );
         for ((result, public_input), return_type) in results.iter().zip(return_input_values.iter()).zip(return_types.iter()) {
             Self::assert_eq_deep(wrapper, entry_block, *result, *public_input, return_type);

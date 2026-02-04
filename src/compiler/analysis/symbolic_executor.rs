@@ -274,6 +274,7 @@ impl SymbolicExecutor {
                         results: returns,
                         function: function_id,
                         args: arguments,
+                        is_unconstrained: _,
                     } => {
                         let params = arguments
                             .iter()

@@ -357,7 +357,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             }
 
-            OpCode::Call { results, function, args } => {
+            OpCode::Call { results, function, args, is_unconstrained: _ } => {
                 let callee = self.function_map[function];
                 let vm_ptr = self.vm_ptr.unwrap();
 

@@ -709,6 +709,7 @@ impl Specializer {
             unspecialized_id,
             dispatcher_params,
             return_values.len(),
+            todo!(),
         );
         dispatcher.terminate_block_with_jmp(
             unspecialized_caller,
@@ -721,6 +722,7 @@ impl Specializer {
             specialized_id,
             specialized_params,
             return_values.len(),
+            todo!(),
         );
         dispatcher.terminate_block_with_jmp(specialized_caller, return_block, specialized_returns);
 

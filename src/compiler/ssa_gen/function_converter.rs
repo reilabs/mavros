@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::TypeConverter;
 use crate::compiler::{
@@ -40,6 +40,7 @@ impl FunctionConverter {
         &mut self,
         noir_function: &NoirFunction,
         function_mapper: &HashMap<NoirFunctionId, FunctionId>,
+        brillig_functions: &HashSet<NoirFunctionId>,
     ) -> Function<Empty> {
         let mut custom_function = Function::empty(noir_function.name().to_string());
         let entry_block_id = custom_function.get_entry_id();
@@ -138,11 +139,13 @@ impl FunctionConverter {
 
                             let function_id = function_mapper.get(func).unwrap();
 
+                            let is_unconstrained = brillig_functions.contains(func);
                             let return_values = custom_function.push_call(
                                 custom_block_id,
                                 *function_id,
                                 converted_args,
                                 result_ids.len(),
+                                is_unconstrained,
                             );
 
                             for (result_id, return_value) in
