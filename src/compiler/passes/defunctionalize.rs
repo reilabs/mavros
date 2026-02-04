@@ -252,6 +252,28 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
         }
     }
 
+    // Helper: merge src set into dest, return true if anything new was added
+    fn propagate(
+        reaching: &mut ReachingFns,
+        src: (FunctionId, ValueId),
+        dest: (FunctionId, ValueId),
+    ) -> bool {
+        let Some(sources) = reaching.get(&src).cloned() else {
+            return false;
+        };
+        let dest_set = reaching.entry(dest).or_default();
+        let mut did_change = false;
+        for t in sources {
+            if dest_set.insert(t) {
+                did_change = true;
+            }
+        }
+        did_change
+    }
+
+    // Track fn_ptrs stored in global slots (keyed by global offset)
+    let mut global_slots: HashMap<usize, HashSet<FunctionId>> = HashMap::new();
+
     // Fixpoint: propagate sets through edges
     let mut changed = true;
     while changed {
@@ -269,27 +291,19 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                         .collect();
                     for (i, arg) in args.iter().enumerate() {
                         if i < dest_params.len() {
-                            if let Some(targets) = reaching.get(&(fid, *arg)).cloned() {
-                                let dest_set = reaching.entry((fid, dest_params[i])).or_default();
-                                for t in targets {
-                                    if dest_set.insert(t) {
-                                        changed = true;
-                                    }
-                                }
-                            }
+                            changed |= propagate(&mut reaching, (fid, *arg), (fid, dest_params[i]));
                         }
                     }
                 }
 
-                // Call edges
                 for instr in block.get_instructions() {
                     match instr {
+                        // Static call: forward through args, backward through returns
                         OpCode::Call {
                             function: CallTarget::Static(callee_id),
                             args,
                             results,
                         } => {
-                            // Forward: caller args → callee params
                             let callee = ssa.get_function(*callee_id);
                             let callee_params: Vec<ValueId> = callee
                                 .get_entry()
@@ -297,46 +311,32 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                                 .map(|(vid, _)| *vid)
                                 .collect();
                             for (i, arg) in args.iter().enumerate() {
-                                if i >= callee_params.len() {
-                                    continue;
-                                }
-                                if let Some(targets) = reaching.get(&(fid, *arg)).cloned() {
-                                    let dest =
-                                        reaching.entry((*callee_id, callee_params[i])).or_default();
-                                    for t in targets {
-                                        if dest.insert(t) {
-                                            changed = true;
-                                        }
-                                    }
+                                if i < callee_params.len() {
+                                    changed |= propagate(
+                                        &mut reaching,
+                                        (fid, *arg),
+                                        (*callee_id, callee_params[i]),
+                                    );
                                 }
                             }
-
-                            // Backward: callee return values → caller results
                             if let Some(ret_vals) = return_values.get(callee_id) {
                                 for (i, ret_val) in ret_vals.iter().enumerate() {
                                     if i < results.len() {
-                                        if let Some(targets) =
-                                            reaching.get(&(*callee_id, *ret_val)).cloned()
-                                        {
-                                            let dest =
-                                                reaching.entry((fid, results[i])).or_default();
-                                            for t in targets {
-                                                if dest.insert(t) {
-                                                    changed = true;
-                                                }
-                                            }
-                                        }
+                                        changed |= propagate(
+                                            &mut reaching,
+                                            (*callee_id, *ret_val),
+                                            (fid, results[i]),
+                                        );
                                     }
                                 }
                             }
                         }
+                        // Dynamic call: propagate through resolved targets' returns
                         OpCode::Call {
                             function: CallTarget::Dynamic(fn_ptr_val),
                             results,
                             ..
                         } => {
-                            // If we know what this calls, propagate through
-                            // target functions' return values
                             if let Some(target_fns) =
                                 reaching.get(&(fid, *fn_ptr_val)).cloned()
                             {
@@ -344,21 +344,72 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                                     if let Some(ret_vals) = return_values.get(&target_fn) {
                                         for (i, ret_val) in ret_vals.iter().enumerate() {
                                             if i < results.len() {
-                                                if let Some(targets) = reaching
-                                                    .get(&(target_fn, *ret_val))
-                                                    .cloned()
-                                                {
-                                                    let dest = reaching
-                                                        .entry((fid, results[i]))
-                                                        .or_default();
-                                                    for t in targets {
-                                                        if dest.insert(t) {
-                                                            changed = true;
-                                                        }
-                                                    }
-                                                }
+                                                changed |= propagate(
+                                                    &mut reaching,
+                                                    (target_fn, *ret_val),
+                                                    (fid, results[i]),
+                                                );
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        // Data structure operations: propagate through containers
+                        OpCode::MkTuple { result, elems, .. } => {
+                            for elem in elems {
+                                changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
+                            }
+                        }
+                        OpCode::MkSeq { result, elems, .. } => {
+                            for elem in elems {
+                                changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
+                            }
+                        }
+                        OpCode::ArrayGet { result, array, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
+                        }
+                        OpCode::ArraySet { result, array, value, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
+                            changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                        }
+                        OpCode::TupleProj { result, tuple, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *tuple), (fid, *result));
+                        }
+                        OpCode::Load { result, ptr } => {
+                            changed |= propagate(&mut reaching, (fid, *ptr), (fid, *result));
+                        }
+                        OpCode::Store { ptr, value } => {
+                            changed |= propagate(&mut reaching, (fid, *value), (fid, *ptr));
+                        }
+                        OpCode::SlicePush { result, slice, values, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *slice), (fid, *result));
+                            for v in values {
+                                changed |= propagate(&mut reaching, (fid, *v), (fid, *result));
+                            }
+                        }
+                        OpCode::Select { result, if_t, if_f, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *if_t), (fid, *result));
+                            changed |= propagate(&mut reaching, (fid, *if_f), (fid, *result));
+                        }
+                        OpCode::InitGlobal { global, value } => {
+                            // Propagate into the global slot (keyed by offset)
+                            if let Some(targets) = reaching.get(&(fid, *value)).cloned() {
+                                let slot = global_slots.entry(*global).or_default();
+                                for t in targets {
+                                    if slot.insert(t) {
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        OpCode::ReadGlobal { result, offset, .. } => {
+                            // Propagate from the global slot
+                            if let Some(targets) = global_slots.get(&(*offset as usize)).cloned() {
+                                let dest = reaching.entry((fid, *result)).or_default();
+                                for t in targets {
+                                    if dest.insert(t) {
+                                        changed = true;
                                     }
                                 }
                             }

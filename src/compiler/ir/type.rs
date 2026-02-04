@@ -346,7 +346,9 @@ impl<V> Type<V> {
             TypeExpr::Tuple(inner_types) => {
                 inner_types.iter().map(|t| t.calculate_type_size()).sum()
             }
-            _ => panic!("Cannot currently calculate size for types other than Field, Array, and Tuple"),
+            TypeExpr::Function => 1,
+            TypeExpr::U(_) => 1,
+            _ => panic!("Cannot currently calculate size for types other than Field, U, Function, Array, and Tuple"),
         }
     }
 }
