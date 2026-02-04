@@ -262,7 +262,19 @@ fn resolve_fn_ptr_dispatch(
         }
     }
 
-    // Step 2: fixpoint — propagate through Jmp edges and static call args
+    // Pre-compute: for each function, find its Return terminator's value list
+    let mut return_values: HashMap<FunctionId, Vec<ValueId>> = HashMap::new();
+    for &fid in &func_ids {
+        let func = ssa.get_function(fid);
+        for (_bid, block) in func.get_blocks() {
+            if let Some(Terminator::Return(vals)) = block.get_terminator() {
+                return_values.insert(fid, vals.clone());
+                break;
+            }
+        }
+    }
+
+    // Step 2: fixpoint — propagate through Jmp edges, call args, and call returns
     let mut changed = true;
     while changed {
         changed = false;
@@ -294,37 +306,26 @@ fn resolve_fn_ptr_dispatch(
                     }
                 }
 
-                // Propagate through static call args (inter-function)
+                // Propagate through call args and return values
                 for instr in block.get_instructions() {
-                    if let OpCode::Call {
-                        function: CallTarget::Static(callee_id),
-                        args,
-                        ..
-                    } = instr
-                    {
-                        let callee = ssa.get_function(*callee_id);
-                        let callee_params: Vec<ValueId> = callee
-                            .get_entry()
-                            .get_parameters()
-                            .map(|(vid, _)| *vid)
-                            .collect();
-                        for (i, arg) in args.iter().enumerate() {
-                            if i >= callee_params.len() {
-                                continue;
-                            }
-                            // Direct: arg is a known FnPtr
-                            if let Some(&target) = value_to_target.get(&(fid, *arg)) {
-                                if !value_to_target.contains_key(&(*callee_id, callee_params[i])) {
-                                    value_to_target
-                                        .insert((*callee_id, callee_params[i]), target);
-                                    changed = true;
+                    match instr {
+                        OpCode::Call {
+                            function: CallTarget::Static(callee_id),
+                            args,
+                            results,
+                        } => {
+                            // Forward: caller args → callee params
+                            let callee = ssa.get_function(*callee_id);
+                            let callee_params: Vec<ValueId> = callee
+                                .get_entry()
+                                .get_parameters()
+                                .map(|(vid, _)| *vid)
+                                .collect();
+                            for (i, arg) in args.iter().enumerate() {
+                                if i >= callee_params.len() {
+                                    continue;
                                 }
-                            }
-                            // Transitive: arg is an entry param already resolved
-                            else if let Some(param_idx) =
-                                entry_params.iter().position(|vid| vid == arg)
-                            {
-                                if let Some(&target) = value_to_target.get(&(fid, entry_params[param_idx])) {
+                                if let Some(&target) = value_to_target.get(&(fid, *arg)) {
                                     if !value_to_target
                                         .contains_key(&(*callee_id, callee_params[i]))
                                     {
@@ -334,7 +335,52 @@ fn resolve_fn_ptr_dispatch(
                                     }
                                 }
                             }
+
+                            // Backward: callee return values → caller results
+                            if let Some(ret_vals) = return_values.get(callee_id) {
+                                for (i, ret_val) in ret_vals.iter().enumerate() {
+                                    if i < results.len() {
+                                        if let Some(&target) =
+                                            value_to_target.get(&(*callee_id, *ret_val))
+                                        {
+                                            if !value_to_target.contains_key(&(fid, results[i])) {
+                                                value_to_target
+                                                    .insert((fid, results[i]), target);
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        OpCode::Call {
+                            function: CallTarget::Dynamic(fn_ptr_val),
+                            results,
+                            ..
+                        } => {
+                            // If the dynamic call target is resolved, propagate
+                            // through the target function's return values
+                            if let Some(&target_fn) = value_to_target.get(&(fid, *fn_ptr_val)) {
+                                if let Some(ret_vals) = return_values.get(&target_fn) {
+                                    for (i, ret_val) in ret_vals.iter().enumerate() {
+                                        if i < results.len() {
+                                            if let Some(&target) =
+                                                value_to_target.get(&(target_fn, *ret_val))
+                                            {
+                                                if !value_to_target
+                                                    .contains_key(&(fid, results[i]))
+                                                {
+                                                    value_to_target
+                                                        .insert((fid, results[i]), target);
+                                                    changed = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
