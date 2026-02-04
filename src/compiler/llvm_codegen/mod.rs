@@ -268,6 +268,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Const::WitnessRef(_) => {
                 todo!("WitnessRef constants not yet supported in LLVM codegen")
             }
+            Const::FnPtr(_) => {
+                todo!("FnPtr constants not yet supported in LLVM codegen")
+            }
         }
     }
 

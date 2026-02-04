@@ -723,6 +723,7 @@ impl WitnessToRef {
                 self.witness_to_ref_in_type(inner).ref_of(tp.annotation.clone())
             }
             TypeExpr::WitnessRef => tp.clone(),
+            TypeExpr::Function => tp.clone(),
             TypeExpr::Tuple(elements) => {
                 let boxed_elements = elements
                     .iter()

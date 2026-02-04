@@ -44,9 +44,7 @@ impl TypeConverter {
                 let converted_element = self.convert_type(element_type);
                 Type::slice_of(converted_element, Empty)
             }
-            NoirType::Function => {
-                panic!("Function types are not supported in custom SSA")
-            }
+            NoirType::Function => Type::function(Empty),
         }
     }
 } 

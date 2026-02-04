@@ -80,6 +80,9 @@ impl Types {
                 Const::WitnessRef(_) => function_info
                     .values
                     .insert(*value_id, Type::witness_ref(V::empty())),
+                Const::FnPtr(_) => function_info
+                    .values
+                    .insert(*value_id, Type::function(V::empty())),
             };
         }
 

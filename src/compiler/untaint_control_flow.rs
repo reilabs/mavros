@@ -846,6 +846,10 @@ impl UntaintControlFlow {
                 annotation: ConstantTaint::Pure,
             },
             TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Function => Type {
+                expr: TypeExpr::Function,
+                annotation: ConstantTaint::Pure,
+            },
         }
     }
 }

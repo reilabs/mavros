@@ -284,6 +284,7 @@ impl CSE {
                 Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
                 Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
                 Const::WitnessRef(_) => todo!(),
+                Const::FnPtr(_) => None,
             };
         }
 

@@ -185,6 +185,7 @@ pub enum Const {
     U(usize, u128),
     Field(ark_bn254::Fr),
     WitnessRef(ark_bn254::Fr),
+    FnPtr(FunctionId),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -399,6 +400,10 @@ impl<V: Clone> Function<V> {
         self.push_const(Const::Field(value))
     }
 
+    pub fn push_fn_ptr_const(&mut self, fn_id: FunctionId) -> ValueId {
+        self.push_const(Const::FnPtr(fn_id))
+    }
+
 
     pub fn push_cmp(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId, kind: CmpKind) -> ValueId {
         let value_id = ValueId(self.next_value);
@@ -606,6 +611,31 @@ impl<V: Clone> Function<V> {
                 results: return_values.clone(),
                 function: CallTarget::Static(fn_id),
                 args: args,
+            });
+        return_values
+    }
+
+    pub fn push_call_indirect(
+        &mut self,
+        block_id: BlockId,
+        fn_ptr: ValueId,
+        args: Vec<ValueId>,
+        return_size: usize,
+    ) -> Vec<ValueId> {
+        let mut return_values = Vec::new();
+        for _ in 0..return_size {
+            let value_id = ValueId(self.next_value);
+            self.next_value += 1;
+            return_values.push(value_id);
+        }
+        self.blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .instructions
+            .push(OpCode::Call {
+                results: return_values.clone(),
+                function: CallTarget::Dynamic(fn_ptr),
+                args,
             });
         return_values
     }

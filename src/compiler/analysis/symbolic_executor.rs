@@ -160,6 +160,7 @@ impl SymbolicExecutor {
                 Const::U(s, v) => V::of_u(*s, *v, ctx),
                 Const::Field(f) => V::of_field(f.clone(), ctx),
                 Const::WitnessRef(_) => todo!(),
+                Const::FnPtr(_) => todo!(),
             };
             scope[val.0 as usize] = Some(v);
         }

@@ -136,6 +136,7 @@ impl GlobalFrameLayouter {
                     1
                 }
                 ssa::GlobalDef::Const(ssa::Const::WitnessRef(_)) => 1,
+                ssa::GlobalDef::Const(ssa::Const::FnPtr(_)) => panic!("FnPtr globals not supported in codegen"),
                 ssa::GlobalDef::Array(_, _) => 1, // Ptr (BoxedValue)
             };
             offsets.push(next_free);
@@ -268,6 +269,7 @@ impl CodeGen {
                         data: *v,
                     });
                 }
+                Const::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
             }
         }
 

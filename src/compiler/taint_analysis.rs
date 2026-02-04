@@ -1121,7 +1121,8 @@ impl TaintAnalysis {
                     .iter()
                     .map(|e| self.construct_free_taint_for_type(e))
                     .collect(),
-            )
+            ),
+            TypeExpr::Function => TaintType::Primitive(Taint::Constant(ConstantTaint::Pure)),
         }
     }
 
@@ -1151,7 +1152,8 @@ impl TaintAnalysis {
                     .iter()
                     .map(|e| self.construct_pure_taint_for_type(e))
                     .collect(),
-            )
+            ),
+            TypeExpr::Function => TaintType::Primitive(Taint::Constant(ConstantTaint::Pure)),
         }
     }
 }

@@ -105,10 +105,6 @@ impl Driver {
 
         let passes = vec![
             noirc_evaluator::ssa::SsaPass::new(
-                noirc_evaluator::ssa::ssa_gen::Ssa::defunctionalize,
-                "Defunctionalization",
-            ),
-            noirc_evaluator::ssa::SsaPass::new(
                 noirc_evaluator::ssa::ssa_gen::Ssa::remove_unreachable_functions,
                 "Removing Unreachable Functions",
             ),
