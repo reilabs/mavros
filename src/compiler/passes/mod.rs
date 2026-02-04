@@ -1,4 +1,5 @@
 pub mod arithmetic_simplifier;
+pub mod defunctionalize;
 pub mod witness_to_ref;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;

@@ -17,6 +17,10 @@ impl<V> TypeInfo<V> {
     pub fn get_function(&self, function_id: FunctionId) -> &FunctionTypeInfo<V> {
         self.functions.get(&function_id).unwrap()
     }
+
+    pub fn has_function(&self, function_id: FunctionId) -> bool {
+        self.functions.contains_key(&function_id)
+    }
 }
 
 pub struct FunctionTypeInfo<V> {
@@ -71,23 +75,23 @@ impl Types {
 
         for (value_id, const_) in function.iter_consts() {
             match const_ {
-                Const::U(size, _) => function_info
-                    .values
-                    .insert(*value_id, Type::u(*size, V::empty())),
-                Const::Field(_) => function_info
-                    .values
-                    .insert(*value_id, Type::field(V::empty())),
-                Const::WitnessRef(_) => function_info
-                    .values
-                    .insert(*value_id, Type::witness_ref(V::empty())),
-                Const::FnPtr(_) => function_info
-                    .values
-                    .insert(*value_id, Type::function(V::empty())),
-            };
+                Const::U(size, _) => {
+                    function_info.values.insert(*value_id, Type::u(*size, V::empty()));
+                }
+                Const::Field(_) => {
+                    function_info.values.insert(*value_id, Type::field(V::empty()));
+                }
+                Const::WitnessRef(_) => {
+                    function_info.values.insert(*value_id, Type::witness_ref(V::empty()));
+                }
+                Const::FnPtr(_) => {
+                    function_info.values.insert(*value_id, Type::function(V::empty()));
+                }
+            }
         }
 
-        for block in cfg.get_domination_pre_order() {
-            let block = function.get_block(block);
+        for block_id in cfg.get_domination_pre_order() {
+            let block = function.get_block(block_id);
 
             for param in block.get_parameters() {
                 function_info.values.insert(param.0, param.1.clone());
@@ -205,8 +209,8 @@ impl Types {
                         }
                         Ok(())
                     }
-                    CallTarget::Dynamic(_fn_ptr) => {
-                        panic!("Dynamic call targets are not supported in type checking")
+                    CallTarget::Dynamic(_) => {
+                        panic!("Dynamic calls should be eliminated by defunctionalization before type analysis");
                     }
                 }
             }

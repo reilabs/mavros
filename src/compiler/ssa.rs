@@ -1014,6 +1014,14 @@ impl<V: Clone> Function<V> {
         self.consts_to_val.remove(&v.unwrap());
     }
 
+    pub fn replace_const(&mut self, value_id: ValueId, new_const: Const) {
+        if let Some(old_const) = self.consts.remove(&value_id) {
+            self.consts_to_val.remove(&old_const);
+        }
+        self.consts.insert(value_id, new_const.clone());
+        self.consts_to_val.insert(new_const, value_id);
+    }
+
     pub fn take_returns(&mut self) -> Vec<Type<V>> {
         std::mem::take(&mut self.returns)
     }

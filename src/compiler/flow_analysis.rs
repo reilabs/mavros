@@ -680,7 +680,8 @@ impl FlowAnalysis {
                             call_graph.add_call(*func_id, *tgt_id);
                         }
                         OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
-                            panic!("Dynamic call targets are not supported in flow analysis")
+                            // Dynamic calls are resolved by the defunctionalization pass.
+                            // Skip adding call graph edges for them.
                         }
                         _ => {}
                     }
