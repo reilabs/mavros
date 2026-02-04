@@ -1,48 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     ir::r#type::{Empty, Type, TypeExpr},
     pass_manager::{Pass, PassInfo, PassManager},
     ssa::{
-        BlockId, CallTarget, Const, Function, FunctionId, OpCode, Terminator, TupleIdx, ValueId,
-        SSA,
+        BlockId, CallTarget, Const, FunctionId, OpCode, Terminator, TupleIdx, ValueId, SSA,
     },
 };
-
-/// A canonical call signature derived from function param/return types.
-/// Uses Display representation for hashing since `Type<Empty>` doesn't implement `Hash`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct CallSignature {
-    param_keys: Vec<String>,
-    return_keys: Vec<String>,
-}
-
-impl CallSignature {
-    fn from_function(func: &Function<Empty>) -> Self {
-        let param_keys = func
-            .get_param_types()
-            .iter()
-            .map(|t| format!("{}", t))
-            .collect();
-        let return_keys = func
-            .get_returns()
-            .iter()
-            .map(|t| format!("{}", t))
-            .collect();
-        CallSignature {
-            param_keys,
-            return_keys,
-        }
-    }
-}
-
-/// Stored alongside the signature key so we can build dispatch functions
-/// with concrete types.
-#[derive(Clone)]
-struct SignatureInfo {
-    param_types: Vec<Type<Empty>>,
-    return_types: Vec<Type<Empty>>,
-}
 
 pub struct Defunctionalize {}
 
@@ -73,59 +37,80 @@ impl Pass<Empty> for Defunctionalize {
     }
 }
 
+/// For each SSA value that may hold a function pointer, the set of
+/// concrete FunctionIds it can point to.
+type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
+
 fn run_defunctionalize(ssa: &mut SSA<Empty>) {
-    // Phase 1: Discovery — collect all FnPtr targets
-    let mut fn_ptr_targets: Vec<FunctionId> = Vec::new();
-    {
-        let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
-        for fid in &func_ids {
-            let func = ssa.get_function(*fid);
-            for (_vid, c) in func.iter_consts() {
-                if let Const::FnPtr(target) = c {
-                    if !fn_ptr_targets.contains(target) {
-                        fn_ptr_targets.push(*target);
-                    }
+    // Check if there are any FnPtrs at all
+    let has_fn_ptrs = ssa.get_function_ids().collect::<Vec<_>>().iter().any(|fid| {
+        ssa.get_function(*fid)
+            .iter_consts()
+            .any(|(_, c)| matches!(c, Const::FnPtr(_)))
+    });
+    if !has_fn_ptrs {
+        return;
+    }
+
+    // Phase 1: Compute reaching definitions — which FnPtrs can reach each value
+    let reaching = compute_reaching_fn_ptrs(ssa);
+
+    // Phase 2: For each dynamic call site, build a dispatch function
+    // with exactly the reachable targets
+    let mut call_site_dispatch: HashMap<(FunctionId, ValueId), FunctionId> = HashMap::new();
+    let mut dispatch_counter = 0u32;
+
+    let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+    // Collect all call sites first, then build dispatch functions
+    let mut call_sites: Vec<(FunctionId, ValueId)> = Vec::new();
+    for &fid in &func_ids {
+        let func = ssa.get_function(fid);
+        for (_bid, block) in func.get_blocks() {
+            for instr in block.get_instructions() {
+                if let OpCode::Call {
+                    function: CallTarget::Dynamic(fn_ptr_val),
+                    ..
+                } = instr
+                {
+                    call_sites.push((fid, *fn_ptr_val));
                 }
             }
         }
     }
 
-    if fn_ptr_targets.is_empty() {
-        return;
-    }
+    for (fid, fn_ptr_val) in &call_sites {
+        // Skip if we already built a dispatch for this exact (func, value) pair
+        if call_site_dispatch.contains_key(&(*fid, *fn_ptr_val)) {
+            continue;
+        }
+        let targets: Vec<FunctionId> = reaching
+            .get(&(*fid, *fn_ptr_val))
+            .unwrap_or_else(|| {
+                panic!(
+                    "No reaching FnPtrs for v{} in {:?}",
+                    fn_ptr_val.0, fid
+                )
+            })
+            .iter()
+            .copied()
+            .collect();
 
-    // Compute signatures and group targets by signature
-    let mut sig_groups: HashMap<CallSignature, (SignatureInfo, Vec<FunctionId>)> = HashMap::new();
-    for &target_fn_id in &fn_ptr_targets {
-        let target_func = ssa.get_function(target_fn_id);
-        let sig = CallSignature::from_function(target_func);
-        let info = SignatureInfo {
-            param_types: target_func.get_param_types(),
-            return_types: target_func.get_returns().to_vec(),
-        };
-        sig_groups
-            .entry(sig)
-            .or_insert_with(|| (info, Vec::new()))
-            .1
-            .push(target_fn_id);
-    }
+        assert!(!targets.is_empty(), "Empty target set for v{} in {:?}", fn_ptr_val.0, fid);
 
-    // Phase 2: Build dispatch functions
-    let mut dispatch_map: HashMap<CallSignature, FunctionId> = HashMap::new();
-    let mut dispatch_counter = 0u32;
+        // Get param/return types from the first target (all must match)
+        let representative = ssa.get_function(targets[0]);
+        let param_types = representative.get_param_types();
+        let return_types = representative.get_returns().to_vec();
 
-    for (sig, (info, variants)) in &sig_groups {
-        let dispatch_fn_id = build_dispatch_function(ssa, dispatch_counter, info, variants);
-        dispatch_map.insert(sig.clone(), dispatch_fn_id);
+        let dispatch_fn_id =
+            build_dispatch_function(ssa, dispatch_counter, &param_types, &return_types, &targets);
+        call_site_dispatch.insert((*fid, *fn_ptr_val), dispatch_fn_id);
         dispatch_counter += 1;
     }
 
-    // Build value→dispatch mapping by tracing FnPtr consts through the SSA
-    let ptr_to_dispatch = resolve_fn_ptr_dispatch(ssa, &dispatch_map);
-
     // Phase 3: Transformation
 
-    // 3a. Replace Const::FnPtr → Const::U32 in all functions
+    // 3a. Replace Const::FnPtr → Const::U(32, ...) in all functions
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in &func_ids {
         let func = ssa.get_function(*fid);
@@ -150,16 +135,9 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
         let func = ssa.get_function(fid);
-        // Check if this function has any dynamic calls
         let has_dynamic = func.get_blocks().any(|(_, block)| {
             block.get_instructions().any(|instr| {
-                matches!(
-                    instr,
-                    OpCode::Call {
-                        function: CallTarget::Dynamic(_),
-                        ..
-                    }
-                )
+                matches!(instr, OpCode::Call { function: CallTarget::Dynamic(_), .. })
             })
         });
         if !has_dynamic {
@@ -181,10 +159,10 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
                         function: CallTarget::Dynamic(fn_ptr_val),
                         args,
                     } => {
-                        let dispatch_fn = *ptr_to_dispatch
+                        let dispatch_fn = *call_site_dispatch
                             .get(&(fid, fn_ptr_val))
                             .expect(&format!(
-                                "No dispatch function resolved for v{} in function {:?}",
+                                "No dispatch function for v{} in {:?}",
                                 fn_ptr_val.0, fid
                             ));
                         let mut new_args = Vec::with_capacity(args.len() + 1);
@@ -206,12 +184,11 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
         }
     }
 
-    // 3c. Replace TypeExpr::Function → TypeExpr::U(32) in type annotations
+    // 3c. Replace TypeExpr::Function → TypeExpr::U(32) everywhere
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
         let func = ssa.get_function_mut(fid);
 
-        // Replace in return types
         let mut returns = func.take_returns();
         for ret_type in returns.iter_mut() {
             replace_function_type(ret_type);
@@ -220,7 +197,6 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
             func.add_return_type(ret_type);
         }
 
-        // Replace in block parameters and instructions
         let block_ids: Vec<BlockId> = func.get_blocks().map(|(bid, _)| *bid).collect();
         for bid in block_ids {
             let block = func.get_block_mut(bid);
@@ -240,29 +216,31 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
     }
 }
 
-/// Resolve which dispatch function each dynamic call's fn_ptr value maps to.
-///
-/// Traces FnPtr consts through Jmp block-parameter edges (intra-function) and
-/// static call argument edges (inter-function) using fixpoint iteration.
-/// Returns a map: (FunctionId, ValueId) → dispatch FunctionId.
-fn resolve_fn_ptr_dispatch(
-    ssa: &SSA<Empty>,
-    dispatch_map: &HashMap<CallSignature, FunctionId>,
-) -> HashMap<(FunctionId, ValueId), FunctionId> {
-    // Step 1: seed from FnPtr consts — map (func, value) → target FunctionId
-    let mut value_to_target: HashMap<(FunctionId, ValueId), FunctionId> = HashMap::new();
+/// Compute, for each (function, value) pair, the set of FunctionIds that
+/// the value can point to. Uses fixpoint iteration over:
+///   - FnPtr constants (seeds)
+///   - Jmp block-parameter edges (intra-function)
+///   - Static call argument edges (caller → callee params)
+///   - Static call return edges (callee returns → caller results)
+///   - Dynamic call return edges (resolved target returns → caller results)
+fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
+    let mut reaching: ReachingFns = HashMap::new();
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
+    // Seed from FnPtr consts
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         for (vid, c) in func.iter_consts() {
             if let Const::FnPtr(target) = c {
-                value_to_target.insert((fid, *vid), *target);
+                reaching
+                    .entry((fid, *vid))
+                    .or_default()
+                    .insert(*target);
             }
         }
     }
 
-    // Pre-compute: for each function, find its Return terminator's value list
+    // Pre-compute return values per function
     let mut return_values: HashMap<FunctionId, Vec<ValueId>> = HashMap::new();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
@@ -274,20 +252,15 @@ fn resolve_fn_ptr_dispatch(
         }
     }
 
-    // Step 2: fixpoint — propagate through Jmp edges, call args, and call returns
+    // Fixpoint: propagate sets through edges
     let mut changed = true;
     while changed {
         changed = false;
         for &fid in &func_ids {
             let func = ssa.get_function(fid);
-            let entry_params: Vec<ValueId> = func
-                .get_entry()
-                .get_parameters()
-                .map(|(vid, _)| *vid)
-                .collect();
 
             for (_bid, block) in func.get_blocks() {
-                // Propagate through Jmp edges (intra-function)
+                // Jmp edges (intra-function)
                 if let Some(Terminator::Jmp(dest, args)) = block.get_terminator() {
                     let dest_params: Vec<ValueId> = func
                         .get_block(*dest)
@@ -296,17 +269,19 @@ fn resolve_fn_ptr_dispatch(
                         .collect();
                     for (i, arg) in args.iter().enumerate() {
                         if i < dest_params.len() {
-                            if let Some(&target) = value_to_target.get(&(fid, *arg)) {
-                                if !value_to_target.contains_key(&(fid, dest_params[i])) {
-                                    value_to_target.insert((fid, dest_params[i]), target);
-                                    changed = true;
+                            if let Some(targets) = reaching.get(&(fid, *arg)).cloned() {
+                                let dest_set = reaching.entry((fid, dest_params[i])).or_default();
+                                for t in targets {
+                                    if dest_set.insert(t) {
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                // Propagate through call args and return values
+                // Call edges
                 for instr in block.get_instructions() {
                     match instr {
                         OpCode::Call {
@@ -325,13 +300,13 @@ fn resolve_fn_ptr_dispatch(
                                 if i >= callee_params.len() {
                                     continue;
                                 }
-                                if let Some(&target) = value_to_target.get(&(fid, *arg)) {
-                                    if !value_to_target
-                                        .contains_key(&(*callee_id, callee_params[i]))
-                                    {
-                                        value_to_target
-                                            .insert((*callee_id, callee_params[i]), target);
-                                        changed = true;
+                                if let Some(targets) = reaching.get(&(fid, *arg)).cloned() {
+                                    let dest =
+                                        reaching.entry((*callee_id, callee_params[i])).or_default();
+                                    for t in targets {
+                                        if dest.insert(t) {
+                                            changed = true;
+                                        }
                                     }
                                 }
                             }
@@ -340,13 +315,15 @@ fn resolve_fn_ptr_dispatch(
                             if let Some(ret_vals) = return_values.get(callee_id) {
                                 for (i, ret_val) in ret_vals.iter().enumerate() {
                                     if i < results.len() {
-                                        if let Some(&target) =
-                                            value_to_target.get(&(*callee_id, *ret_val))
+                                        if let Some(targets) =
+                                            reaching.get(&(*callee_id, *ret_val)).cloned()
                                         {
-                                            if !value_to_target.contains_key(&(fid, results[i])) {
-                                                value_to_target
-                                                    .insert((fid, results[i]), target);
-                                                changed = true;
+                                            let dest =
+                                                reaching.entry((fid, results[i])).or_default();
+                                            for t in targets {
+                                                if dest.insert(t) {
+                                                    changed = true;
+                                                }
                                             }
                                         }
                                     }
@@ -358,21 +335,27 @@ fn resolve_fn_ptr_dispatch(
                             results,
                             ..
                         } => {
-                            // If the dynamic call target is resolved, propagate
-                            // through the target function's return values
-                            if let Some(&target_fn) = value_to_target.get(&(fid, *fn_ptr_val)) {
-                                if let Some(ret_vals) = return_values.get(&target_fn) {
-                                    for (i, ret_val) in ret_vals.iter().enumerate() {
-                                        if i < results.len() {
-                                            if let Some(&target) =
-                                                value_to_target.get(&(target_fn, *ret_val))
-                                            {
-                                                if !value_to_target
-                                                    .contains_key(&(fid, results[i]))
+                            // If we know what this calls, propagate through
+                            // target functions' return values
+                            if let Some(target_fns) =
+                                reaching.get(&(fid, *fn_ptr_val)).cloned()
+                            {
+                                for target_fn in target_fns {
+                                    if let Some(ret_vals) = return_values.get(&target_fn) {
+                                        for (i, ret_val) in ret_vals.iter().enumerate() {
+                                            if i < results.len() {
+                                                if let Some(targets) = reaching
+                                                    .get(&(target_fn, *ret_val))
+                                                    .cloned()
                                                 {
-                                                    value_to_target
-                                                        .insert((fid, results[i]), target);
-                                                    changed = true;
+                                                    let dest = reaching
+                                                        .entry((fid, results[i]))
+                                                        .or_default();
+                                                    for t in targets {
+                                                        if dest.insert(t) {
+                                                            changed = true;
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -387,45 +370,36 @@ fn resolve_fn_ptr_dispatch(
         }
     }
 
-    // Step 3: map each (func, value) → dispatch function via the target's signature
-    let mut result: HashMap<(FunctionId, ValueId), FunctionId> = HashMap::new();
-    for ((fid, vid), target) in &value_to_target {
-        let target_func = ssa.get_function(*target);
-        let sig = CallSignature::from_function(target_func);
-        if let Some(&dispatch_fn) = dispatch_map.get(&sig) {
-            result.insert((*fid, *vid), dispatch_fn);
-        }
-    }
-    result
+    reaching
 }
 
-/// Build a dispatch function for a signature group.
+/// Build a dispatch function for a specific call site's reachable targets.
 fn build_dispatch_function(
     ssa: &mut SSA<Empty>,
     counter: u32,
-    info: &SignatureInfo,
+    param_types: &[Type<Empty>],
+    return_types: &[Type<Empty>],
     variants: &[FunctionId],
 ) -> FunctionId {
     let dispatch_fn_id = ssa.add_function(format!("apply_dispatch@{}", counter));
     let func = ssa.get_function_mut(dispatch_fn_id);
 
-    for ret_type in &info.return_types {
+    for ret_type in return_types {
         func.add_return_type(ret_type.clone());
     }
 
     let entry_block = func.get_entry_id();
-
     let fn_id_param = func.add_parameter(entry_block, Type::u32(Empty));
 
     let mut forwarded_params: Vec<ValueId> = Vec::new();
-    for param_type in &info.param_types {
+    for param_type in param_types {
         let p = func.add_parameter(entry_block, param_type.clone());
         forwarded_params.push(p);
     }
 
     let merge_block = func.add_block();
     let mut merge_results: Vec<ValueId> = Vec::new();
-    for ret_type in &info.return_types {
+    for ret_type in return_types {
         let r = func.add_parameter(merge_block, ret_type.clone());
         merge_results.push(r);
     }
@@ -439,7 +413,7 @@ fn build_dispatch_function(
             entry_block,
             variant_id,
             forwarded_params.clone(),
-            info.return_types.len(),
+            return_types.len(),
         );
         func.terminate_block_with_jmp(entry_block, merge_block, call_results);
     } else {
@@ -455,7 +429,7 @@ fn build_dispatch_function(
                     current_block,
                     variant_id,
                     forwarded_params.clone(),
-                    info.return_types.len(),
+                    return_types.len(),
                 );
                 func.terminate_block_with_jmp(current_block, merge_block, call_results);
             } else {
@@ -476,7 +450,7 @@ fn build_dispatch_function(
                     call_block,
                     variant_id,
                     forwarded_params.clone(),
-                    info.return_types.len(),
+                    return_types.len(),
                 );
                 func.terminate_block_with_jmp(call_block, merge_block, call_results);
 
@@ -494,15 +468,9 @@ fn replace_function_type(typ: &mut Type<Empty>) {
         TypeExpr::Function => {
             typ.expr = TypeExpr::U(32);
         }
-        TypeExpr::Array(inner, _) => {
-            replace_function_type(inner);
-        }
-        TypeExpr::Slice(inner) => {
-            replace_function_type(inner);
-        }
-        TypeExpr::Ref(inner) => {
-            replace_function_type(inner);
-        }
+        TypeExpr::Array(inner, _) => replace_function_type(inner),
+        TypeExpr::Slice(inner) => replace_function_type(inner),
+        TypeExpr::Ref(inner) => replace_function_type(inner),
         TypeExpr::Tuple(elements) => {
             for elem in elements.iter_mut() {
                 replace_function_type(elem);
@@ -515,23 +483,15 @@ fn replace_function_type(typ: &mut Type<Empty>) {
 /// Replace `TypeExpr::Function` in all type annotations within an instruction.
 fn replace_function_types_in_instruction(instr: &mut OpCode<Empty>) {
     match instr {
-        OpCode::MkSeq { elem_type, .. } => {
-            replace_function_type(elem_type);
-        }
-        OpCode::Alloc { elem_type, .. } => {
-            replace_function_type(elem_type);
-        }
+        OpCode::MkSeq { elem_type, .. } => replace_function_type(elem_type),
+        OpCode::Alloc { elem_type, .. } => replace_function_type(elem_type),
         OpCode::MkTuple { element_types, .. } => {
             for t in element_types.iter_mut() {
                 replace_function_type(t);
             }
         }
-        OpCode::FreshWitness { result_type, .. } => {
-            replace_function_type(result_type);
-        }
-        OpCode::ReadGlobal { result_type, .. } => {
-            replace_function_type(result_type);
-        }
+        OpCode::FreshWitness { result_type, .. } => replace_function_type(result_type),
+        OpCode::ReadGlobal { result_type, .. } => replace_function_type(result_type),
         OpCode::TupleProj { idx, .. } => {
             if let TupleIdx::Dynamic(_, typ) = idx {
                 replace_function_type(typ);
