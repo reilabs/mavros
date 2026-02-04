@@ -612,7 +612,7 @@ impl UntaintControlFlow {
                             results: ret,
                             function: tgt,
                             args: args,
-                            is_unconstrained: todo!(),
+                            is_unconstrained,
                         });
                     }
 

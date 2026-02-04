@@ -1499,7 +1499,7 @@ impl<V: Display + Clone> OpCode<V> {
                 results: result,
                 function: fn_id,
                 args,
-                is_unconstrained: _,
+                is_unconstrained,
             } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
@@ -1507,8 +1507,9 @@ impl<V: Display + Clone> OpCode<V> {
                     .map(|v| format!("v{}{}", v.0, annotate(value_annotator, *v)))
                     .join(", ");
                 format!(
-                    "{} = call {}@{}({})",
+                    "{} = {} call {}@{}({})",
                     result_str,
+                    if *is_unconstrained { "unconstrained" } else { "" },
                     ssa.get_function(*fn_id).get_name(),
                     fn_id.0,
                     args_str
