@@ -227,6 +227,45 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
     let mut reaching: ReachingFns = HashMap::new();
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
+    // Check if a type contains Function anywhere (for alias-aware propagation)
+    fn contains_function(typ: &Type<Empty>) -> bool {
+        match &typ.expr {
+            TypeExpr::Function => true,
+            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) | TypeExpr::Ref(inner) => {
+                contains_function(inner)
+            }
+            TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessRef => false,
+        }
+    }
+
+    // Pre-compute which values are Refs containing Functions (need bidirectional propagation)
+    // These come from: Alloc results, block parameters with Ref<...Function...> type
+    let mut is_ref_with_fn: HashSet<(FunctionId, ValueId)> = HashSet::new();
+    for &fid in &func_ids {
+        let func = ssa.get_function(fid);
+        // Check Alloc instructions
+        for (_bid, block) in func.get_blocks() {
+            for instr in block.get_instructions() {
+                if let OpCode::Alloc { result, elem_type, .. } = instr {
+                    if contains_function(elem_type) {
+                        is_ref_with_fn.insert((fid, *result));
+                    }
+                }
+            }
+        }
+        // Check block parameters
+        for (_bid, block) in func.get_blocks() {
+            for (vid, typ) in block.get_parameters() {
+                if let TypeExpr::Ref(inner) = &typ.expr {
+                    if contains_function(inner) {
+                        is_ref_with_fn.insert((fid, *vid));
+                    }
+                }
+            }
+        }
+    }
+
     // Seed from FnPtr consts
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
@@ -274,7 +313,8 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
     // Track fn_ptrs stored in global slots (keyed by global offset)
     let mut global_slots: HashMap<usize, HashSet<FunctionId>> = HashMap::new();
 
-    // Fixpoint: propagate sets through edges
+    // Fixpoint: propagate reaching sets through edges
+    // Backward propagation only happens when source is_ref_with_fn (pointer aliasing)
     let mut changed = true;
     while changed {
         changed = false;
@@ -282,7 +322,6 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
             let func = ssa.get_function(fid);
 
             for (_bid, block) in func.get_blocks() {
-                // Jmp edges (intra-function)
                 if let Some(Terminator::Jmp(dest, args)) = block.get_terminator() {
                     let dest_params: Vec<ValueId> = func
                         .get_block(*dest)
@@ -292,13 +331,15 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                     for (i, arg) in args.iter().enumerate() {
                         if i < dest_params.len() {
                             changed |= propagate(&mut reaching, (fid, *arg), (fid, dest_params[i]));
+                            if is_ref_with_fn.contains(&(fid, dest_params[i])) {
+                                changed |= propagate(&mut reaching, (fid, dest_params[i]), (fid, *arg));
+                            }
                         }
                     }
                 }
 
                 for instr in block.get_instructions() {
                     match instr {
-                        // Call: forward through args, backward through returns
                         OpCode::Call { function, args, results } => {
                             let target_fns: Vec<FunctionId> = match function {
                                 CallTarget::Static(callee_id) => vec![*callee_id],
@@ -316,7 +357,6 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                                     .get_parameters()
                                     .map(|(vid, _)| *vid)
                                     .collect();
-                                // Forward: caller args → callee params
                                 for (i, arg) in args.iter().enumerate() {
                                     if i < callee_params.len() {
                                         changed |= propagate(
@@ -324,9 +364,15 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                                             (fid, *arg),
                                             (target_fn, callee_params[i]),
                                         );
+                                        if is_ref_with_fn.contains(&(target_fn, callee_params[i])) {
+                                            changed |= propagate(
+                                                &mut reaching,
+                                                (target_fn, callee_params[i]),
+                                                (fid, *arg),
+                                            );
+                                        }
                                     }
                                 }
-                                // Backward: callee returns → caller results
                                 if let Some(ret_vals) = return_values.get(&target_fn) {
                                     for (i, ret_val) in ret_vals.iter().enumerate() {
                                         if i < results.len() {
@@ -340,26 +386,41 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                                 }
                             }
                         }
-                        // Data structure operations: propagate through containers
                         OpCode::MkTuple { result, elems, .. } => {
                             for elem in elems {
                                 changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
+                                if is_ref_with_fn.contains(&(fid, *elem)) {
+                                    changed |= propagate(&mut reaching, (fid, *result), (fid, *elem));
+                                }
                             }
                         }
                         OpCode::MkSeq { result, elems, .. } => {
                             for elem in elems {
                                 changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
+                                if is_ref_with_fn.contains(&(fid, *elem)) {
+                                    changed |= propagate(&mut reaching, (fid, *result), (fid, *elem));
+                                }
                             }
                         }
                         OpCode::ArrayGet { result, array, .. } => {
                             changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *result)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *array));
+                            }
                         }
                         OpCode::ArraySet { result, array, value, .. } => {
                             changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *value)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *array));
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
+                            }
                         }
                         OpCode::TupleProj { result, tuple, .. } => {
                             changed |= propagate(&mut reaching, (fid, *tuple), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *result)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *tuple));
+                            }
                         }
                         OpCode::Load { result, ptr } => {
                             changed |= propagate(&mut reaching, (fid, *ptr), (fid, *result));
@@ -369,16 +430,27 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                         }
                         OpCode::SlicePush { result, slice, values, .. } => {
                             changed |= propagate(&mut reaching, (fid, *slice), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *slice)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *slice));
+                            }
                             for v in values {
                                 changed |= propagate(&mut reaching, (fid, *v), (fid, *result));
+                                if is_ref_with_fn.contains(&(fid, *v)) {
+                                    changed |= propagate(&mut reaching, (fid, *result), (fid, *v));
+                                }
                             }
                         }
                         OpCode::Select { result, if_t, if_f, .. } => {
                             changed |= propagate(&mut reaching, (fid, *if_t), (fid, *result));
                             changed |= propagate(&mut reaching, (fid, *if_f), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *if_t)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *if_t));
+                            }
+                            if is_ref_with_fn.contains(&(fid, *if_f)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *if_f));
+                            }
                         }
                         OpCode::InitGlobal { global, value } => {
-                            // Propagate into the global slot (keyed by offset)
                             if let Some(targets) = reaching.get(&(fid, *value)).cloned() {
                                 let slot = global_slots.entry(*global).or_default();
                                 for t in targets {
@@ -389,7 +461,6 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
                             }
                         }
                         OpCode::ReadGlobal { result, offset, .. } => {
-                            // Propagate from the global slot
                             if let Some(targets) = global_slots.get(&(*offset as usize)).cloned() {
                                 let dest = reaching.entry((fid, *result)).or_default();
                                 for t in targets {
