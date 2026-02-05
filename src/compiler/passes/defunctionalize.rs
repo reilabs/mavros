@@ -298,58 +298,43 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
 
                 for instr in block.get_instructions() {
                     match instr {
-                        // Static call: forward through args, backward through returns
-                        OpCode::Call {
-                            function: CallTarget::Static(callee_id),
-                            args,
-                            results,
-                        } => {
-                            let callee = ssa.get_function(*callee_id);
-                            let callee_params: Vec<ValueId> = callee
-                                .get_entry()
-                                .get_parameters()
-                                .map(|(vid, _)| *vid)
-                                .collect();
-                            for (i, arg) in args.iter().enumerate() {
-                                if i < callee_params.len() {
-                                    changed |= propagate(
-                                        &mut reaching,
-                                        (fid, *arg),
-                                        (*callee_id, callee_params[i]),
-                                    );
-                                }
-                            }
-                            if let Some(ret_vals) = return_values.get(callee_id) {
-                                for (i, ret_val) in ret_vals.iter().enumerate() {
-                                    if i < results.len() {
+                        // Call: forward through args, backward through returns
+                        OpCode::Call { function, args, results } => {
+                            let target_fns: Vec<FunctionId> = match function {
+                                CallTarget::Static(callee_id) => vec![*callee_id],
+                                CallTarget::Dynamic(fn_ptr_val) => reaching
+                                    .get(&(fid, *fn_ptr_val))
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect(),
+                            };
+                            for target_fn in target_fns {
+                                let callee = ssa.get_function(target_fn);
+                                let callee_params: Vec<ValueId> = callee
+                                    .get_entry()
+                                    .get_parameters()
+                                    .map(|(vid, _)| *vid)
+                                    .collect();
+                                // Forward: caller args → callee params
+                                for (i, arg) in args.iter().enumerate() {
+                                    if i < callee_params.len() {
                                         changed |= propagate(
                                             &mut reaching,
-                                            (*callee_id, *ret_val),
-                                            (fid, results[i]),
+                                            (fid, *arg),
+                                            (target_fn, callee_params[i]),
                                         );
                                     }
                                 }
-                            }
-                        }
-                        // Dynamic call: propagate through resolved targets' returns
-                        OpCode::Call {
-                            function: CallTarget::Dynamic(fn_ptr_val),
-                            results,
-                            ..
-                        } => {
-                            if let Some(target_fns) =
-                                reaching.get(&(fid, *fn_ptr_val)).cloned()
-                            {
-                                for target_fn in target_fns {
-                                    if let Some(ret_vals) = return_values.get(&target_fn) {
-                                        for (i, ret_val) in ret_vals.iter().enumerate() {
-                                            if i < results.len() {
-                                                changed |= propagate(
-                                                    &mut reaching,
-                                                    (target_fn, *ret_val),
-                                                    (fid, results[i]),
-                                                );
-                                            }
+                                // Backward: callee returns → caller results
+                                if let Some(ret_vals) = return_values.get(&target_fn) {
+                                    for (i, ret_val) in ret_vals.iter().enumerate() {
+                                        if i < results.len() {
+                                            changed |= propagate(
+                                                &mut reaching,
+                                                (target_fn, *ret_val),
+                                                (fid, results[i]),
+                                            );
                                         }
                                     }
                                 }
