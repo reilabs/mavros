@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
-    Assign, Binary, Definition, Expression, FuncId as AstFuncId, Ident, LValue, Let, LocalId,
+    Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, Ident, LValue, Let, LocalId,
 };
 
 use crate::compiler::ir::r#type::{Empty, Type};
@@ -112,6 +112,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Tuple(exprs) => self.convert_tuple(exprs, function),
             Expression::Call(call) => self.convert_call(call, function),
             Expression::Assign(assign) => self.convert_assign(assign, function),
+            Expression::For(for_expr) => self.convert_for(for_expr, function),
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -295,12 +296,69 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    fn convert_for(
+        &mut self,
+        for_expr: &For,
+        function: &mut Function<Empty>,
+    ) -> ExprResult {
+        // Evaluate start and end range in the current block
+        let start = self.convert_expression(&for_expr.start_range, function).into_value();
+        let end = self.convert_expression(&for_expr.end_range, function).into_value();
+
+        // Create blocks for the loop structure
+        let loop_header = function.add_block();
+        let loop_body = function.add_block();
+        let exit_block = function.add_block();
+
+        // Convert the index type
+        let index_type = self.type_converter.convert_type(&for_expr.index_type);
+
+        // Add the loop index as a parameter to the header block
+        let loop_index = function.add_parameter(loop_header, index_type);
+
+        // Jump from current block to loop header with start value
+        function.terminate_block_with_jmp(self.current_block, loop_header, vec![start]);
+
+        // In the loop header: check if index < end
+        let cond = function.push_lt(loop_header, loop_index, end);
+        function.terminate_block_with_jmp_if(loop_header, cond, loop_body, exit_block);
+
+        // In the loop body: bind the index variable and execute the block
+        self.current_block = loop_body;
+        self.bindings.insert(for_expr.index_variable, loop_index);
+
+        // Execute the loop body
+        self.convert_expression(&for_expr.block, function);
+
+        // Increment the index and jump back to header
+        let index_bit_size = self.type_converter.convert_type(&for_expr.index_type).get_bit_size();
+        let one = function.push_u_const(index_bit_size, 1);
+        let next_index = function.push_add(self.current_block, loop_index, one);
+        function.terminate_block_with_jmp(self.current_block, loop_header, vec![next_index]);
+
+        // Continue in the exit block
+        self.current_block = exit_block;
+
+        // For loops don't produce a value
+        ExprResult::Unit
+    }
+
     fn convert_constrain(
         &mut self,
         constraint_expr: &Expression,
         function: &mut Function<Empty>,
     ) -> ExprResult {
-        // The constraint expression must evaluate to true (1)
+        // Special case: if the constraint is a binary equality, emit AssertEq directly
+        if let Expression::Binary(binary) = constraint_expr {
+            if binary.operator == BinaryOpKind::Equal {
+                let lhs = self.convert_expression(&binary.lhs, function).into_value();
+                let rhs = self.convert_expression(&binary.rhs, function).into_value();
+                function.push_assert_eq(self.current_block, lhs, rhs);
+                return ExprResult::Unit;
+            }
+        }
+
+        // General case: the constraint expression must evaluate to true (1)
         let result = self.convert_expression(constraint_expr, function).into_value();
         let one = function.push_u_const(1, 1);
         function.push_assert_eq(self.current_block, result, one);
