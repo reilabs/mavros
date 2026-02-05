@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet};
 
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
-    Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, Ident, LValue, Let, LocalId,
+    Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, Ident, Index, LValue, Let, LocalId,
 };
 
 use crate::compiler::ir::r#type::{Empty, Type};
-use crate::compiler::ssa::{BlockId, Function, FunctionId, ValueId};
+use crate::compiler::ssa::{BlockId, Function, FunctionId, SeqType, ValueId};
 
 use super::type_converter::AstTypeConverter;
 
@@ -113,6 +113,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Call(call) => self.convert_call(call, function),
             Expression::Assign(assign) => self.convert_assign(assign, function),
             Expression::For(for_expr) => self.convert_for(for_expr, function),
+            Expression::Index(index) => self.convert_index(index, function),
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -343,6 +344,17 @@ impl<'a> ExpressionConverter<'a> {
         ExprResult::Unit
     }
 
+    fn convert_index(
+        &mut self,
+        index: &Index,
+        function: &mut Function<Empty>,
+    ) -> ExprResult {
+        let collection = self.convert_expression(&index.collection, function).into_value();
+        let idx = self.convert_expression(&index.index, function).into_value();
+        let result = function.push_array_get(self.current_block, collection, idx);
+        ExprResult::Value(result)
+    }
+
     fn convert_constrain(
         &mut self,
         constraint_expr: &Expression,
@@ -405,12 +417,45 @@ impl<'a> ExpressionConverter<'a> {
                 }
             }
             Literal::Unit => ExprResult::Unit,
-            Literal::Array(_) | Literal::Slice(_) => {
-                todo!("Array/Slice literals not yet supported")
+            Literal::Array(array_lit) => {
+                self.convert_array_literal(array_lit, function)
+            }
+            Literal::Slice(_) => {
+                todo!("Slice literals not yet supported")
             }
             Literal::Str(_) => todo!("String literals not yet supported"),
             Literal::FmtStr(_, _, _) => todo!("Format string literals not yet supported"),
         }
+    }
+
+    fn convert_array_literal(
+        &mut self,
+        array_lit: &noirc_frontend::monomorphization::ast::ArrayLiteral,
+        function: &mut Function<Empty>,
+    ) -> ExprResult {
+        // Convert each element
+        let elements: Vec<ValueId> = array_lit.contents
+            .iter()
+            .map(|e| self.convert_expression(e, function).into_value())
+            .collect();
+
+        let len = elements.len();
+
+        // Get the element type from the array type
+        let elem_type = match &array_lit.typ {
+            noirc_frontend::monomorphization::ast::Type::Array(_, elem_type) => {
+                self.type_converter.convert_type(elem_type)
+            }
+            _ => panic!("Expected array type for array literal, got {:?}", array_lit.typ),
+        };
+
+        let result = function.push_mk_array(
+            self.current_block,
+            elements,
+            SeqType::Array(len),
+            elem_type,
+        );
+        ExprResult::Value(result)
     }
 
     fn convert_tuple(
