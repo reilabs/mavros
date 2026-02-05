@@ -1,13 +1,13 @@
 //! Converts monomorphized AST expressions to SSA instructions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
-    Binary, Definition, Expression, FuncId as AstFuncId, Ident, Let, LocalId,
+    Assign, Binary, Definition, Expression, FuncId as AstFuncId, Ident, LValue, Let, LocalId,
 };
 
-use crate::compiler::ir::r#type::Empty;
+use crate::compiler::ir::r#type::{Empty, Type};
 use crate::compiler::ssa::{BlockId, Function, FunctionId, ValueId};
 
 use super::type_converter::AstTypeConverter;
@@ -37,8 +37,12 @@ impl ExprResult {
 
 /// Converts expressions within a single function.
 pub struct ExpressionConverter<'a> {
-    /// Maps LocalId to ValueId for variable bindings
+    /// Maps LocalId to ValueId for variable bindings.
+    /// For mutable variables, this stores the pointer to the value.
+    /// For immutable variables, this stores the value directly.
     bindings: HashMap<LocalId, ValueId>,
+    /// Tracks which LocalIds are mutable (their binding is a pointer)
+    mutable_locals: HashSet<LocalId>,
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
     /// Type converter
@@ -54,15 +58,30 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Self {
         Self {
             bindings: HashMap::new(),
+            mutable_locals: HashSet::new(),
             function_mapper,
             type_converter: AstTypeConverter::new(),
             current_block: entry_block,
         }
     }
 
-    /// Bind a local variable to a value
+    /// Bind an immutable local variable to a value
     pub fn bind_local(&mut self, local_id: LocalId, value_id: ValueId) {
         self.bindings.insert(local_id, value_id);
+    }
+
+    /// Bind a mutable local variable - allocates a pointer and stores the initial value
+    pub fn bind_local_mut(
+        &mut self,
+        local_id: LocalId,
+        value_id: ValueId,
+        typ: Type<Empty>,
+        function: &mut Function<Empty>,
+    ) {
+        let ptr = function.push_alloc(self.current_block, typ, Empty);
+        function.push_store(self.current_block, ptr, value_id);
+        self.bindings.insert(local_id, ptr);
+        self.mutable_locals.insert(local_id);
     }
 
     /// Get the current block
@@ -92,6 +111,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Literal(lit) => self.convert_literal(lit, function),
             Expression::Tuple(exprs) => self.convert_tuple(exprs, function),
             Expression::Call(call) => self.convert_call(call, function),
+            Expression::Assign(assign) => self.convert_assign(assign, function),
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -99,19 +119,26 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_ident(
         &mut self,
         ident: &Ident,
-        _function: &mut Function<Empty>,
+        function: &mut Function<Empty>,
     ) -> ExprResult {
         match &ident.definition {
             Definition::Local(local_id) => {
-                let value_id = self.bindings.get(local_id)
+                let value_id = *self.bindings.get(local_id)
                     .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
-                ExprResult::Value(*value_id)
+
+                // For mutable variables, we need to load from the pointer
+                if self.mutable_locals.contains(local_id) {
+                    let loaded = function.push_load(self.current_block, value_id);
+                    ExprResult::Value(loaded)
+                } else {
+                    ExprResult::Value(value_id)
+                }
             }
             Definition::Function(func_id) => {
                 let ssa_func_id = self.function_mapper.get(func_id)
                     .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
                 // Return a function pointer constant
-                let value_id = _function.push_fn_ptr_const(*ssa_func_id);
+                let value_id = function.push_fn_ptr_const(*ssa_func_id);
                 ExprResult::Value(value_id)
             }
             Definition::Builtin(name) => {
@@ -196,7 +223,16 @@ impl<'a> ExpressionConverter<'a> {
         function: &mut Function<Empty>,
     ) -> ExprResult {
         let value = self.convert_expression(&let_expr.expression, function).into_value();
-        self.bindings.insert(let_expr.id, value);
+
+        if let_expr.mutable {
+            // For mutable variables, get the type and allocate a pointer
+            let typ = let_expr.expression.return_type()
+                .map(|t| self.type_converter.convert_type(&t))
+                .unwrap_or_else(|| Type::field(Empty));
+            self.bind_local_mut(let_expr.id, value, typ, function);
+        } else {
+            self.bindings.insert(let_expr.id, value);
+        }
         ExprResult::Unit
     }
 
@@ -210,6 +246,53 @@ impl<'a> ExpressionConverter<'a> {
             last_result = self.convert_expression(expr, function);
         }
         last_result
+    }
+
+    fn convert_assign(
+        &mut self,
+        assign: &Assign,
+        function: &mut Function<Empty>,
+    ) -> ExprResult {
+        let value = self.convert_expression(&assign.expression, function).into_value();
+        let ptr = self.convert_lvalue(&assign.lvalue, function);
+        function.push_store(self.current_block, ptr, value);
+        ExprResult::Unit
+    }
+
+    /// Convert an LValue to a pointer ValueId
+    fn convert_lvalue(
+        &mut self,
+        lvalue: &LValue,
+        function: &mut Function<Empty>,
+    ) -> ValueId {
+        match lvalue {
+            LValue::Ident(ident) => {
+                match &ident.definition {
+                    Definition::Local(local_id) => {
+                        // For mutable locals, the binding is already a pointer
+                        if self.mutable_locals.contains(local_id) {
+                            *self.bindings.get(local_id)
+                                .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id))
+                        } else {
+                            panic!("Cannot assign to immutable local variable: {}", ident.name)
+                        }
+                    }
+                    _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
+                }
+            }
+            LValue::Index { .. } => {
+                todo!("Array index lvalue not yet supported")
+            }
+            LValue::MemberAccess { .. } => {
+                todo!("Member access lvalue not yet supported")
+            }
+            LValue::Dereference { .. } => {
+                todo!("Dereference lvalue not yet supported")
+            }
+            LValue::Clone(inner) => {
+                self.convert_lvalue(inner, function)
+            }
+        }
     }
 
     fn convert_constrain(

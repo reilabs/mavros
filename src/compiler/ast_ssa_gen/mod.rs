@@ -77,10 +77,16 @@ impl AstSsaConverter {
         let mut expr_converter = ExpressionConverter::new(&self.function_mapper, entry_block);
 
         // Add function parameters as block parameters
-        for (local_id, _mutable, _name, param_type, _visibility) in &ast_func.parameters {
+        for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
             let converted_type = self.type_converter.convert_type(param_type);
-            let value_id = function.add_parameter(entry_block, converted_type);
-            expr_converter.bind_local(*local_id, value_id);
+            let value_id = function.add_parameter(entry_block, converted_type.clone());
+
+            if *mutable {
+                // For mutable parameters, allocate a pointer and store the value
+                expr_converter.bind_local_mut(*local_id, value_id, converted_type, &mut function);
+            } else {
+                expr_converter.bind_local(*local_id, value_id);
+            }
         }
 
         // Convert the function body
