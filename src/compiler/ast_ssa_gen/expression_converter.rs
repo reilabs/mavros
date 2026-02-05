@@ -8,7 +8,7 @@ use noirc_frontend::monomorphization::ast::{
 };
 
 use crate::compiler::ir::r#type::{Empty, Type};
-use crate::compiler::ssa::{BlockId, Function, FunctionId, SeqType, ValueId};
+use crate::compiler::ssa::{BlockId, Function, FunctionId, SeqType, TupleIdx, ValueId};
 
 use super::type_converter::AstTypeConverter;
 
@@ -114,6 +114,9 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Assign(assign) => self.convert_assign(assign, function),
             Expression::For(for_expr) => self.convert_for(for_expr, function),
             Expression::Index(index) => self.convert_index(index, function),
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                self.convert_extract_tuple_field(tuple_expr, *idx, function)
+            }
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -352,6 +355,17 @@ impl<'a> ExpressionConverter<'a> {
         let collection = self.convert_expression(&index.collection, function).into_value();
         let idx = self.convert_expression(&index.index, function).into_value();
         let result = function.push_array_get(self.current_block, collection, idx);
+        ExprResult::Value(result)
+    }
+
+    fn convert_extract_tuple_field(
+        &mut self,
+        tuple_expr: &Expression,
+        idx: usize,
+        function: &mut Function<Empty>,
+    ) -> ExprResult {
+        let tuple = self.convert_expression(tuple_expr, function).into_value();
+        let result = function.push_tuple_proj(self.current_block, tuple, TupleIdx::Static(idx));
         ExprResult::Value(result)
     }
 
