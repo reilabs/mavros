@@ -161,6 +161,7 @@ impl<'a> ExpressionConverter<'a> {
             }
             BinaryOpKind::And => function.push_and(self.current_block, lhs, rhs),
             BinaryOpKind::Or => {
+                // TODO: Support Or directly in SSA
                 // a || b = !(!a && !b)
                 let not_a = function.push_not(self.current_block, lhs);
                 let not_b = function.push_not(self.current_block, rhs);
@@ -168,12 +169,15 @@ impl<'a> ExpressionConverter<'a> {
                 function.push_not(self.current_block, and)
             }
             BinaryOpKind::Xor => {
+                // TODO: Support Xor directly in SSA
                 // a ^ b = (a || b) && !(a && b)
-                // But for bits: a ^ b = (a + b) - 2 * (a * b) = a + b - 2ab
-                // Simpler: a ^ b = (a != b)
-                // For boolean: not(eq(a, b))
-                let eq = function.push_eq(self.current_block, lhs, rhs);
-                function.push_not(self.current_block, eq)
+                let not_a = function.push_not(self.current_block, lhs);
+                let not_b = function.push_not(self.current_block, rhs);
+                let nand_ab = function.push_and(self.current_block, not_a, not_b);
+                let or_result = function.push_not(self.current_block, nand_ab);
+                let and_result = function.push_and(self.current_block, lhs, rhs);
+                let not_and = function.push_not(self.current_block, and_result);
+                function.push_and(self.current_block, or_result, not_and)
             }
             BinaryOpKind::Modulo => {
                 todo!("Modulo operator not yet supported")
