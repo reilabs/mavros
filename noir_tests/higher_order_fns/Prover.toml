@@ -1,0 +1,3 @@
+x = "3"
+y = "7"
+expected_dot = "90"

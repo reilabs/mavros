@@ -111,7 +111,6 @@ impl SsaConverter {
         }
 
         let mut globals_init = false;
-        // for noir_value_id in noir_ssa
 
         for (noir_function_id, noir_function) in noir_ssa.functions.iter() {
             if !globals_init {

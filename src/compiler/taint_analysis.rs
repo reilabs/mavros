@@ -2,7 +2,7 @@ use itertools::Itertools;
 
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
-use crate::compiler::ssa::{BlockId, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId};
+use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId};
 use crate::compiler::union_find::UnionFind;
 use std::collections::{HashMap, HashSet};
 
@@ -776,7 +776,7 @@ impl TaintAnalysis {
                     }
                     OpCode::Call {
                         results: outputs,
-                        function: func,
+                        function: CallTarget::Static(func),
                         args: inputs,
                     } => {
                         let return_types = ssa.get_function(*func).get_returns();
@@ -812,6 +812,9 @@ impl TaintAnalysis {
                             cfg_taint.clone(),
                             func_taint.cfg_taint.clone(),
                         ));
+                    }
+                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                        panic!("Dynamic call targets are not supported in taint analysis")
                     }
                     OpCode::MkSeq {
                         result,
@@ -1118,7 +1121,8 @@ impl TaintAnalysis {
                     .iter()
                     .map(|e| self.construct_free_taint_for_type(e))
                     .collect(),
-            )
+            ),
+            TypeExpr::Function => TaintType::Primitive(Taint::Constant(ConstantTaint::Pure)),
         }
     }
 
@@ -1148,7 +1152,8 @@ impl TaintAnalysis {
                     .iter()
                     .map(|e| self.construct_pure_taint_for_type(e))
                     .collect(),
-            )
+            ),
+            TypeExpr::Function => TaintType::Primitive(Taint::Constant(ConstantTaint::Pure)),
         }
     }
 }

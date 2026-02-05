@@ -503,6 +503,7 @@ impl Value {
             TypeExpr::Slice(_) => panic!("Cannot witness slice type"),
             TypeExpr::Ref(_) => panic!("Cannot witness pointer type"),
             TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Function => panic!("Cannot witness function type"),
         }
     }
 
@@ -1404,6 +1405,7 @@ impl CostEstimator {
             TypeExpr::Tuple(elements) => {
                 ValueSignature::Tuple(elements.iter().map(|e| self.make_witness_sig(e)).collect())
             }
+            TypeExpr::Function => panic!("function type not possible here"),
         }
     }
 }

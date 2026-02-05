@@ -66,6 +66,9 @@ impl PrepareEntryPoint {
                 GlobalDef::Const(Const::WitnessRef(_)) => {
                     todo!("WitnessRef globals not yet supported in InitGlobal");
                 }
+                GlobalDef::Const(Const::FnPtr(_)) => {
+                    panic!("FnPtr globals not supported in prepare_entry_point");
+                }
                 GlobalDef::Array(indices, elem_type) => {
                     // Each index refers to an already-initialized global
                     let elems: Vec<ValueId> = indices
@@ -115,6 +118,7 @@ impl PrepareEntryPoint {
             GlobalDef::Const(Const::Field(_)) => Type::field(Empty),
             GlobalDef::Const(Const::U(s, _)) => Type::u(*s, Empty),
             GlobalDef::Const(Const::WitnessRef(_)) => Type::witness_ref(Empty),
+            GlobalDef::Const(Const::FnPtr(_)) => Type::function(Empty),
             GlobalDef::Array(indices, elem_type) => {
                 elem_type.clone().array_of(indices.len(), Empty)
             }
@@ -125,6 +129,7 @@ impl PrepareEntryPoint {
         match global {
             GlobalDef::Const(Const::Field(_)) | GlobalDef::Const(Const::U(_, _)) => false,
             GlobalDef::Const(Const::WitnessRef(_)) => true,
+            GlobalDef::Const(Const::FnPtr(_)) => false,
             GlobalDef::Array(_, _) => true,
         }
     }
