@@ -217,43 +217,11 @@ impl<'a> ExpressionConverter<'a> {
         constraint_expr: &Expression,
         function: &mut Function<Empty>,
     ) -> ExprResult {
-        // The constraint expression should be either:
-        // 1. A binary equality check (a == b)
-        // 2. A call to assert_eq
-        // 3. A boolean expression that should be true
-
-        match constraint_expr {
-            Expression::Binary(binary) if binary.operator == BinaryOpKind::Equal => {
-                // Direct equality constraint: assert(a == b)
-                let lhs = self.convert_expression(&binary.lhs, function).into_value();
-                let rhs = self.convert_expression(&binary.rhs, function).into_value();
-                function.push_assert_eq(self.current_block, lhs, rhs);
-                ExprResult::Unit
-            }
-            Expression::Call(call) => {
-                // Check if it's assert_eq
-                if let Expression::Ident(ident) = call.func.as_ref() {
-                    if ident.name == "assert_eq" && call.arguments.len() == 2 {
-                        let lhs = self.convert_expression(&call.arguments[0], function).into_value();
-                        let rhs = self.convert_expression(&call.arguments[1], function).into_value();
-                        function.push_assert_eq(self.current_block, lhs, rhs);
-                        return ExprResult::Unit;
-                    }
-                }
-                // Other call-based constraints
-                let result = self.convert_expression(constraint_expr, function).into_value();
-                let one = function.push_u_const(1, 1);
-                function.push_assert_eq(self.current_block, result, one);
-                ExprResult::Unit
-            }
-            _ => {
-                // General boolean constraint: the expression should evaluate to true (1)
-                let result = self.convert_expression(constraint_expr, function).into_value();
-                let one = function.push_u_const(1, 1);
-                function.push_assert_eq(self.current_block, result, one);
-                ExprResult::Unit
-            }
-        }
+        // The constraint expression must evaluate to true (1)
+        let result = self.convert_expression(constraint_expr, function).into_value();
+        let one = function.push_u_const(1, 1);
+        function.push_assert_eq(self.current_block, result, one);
+        ExprResult::Unit
     }
 
     fn convert_literal(
@@ -269,15 +237,13 @@ impl<'a> ExpressionConverter<'a> {
                 ExprResult::Value(function.push_u_const(1, value))
             }
             Literal::Integer(signed_field, typ, _location) => {
-                use std::str::FromStr;
                 use noirc_frontend::monomorphization::ast::Type as AstType;
 
                 match typ {
                     AstType::Field => {
-                        // Convert SignedField to ark_bn254::Fr via string representation
+                        // Convert SignedField to ark_bn254::Fr directly (both backed by same type)
                         let field_element = signed_field.to_field_element();
-                        let field_str = field_element.to_string();
-                        let field_val = ark_bn254::Fr::from_str(&field_str).unwrap();
+                        let field_val = field_element.into_repr();
                         ExprResult::Value(function.push_field_const(field_val))
                     }
                     AstType::Integer(signedness, bit_size) => {
@@ -414,15 +380,11 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_lowlevel_call(
         &mut self,
         name: &str,
-        args: &[ValueId],
+        _args: &[ValueId],
         _call: &noirc_frontend::monomorphization::ast::Call,
-        function: &mut Function<Empty>,
+        _function: &mut Function<Empty>,
     ) -> ExprResult {
         match name {
-            "assert_constant" => {
-                // assert_constant is a compile-time check, no runtime code needed
-                ExprResult::Unit
-            }
             _ => todo!("LowLevel function '{}' not yet supported", name),
         }
     }
