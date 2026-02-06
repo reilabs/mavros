@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
-    Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, Ident, If, Index, LValue, Let, LocalId,
+    Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If, Index, LValue, Let, LocalId,
 };
 
 use crate::compiler::ir::r#type::{Empty, Type};
@@ -72,13 +72,16 @@ pub struct ExpressionConverter<'a> {
     loop_stack: Vec<LoopContext>,
     /// Whether the current function is unconstrained
     in_unconstrained: bool,
+    /// Maps GlobalId to global slot index
+    global_slots: &'a HashMap<GlobalId, usize>,
 }
 
 impl<'a> ExpressionConverter<'a> {
-    pub fn new(
+    pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
         entry_block: BlockId,
         in_unconstrained: bool,
+        global_slots: &'a HashMap<GlobalId, usize>,
     ) -> Self {
         Self {
             bindings: HashMap::new(),
@@ -88,6 +91,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             loop_stack: Vec::new(),
             in_unconstrained,
+            global_slots,
         }
     }
 
@@ -259,8 +263,12 @@ impl<'a> ExpressionConverter<'a> {
             Definition::Oracle(name) => {
                 todo!("Oracle function not yet supported: {}", name)
             }
-            Definition::Global(_) => {
-                todo!("Global variables not yet supported")
+            Definition::Global(global_id) => {
+                let slot = *self.global_slots.get(global_id)
+                    .unwrap_or_else(|| panic!("Undefined global: {:?}", global_id));
+                let typ = self.type_converter.convert_type(&ident.typ);
+                let value = function.push_read_global(self.current_block, slot as u64, typ);
+                ExprResult::Value(value)
             }
         }
     }

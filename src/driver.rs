@@ -116,8 +116,8 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(PrepareEntryPoint::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 Box::new(MakeStructAccessStatic::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.

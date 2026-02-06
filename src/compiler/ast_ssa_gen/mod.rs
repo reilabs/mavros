@@ -9,7 +9,8 @@ mod type_converter;
 use std::collections::HashMap;
 
 use noirc_frontend::monomorphization::ast::{
-    FuncId as AstFuncId, Function as AstFunction, Program,
+    Definition, Expression, FuncId as AstFuncId, Function as AstFunction,
+    GlobalId, Program,
 };
 
 use crate::compiler::ir::r#type::Empty;
@@ -26,6 +27,8 @@ pub struct AstSsaConverter {
     /// For natively unconstrained functions, same ID as constrained_mapper.
     /// For constrained functions, points to a separate unconstrained variant.
     unconstrained_mapper: HashMap<AstFuncId, FunctionId>,
+    /// Maps GlobalId to global slot index
+    global_slots: HashMap<GlobalId, usize>,
     /// Type converter
     type_converter: AstTypeConverter,
 }
@@ -35,6 +38,7 @@ impl AstSsaConverter {
         Self {
             constrained_mapper: HashMap::new(),
             unconstrained_mapper: HashMap::new(),
+            global_slots: HashMap::new(),
             type_converter: AstTypeConverter::new(),
         }
     }
@@ -64,7 +68,12 @@ impl AstSsaConverter {
             }
         }
 
-        // Phase 2: Convert each function
+        // Phase 2: Convert globals (must be before function conversion so global_slots are available)
+        if !program.globals.is_empty() {
+            self.convert_globals(program, &mut ssa);
+        }
+
+        // Phase 3: Convert each function
         for ast_func in &program.functions {
             if ast_func.unconstrained {
                 // Natively unconstrained: convert once with is_unconstrained=true
@@ -84,10 +93,166 @@ impl AstSsaConverter {
             }
         }
 
-        // TODO: Handle globals if needed
-        // For now, we'll leave globals empty since just_add doesn't use them
-
         ssa
+    }
+
+    /// Collect all GlobalIds referenced transitively by an expression.
+    fn collect_global_deps(expr: &Expression, deps: &mut Vec<GlobalId>) {
+        match expr {
+            Expression::Ident(ident) => {
+                if let Definition::Global(gid) = &ident.definition {
+                    deps.push(*gid);
+                }
+            }
+            Expression::Literal(lit) => {
+                use noirc_frontend::monomorphization::ast::Literal;
+                match lit {
+                    Literal::Array(arr) | Literal::Slice(arr) => {
+                        for e in &arr.contents {
+                            Self::collect_global_deps(e, deps);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Expression::Block(exprs) => {
+                for e in exprs {
+                    Self::collect_global_deps(e, deps);
+                }
+            }
+            Expression::Binary(bin) => {
+                Self::collect_global_deps(&bin.lhs, deps);
+                Self::collect_global_deps(&bin.rhs, deps);
+            }
+            Expression::Unary(un) => {
+                Self::collect_global_deps(&un.rhs, deps);
+            }
+            Expression::Cast(cast) => {
+                Self::collect_global_deps(&cast.lhs, deps);
+            }
+            Expression::Tuple(elems) => {
+                for e in elems {
+                    Self::collect_global_deps(e, deps);
+                }
+            }
+            Expression::Call(call) => {
+                Self::collect_global_deps(&call.func, deps);
+                for arg in &call.arguments {
+                    Self::collect_global_deps(arg, deps);
+                }
+            }
+            Expression::If(if_expr) => {
+                Self::collect_global_deps(&if_expr.condition, deps);
+                Self::collect_global_deps(&if_expr.consequence, deps);
+                if let Some(alt) = &if_expr.alternative {
+                    Self::collect_global_deps(alt, deps);
+                }
+            }
+            Expression::Let(let_expr) => {
+                Self::collect_global_deps(&let_expr.expression, deps);
+            }
+            Expression::Semi(inner) | Expression::Clone(inner) | Expression::Drop(inner) => {
+                Self::collect_global_deps(inner, deps);
+            }
+            Expression::Index(idx) => {
+                Self::collect_global_deps(&idx.collection, deps);
+                Self::collect_global_deps(&idx.index, deps);
+            }
+            Expression::ExtractTupleField(tuple_expr, _) => {
+                Self::collect_global_deps(tuple_expr, deps);
+            }
+            _ => {}
+        }
+    }
+
+    /// Convert globals: assign slot indices, build init/deinit functions.
+    fn convert_globals(&mut self, program: &Program, ssa: &mut SSA<Empty>) {
+        // Assign slot indices
+        let mut global_types = Vec::new();
+        let mut ordered_ids: Vec<GlobalId> = Vec::new();
+
+        // Topological sort: process globals in dependency order.
+        // Build adjacency: each global depends on other globals referenced in its initializer.
+        let all_ids: Vec<GlobalId> = program.globals.keys().copied().collect();
+        let mut visited = std::collections::HashSet::new();
+        let mut in_stack = std::collections::HashSet::new();
+
+        fn topo_visit(
+            gid: GlobalId,
+            program: &Program,
+            visited: &mut std::collections::HashSet<GlobalId>,
+            in_stack: &mut std::collections::HashSet<GlobalId>,
+            ordered: &mut Vec<GlobalId>,
+        ) {
+            if visited.contains(&gid) {
+                return;
+            }
+            assert!(!in_stack.contains(&gid), "Cyclic global dependency on {:?}", gid);
+            in_stack.insert(gid);
+            let (_name, _typ, init_expr) = &program.globals[&gid];
+            let mut deps = Vec::new();
+            AstSsaConverter::collect_global_deps(init_expr, &mut deps);
+            for dep in deps {
+                topo_visit(dep, program, visited, in_stack, ordered);
+            }
+            in_stack.remove(&gid);
+            visited.insert(gid);
+            ordered.push(gid);
+        }
+
+        for gid in &all_ids {
+            topo_visit(*gid, program, &mut visited, &mut in_stack, &mut ordered_ids);
+        }
+
+        // Assign slot indices in dependency order
+        for gid in &ordered_ids {
+            let (_name, typ, _expr) = &program.globals[gid];
+            let converted_type = self.type_converter.convert_type(typ);
+            let idx = global_types.len();
+            global_types.push(converted_type);
+            self.global_slots.insert(*gid, idx);
+        }
+
+        // Build init function
+        let init_fn_id = ssa.add_function("globals_init".to_string());
+        {
+            let init_fn = ssa.get_function_mut(init_fn_id);
+            let entry = init_fn.get_entry_id();
+
+            // We need an ExpressionConverter to evaluate initializer expressions
+            let mut expr_converter = ExpressionConverter::new_with_globals(
+                &self.constrained_mapper,
+                entry,
+                false,
+                &self.global_slots,
+            );
+
+            for gid in &ordered_ids {
+                let (_name, _typ, init_expr) = &program.globals[gid];
+                let value = expr_converter.convert_expression(init_expr, init_fn).into_value();
+                let idx = self.global_slots[gid];
+                init_fn.push_init_global(entry, idx, value);
+            }
+
+            init_fn.terminate_block_with_return(entry, vec![]);
+        }
+
+        // Build deinit function
+        let deinit_fn_id = ssa.add_function("globals_deinit".to_string());
+        {
+            let deinit_fn = ssa.get_function_mut(deinit_fn_id);
+            let entry = deinit_fn.get_entry_id();
+            for (i, typ) in global_types.iter().enumerate() {
+                if typ.is_heap_allocated() {
+                    deinit_fn.push_drop_global(entry, i);
+                }
+            }
+            deinit_fn.terminate_block_with_return(entry, vec![]);
+        }
+
+        ssa.set_global_types(global_types);
+        ssa.set_globals_init_fn(init_fn_id);
+        ssa.set_globals_deinit_fn(deinit_fn_id);
     }
 
     /// Convert a single function to SSA.
@@ -112,7 +277,7 @@ impl AstSsaConverter {
         }
 
         // Create expression converter
-        let mut expr_converter = ExpressionConverter::new(function_mapper, entry_block, in_unconstrained);
+        let mut expr_converter = ExpressionConverter::new_with_globals(function_mapper, entry_block, in_unconstrained, &self.global_slots);
 
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
