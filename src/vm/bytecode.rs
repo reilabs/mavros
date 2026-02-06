@@ -598,7 +598,7 @@ mod def {
     #[opcode]
     fn div_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
-            *res = a / b;
+            *res = if b == Field::ZERO { Field::ZERO } else { a / b };
         }
     }
 
@@ -738,6 +738,18 @@ mod def {
         frame.write_to(target, source.0 as isize, stride);
         unsafe {
             *res = new_array;
+        }
+    }
+
+    #[opcode]
+    fn slice_len(
+        #[out] res: *mut u64,
+        #[frame] array: BoxedValue,
+        stride: usize,
+    ) {
+        let len = array.layout().array_size() / stride;
+        unsafe {
+            *res = len as u64;
         }
     }
 

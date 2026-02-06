@@ -23,7 +23,13 @@ impl UntaintControlFlow {
         taint_analysis: &TaintAnalysis,
         flow_analysis: &FlowAnalysis,
     ) -> SSA<ConstantTaint> {
-        let (mut result_ssa, functions) = ssa.prepare_rebuild::<ConstantTaint>();
+        let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild::<ConstantTaint>();
+
+        // Convert global types from Empty to ConstantTaint
+        let new_global_types: Vec<_> = old_global_types.into_iter()
+            .map(|t| self.pure_taint_for_type(t))
+            .collect();
+        result_ssa.set_global_types(new_global_types);
 
         for (function_id, function) in functions.into_iter() {
             let function_taint = taint_analysis.get_function_taint(function_id);
