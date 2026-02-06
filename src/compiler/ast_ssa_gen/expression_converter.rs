@@ -8,7 +8,7 @@ use noirc_frontend::monomorphization::ast::{
 };
 
 use crate::compiler::ir::r#type::{Empty, Type};
-use crate::compiler::ssa::{BlockId, Function, FunctionId, SeqType, TupleIdx, ValueId};
+use crate::compiler::ssa::{BlockId, CastTarget, Function, FunctionId, SeqType, TupleIdx, ValueId};
 
 use super::type_converter::AstTypeConverter;
 
@@ -33,14 +33,25 @@ impl ExprResult {
             ExprResult::Unit => panic!("Expected value, got unit"),
         }
     }
+
+}
+
+/// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
+#[derive(Debug)]
+enum AccessStep {
+    /// Array index: `arr[idx]`
+    Index(ValueId),
+    /// Tuple/struct field: `obj.field_N`
+    Field(usize),
 }
 
 /// Converts expressions within a single function.
 pub struct ExpressionConverter<'a> {
-    /// Maps LocalId to ValueId for variable bindings.
-    /// For mutable variables, this stores the pointer to the value.
-    /// For immutable variables, this stores the value directly.
-    bindings: HashMap<LocalId, ValueId>,
+    /// Maps LocalId to ValueId(s) for variable bindings.
+    /// Tuples/structs are stored as multiple values (flattened).
+    /// For mutable variables, this stores the pointer(s) to the value(s).
+    /// For immutable variables, this stores the value(s) directly.
+    bindings: HashMap<LocalId, Vec<ValueId>>,
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
     /// Maps AST FuncId to SSA FunctionId
@@ -65,9 +76,9 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    /// Bind an immutable local variable to a value
-    pub fn bind_local(&mut self, local_id: LocalId, value_id: ValueId) {
-        self.bindings.insert(local_id, value_id);
+    /// Bind an immutable local variable to value(s)
+    pub fn bind_local(&mut self, local_id: LocalId, values: Vec<ValueId>) {
+        self.bindings.insert(local_id, values);
     }
 
     /// Bind a mutable local variable - allocates a pointer and stores the initial value
@@ -80,8 +91,47 @@ impl<'a> ExpressionConverter<'a> {
     ) {
         let ptr = function.push_alloc(self.current_block, typ, Empty);
         function.push_store(self.current_block, ptr, value_id);
-        self.bindings.insert(local_id, ptr);
+        self.bindings.insert(local_id, vec![ptr]);
         self.mutable_locals.insert(local_id);
+    }
+
+    /// Get flattened types for an expression (for tuple/struct allocation)
+    fn get_flattened_types(&self, expr: &Expression) -> Vec<Type<Empty>> {
+        if let Some(typ) = expr.return_type() {
+            self.flatten_type(&typ)
+        } else {
+            vec![Type::field(Empty)]
+        }
+    }
+
+    /// Flatten a type into its component types
+    fn flatten_type(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> Vec<Type<Empty>> {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+        match typ {
+            AstType::Tuple(types) => {
+                types.iter().flat_map(|t| self.flatten_type(t)).collect()
+            }
+            _ => vec![self.type_converter.convert_type(typ)],
+        }
+    }
+
+    /// Check whether a Noir type contains an array anywhere in its structure.
+    fn noir_type_contains_array(typ: &noirc_frontend::monomorphization::ast::Type) -> bool {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+        match typ {
+            AstType::Array(_, _) => true,
+            AstType::Tuple(fields) => fields.iter().any(|f| Self::noir_type_contains_array(f)),
+            _ => false,
+        }
+    }
+
+    /// Calculate return size for function calls (tuples count as 1, unit as 0)
+    fn return_size(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> usize {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+        match typ {
+            AstType::Unit => 0,
+            _ => 1,
+        }
     }
 
     /// Get the current block
@@ -117,6 +167,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::ExtractTupleField(tuple_expr, idx) => {
                 self.convert_extract_tuple_field(tuple_expr, *idx, function)
             }
+            Expression::Cast(cast) => self.convert_cast(cast, function),
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -128,15 +179,28 @@ impl<'a> ExpressionConverter<'a> {
     ) -> ExprResult {
         match &ident.definition {
             Definition::Local(local_id) => {
-                let value_id = *self.bindings.get(local_id)
-                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
+                let values = self.bindings.get(local_id)
+                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id))
+                    .clone();
 
-                // For mutable variables, we need to load from the pointer
-                if self.mutable_locals.contains(local_id) {
-                    let loaded = function.push_load(self.current_block, value_id);
-                    ExprResult::Value(loaded)
+                // For mutable variables, we need to load from the pointer(s)
+                let values = if self.mutable_locals.contains(local_id) {
+                    values.iter()
+                        .map(|ptr| function.push_load(self.current_block, *ptr))
+                        .collect()
                 } else {
-                    ExprResult::Value(value_id)
+                    values
+                };
+
+                // If we have multiple values (flattened tuple binding), reconstruct the tuple
+                // so callers always get a properly typed materialized value
+                if values.len() == 1 {
+                    ExprResult::Value(values[0])
+                } else {
+                    // Reconstruct tuple from flattened values
+                    let types = self.flatten_type(&ident.typ);
+                    let tuple = function.push_mk_tuple(self.current_block, values, types);
+                    ExprResult::Value(tuple)
                 }
             }
             Definition::Function(func_id) => {
@@ -230,13 +294,36 @@ impl<'a> ExpressionConverter<'a> {
         let value = self.convert_expression(&let_expr.expression, function).into_value();
 
         if let_expr.mutable {
-            // For mutable variables, get the type and allocate a pointer
-            let typ = let_expr.expression.return_type()
-                .map(|t| self.type_converter.convert_type(&t))
-                .unwrap_or_else(|| Type::field(Empty));
-            self.bind_local_mut(let_expr.id, value, typ, function);
+            // Always use a single pointer for the whole value.
+            // Nested field/index updates are handled by the descend-modify-ascend
+            // pattern in convert_assign.
+            let ast_type = let_expr.expression.return_type()
+                .expect("Mutable let binding must have a typed expression");
+            let typ = self.type_converter.convert_type(&ast_type);
+
+            // For plain tuples/structs without arrays, use flattened pointers
+            // (one per field) since downstream passes expect this form.
+            // For everything else, use a single pointer with the zipper pattern.
+            let types = self.get_flattened_types(&let_expr.expression);
+            if types.len() > 1 && !Self::noir_type_contains_array(&ast_type) {
+                let ptrs: Vec<_> = types.iter().enumerate()
+                    .map(|(i, typ)| {
+                        let field = function.push_tuple_proj(self.current_block, value, TupleIdx::Static(i));
+                        let ptr = function.push_alloc(self.current_block, typ.clone(), Empty);
+                        function.push_store(self.current_block, ptr, field);
+                        ptr
+                    })
+                    .collect();
+                self.bindings.insert(let_expr.id, ptrs);
+            } else {
+                let ptr = function.push_alloc(self.current_block, typ, Empty);
+                function.push_store(self.current_block, ptr, value);
+                self.bindings.insert(let_expr.id, vec![ptr]);
+            }
+            self.mutable_locals.insert(let_expr.id);
         } else {
-            self.bindings.insert(let_expr.id, value);
+            // Immutable - store single materialized value
+            self.bindings.insert(let_expr.id, vec![value]);
         }
         ExprResult::Unit
     }
@@ -258,26 +345,130 @@ impl<'a> ExpressionConverter<'a> {
         assign: &Assign,
         function: &mut Function<Empty>,
     ) -> ExprResult {
-        let value = self.convert_expression(&assign.expression, function).into_value();
-        let ptr = self.convert_lvalue(&assign.lvalue, function);
-        function.push_store(self.current_block, ptr, value);
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+
+        let new_value = self.convert_expression(&assign.expression, function).into_value();
+
+        // Flatten the lvalue into a root pointer(s) + access path
+        let (root_ptrs, root_type, steps) = self.flatten_lvalue(&assign.lvalue, function);
+
+        if steps.is_empty() {
+            // Simple variable assignment — store directly
+            if root_ptrs.len() == 1 {
+                function.push_store(self.current_block, root_ptrs[0], new_value);
+            } else {
+                // Flattened tuple binding — project each field and store
+                for (i, ptr) in root_ptrs.iter().enumerate() {
+                    let field = function.push_tuple_proj(self.current_block, new_value, TupleIdx::Static(i));
+                    function.push_store(self.current_block, *ptr, field);
+                }
+            }
+            return ExprResult::Unit;
+        }
+
+        assert_eq!(root_ptrs.len(), 1, "Nested lvalue access requires single-pointer binding");
+        let root_ptr = root_ptrs[0];
+
+        // Phase 1: Descend — load root, then extract at each level
+        let mut values = Vec::with_capacity(steps.len() + 1);
+        let mut types = Vec::with_capacity(steps.len() + 1);
+
+        values.push(function.push_load(self.current_block, root_ptr));
+        types.push(root_type);
+
+        for step in &steps {
+            let parent = *values.last().unwrap();
+            let child = match step {
+                AccessStep::Index(idx) => {
+                    function.push_array_get(self.current_block, parent, *idx)
+                }
+                AccessStep::Field(field_idx) => {
+                    function.push_tuple_proj(self.current_block, parent, TupleIdx::Static(*field_idx))
+                }
+            };
+            let child_type = match (step, types.last().unwrap()) {
+                (AccessStep::Index(_), AstType::Array(_, elem)) => elem.as_ref().clone(),
+                (AccessStep::Field(idx), AstType::Tuple(fields)) => fields[*idx].clone(),
+                (step, ty) => panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty),
+            };
+            values.push(child);
+            types.push(child_type);
+        }
+
+        // Phase 2: Replace leaf
+        *values.last_mut().unwrap() = new_value;
+
+        // Phase 3: Ascend — reconstruct from leaf to root
+        for k in (0..steps.len()).rev() {
+            let modified_child = values[k + 1];
+            let parent = values[k];
+            values[k] = match &steps[k] {
+                AccessStep::Index(idx) => {
+                    function.push_array_set(self.current_block, parent, *idx, modified_child)
+                }
+                AccessStep::Field(field_idx) => {
+                    self.synthesize_tuple_set(
+                        parent, *field_idx, modified_child, &types[k], function,
+                    )
+                }
+            };
+        }
+
+        // Phase 4: Store reconstructed root
+        function.push_store(self.current_block, root_ptr, values[0]);
         ExprResult::Unit
     }
 
-    /// Convert an LValue to a pointer ValueId
-    fn convert_lvalue(
+    /// Synthesize a tuple "set" by projecting all fields, replacing one, and rebuilding.
+    fn synthesize_tuple_set(
+        &mut self,
+        tuple: ValueId,
+        target_field: usize,
+        new_value: ValueId,
+        noir_type: &noirc_frontend::monomorphization::ast::Type,
+        function: &mut Function<Empty>,
+    ) -> ValueId {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+
+        let fields = match noir_type {
+            AstType::Tuple(fields) => fields,
+            _ => panic!("synthesize_tuple_set called on non-tuple type: {:?}", noir_type),
+        };
+
+        let mut elements = Vec::with_capacity(fields.len());
+        let mut element_types = Vec::with_capacity(fields.len());
+
+        for (i, field_type) in fields.iter().enumerate() {
+            let elem = if i == target_field {
+                new_value
+            } else {
+                function.push_tuple_proj(self.current_block, tuple, TupleIdx::Static(i))
+            };
+            elements.push(elem);
+            element_types.push(self.type_converter.convert_type(field_type));
+        }
+
+        function.push_mk_tuple(self.current_block, elements, element_types)
+    }
+
+    /// Flatten an LValue into (root_pointers, root_noir_type, access_steps).
+    /// Walks the LValue tree to the root Ident and collects steps in root-to-leaf order.
+    /// Returns multiple pointers for flattened tuple/struct bindings (no nested access),
+    /// or a single pointer for types that use the zipper pattern.
+    fn flatten_lvalue(
         &mut self,
         lvalue: &LValue,
         function: &mut Function<Empty>,
-    ) -> ValueId {
+    ) -> (Vec<ValueId>, noirc_frontend::monomorphization::ast::Type, Vec<AccessStep>) {
         match lvalue {
             LValue::Ident(ident) => {
                 match &ident.definition {
                     Definition::Local(local_id) => {
-                        // For mutable locals, the binding is already a pointer
                         if self.mutable_locals.contains(local_id) {
-                            *self.bindings.get(local_id)
+                            let ptrs = self.bindings.get(local_id)
                                 .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id))
+                                .clone();
+                            (ptrs, ident.typ.clone(), vec![])
                         } else {
                             panic!("Cannot assign to immutable local variable: {}", ident.name)
                         }
@@ -285,17 +476,22 @@ impl<'a> ExpressionConverter<'a> {
                     _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
                 }
             }
-            LValue::Index { .. } => {
-                todo!("Array index lvalue not yet supported")
+            LValue::Index { array, index, .. } => {
+                let (root_ptrs, root_type, mut steps) = self.flatten_lvalue(array, function);
+                let idx_value = self.convert_expression(index, function).into_value();
+                steps.push(AccessStep::Index(idx_value));
+                (root_ptrs, root_type, steps)
             }
-            LValue::MemberAccess { .. } => {
-                todo!("Member access lvalue not yet supported")
+            LValue::MemberAccess { object, field_index } => {
+                let (root_ptrs, root_type, mut steps) = self.flatten_lvalue(object, function);
+                steps.push(AccessStep::Field(*field_index));
+                (root_ptrs, root_type, steps)
             }
             LValue::Dereference { .. } => {
                 todo!("Dereference lvalue not yet supported")
             }
             LValue::Clone(inner) => {
-                self.convert_lvalue(inner, function)
+                self.flatten_lvalue(inner, function)
             }
         }
     }
@@ -329,7 +525,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // In the loop body: bind the index variable and execute the block
         self.current_block = loop_body;
-        self.bindings.insert(for_expr.index_variable, loop_index);
+        self.bindings.insert(for_expr.index_variable, vec![loop_index]);
 
         // Execute the loop body
         self.convert_expression(&for_expr.block, function);
@@ -364,8 +560,46 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         function: &mut Function<Empty>,
     ) -> ExprResult {
+        // Expressions always return materialized tuples, so just use projection
         let tuple = self.convert_expression(tuple_expr, function).into_value();
         let result = function.push_tuple_proj(self.current_block, tuple, TupleIdx::Static(idx));
+        ExprResult::Value(result)
+    }
+
+    fn convert_cast(
+        &mut self,
+        cast: &noirc_frontend::monomorphization::ast::Cast,
+        function: &mut Function<Empty>,
+    ) -> ExprResult {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+
+        let value = self.convert_expression(&cast.lhs, function).into_value();
+
+        let src_bits = match cast.lhs.return_type().as_deref() {
+            Some(AstType::Field) => 254,
+            Some(AstType::Integer(_, bit_size)) => bit_size.bit_size() as usize,
+            Some(AstType::Bool) => 1,
+            _ => 0,
+        };
+
+        let (target, target_bits) = match &cast.r#type {
+            AstType::Field => (CastTarget::Field, 254),
+            AstType::Integer(_, bit_size) => {
+                let bits = bit_size.bit_size() as usize;
+                (CastTarget::U(bits), bits)
+            }
+            AstType::Bool => (CastTarget::U(1), 1),
+            _ => panic!("Unsupported cast target type: {:?}", cast.r#type),
+        };
+
+        // Narrowing cast: truncate first, then cast
+        let value = if src_bits > 0 && target_bits < src_bits {
+            function.push_truncate(self.current_block, value, target_bits, src_bits)
+        } else {
+            value
+        };
+
+        let result = function.push_cast(self.current_block, value, target);
         ExprResult::Value(result)
     }
 
@@ -447,21 +681,23 @@ impl<'a> ExpressionConverter<'a> {
         array_lit: &noirc_frontend::monomorphization::ast::ArrayLiteral,
         function: &mut Function<Empty>,
     ) -> ExprResult {
-        // Convert each element
+        // Get the element type from the array type
+        let elem_ast_type = match &array_lit.typ {
+            noirc_frontend::monomorphization::ast::Type::Array(_, elem_type) => elem_type.as_ref(),
+            _ => panic!("Expected array type for array literal, got {:?}", array_lit.typ),
+        };
+
+        // Convert each element, materializing tuples if needed
         let elements: Vec<ValueId> = array_lit.contents
             .iter()
-            .map(|e| self.convert_expression(e, function).into_value())
+            .map(|e| {
+                let result = self.convert_expression(e, function);
+                self.materialize_if_tuple(result, elem_ast_type, function)
+            })
             .collect();
 
         let len = elements.len();
-
-        // Get the element type from the array type
-        let elem_type = match &array_lit.typ {
-            noirc_frontend::monomorphization::ast::Type::Array(_, elem_type) => {
-                self.type_converter.convert_type(elem_type)
-            }
-            _ => panic!("Expected array type for array literal, got {:?}", array_lit.typ),
-        };
+        let elem_type = self.type_converter.convert_type(elem_ast_type);
 
         let result = function.push_mk_array(
             self.current_block,
@@ -472,29 +708,60 @@ impl<'a> ExpressionConverter<'a> {
         ExprResult::Value(result)
     }
 
+    /// Materialize a tuple value if the result has multiple values
+    fn materialize_if_tuple(
+        &self,
+        result: ExprResult,
+        typ: &noirc_frontend::monomorphization::ast::Type,
+        function: &mut Function<Empty>,
+    ) -> ValueId {
+        match result {
+            ExprResult::Value(v) => v,
+            ExprResult::Values(values) => {
+                // Need to construct a tuple from the values
+                let types = self.flatten_type(typ);
+                function.push_mk_tuple(self.current_block, values, types)
+            }
+            ExprResult::Unit => panic!("Cannot materialize unit value"),
+        }
+    }
+
     fn convert_tuple(
         &mut self,
         exprs: &[Expression],
         function: &mut Function<Empty>,
     ) -> ExprResult {
+        if exprs.is_empty() {
+            return ExprResult::Unit;
+        }
+
+        // Convert each element to a single materialized value
         let values: Vec<ValueId> = exprs
             .iter()
             .map(|e| self.convert_expression(e, function).into_value())
             .collect();
 
-        if values.is_empty() {
-            return ExprResult::Unit;
-        }
-
-        // Get types for the tuple elements
+        // Get types for each element
+        // Note: For Definition::Function idents, the Noir type may be
+        // Tuple([Function, Function]) (constrained + unconstrained pair),
+        // but convert_ident produces a single scalar FnPtr value.
+        // Use Type::function() to match the actual value produced.
         let types: Vec<_> = exprs
             .iter()
-            .filter_map(|e| e.return_type())
-            .map(|t| self.type_converter.convert_type(&t))
+            .map(|e| {
+                if let Expression::Ident(ident) = e {
+                    if matches!(&ident.definition, Definition::Function(_)) {
+                        return Type::function(Empty);
+                    }
+                }
+                let return_type = e.return_type().expect("Tuple element must have a type");
+                self.type_converter.convert_type(&return_type)
+            })
             .collect();
 
-        let result = function.push_mk_tuple(self.current_block, values, types);
-        ExprResult::Value(result)
+        // Always construct a materialized tuple
+        let tuple = function.push_mk_tuple(self.current_block, values, types);
+        ExprResult::Value(tuple)
     }
 
     fn convert_call(
@@ -516,18 +783,18 @@ impl<'a> ExpressionConverter<'a> {
                         let ssa_func_id = self.function_mapper.get(func_id)
                             .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
 
-                        // Determine return size
+                        // Return size is 1 for tuples (they're returned as a single value)
+                        // and 0 for unit
                         let return_type = &call.return_type;
-                        let return_size = self.type_converter.convert_type(return_type).calculate_type_size();
+                        let return_size = self.return_size(return_type);
 
                         let results = function.push_call(self.current_block, *ssa_func_id, args, return_size);
 
                         if results.is_empty() {
                             ExprResult::Unit
-                        } else if results.len() == 1 {
-                            ExprResult::Value(results[0])
                         } else {
-                            ExprResult::Values(results)
+                            // Always a single value (tuples are materialized)
+                            ExprResult::Value(results[0])
                         }
                     }
                     Definition::Builtin(name) => {
@@ -543,16 +810,15 @@ impl<'a> ExpressionConverter<'a> {
                 // Indirect call through a function pointer
                 let fn_ptr = self.convert_expression(&call.func, function).into_value();
                 let return_type = &call.return_type;
-                let return_size = self.type_converter.convert_type(return_type).calculate_type_size();
+                let return_size = self.return_size(return_type);
 
                 let results = function.push_call_indirect(self.current_block, fn_ptr, args, return_size);
 
                 if results.is_empty() {
                     ExprResult::Unit
-                } else if results.len() == 1 {
-                    ExprResult::Value(results[0])
                 } else {
-                    ExprResult::Values(results)
+                    // Always a single value (tuples are materialized)
+                    ExprResult::Value(results[0])
                 }
             }
         }
@@ -562,7 +828,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         name: &str,
         args: &[ValueId],
-        _call: &noirc_frontend::monomorphization::ast::Call,
+        call: &noirc_frontend::monomorphization::ast::Call,
         function: &mut Function<Empty>,
     ) -> ExprResult {
         match name {
@@ -572,6 +838,17 @@ impl<'a> ExpressionConverter<'a> {
                 }
                 function.push_assert_eq(self.current_block, args[0], args[1]);
                 ExprResult::Unit
+            }
+            "array_len" => {
+                let arg_type = call.arguments[0].return_type()
+                    .expect("array_len argument must have a known type");
+                match arg_type.as_ref() {
+                    noirc_frontend::monomorphization::ast::Type::Array(len, _) => {
+                        let value = function.push_u_const(32, *len as u128);
+                        ExprResult::Value(value)
+                    }
+                    _ => panic!("array_len called on non-array type: {:?}", arg_type),
+                }
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }

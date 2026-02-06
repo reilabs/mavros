@@ -85,7 +85,7 @@ impl AstSsaConverter {
                 // For mutable parameters, allocate a pointer and store the value
                 expr_converter.bind_local_mut(*local_id, value_id, converted_type, &mut function);
             } else {
-                expr_converter.bind_local(*local_id, value_id);
+                expr_converter.bind_local(*local_id, vec![value_id]);
             }
         }
 
@@ -99,7 +99,12 @@ impl AstSsaConverter {
                 function.terminate_block_with_return(current_block, vec![v]);
             }
             expression_converter::ExprResult::Values(vs) => {
-                function.terminate_block_with_return(current_block, vs);
+                // Multiple values (tuple) - materialize into a single tuple value
+                let types: Vec<_> = vs.iter()
+                    .map(|_| crate::compiler::ir::r#type::Type::field(Empty))
+                    .collect();
+                let tuple = function.push_mk_tuple(current_block, vs, types);
+                function.terminate_block_with_return(current_block, vec![tuple]);
             }
             expression_converter::ExprResult::Unit => {
                 function.terminate_block_with_return(current_block, vec![]);
