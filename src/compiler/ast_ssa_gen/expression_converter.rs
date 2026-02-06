@@ -45,6 +45,14 @@ enum AccessStep {
     Field(usize),
 }
 
+/// Loop context for break/continue support.
+struct LoopContext {
+    loop_header: BlockId,
+    exit_block: BlockId,
+    loop_index: ValueId,
+    index_bit_size: usize,
+}
+
 /// Converts expressions within a single function.
 pub struct ExpressionConverter<'a> {
     /// Maps LocalId to ValueId(s) for variable bindings.
@@ -60,6 +68,8 @@ pub struct ExpressionConverter<'a> {
     type_converter: AstTypeConverter,
     /// Current block we're building
     current_block: BlockId,
+    /// Stack of enclosing loop contexts for break/continue
+    loop_stack: Vec<LoopContext>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -73,6 +83,7 @@ impl<'a> ExpressionConverter<'a> {
             function_mapper,
             type_converter: AstTypeConverter::new(),
             current_block: entry_block,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -172,6 +183,27 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Unary(unary) => self.convert_unary(unary, function),
             Expression::Clone(inner) => self.convert_expression(inner, function),
             Expression::Drop(_) => ExprResult::Unit,
+            Expression::Break => {
+                let ctx = self.loop_stack.last().expect("break outside of loop");
+                let exit_block = ctx.exit_block;
+                function.terminate_block_with_jmp(self.current_block, exit_block, vec![]);
+                // Create a dead block for any subsequent code
+                self.current_block = function.add_block();
+                ExprResult::Unit
+            }
+            Expression::Continue => {
+                let ctx = self.loop_stack.last().expect("continue outside of loop");
+                let loop_header = ctx.loop_header;
+                let loop_index = ctx.loop_index;
+                let index_bit_size = ctx.index_bit_size;
+                // Increment index and jump back to header
+                let one = function.push_u_const(index_bit_size, 1);
+                let next_index = function.push_add(self.current_block, loop_index, one);
+                function.terminate_block_with_jmp(self.current_block, loop_header, vec![next_index]);
+                // Create a dead block for any subsequent code
+                self.current_block = function.add_block();
+                ExprResult::Unit
+            }
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -552,14 +584,28 @@ impl<'a> ExpressionConverter<'a> {
         self.current_block = loop_body;
         self.bindings.insert(for_expr.index_variable, vec![loop_index]);
 
+        let index_bit_size = self.type_converter.convert_type(&for_expr.index_type).get_bit_size();
+
+        // Push loop context for break/continue
+        self.loop_stack.push(LoopContext {
+            loop_header,
+            exit_block,
+            loop_index,
+            index_bit_size,
+        });
+
         // Execute the loop body
         self.convert_expression(&for_expr.block, function);
 
+        self.loop_stack.pop();
+
         // Increment the index and jump back to header
-        let index_bit_size = self.type_converter.convert_type(&for_expr.index_type).get_bit_size();
-        let one = function.push_u_const(index_bit_size, 1);
-        let next_index = function.push_add(self.current_block, loop_index, one);
-        function.terminate_block_with_jmp(self.current_block, loop_header, vec![next_index]);
+        // (only if current block is not already terminated by break/continue)
+        if !function.block_is_terminated(self.current_block) {
+            let one = function.push_u_const(index_bit_size, 1);
+            let next_index = function.push_add(self.current_block, loop_index, one);
+            function.terminate_block_with_jmp(self.current_block, loop_header, vec![next_index]);
+        }
 
         // Continue in the exit block
         self.current_block = exit_block;
@@ -1036,6 +1082,11 @@ impl<'a> ExpressionConverter<'a> {
                 // In constrained context, always returns false
                 let value = function.push_u_const(1, 0);
                 ExprResult::Value(value)
+            }
+            "as_witness" => {
+                // No-op hint, just evaluate the argument and discard
+                self.convert_expression(&call.arguments[0], function);
+                ExprResult::Unit
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }

@@ -331,6 +331,10 @@ impl<V: Clone> Function<V> {
         new_id
     }
 
+    pub fn block_is_terminated(&self, block_id: BlockId) -> bool {
+        self.blocks.get(&block_id).unwrap().get_terminator().is_some()
+    }
+
     pub fn next_virtual_block(&mut self) -> (BlockId, Block<V>) {
         let new_id = BlockId(self.next_block);
         self.next_block += 1;
