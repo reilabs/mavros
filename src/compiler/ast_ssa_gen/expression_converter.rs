@@ -1184,10 +1184,14 @@ impl<'a> ExpressionConverter<'a> {
                 ExprResult::Value(result)
             }
             "apply_range_constraint" => {
-                // apply_range_constraint(value, bit_size) - range check
-                let _value = self.convert_expression(&call.arguments[0], function).into_value();
-                let _bit_size = self.convert_expression(&call.arguments[1], function).into_value();
-                // TODO: emit range constraint instruction
+                let value = self.convert_expression(&call.arguments[0], function).into_value();
+                let bit_size = match &call.arguments[1] {
+                    Expression::Literal(noirc_frontend::monomorphization::ast::Literal::Integer(sf, _, _)) => {
+                        sf.to_u128() as usize
+                    }
+                    other => panic!("apply_range_constraint bit_size must be a constant, got {:?}", other),
+                };
+                function.push_rangecheck(self.current_block, value, bit_size);
                 ExprResult::Unit
             }
             "is_unconstrained" => {
