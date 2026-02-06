@@ -144,6 +144,17 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    /// Check whether a tuple type is flat (all fields are scalars, no nested tuples/arrays).
+    fn noir_type_is_flat_tuple(typ: &noirc_frontend::monomorphization::ast::Type) -> bool {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+        match typ {
+            AstType::Tuple(fields) => fields.iter().all(|f| matches!(f,
+                AstType::Field | AstType::Integer(..) | AstType::Bool
+            )),
+            _ => false,
+        }
+    }
+
     /// Calculate return size for function calls (tuples count as 1, unit as 0)
     fn return_size(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> usize {
         use noirc_frontend::monomorphization::ast::Type as AstType;
@@ -349,11 +360,11 @@ impl<'a> ExpressionConverter<'a> {
                 .expect("Mutable let binding must have a typed expression");
             let typ = self.type_converter.convert_type(&ast_type);
 
-            // For plain tuples/structs without arrays, use flattened pointers
-            // (one per field) since downstream passes expect this form.
+            // For flat tuples/structs (all scalar fields, no nested tuples/arrays),
+            // use flattened pointers (one per field) since downstream passes expect this form.
             // For everything else, use a single pointer with the zipper pattern.
             let types = self.get_flattened_types(&let_expr.expression);
-            if types.len() > 1 && !Self::noir_type_contains_array(&ast_type) {
+            if types.len() > 1 && Self::noir_type_is_flat_tuple(&ast_type) {
                 let ptrs: Vec<_> = types.iter().enumerate()
                     .map(|(i, typ)| {
                         let field = function.push_tuple_proj(self.current_block, value, TupleIdx::Static(i));
