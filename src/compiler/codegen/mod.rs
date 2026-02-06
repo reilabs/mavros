@@ -676,10 +676,18 @@ impl CodeGen {
                     panic!("SlicePush bytecode opcode not yet implemented");
                 }
                 ssa::OpCode::SliceLen {
-                    result: _r,
-                    slice: _sl,
+                    result: r,
+                    slice: sl,
                 } => {
-                    panic!("SliceLen bytecode opcode not yet implemented");
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let slice_type = type_info.get_value_type(*sl);
+                    let elem_type = slice_type.get_array_element();
+                    let stride = layouter.type_size(&elem_type);
+                    emitter.push_op(bytecode::OpCode::SliceLen {
+                        res,
+                        array: layouter.get_value(*sl),
+                        stride,
+                    });
                 }
                 ssa::OpCode::MkSeq {
                     result: r,

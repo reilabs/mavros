@@ -742,6 +742,18 @@ mod def {
     }
 
     #[opcode]
+    fn slice_len(
+        #[out] res: *mut u64,
+        #[frame] array: BoxedValue,
+        stride: usize,
+    ) {
+        let len = array.layout().array_size() / stride;
+        unsafe {
+            *res = len as u64;
+        }
+    }
+
+    #[opcode]
     fn inc_rc(#[frame] array: BoxedValue, amount: u64) {
         // println!("inc_array_rc_intro");
         array.inc_rc(amount);

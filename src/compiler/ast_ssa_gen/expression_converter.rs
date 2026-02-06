@@ -70,12 +70,15 @@ pub struct ExpressionConverter<'a> {
     current_block: BlockId,
     /// Stack of enclosing loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
+    /// Whether the current function is unconstrained
+    in_unconstrained: bool,
 }
 
 impl<'a> ExpressionConverter<'a> {
     pub fn new(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
         entry_block: BlockId,
+        in_unconstrained: bool,
     ) -> Self {
         Self {
             bindings: HashMap::new(),
@@ -84,6 +87,7 @@ impl<'a> ExpressionConverter<'a> {
             type_converter: AstTypeConverter::new(),
             current_block: entry_block,
             loop_stack: Vec::new(),
+            in_unconstrained,
         }
     }
 
@@ -614,12 +618,45 @@ impl<'a> ExpressionConverter<'a> {
         ExprResult::Unit
     }
 
+    /// Try to evaluate a boolean expression to a compile-time constant.
+    /// Used to fold `if is_unconstrained()` / `if !is_unconstrained()`.
+    fn try_eval_const_bool(&self, expr: &Expression) -> Option<bool> {
+        match expr {
+            Expression::Unary(unary) if matches!(unary.operator, noirc_frontend::ast::UnaryOp::Not) && !unary.skip => {
+                self.try_eval_const_bool(&unary.rhs).map(|b| !b)
+            }
+            Expression::Call(call) => {
+                if let Expression::Ident(ident) = call.func.as_ref() {
+                    if let Definition::Builtin(name) = &ident.definition {
+                        if name == "is_unconstrained" {
+                            return Some(self.in_unconstrained);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn convert_if(
         &mut self,
         if_expr: &If,
         function: &mut Function<Empty>,
     ) -> ExprResult {
         use noirc_frontend::monomorphization::ast::Type as AstType;
+
+        // Fold constant boolean conditions (e.g. if !is_unconstrained())
+        // to avoid emitting dead branches that contain unsupported operations.
+        if let Some(known) = self.try_eval_const_bool(&if_expr.condition) {
+            if known {
+                return self.convert_expression(&if_expr.consequence, function);
+            } else if let Some(alt) = &if_expr.alternative {
+                return self.convert_expression(alt, function);
+            } else {
+                return ExprResult::Unit;
+            }
+        }
 
         let condition = self.convert_expression(&if_expr.condition, function).into_value();
 
@@ -1079,14 +1116,31 @@ impl<'a> ExpressionConverter<'a> {
                 ExprResult::Unit
             }
             "is_unconstrained" => {
-                // In constrained context, always returns false
-                let value = function.push_u_const(1, 0);
+                let value = function.push_u_const(1, if self.in_unconstrained { 1 } else { 0 });
                 ExprResult::Value(value)
             }
             "as_witness" => {
                 // No-op hint, just evaluate the argument and discard
                 self.convert_expression(&call.arguments[0], function);
                 ExprResult::Unit
+            }
+            "to_le_bits" => {
+                let input = self.convert_expression(&call.arguments[0], function).into_value();
+                let output_size = match call.return_type {
+                    noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
+                    _ => panic!("to_le_bits must return an array, got {:?}", call.return_type),
+                };
+                let result = function.push_to_bits(self.current_block, input, Endianness::Little, output_size);
+                ExprResult::Value(result)
+            }
+            "to_be_bits" => {
+                let input = self.convert_expression(&call.arguments[0], function).into_value();
+                let output_size = match call.return_type {
+                    noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
+                    _ => panic!("to_be_bits must return an array, got {:?}", call.return_type),
+                };
+                let result = function.push_to_bits(self.current_block, input, Endianness::Big, output_size);
+                ExprResult::Value(result)
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
