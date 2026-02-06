@@ -172,7 +172,7 @@ impl Types {
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function: fn_id, args, is_unconstrained: _ } => {
+            OpCode::Call { results: result, function: fn_id, args, is_unconstrained } => {
                 let (param_types, return_types) = function_types
                     .get(fn_id)
                     .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
@@ -196,7 +196,16 @@ impl Types {
                 }
 
                 for (ret, ret_type) in result.iter().zip(return_types.iter()) {
-                    function_info.values.insert(*ret, ret_type.clone());
+                    let ret_type = if *is_unconstrained {
+                        // Unconstrained call results are always witness values
+                        Type {
+                            expr: ret_type.expr.clone(),
+                            annotation: V::witness(),
+                        }
+                    } else {
+                        ret_type.clone()
+                    };
+                    function_info.values.insert(*ret, ret_type);
                 }
                 Ok(())
             }

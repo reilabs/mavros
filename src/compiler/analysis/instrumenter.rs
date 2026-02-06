@@ -393,6 +393,7 @@ impl Value {
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
             (Value::UWitness(_), CastTarget::Field) => Value::FWitness,
             (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
+            (Value::FWitness, CastTarget::Field) => Value::FWitness,
             (Value::Field(f), CastTarget::U(s)) => {
                 let bigint = f.into_bigint();
 

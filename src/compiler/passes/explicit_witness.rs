@@ -63,7 +63,6 @@ impl ExplicitWitness {
                             new_instructions.push(instruction);
                         }
                         OpCode::Alloc { .. }
-                        | OpCode::Call { .. }
                         | OpCode::Constrain { .. }
                         | OpCode::WriteWitness { .. }
                         | OpCode::FreshWitness {
@@ -71,6 +70,44 @@ impl ExplicitWitness {
                             result_type: _,
                         } => {
                             new_instructions.push(instruction);
+                        }
+                        OpCode::Call {
+                            results,
+                            function: called_fn,
+                            args,
+                            is_unconstrained,
+                        } => {
+                            if is_unconstrained {
+                                // For unconstrained calls, create fresh result IDs for the call,
+                                // then write each result to witness.
+                                let raw_results: Vec<_> = results
+                                    .iter()
+                                    .map(|_| function.fresh_value())
+                                    .collect();
+
+                                new_instructions.push(OpCode::Call {
+                                    results: raw_results.clone(),
+                                    function: called_fn,
+                                    args,
+                                    is_unconstrained: true,
+                                });
+
+                                // Write each return value to witness
+                                for (orig_id, raw_id) in results.iter().zip(raw_results.iter()) {
+                                    new_instructions.push(OpCode::WriteWitness {
+                                        result: Some(*orig_id),
+                                        value: *raw_id,
+                                        witness_annotation: ConstantTaint::Witness,
+                                    });
+                                }
+                            } else {
+                                new_instructions.push(OpCode::Call {
+                                    results,
+                                    function: called_fn,
+                                    args,
+                                    is_unconstrained,
+                                });
+                            }
                         }
                         OpCode::Cmp {
                             kind,

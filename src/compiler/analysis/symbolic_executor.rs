@@ -274,16 +274,25 @@ impl SymbolicExecutor {
                         results: returns,
                         function: function_id,
                         args: arguments,
-                        is_unconstrained: _,
+                        is_unconstrained,
                     } => {
-                        let params = arguments
-                            .iter()
-                            .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
-                            .collect::<Vec<_>>();
-                        let outputs =
-                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
-                        for (i, val) in returns.iter().enumerate() {
-                            scope[val.0 as usize] = Some(outputs[i].clone());
+                        if *is_unconstrained {
+                            // For unconstrained calls, create fresh witness values for returns
+                            // instead of executing the function symbolically.
+                            // The actual execution happens in Brillig VM.
+                            for val in returns.iter() {
+                                scope[val.0 as usize] = Some(V::fresh_witness(ctx));
+                            }
+                        } else {
+                            let params = arguments
+                                .iter()
+                                .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
+                                .collect::<Vec<_>>();
+                            let outputs =
+                                self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
+                            for (i, val) in returns.iter().enumerate() {
+                                scope[val.0 as usize] = Some(outputs[i].clone());
+                            }
                         }
                     }
                     crate::compiler::ssa::OpCode::ArrayGet {

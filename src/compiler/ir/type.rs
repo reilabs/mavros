@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display, Formatter};
 
 pub trait CommutativeMonoid {
     fn empty() -> Self;
+    fn witness() -> Self;
     fn op(&self, other: &Self) -> Self;
 }
 
@@ -10,6 +11,10 @@ pub struct Empty;
 
 impl CommutativeMonoid for Empty {
     fn empty() -> Self {
+        Empty
+    }
+
+    fn witness() -> Self {
         Empty
     }
 
