@@ -453,7 +453,8 @@ impl<'a> ExpressionConverter<'a> {
                 }
             };
             let child_type = match (step, types.last().unwrap()) {
-                (AccessStep::Index(_), AstType::Array(_, elem)) => elem.as_ref().clone(),
+                (AccessStep::Index(_), AstType::Array(_, elem))
+                | (AccessStep::Index(_), AstType::Slice(elem)) => elem.as_ref().clone(),
                 (AccessStep::Field(idx), AstType::Tuple(fields)) => fields[*idx].clone(),
                 (step, ty) => panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty),
             };
