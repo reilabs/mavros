@@ -940,7 +940,9 @@ impl<'a> ExpressionConverter<'a> {
         function: &mut Function<Empty>,
     ) -> ExprResult {
         if exprs.is_empty() {
-            return ExprResult::Unit;
+            // Empty struct/tuple — still a value (e.g. A {})
+            let tuple = function.push_mk_tuple(self.current_block, vec![], vec![]);
+            return ExprResult::Value(tuple);
         }
 
         // Convert each element to a single materialized value
