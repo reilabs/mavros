@@ -551,7 +551,9 @@ impl CodeGen {
                     value: v,
                     target: tgt,
                 } => {
-                    if *tgt == ssa::CastTarget::Nop {
+                    let is_nop = *tgt == ssa::CastTarget::Nop
+                        || type_info.get_value_type(*v).expr == type_info.get_value_type(*r).expr;
+                    if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);
                         continue;

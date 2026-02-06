@@ -350,7 +350,14 @@ impl<'a> ExpressionConverter<'a> {
         let_expr: &Let,
         function: &mut Function<Empty>,
     ) -> ExprResult {
-        let value = self.convert_expression(&let_expr.expression, function).into_value();
+        let result = self.convert_expression(&let_expr.expression, function);
+        let value = match result {
+            ExprResult::Unit => {
+                // Unit binding (e.g., `let unit = ()`) — create an empty tuple
+                function.push_mk_tuple(self.current_block, vec![], vec![])
+            }
+            other => other.into_value(),
+        };
 
         if let_expr.mutable {
             // Always use a single pointer for the whole value.
@@ -894,8 +901,54 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Array(array_lit) | Literal::Slice(array_lit) => {
                 self.convert_array_literal(array_lit, function)
             }
-            Literal::Str(_) => todo!("String literals not yet supported"),
-            Literal::FmtStr(_, _, _) => todo!("Format string literals not yet supported"),
+            Literal::Str(s) => {
+                // str<N>: array of u8 (UTF-8 bytes)
+                let elem_type = Type::u(8, Empty);
+                let len = s.len();
+                let elems: Vec<ValueId> = s.bytes()
+                    .map(|b| function.push_u_const(8, b as u128))
+                    .collect();
+                let arr = function.push_mk_array(
+                    self.current_block, elems, SeqType::Array(len), elem_type,
+                );
+                ExprResult::Value(arr)
+            }
+            Literal::FmtStr(fragments, _count, captures) => {
+                // fmtstr<N, T>: Tuple(Array(U(32), N), ...T_fields)
+                use noirc_frontend::token::FmtStrFragment;
+
+                // Build the codepoint array from fragments
+                let mut codepoints = Vec::new();
+                for fragment in fragments {
+                    let text = match fragment {
+                        FmtStrFragment::String(s) => s.clone(),
+                        FmtStrFragment::Interpolation(name, _) => format!("{{{name}}}"),
+                    };
+                    for c in text.chars() {
+                        codepoints.push(function.push_u_const(32, c as u128));
+                    }
+                }
+                let cp_len = codepoints.len();
+                let cp_array = function.push_mk_array(
+                    self.current_block, codepoints, SeqType::Array(cp_len), Type::u(32, Empty),
+                );
+
+                // Convert captures (always a Tuple expression) and flatten
+                let mut tuple_elems = vec![cp_array];
+                let mut elem_types = vec![Type::u(32, Empty).array_of(cp_len, Empty)];
+                if let Expression::Tuple(capture_exprs) = captures.as_ref() {
+                    for expr in capture_exprs {
+                        let val = self.convert_expression(expr, function).into_value();
+                        tuple_elems.push(val);
+                        let typ = expr.return_type()
+                            .expect("FmtStr capture must have a type");
+                        elem_types.push(self.type_converter.convert_type(&typ));
+                    }
+                }
+
+                let result = function.push_mk_tuple(self.current_block, tuple_elems, elem_types);
+                ExprResult::Value(result)
+            }
         }
     }
 

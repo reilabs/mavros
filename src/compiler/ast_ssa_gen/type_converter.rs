@@ -48,8 +48,25 @@ impl AstTypeConverter {
                 inner_type.ref_of(Empty)
             }
             AstType::Function(_, _, _, _) => Type::function(Empty),
-            AstType::String(_) => todo!("String types not yet supported"),
-            AstType::FmtString(_, _) => todo!("Format string types not yet supported"),
+            AstType::String(len) => {
+                // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
+                Type::u(8, Empty).array_of(*len as usize, Empty)
+            }
+            AstType::FmtString(len, captures_type) => {
+                // fmtstr<N, T>: N is codepoint count, represented as
+                // Tuple(Array(U(32), N), ...T_fields)
+                let codepoints_array = Type::u(32, Empty).array_of(*len as usize, Empty);
+                let capture_fields = match captures_type.as_ref() {
+                    AstType::Tuple(fields) => fields.iter()
+                        .map(|t| self.convert_type(t))
+                        .collect::<Vec<_>>(),
+                    AstType::Unit => vec![],
+                    other => vec![self.convert_type(other)],
+                };
+                let mut all_fields = vec![codepoints_array];
+                all_fields.extend(capture_fields);
+                Type::tuple_of(all_fields, Empty)
+            }
         }
     }
 }
