@@ -101,16 +101,17 @@ impl UnionFind {
 
     pub fn get_class(&self, x: TypeVariable) -> Vec<TypeVariable> {
         let parent = self.parent.borrow();
+        let representative = self.find(x);
         let mut result = Vec::new();
         for (var, _) in parent.iter() {
-            if parent[var] == parent[&x] {
+            if self.find(*var) == representative {
                 result.push(*var);
             }
         }
         result
     }
 
-    pub fn set_taint(&mut self, representative: TypeVariable, taint: ConstantTaint) {
+    fn set_taint_for_representative(&mut self, representative: TypeVariable, taint: ConstantTaint) {
         let mut mapping = self.taint_mapping.borrow_mut();
         let old_taint = mapping.get(&representative).cloned();
         if old_taint.is_some() && old_taint.unwrap() != taint {
@@ -119,14 +120,19 @@ impl UnionFind {
         mapping.insert(representative, taint);
     }
 
-    pub fn get_taint(&self, representative: TypeVariable) -> Option<Taint> {
+    pub fn set_taint_for_variable(&mut self, variable: TypeVariable, taint: ConstantTaint) {
+        let representative = self.find(variable);
+        self.set_taint_for_representative(representative, taint);
+    }
+
+    fn get_taint_for_representative(&self, representative: TypeVariable) -> Option<Taint> {
         let mapping = self.taint_mapping.borrow();
         mapping.get(&representative).cloned().map(|t| Taint::Constant(t))
     }
 
     pub fn get_taint_for_variable(&self, variable: TypeVariable) -> Option<Taint> {
         let representative = self.find(variable);
-        self.get_taint(representative)
+        self.get_taint_for_representative(representative)
     }
 
     pub fn substitute_variables(&self, taint: &Taint) -> Taint {
@@ -134,7 +140,7 @@ impl UnionFind {
             Taint::Constant(constant) => Taint::Constant(*constant),
             Taint::Variable(var) => {
                 let representative = self.find(*var);
-                if let Some(representative_taint) = self.get_taint(representative) {
+                if let Some(representative_taint) = self.get_taint_for_representative(representative) {
                     self.substitute_variables(&representative_taint)
                 } else {
                     Taint::Variable(representative)
