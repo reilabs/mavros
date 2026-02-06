@@ -170,6 +170,8 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Cast(cast) => self.convert_cast(cast, function),
             Expression::If(if_expr) => self.convert_if(if_expr, function),
             Expression::Unary(unary) => self.convert_unary(unary, function),
+            Expression::Clone(inner) => self.convert_expression(inner, function),
+            Expression::Drop(_) => ExprResult::Unit,
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
     }
@@ -453,6 +455,24 @@ impl<'a> ExpressionConverter<'a> {
         function.push_mk_tuple(self.current_block, elements, element_types)
     }
 
+    /// Read an LValue as a value (for Dereference: get the pointer that the lvalue holds).
+    fn convert_lvalue_to_value(
+        &mut self,
+        lvalue: &LValue,
+        function: &mut Function<Empty>,
+    ) -> ValueId {
+        match lvalue {
+            LValue::Ident(ident) => {
+                self.convert_ident(ident, function).into_value()
+            }
+            LValue::Dereference { reference, .. } => {
+                let ptr = self.convert_lvalue_to_value(reference, function);
+                function.push_load(self.current_block, ptr)
+            }
+            _ => panic!("Unsupported lvalue in dereference position: {:?}", std::mem::discriminant(lvalue)),
+        }
+    }
+
     /// Flatten an LValue into (root_pointers, root_noir_type, access_steps).
     /// Walks the LValue tree to the root Ident and collects steps in root-to-leaf order.
     /// Returns multiple pointers for flattened tuple/struct bindings (no nested access),
@@ -489,8 +509,11 @@ impl<'a> ExpressionConverter<'a> {
                 steps.push(AccessStep::Field(*field_index));
                 (root_ptrs, root_type, steps)
             }
-            LValue::Dereference { .. } => {
-                todo!("Dereference lvalue not yet supported")
+            LValue::Dereference { reference, element_type } => {
+                // *b where b holds a pointer — evaluate the inner lvalue as an
+                // expression to get the pointer value, then use it as root
+                let ptr = self.convert_lvalue_to_value(reference, function);
+                (vec![ptr], element_type.clone(), vec![])
             }
             LValue::Clone(inner) => {
                 self.flatten_lvalue(inner, function)
@@ -601,18 +624,47 @@ impl<'a> ExpressionConverter<'a> {
         if unary.skip {
             return self.convert_expression(&unary.rhs, function);
         }
-        let value = self.convert_expression(&unary.rhs, function).into_value();
-        let result = match unary.operator {
-            noirc_frontend::ast::UnaryOp::Not => {
-                function.push_not(self.current_block, value)
+        match unary.operator {
+            noirc_frontend::ast::UnaryOp::Reference { .. } => {
+                // &mut x on a let-mut local: return the ptr directly (no load)
+                if let Expression::Ident(ident) = unary.rhs.as_ref() {
+                    if let Definition::Local(local_id) = &ident.definition {
+                        if self.mutable_locals.contains(local_id) {
+                            let ptrs = self.bindings.get(local_id).unwrap().clone();
+                            assert_eq!(ptrs.len(), 1, "&mut on flattened tuple binding not supported");
+                            return ExprResult::Value(ptrs[0]);
+                        }
+                    }
+                }
+                // Non-mutable-local: evaluate and alloc a fresh Ref
+                let value = self.convert_expression(&unary.rhs, function).into_value();
+                let inner_type = self.type_converter.convert_type(
+                    &unary.rhs.return_type().expect("Reference operand must have a type")
+                );
+                let ptr = function.push_alloc(self.current_block, inner_type, Empty);
+                function.push_store(self.current_block, ptr, value);
+                ExprResult::Value(ptr)
             }
-            noirc_frontend::ast::UnaryOp::Minus => {
-                let zero = function.push_field_const(ark_bn254::Fr::from(0u64));
-                function.push_sub(self.current_block, zero, value)
+            noirc_frontend::ast::UnaryOp::Dereference { .. } => {
+                // *x — load from the pointer
+                let value = self.convert_expression(&unary.rhs, function).into_value();
+                ExprResult::Value(function.push_load(self.current_block, value))
             }
-            _ => todo!("Unary operator {:?} not yet supported", unary.operator),
-        };
-        ExprResult::Value(result)
+            _ => {
+                let value = self.convert_expression(&unary.rhs, function).into_value();
+                let result = match unary.operator {
+                    noirc_frontend::ast::UnaryOp::Not => {
+                        function.push_not(self.current_block, value)
+                    }
+                    noirc_frontend::ast::UnaryOp::Minus => {
+                        let zero = function.push_field_const(ark_bn254::Fr::from(0u64));
+                        function.push_sub(self.current_block, zero, value)
+                    }
+                    _ => unreachable!(),
+                };
+                ExprResult::Value(result)
+            }
+        }
     }
 
     fn convert_index(
