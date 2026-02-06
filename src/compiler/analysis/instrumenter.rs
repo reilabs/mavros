@@ -106,7 +106,8 @@ impl Value {
                 Value::UWitness(1)
             }
             (Value::FWitness, _) | (_, Value::FWitness) => {
-                todo!();
+                instrumenter.record_constraints(1);
+                Value::UWitness(1)
             }
             (_, _) => {
                 panic!("Cannot compare {:?} and {:?}", self, b);

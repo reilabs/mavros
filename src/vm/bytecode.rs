@@ -598,7 +598,7 @@ mod def {
     #[opcode]
     fn div_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
-            *res = a / b;
+            *res = if b == Field::ZERO { Field::ZERO } else { a / b };
         }
     }
 
