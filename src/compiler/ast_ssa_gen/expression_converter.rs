@@ -1147,6 +1147,10 @@ impl<'a> ExpressionConverter<'a> {
                     .expect("array_len argument must have a known type");
                 match arg_type.as_ref() {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => {
+                        // Evaluate the argument for side effects (e.g., it may be a
+                        // function call that emits constraints), then return the
+                        // compile-time-known length.
+                        self.convert_expression(&call.arguments[0], function);
                         let value = function.push_u_const(32, *len as u128);
                         ExprResult::Value(value)
                     }
