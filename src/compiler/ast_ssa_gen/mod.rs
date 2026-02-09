@@ -229,7 +229,7 @@ impl AstSsaConverter {
 
             for gid in &ordered_ids {
                 let (_name, _typ, init_expr) = &program.globals[gid];
-                let value = expr_converter.convert_expression(init_expr, init_fn).into_value();
+                let value = expr_converter.convert_expression(init_expr, init_fn).unwrap();
                 let idx = self.global_slots[gid];
                 init_fn.push_init_global(entry, idx, value);
             }
@@ -288,7 +288,7 @@ impl AstSsaConverter {
                 // For mutable parameters, allocate a pointer and store the value
                 expr_converter.bind_local_mut(*local_id, value_id, converted_type, &mut function);
             } else {
-                expr_converter.bind_local(*local_id, vec![value_id]);
+                expr_converter.bind_local(*local_id, value_id);
             }
         }
 
@@ -297,22 +297,8 @@ impl AstSsaConverter {
 
         // Add return terminator
         let current_block = expr_converter.current_block();
-        match result {
-            expression_converter::ExprResult::Value(v) => {
-                function.terminate_block_with_return(current_block, vec![v]);
-            }
-            expression_converter::ExprResult::Values(vs) => {
-                // Multiple values (tuple) - materialize into a single tuple value
-                let types: Vec<_> = vs.iter()
-                    .map(|_| crate::compiler::ir::r#type::Type::field(Empty))
-                    .collect();
-                let tuple = function.push_mk_tuple(current_block, vs, types);
-                function.terminate_block_with_return(current_block, vec![tuple]);
-            }
-            expression_converter::ExprResult::Unit => {
-                function.terminate_block_with_return(current_block, vec![]);
-            }
-        }
+        let return_values = result.into_iter().collect();
+        function.terminate_block_with_return(current_block, return_values);
 
         function
     }

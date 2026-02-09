@@ -105,10 +105,13 @@ impl Value {
                 instrumenter.record_rangechecks(*i as u8, 1);
                 Value::UWitness(1)
             }
-            (Value::FWitness, _) | (_, Value::FWitness) => {
-                instrumenter.record_constraints(1);
-                Value::UWitness(1)
-            }
+            (Value::FWitness, _) | (_, Value::FWitness) => match cmp_kind {
+                CmpKind::Eq => {
+                    instrumenter.record_constraints(1);
+                    Value::UWitness(1)
+                }
+                CmpKind::Lt => panic!("Cannot compare Field witnesses with Lt"),
+            },
             (_, _) => {
                 panic!("Cannot compare {:?} and {:?}", self, b);
             }

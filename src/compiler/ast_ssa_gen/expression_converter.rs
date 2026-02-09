@@ -12,29 +12,6 @@ use crate::compiler::ssa::{BlockId, CastTarget, Endianness, Function, FunctionId
 
 use super::type_converter::AstTypeConverter;
 
-/// Result of converting an expression.
-/// Some expressions produce values, others don't (e.g., constraints).
-pub enum ExprResult {
-    /// Expression produced a value
-    Value(ValueId),
-    /// Expression produced multiple values (e.g., tuple)
-    Values(Vec<ValueId>),
-    /// Expression produced no value (e.g., assert, unit)
-    Unit,
-}
-
-impl ExprResult {
-    /// Get the single value, panicking if not exactly one value.
-    pub fn into_value(self) -> ValueId {
-        match self {
-            ExprResult::Value(v) => v,
-            ExprResult::Values(vs) if vs.len() == 1 => vs[0],
-            ExprResult::Values(_) => panic!("Expected single value, got multiple"),
-            ExprResult::Unit => panic!("Expected value, got unit"),
-        }
-    }
-
-}
 
 /// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
 #[derive(Debug)]
@@ -55,11 +32,10 @@ struct LoopContext {
 
 /// Converts expressions within a single function.
 pub struct ExpressionConverter<'a> {
-    /// Maps LocalId to ValueId(s) for variable bindings.
-    /// Tuples/structs are stored as multiple values (flattened).
-    /// For mutable variables, this stores the pointer(s) to the value(s).
-    /// For immutable variables, this stores the value(s) directly.
-    bindings: HashMap<LocalId, Vec<ValueId>>,
+    /// Maps LocalId to ValueId for variable bindings.
+    /// For mutable variables, this stores the pointer to the value.
+    /// For immutable variables, this stores the value directly.
+    bindings: HashMap<LocalId, ValueId>,
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
     /// Maps AST FuncId to SSA FunctionId
@@ -95,9 +71,9 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    /// Bind an immutable local variable to value(s)
-    pub fn bind_local(&mut self, local_id: LocalId, values: Vec<ValueId>) {
-        self.bindings.insert(local_id, values);
+    /// Bind an immutable local variable to a value
+    pub fn bind_local(&mut self, local_id: LocalId, value: ValueId) {
+        self.bindings.insert(local_id, value);
     }
 
     /// Bind a mutable local variable - allocates a pointer and stores the initial value
@@ -110,49 +86,8 @@ impl<'a> ExpressionConverter<'a> {
     ) {
         let ptr = function.push_alloc(self.current_block, typ, Empty);
         function.push_store(self.current_block, ptr, value_id);
-        self.bindings.insert(local_id, vec![ptr]);
+        self.bindings.insert(local_id, ptr);
         self.mutable_locals.insert(local_id);
-    }
-
-    /// Get flattened types for an expression (for tuple/struct allocation)
-    fn get_flattened_types(&self, expr: &Expression) -> Vec<Type<Empty>> {
-        if let Some(typ) = expr.return_type() {
-            self.flatten_type(&typ)
-        } else {
-            vec![Type::field(Empty)]
-        }
-    }
-
-    /// Flatten a type into its component types
-    fn flatten_type(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> Vec<Type<Empty>> {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-        match typ {
-            AstType::Tuple(types) => {
-                types.iter().flat_map(|t| self.flatten_type(t)).collect()
-            }
-            _ => vec![self.type_converter.convert_type(typ)],
-        }
-    }
-
-    /// Check whether a Noir type contains an array anywhere in its structure.
-    fn noir_type_contains_array(typ: &noirc_frontend::monomorphization::ast::Type) -> bool {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-        match typ {
-            AstType::Array(_, _) => true,
-            AstType::Tuple(fields) => fields.iter().any(|f| Self::noir_type_contains_array(f)),
-            _ => false,
-        }
-    }
-
-    /// Check whether a tuple type is flat (all fields are scalars, no nested tuples/arrays).
-    fn noir_type_is_flat_tuple(typ: &noirc_frontend::monomorphization::ast::Type) -> bool {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-        match typ {
-            AstType::Tuple(fields) => fields.iter().all(|f| matches!(f,
-                AstType::Field | AstType::Integer(..) | AstType::Bool
-            )),
-            _ => false,
-        }
     }
 
     /// Calculate return size for function calls (tuples count as 1, unit as 0)
@@ -174,7 +109,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         expr: &Expression,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         match expr {
             Expression::Ident(ident) => self.convert_ident(ident, function),
             Expression::Binary(binary) => self.convert_binary(binary, function),
@@ -186,7 +121,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Semi(inner) => {
                 // Semi expressions evaluate the inner expression and discard the result
                 self.convert_expression(inner, function);
-                ExprResult::Unit
+                None
             }
             Expression::Literal(lit) => self.convert_literal(lit, function),
             Expression::Tuple(exprs) => self.convert_tuple(exprs, function),
@@ -201,14 +136,14 @@ impl<'a> ExpressionConverter<'a> {
             Expression::If(if_expr) => self.convert_if(if_expr, function),
             Expression::Unary(unary) => self.convert_unary(unary, function),
             Expression::Clone(inner) => self.convert_expression(inner, function),
-            Expression::Drop(_) => ExprResult::Unit,
+            Expression::Drop(_) => None,
             Expression::Break => {
                 let ctx = self.loop_stack.last().expect("break outside of loop");
                 let exit_block = ctx.exit_block;
                 function.terminate_block_with_jmp(self.current_block, exit_block, vec![]);
                 // Create a dead block for any subsequent code
                 self.current_block = function.add_block();
-                ExprResult::Unit
+                None
             }
             Expression::Continue => {
                 let ctx = self.loop_stack.last().expect("continue outside of loop");
@@ -221,7 +156,7 @@ impl<'a> ExpressionConverter<'a> {
                 function.terminate_block_with_jmp(self.current_block, loop_header, vec![next_index]);
                 // Create a dead block for any subsequent code
                 self.current_block = function.add_block();
-                ExprResult::Unit
+                None
             }
             _ => todo!("Expression type not yet supported: {:?}", std::mem::discriminant(expr)),
         }
@@ -231,39 +166,27 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         ident: &Ident,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         match &ident.definition {
             Definition::Local(local_id) => {
-                let values = self.bindings.get(local_id)
-                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id))
-                    .clone();
+                let value = *self.bindings.get(local_id)
+                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
 
-                // For mutable variables, we need to load from the pointer(s)
-                let values = if self.mutable_locals.contains(local_id) {
-                    values.iter()
-                        .map(|ptr| function.push_load(self.current_block, *ptr))
-                        .collect()
+                // For mutable variables, we need to load from the pointer
+                let value = if self.mutable_locals.contains(local_id) {
+                    function.push_load(self.current_block, value)
                 } else {
-                    values
+                    value
                 };
 
-                // If we have multiple values (flattened tuple binding), reconstruct the tuple
-                // so callers always get a properly typed materialized value
-                if values.len() == 1 {
-                    ExprResult::Value(values[0])
-                } else {
-                    // Reconstruct tuple from flattened values
-                    let types = self.flatten_type(&ident.typ);
-                    let tuple = function.push_mk_tuple(self.current_block, values, types);
-                    ExprResult::Value(tuple)
-                }
+                Some(value)
             }
             Definition::Function(func_id) => {
                 let ssa_func_id = self.function_mapper.get(func_id)
                     .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
                 // Return a function pointer constant
                 let value_id = function.push_fn_ptr_const(*ssa_func_id);
-                ExprResult::Value(value_id)
+                Some(value_id)
             }
             Definition::Builtin(name) => {
                 todo!("Builtin function not yet supported: {}", name)
@@ -279,7 +202,7 @@ impl<'a> ExpressionConverter<'a> {
                     .unwrap_or_else(|| panic!("Undefined global: {:?}", global_id));
                 let typ = self.type_converter.convert_type(&ident.typ);
                 let value = function.push_read_global(self.current_block, slot as u64, typ);
-                ExprResult::Value(value)
+                Some(value)
             }
         }
     }
@@ -288,9 +211,9 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         binary: &Binary,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
-        let lhs = self.convert_expression(&binary.lhs, function).into_value();
-        let rhs = self.convert_expression(&binary.rhs, function).into_value();
+    ) -> Option<ValueId> {
+        let lhs = self.convert_expression(&binary.lhs, function).unwrap();
+        let rhs = self.convert_expression(&binary.rhs, function).unwrap();
 
         let result = match binary.operator {
             BinaryOpKind::Add => function.push_add(self.current_block, lhs, rhs),
@@ -342,64 +265,44 @@ impl<'a> ExpressionConverter<'a> {
             }
         };
 
-        ExprResult::Value(result)
+        Some(result)
     }
 
     fn convert_let(
         &mut self,
         let_expr: &Let,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         let result = self.convert_expression(&let_expr.expression, function);
-        let value = match result {
-            ExprResult::Unit => {
-                // Unit binding (e.g., `let unit = ()`) — create an empty tuple
-                function.push_mk_tuple(self.current_block, vec![], vec![])
-            }
-            other => other.into_value(),
-        };
+        let value = result.unwrap_or_else(|| {
+            // Unit binding (e.g., `let unit = ()`) — create an empty tuple
+            function.push_mk_tuple(self.current_block, vec![], vec![])
+        });
 
         if let_expr.mutable {
-            // Always use a single pointer for the whole value.
+            // Use a single pointer for the whole value.
             // Nested field/index updates are handled by the descend-modify-ascend
             // pattern in convert_assign.
             let ast_type = let_expr.expression.return_type()
                 .expect("Mutable let binding must have a typed expression");
             let typ = self.type_converter.convert_type(&ast_type);
-
-            // For flat tuples/structs (all scalar fields, no nested tuples/arrays),
-            // use flattened pointers (one per field) since downstream passes expect this form.
-            // For everything else, use a single pointer with the zipper pattern.
-            let types = self.get_flattened_types(&let_expr.expression);
-            if types.len() > 1 && Self::noir_type_is_flat_tuple(&ast_type) {
-                let ptrs: Vec<_> = types.iter().enumerate()
-                    .map(|(i, typ)| {
-                        let field = function.push_tuple_proj(self.current_block, value, TupleIdx::Static(i));
-                        let ptr = function.push_alloc(self.current_block, typ.clone(), Empty);
-                        function.push_store(self.current_block, ptr, field);
-                        ptr
-                    })
-                    .collect();
-                self.bindings.insert(let_expr.id, ptrs);
-            } else {
-                let ptr = function.push_alloc(self.current_block, typ, Empty);
-                function.push_store(self.current_block, ptr, value);
-                self.bindings.insert(let_expr.id, vec![ptr]);
-            }
+            let ptr = function.push_alloc(self.current_block, typ, Empty);
+            function.push_store(self.current_block, ptr, value);
+            self.bindings.insert(let_expr.id, ptr);
             self.mutable_locals.insert(let_expr.id);
         } else {
             // Immutable - store single materialized value
-            self.bindings.insert(let_expr.id, vec![value]);
+            self.bindings.insert(let_expr.id, value);
         }
-        ExprResult::Unit
+        None
     }
 
     fn convert_block(
         &mut self,
         exprs: &[Expression],
         function: &mut Function<Empty>,
-    ) -> ExprResult {
-        let mut last_result = ExprResult::Unit;
+    ) -> Option<ValueId> {
+        let mut last_result = None;
         for expr in exprs {
             last_result = self.convert_expression(expr, function);
         }
@@ -410,30 +313,19 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         assign: &Assign,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
-        let new_value = self.convert_expression(&assign.expression, function).into_value();
+        let new_value = self.convert_expression(&assign.expression, function).unwrap();
 
-        // Flatten the lvalue into a root pointer(s) + access path
-        let (root_ptrs, root_type, steps) = self.flatten_lvalue(&assign.lvalue, function);
+        // Flatten the lvalue into a root pointer + access path
+        let (root_ptr, root_type, steps) = self.flatten_lvalue(&assign.lvalue, function);
 
         if steps.is_empty() {
             // Simple variable assignment — store directly
-            if root_ptrs.len() == 1 {
-                function.push_store(self.current_block, root_ptrs[0], new_value);
-            } else {
-                // Flattened tuple binding — project each field and store
-                for (i, ptr) in root_ptrs.iter().enumerate() {
-                    let field = function.push_tuple_proj(self.current_block, new_value, TupleIdx::Static(i));
-                    function.push_store(self.current_block, *ptr, field);
-                }
-            }
-            return ExprResult::Unit;
+            function.push_store(self.current_block, root_ptr, new_value);
+            return None;
         }
-
-        assert_eq!(root_ptrs.len(), 1, "Nested lvalue access requires single-pointer binding");
-        let root_ptr = root_ptrs[0];
 
         // Phase 1: Descend — load root, then extract at each level
         let mut values = Vec::with_capacity(steps.len() + 1);
@@ -483,7 +375,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // Phase 4: Store reconstructed root
         function.push_store(self.current_block, root_ptr, values[0]);
-        ExprResult::Unit
+        None
     }
 
     /// Synthesize a tuple "set" by projecting all fields, replacing one, and rebuilding.
@@ -526,7 +418,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> ValueId {
         match lvalue {
             LValue::Ident(ident) => {
-                self.convert_ident(ident, function).into_value()
+                self.convert_ident(ident, function).unwrap()
             }
             LValue::Dereference { reference, .. } => {
                 let ptr = self.convert_lvalue_to_value(reference, function);
@@ -536,24 +428,21 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    /// Flatten an LValue into (root_pointers, root_noir_type, access_steps).
+    /// Flatten an LValue into (root_pointer, root_noir_type, access_steps).
     /// Walks the LValue tree to the root Ident and collects steps in root-to-leaf order.
-    /// Returns multiple pointers for flattened tuple/struct bindings (no nested access),
-    /// or a single pointer for types that use the zipper pattern.
     fn flatten_lvalue(
         &mut self,
         lvalue: &LValue,
         function: &mut Function<Empty>,
-    ) -> (Vec<ValueId>, noirc_frontend::monomorphization::ast::Type, Vec<AccessStep>) {
+    ) -> (ValueId, noirc_frontend::monomorphization::ast::Type, Vec<AccessStep>) {
         match lvalue {
             LValue::Ident(ident) => {
                 match &ident.definition {
                     Definition::Local(local_id) => {
                         if self.mutable_locals.contains(local_id) {
-                            let ptrs = self.bindings.get(local_id)
-                                .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id))
-                                .clone();
-                            (ptrs, ident.typ.clone(), vec![])
+                            let ptr = *self.bindings.get(local_id)
+                                .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
+                            (ptr, ident.typ.clone(), vec![])
                         } else {
                             panic!("Cannot assign to immutable local variable: {}", ident.name)
                         }
@@ -562,21 +451,21 @@ impl<'a> ExpressionConverter<'a> {
                 }
             }
             LValue::Index { array, index, .. } => {
-                let (root_ptrs, root_type, mut steps) = self.flatten_lvalue(array, function);
-                let idx_value = self.convert_expression(index, function).into_value();
+                let (root_ptr, root_type, mut steps) = self.flatten_lvalue(array, function);
+                let idx_value = self.convert_expression(index, function).unwrap();
                 steps.push(AccessStep::Index(idx_value));
-                (root_ptrs, root_type, steps)
+                (root_ptr, root_type, steps)
             }
             LValue::MemberAccess { object, field_index } => {
-                let (root_ptrs, root_type, mut steps) = self.flatten_lvalue(object, function);
+                let (root_ptr, root_type, mut steps) = self.flatten_lvalue(object, function);
                 steps.push(AccessStep::Field(*field_index));
-                (root_ptrs, root_type, steps)
+                (root_ptr, root_type, steps)
             }
             LValue::Dereference { reference, element_type } => {
                 // *b where b holds a pointer — evaluate the inner lvalue as an
                 // expression to get the pointer value, then use it as root
                 let ptr = self.convert_lvalue_to_value(reference, function);
-                (vec![ptr], element_type.clone(), vec![])
+                (ptr, element_type.clone(), vec![])
             }
             LValue::Clone(inner) => {
                 self.flatten_lvalue(inner, function)
@@ -588,10 +477,10 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         for_expr: &For,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         // Evaluate start and end range in the current block
-        let start = self.convert_expression(&for_expr.start_range, function).into_value();
-        let end = self.convert_expression(&for_expr.end_range, function).into_value();
+        let start = self.convert_expression(&for_expr.start_range, function).unwrap();
+        let end = self.convert_expression(&for_expr.end_range, function).unwrap();
 
         // Create blocks for the loop structure
         let loop_header = function.add_block();
@@ -613,7 +502,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // In the loop body: bind the index variable and execute the block
         self.current_block = loop_body;
-        self.bindings.insert(for_expr.index_variable, vec![loop_index]);
+        self.bindings.insert(for_expr.index_variable, loop_index);
 
         let index_bit_size = self.type_converter.convert_type(&for_expr.index_type).get_bit_size();
 
@@ -642,7 +531,7 @@ impl<'a> ExpressionConverter<'a> {
         self.current_block = exit_block;
 
         // For loops don't produce a value
-        ExprResult::Unit
+        None
     }
 
     /// Try to evaluate a boolean expression to a compile-time constant.
@@ -670,7 +559,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         if_expr: &If,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
         // Fold constant boolean conditions (e.g. if !is_unconstrained())
@@ -681,11 +570,11 @@ impl<'a> ExpressionConverter<'a> {
             } else if let Some(alt) = &if_expr.alternative {
                 return self.convert_expression(alt, function);
             } else {
-                return ExprResult::Unit;
+                return None;
             }
         }
 
-        let condition = self.convert_expression(&if_expr.condition, function).into_value();
+        let condition = self.convert_expression(&if_expr.condition, function).unwrap();
 
         let then_block = function.add_block();
         let else_block = function.add_block();
@@ -698,14 +587,14 @@ impl<'a> ExpressionConverter<'a> {
         // Then branch
         self.current_block = then_block;
         let then_result = self.convert_expression(&if_expr.consequence, function);
-        let then_value = if is_unit { None } else { Some(then_result.into_value()) };
+        let then_value = if is_unit { None } else { Some(then_result.unwrap()) };
         let then_exit = self.current_block;
 
         // Else branch
         self.current_block = else_block;
         let else_value = if let Some(alt) = &if_expr.alternative {
             let else_result = self.convert_expression(alt, function);
-            if is_unit { None } else { Some(else_result.into_value()) }
+            if is_unit { None } else { Some(else_result.unwrap()) }
         } else {
             None
         };
@@ -715,14 +604,14 @@ impl<'a> ExpressionConverter<'a> {
             function.terminate_block_with_jmp(then_exit, merge_block, vec![]);
             function.terminate_block_with_jmp(else_exit, merge_block, vec![]);
             self.current_block = merge_block;
-            ExprResult::Unit
+            None
         } else {
             let result_type = self.type_converter.convert_type(&if_expr.typ);
             let merge_param = function.add_parameter(merge_block, result_type);
             function.terminate_block_with_jmp(then_exit, merge_block, vec![then_value.unwrap()]);
             function.terminate_block_with_jmp(else_exit, merge_block, vec![else_value.unwrap()]);
             self.current_block = merge_block;
-            ExprResult::Value(merge_param)
+            Some(merge_param)
         }
     }
 
@@ -730,7 +619,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         unary: &noirc_frontend::monomorphization::ast::Unary,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         if unary.skip {
             return self.convert_expression(&unary.rhs, function);
         }
@@ -740,9 +629,8 @@ impl<'a> ExpressionConverter<'a> {
                 if let Expression::Ident(ident) = unary.rhs.as_ref() {
                     if let Definition::Local(local_id) = &ident.definition {
                         if self.mutable_locals.contains(local_id) {
-                            let ptrs = self.bindings.get(local_id).unwrap().clone();
-                            assert_eq!(ptrs.len(), 1, "&mut on flattened tuple binding not supported");
-                            return ExprResult::Value(ptrs[0]);
+                            let ptr = *self.bindings.get(local_id).unwrap();
+                            return Some(ptr);
                         }
                     }
                 }
@@ -756,21 +644,21 @@ impl<'a> ExpressionConverter<'a> {
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
-                let value = self.convert_expression(&unary.rhs, function).into_value();
+                let value = self.convert_expression(&unary.rhs, function).unwrap();
                 let inner_type = self.type_converter.convert_type(
                     &unary.rhs.return_type().expect("Reference operand must have a type")
                 );
                 let ptr = function.push_alloc(self.current_block, inner_type, Empty);
                 function.push_store(self.current_block, ptr, value);
-                ExprResult::Value(ptr)
+                Some(ptr)
             }
             noirc_frontend::ast::UnaryOp::Dereference { .. } => {
                 // *x — load from the pointer
-                let value = self.convert_expression(&unary.rhs, function).into_value();
-                ExprResult::Value(function.push_load(self.current_block, value))
+                let value = self.convert_expression(&unary.rhs, function).unwrap();
+                Some(function.push_load(self.current_block, value))
             }
             _ => {
-                let value = self.convert_expression(&unary.rhs, function).into_value();
+                let value = self.convert_expression(&unary.rhs, function).unwrap();
                 let result = match unary.operator {
                     noirc_frontend::ast::UnaryOp::Not => {
                         function.push_not(self.current_block, value)
@@ -781,7 +669,7 @@ impl<'a> ExpressionConverter<'a> {
                     }
                     _ => unreachable!(),
                 };
-                ExprResult::Value(result)
+                Some(result)
             }
         }
     }
@@ -790,11 +678,11 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         index: &Index,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
-        let collection = self.convert_expression(&index.collection, function).into_value();
-        let idx = self.convert_expression(&index.index, function).into_value();
+    ) -> Option<ValueId> {
+        let collection = self.convert_expression(&index.collection, function).unwrap();
+        let idx = self.convert_expression(&index.index, function).unwrap();
         let result = function.push_array_get(self.current_block, collection, idx);
-        ExprResult::Value(result)
+        Some(result)
     }
 
     fn convert_extract_tuple_field(
@@ -802,21 +690,21 @@ impl<'a> ExpressionConverter<'a> {
         tuple_expr: &Expression,
         idx: usize,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         // Expressions always return materialized tuples, so just use projection
-        let tuple = self.convert_expression(tuple_expr, function).into_value();
+        let tuple = self.convert_expression(tuple_expr, function).unwrap();
         let result = function.push_tuple_proj(self.current_block, tuple, TupleIdx::Static(idx));
-        ExprResult::Value(result)
+        Some(result)
     }
 
     fn convert_cast(
         &mut self,
         cast: &noirc_frontend::monomorphization::ast::Cast,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
-        let value = self.convert_expression(&cast.lhs, function).into_value();
+        let value = self.convert_expression(&cast.lhs, function).unwrap();
 
         let src_bits = match cast.lhs.return_type().as_deref() {
             Some(AstType::Field) => 254,
@@ -843,42 +731,42 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let result = function.push_cast(self.current_block, value, target);
-        ExprResult::Value(result)
+        Some(result)
     }
 
     fn convert_constrain(
         &mut self,
         constraint_expr: &Expression,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         // Special case: if the constraint is a binary equality, emit AssertEq directly
         if let Expression::Binary(binary) = constraint_expr {
             if binary.operator == BinaryOpKind::Equal {
-                let lhs = self.convert_expression(&binary.lhs, function).into_value();
-                let rhs = self.convert_expression(&binary.rhs, function).into_value();
+                let lhs = self.convert_expression(&binary.lhs, function).unwrap();
+                let rhs = self.convert_expression(&binary.rhs, function).unwrap();
                 function.push_assert_eq(self.current_block, lhs, rhs);
-                return ExprResult::Unit;
+                return None;
             }
         }
 
         // General case: the constraint expression must evaluate to true (1)
-        let result = self.convert_expression(constraint_expr, function).into_value();
+        let result = self.convert_expression(constraint_expr, function).unwrap();
         let one = function.push_u_const(1, 1);
         function.push_assert_eq(self.current_block, result, one);
-        ExprResult::Unit
+        None
     }
 
     fn convert_literal(
         &mut self,
         lit: &noirc_frontend::monomorphization::ast::Literal,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Literal;
 
         match lit {
             Literal::Bool(b) => {
                 let value = if *b { 1 } else { 0 };
-                ExprResult::Value(function.push_u_const(1, value))
+                Some(function.push_u_const(1, value))
             }
             Literal::Integer(signed_field, typ, _location) => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
@@ -888,7 +776,7 @@ impl<'a> ExpressionConverter<'a> {
                         // Convert SignedField to ark_bn254::Fr directly (both backed by same type)
                         let field_element = signed_field.to_field_element();
                         let field_val = field_element.into_repr();
-                        ExprResult::Value(function.push_field_const(field_val))
+                        Some(function.push_field_const(field_val))
                     }
                     AstType::Integer(signedness, bit_size) => {
                         use noirc_frontend::shared::Signedness;
@@ -898,16 +786,16 @@ impl<'a> ExpressionConverter<'a> {
                         let bits: usize = bit_size.bit_size() as usize;
                         // Get the value as u128
                         let value = signed_field.to_u128();
-                        ExprResult::Value(function.push_u_const(bits, value))
+                        Some(function.push_u_const(bits, value))
                     }
                     AstType::Bool => {
                         let value = signed_field.to_u128();
-                        ExprResult::Value(function.push_u_const(1, value))
+                        Some(function.push_u_const(1, value))
                     }
                     _ => panic!("Unexpected type for integer literal: {:?}", typ),
                 }
             }
-            Literal::Unit => ExprResult::Unit,
+            Literal::Unit => None,
             Literal::Array(array_lit) | Literal::Slice(array_lit) => {
                 self.convert_array_literal(array_lit, function)
             }
@@ -921,7 +809,7 @@ impl<'a> ExpressionConverter<'a> {
                 let arr = function.push_mk_array(
                     self.current_block, elems, SeqType::Array(len), elem_type,
                 );
-                ExprResult::Value(arr)
+                Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
                 // fmtstr<N, T>: Tuple(Array(U(32), N), ...T_fields)
@@ -948,7 +836,7 @@ impl<'a> ExpressionConverter<'a> {
                 let mut elem_types = vec![Type::u(32, Empty).array_of(cp_len, Empty)];
                 if let Expression::Tuple(capture_exprs) = captures.as_ref() {
                     for expr in capture_exprs {
-                        let val = self.convert_expression(expr, function).into_value();
+                        let val = self.convert_expression(expr, function).unwrap();
                         tuple_elems.push(val);
                         let typ = expr.return_type()
                             .expect("FmtStr capture must have a type");
@@ -957,7 +845,7 @@ impl<'a> ExpressionConverter<'a> {
                 }
 
                 let result = function.push_mk_tuple(self.current_block, tuple_elems, elem_types);
-                ExprResult::Value(result)
+                Some(result)
             }
         }
     }
@@ -966,7 +854,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         array_lit: &noirc_frontend::monomorphization::ast::ArrayLiteral,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         // Get the element type from the array/slice type
         let (arr_len, elem_ast_type) = match &array_lit.typ {
             noirc_frontend::monomorphization::ast::Type::Array(len, elem_type) => (Some(*len), elem_type.as_ref()),
@@ -974,13 +862,9 @@ impl<'a> ExpressionConverter<'a> {
             _ => panic!("Expected array/slice type for array literal, got {:?}", array_lit.typ),
         };
 
-        // Convert each element, materializing tuples if needed
         let elements: Vec<ValueId> = array_lit.contents
             .iter()
-            .map(|e| {
-                let result = self.convert_expression(e, function);
-                self.materialize_if_tuple(result, elem_ast_type, function)
-            })
+            .map(|e| self.convert_expression(e, function).unwrap())
             .collect();
 
         let seq_type = match arr_len {
@@ -995,42 +879,24 @@ impl<'a> ExpressionConverter<'a> {
             seq_type,
             elem_type,
         );
-        ExprResult::Value(result)
-    }
-
-    /// Materialize a tuple value if the result has multiple values
-    fn materialize_if_tuple(
-        &self,
-        result: ExprResult,
-        typ: &noirc_frontend::monomorphization::ast::Type,
-        function: &mut Function<Empty>,
-    ) -> ValueId {
-        match result {
-            ExprResult::Value(v) => v,
-            ExprResult::Values(values) => {
-                // Need to construct a tuple from the values
-                let types = self.flatten_type(typ);
-                function.push_mk_tuple(self.current_block, values, types)
-            }
-            ExprResult::Unit => panic!("Cannot materialize unit value"),
-        }
+        Some(result)
     }
 
     fn convert_tuple(
         &mut self,
         exprs: &[Expression],
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         if exprs.is_empty() {
             // Empty struct/tuple — still a value (e.g. A {})
             let tuple = function.push_mk_tuple(self.current_block, vec![], vec![]);
-            return ExprResult::Value(tuple);
+            return Some(tuple);
         }
 
         // Convert each element to a single materialized value
         let values: Vec<ValueId> = exprs
             .iter()
-            .map(|e| self.convert_expression(e, function).into_value())
+            .map(|e| self.convert_expression(e, function).unwrap())
             .collect();
 
         // Get types for each element
@@ -1053,14 +919,14 @@ impl<'a> ExpressionConverter<'a> {
 
         // Always construct a materialized tuple
         let tuple = function.push_mk_tuple(self.current_block, values, types);
-        ExprResult::Value(tuple)
+        Some(tuple)
     }
 
     fn convert_call(
         &mut self,
         call: &noirc_frontend::monomorphization::ast::Call,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         // Determine the function being called
         match call.func.as_ref() {
             Expression::Ident(ident) => {
@@ -1068,7 +934,7 @@ impl<'a> ExpressionConverter<'a> {
                     Definition::Function(func_id) => {
                         let args: Vec<ValueId> = call.arguments
                             .iter()
-                            .map(|arg| self.convert_expression(arg, function).into_value())
+                            .map(|arg| self.convert_expression(arg, function).unwrap())
                             .collect();
 
                         let ssa_func_id = self.function_mapper.get(func_id)
@@ -1082,10 +948,10 @@ impl<'a> ExpressionConverter<'a> {
                         let results = function.push_call(self.current_block, *ssa_func_id, args, return_size);
 
                         if results.is_empty() {
-                            ExprResult::Unit
+                            None
                         } else {
                             // Always a single value (tuples are materialized)
-                            ExprResult::Value(results[0])
+                            Some(results[0])
                         }
                     }
                     // Builtin/LowLevel calls handle their own argument conversion
@@ -1103,20 +969,20 @@ impl<'a> ExpressionConverter<'a> {
                 // Indirect call through a function pointer
                 let args: Vec<ValueId> = call.arguments
                     .iter()
-                    .map(|arg| self.convert_expression(arg, function).into_value())
+                    .map(|arg| self.convert_expression(arg, function).unwrap())
                     .collect();
 
-                let fn_ptr = self.convert_expression(&call.func, function).into_value();
+                let fn_ptr = self.convert_expression(&call.func, function).unwrap();
                 let return_type = &call.return_type;
                 let return_size = self.return_size(return_type);
 
                 let results = function.push_call_indirect(self.current_block, fn_ptr, args, return_size);
 
                 if results.is_empty() {
-                    ExprResult::Unit
+                    None
                 } else {
                     // Always a single value (tuples are materialized)
-                    ExprResult::Value(results[0])
+                    Some(results[0])
                 }
             }
         }
@@ -1127,20 +993,20 @@ impl<'a> ExpressionConverter<'a> {
         name: &str,
         call: &noirc_frontend::monomorphization::ast::Call,
         function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         match name {
             "assert_eq" => {
-                let lhs = self.convert_expression(&call.arguments[0], function).into_value();
-                let rhs = self.convert_expression(&call.arguments[1], function).into_value();
+                let lhs = self.convert_expression(&call.arguments[0], function).unwrap();
+                let rhs = self.convert_expression(&call.arguments[1], function).unwrap();
                 function.push_assert_eq(self.current_block, lhs, rhs);
-                ExprResult::Unit
+                None
             }
             "static_assert" => {
                 // static_assert(condition, message) - drop the string message
-                let cond = self.convert_expression(&call.arguments[0], function).into_value();
+                let cond = self.convert_expression(&call.arguments[0], function).unwrap();
                 let t = function.push_u_const(1, 1);
                 function.push_assert_eq(self.current_block, cond, t);
-                ExprResult::Unit
+                None
             }
             "array_len" => {
                 let arg_type = call.arguments[0].return_type()
@@ -1152,20 +1018,20 @@ impl<'a> ExpressionConverter<'a> {
                         // compile-time-known length.
                         self.convert_expression(&call.arguments[0], function);
                         let value = function.push_u_const(32, *len as u128);
-                        ExprResult::Value(value)
+                        Some(value)
                     }
                     noirc_frontend::monomorphization::ast::Type::Slice(_) => {
-                        let slice = self.convert_expression(&call.arguments[0], function).into_value();
+                        let slice = self.convert_expression(&call.arguments[0], function).unwrap();
                         let value = function.push_slice_len(self.current_block, slice);
-                        ExprResult::Value(value)
+                        Some(value)
                     }
                     _ => panic!("array_len called on non-array/slice type: {:?}", arg_type),
                 }
             }
             "to_le_radix" => {
                 // to_le_radix(value, radix) -> [u8; N]
-                let input = self.convert_expression(&call.arguments[0], function).into_value();
-                let radix = self.convert_expression(&call.arguments[1], function).into_value();
+                let input = self.convert_expression(&call.arguments[0], function).unwrap();
+                let radix = self.convert_expression(&call.arguments[1], function).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
                     _ => panic!("to_le_radix must return an array, got {:?}", call.return_type),
@@ -1177,12 +1043,12 @@ impl<'a> ExpressionConverter<'a> {
                     Endianness::Little,
                     output_size,
                 );
-                ExprResult::Value(result)
+                Some(result)
             }
             "to_be_radix" => {
                 // to_be_radix(value, radix) -> [u8; N]
-                let input = self.convert_expression(&call.arguments[0], function).into_value();
-                let radix = self.convert_expression(&call.arguments[1], function).into_value();
+                let input = self.convert_expression(&call.arguments[0], function).unwrap();
+                let radix = self.convert_expression(&call.arguments[1], function).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
                     _ => panic!("to_be_radix must return an array, got {:?}", call.return_type),
@@ -1194,10 +1060,10 @@ impl<'a> ExpressionConverter<'a> {
                     Endianness::Big,
                     output_size,
                 );
-                ExprResult::Value(result)
+                Some(result)
             }
             "apply_range_constraint" => {
-                let value = self.convert_expression(&call.arguments[0], function).into_value();
+                let value = self.convert_expression(&call.arguments[0], function).unwrap();
                 let bit_size = match &call.arguments[1] {
                     Expression::Literal(noirc_frontend::monomorphization::ast::Literal::Integer(sf, _, _)) => {
                         sf.to_u128() as usize
@@ -1205,34 +1071,34 @@ impl<'a> ExpressionConverter<'a> {
                     other => panic!("apply_range_constraint bit_size must be a constant, got {:?}", other),
                 };
                 function.push_rangecheck(self.current_block, value, bit_size);
-                ExprResult::Unit
+                None
             }
             "is_unconstrained" => {
                 let value = function.push_u_const(1, if self.in_unconstrained { 1 } else { 0 });
-                ExprResult::Value(value)
+                Some(value)
             }
             "as_witness" => {
                 // No-op hint, just evaluate the argument and discard
                 self.convert_expression(&call.arguments[0], function);
-                ExprResult::Unit
+                None
             }
             "to_le_bits" => {
-                let input = self.convert_expression(&call.arguments[0], function).into_value();
+                let input = self.convert_expression(&call.arguments[0], function).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
                     _ => panic!("to_le_bits must return an array, got {:?}", call.return_type),
                 };
                 let result = function.push_to_bits(self.current_block, input, Endianness::Little, output_size);
-                ExprResult::Value(result)
+                Some(result)
             }
             "to_be_bits" => {
-                let input = self.convert_expression(&call.arguments[0], function).into_value();
+                let input = self.convert_expression(&call.arguments[0], function).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
                     _ => panic!("to_be_bits must return an array, got {:?}", call.return_type),
                 };
                 let result = function.push_to_bits(self.current_block, input, Endianness::Big, output_size);
-                ExprResult::Value(result)
+                Some(result)
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
@@ -1243,7 +1109,7 @@ impl<'a> ExpressionConverter<'a> {
         name: &str,
         _call: &noirc_frontend::monomorphization::ast::Call,
         _function: &mut Function<Empty>,
-    ) -> ExprResult {
+    ) -> Option<ValueId> {
         match name {
             _ => todo!("LowLevel function '{}' not yet supported", name),
         }
