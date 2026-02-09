@@ -780,29 +780,20 @@ impl TaintAnalysis {
                     }
                     OpCode::Call {
                         results: outputs,
-                        function: CallTarget::Static(func),
+                        function: CallTarget::Static(called_func),
                         args: inputs,
                         is_unconstrained,
                     } => {
-                        let return_types = ssa.get_function(*func).get_returns();
-                        if *is_unconstrained {
-                            // Unconstrained calls: outputs are Witness values
-                            // (provided by prover via Brillig execution).
-                            for (output, typ) in outputs.iter().zip(return_types.iter()) {
-                                function_taint
-                                    .value_taints
-                                    .insert(*output, self.construct_witness_taint_for_type(typ));
-                            }
-                        } else {
-                            // Constrained calls: outputs get free taints
+                        let return_types = ssa.get_function(*called_func).get_returns();
+
+                        // Only propagate taints for constrained calls.
+                        if !is_unconstrained {
                             for (output, typ) in outputs.iter().zip(return_types.iter()) {
                                 function_taint
                                     .value_taints
                                     .insert(*output, self.construct_free_taint_for_type(typ));
                             }
-                        }
-                        // Only propagate taints for constrained calls.
-                        if !is_unconstrained {
+
                             let outputs_taint = outputs
                                 .iter()
                                 .map(|v| function_taint.value_taints.get(v).unwrap())
@@ -811,7 +802,7 @@ impl TaintAnalysis {
                                 .iter()
                                 .map(|v| function_taint.value_taints.get(v).unwrap())
                                 .collect::<Vec<_>>();
-                            let mut func_taint = self.functions.get(&func).unwrap().clone();
+                            let mut func_taint = self.functions.get(&called_func).unwrap().clone();
                             func_taint.instantiate_from(self);
                             for (output, ret) in
                                 outputs_taint.iter().zip(func_taint.returns_taint.iter())
@@ -829,6 +820,20 @@ impl TaintAnalysis {
                                 cfg_taint.clone(),
                                 func_taint.cfg_taint.clone(),
                             ));
+                        } else {
+                            if func.is_unconstrained() {
+                                for (output, typ) in outputs.iter().zip(return_types.iter()) {
+                                    function_taint
+                                        .value_taints
+                                        .insert(*output, self.construct_pure_taint_for_type(typ));
+                                }
+                            } else {
+                                for (output, typ) in outputs.iter().zip(return_types.iter()) {
+                                    function_taint
+                                        .value_taints
+                                        .insert(*output, self.construct_witness_taint_for_type(typ));
+                                }
+                            }
                         }
                     }
                     OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
@@ -1181,11 +1186,11 @@ impl TaintAnalysis {
                 TaintType::Primitive(Taint::Constant(ConstantTaint::Witness))
             }
             TypeExpr::Array(i, _) => TaintType::NestedImmutable(
-                Taint::Constant(ConstantTaint::Witness),
+                Taint::Constant(ConstantTaint::Pure),
                 Box::new(self.construct_witness_taint_for_type(i)),
             ),
             TypeExpr::Slice(i) => TaintType::NestedImmutable(
-                Taint::Constant(ConstantTaint::Witness),
+                Taint::Constant(ConstantTaint::Pure),
                 Box::new(self.construct_witness_taint_for_type(i)),
             ),
             TypeExpr::Ref(i) => TaintType::NestedMutable(
@@ -1196,7 +1201,7 @@ impl TaintAnalysis {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
             TypeExpr::Tuple(elements) => TaintType::Tuple(
-                Taint::Constant(ConstantTaint::Witness),
+                Taint::Constant(ConstantTaint::Pure),
                 elements
                     .iter()
                     .map(|e| self.construct_witness_taint_for_type(e))
