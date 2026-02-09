@@ -211,6 +211,7 @@ pub struct Function<V> {
     next_value: u64,
     consts: HashMap<ValueId, Const>,
     consts_to_val: HashMap<Const, ValueId>,
+    is_unconstrained: bool,
 }
 
 impl<V: Display + Clone> Function<V> {
@@ -259,6 +260,7 @@ impl<V: Clone> Function<V> {
             next_value: 0,
             consts: HashMap::new(),
             consts_to_val: HashMap::new(),
+            is_unconstrained: false,
         }
     }
 
@@ -273,6 +275,7 @@ impl<V: Clone> Function<V> {
                 next_value: self.next_value,
                 consts: self.consts,
                 consts_to_val: self.consts_to_val,
+                is_unconstrained: self.is_unconstrained,
             },
             self.blocks,
             self.returns,
@@ -285,6 +288,14 @@ impl<V: Clone> Function<V> {
 
     pub fn set_name(&mut self, name: String) {
         self.name = name;
+    }
+
+    pub fn is_unconstrained(&self) -> bool {
+        self.is_unconstrained
+    }
+
+    pub fn set_unconstrained(&mut self, is_unconstrained: bool) {
+        self.is_unconstrained = is_unconstrained;
     }
 
     pub fn get_var_num_bound(&self) -> usize {

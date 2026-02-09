@@ -32,6 +32,7 @@ impl PrepareEntryPoint {
         let original_main = ssa.get_main();
         let param_types = original_main.get_param_types();
         let return_types = original_main.get_returns().to_vec();
+        let is_main_unconstrained = original_main.is_unconstrained();
 
         // Collect globals info before borrowing ssa mutably
         let globals: Vec<GlobalDef> = ssa.get_globals().to_vec();
@@ -98,7 +99,7 @@ impl PrepareEntryPoint {
             original_main_id,
             arg_values,
             return_types.len(),
-            false, // assuming main is never unconstrained 
+            is_main_unconstrained,
         );
         for ((result, public_input), return_type) in results.iter().zip(return_input_values.iter()).zip(return_types.iter()) {
             Self::assert_eq_deep(wrapper, entry_block, *result, *public_input, return_type);

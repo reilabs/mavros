@@ -47,9 +47,11 @@ impl Monomorphization {
 
     pub fn run(&mut self, ssa: &mut SSA<Empty>, taint_analysis: &mut TaintAnalysis) -> Result<(), String> {
         let unspecialized_fns = ssa.get_function_ids().collect::<Vec<_>>();
-        // Track functions called as unconstrained - these shouldn't be removed
-        let mut unconstrained_fns: HashSet<FunctionId> = HashSet::new();
-
+        let unconstrained_fns: HashSet<FunctionId> = unspecialized_fns
+            .iter()
+            .filter(|fn_id| ssa.get_function(**fn_id).is_unconstrained())
+            .cloned()
+            .collect();     
         let entry_point = ssa.get_main_id();
         let entry_point_taint = taint_analysis.get_function_taint(entry_point);
         let entry_point_signature = self.monomorphize_main_signature(entry_point_taint);
@@ -103,7 +105,6 @@ impl Monomorphization {
                             // Skip specialization for unconstrained calls - they run in Brillig VM
                             // and don't need taint-based specialization.
                             if *is_unconstrained {
-                                unconstrained_fns.insert(*func_id);
                                 continue;
                             }
 

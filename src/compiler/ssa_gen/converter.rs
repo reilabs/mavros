@@ -133,6 +133,11 @@ impl SsaConverter {
                 function_converter.convert_function(noir_function, &self.function_mapper, &brillig_functions);
             let function_id = self.function_mapper.get(noir_function_id).unwrap();
             *custom_ssa.get_function_mut(*function_id) = custom_function;
+
+            // Mark brillig functions as unconstrained
+            if brillig_functions.contains(noir_function_id) {
+                custom_ssa.get_function_mut(*function_id).set_unconstrained(true);
+            }
         }
 
         custom_ssa
