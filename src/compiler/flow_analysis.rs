@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::compiler::ssa::{BlockId, FunctionId, OpCode, SSA, Terminator};
+use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, OpCode, SSA, Terminator};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JumpType {
@@ -676,8 +676,11 @@ impl FlowAnalysis {
                 }
                 for instruction in block.get_instructions() {
                     match instruction {
-                        OpCode::Call { results: _, function: tgt_id, args: _, is_unconstrained: _ } => {
+                        OpCode::Call { results: _, function: CallTarget::Static(tgt_id), args: _, is_unconstrained: _ } => {
                             call_graph.add_call(*func_id, *tgt_id);
+                        }
+                        OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                            panic!("Dynamic calls should be eliminated by defunctionalization before flow analysis");
                         }
                         _ => {}
                     }

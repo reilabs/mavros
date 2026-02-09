@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, BlockId, CastTarget, Const, Function, FunctionId, GlobalDef, OpCode, SeqType, TupleIdx, ValueId, SSA}};
+use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, BlockId, CallTarget, CastTarget, Const, Function, FunctionId, GlobalDef, OpCode, SeqType, TupleIdx, ValueId, SSA}};
 
 pub struct PrepareEntryPoint {}
 
@@ -68,6 +68,9 @@ impl PrepareEntryPoint {
                 GlobalDef::Const(Const::WitnessRef(_)) => {
                     todo!("WitnessRef globals not yet supported in InitGlobal");
                 }
+                GlobalDef::Const(Const::FnPtr(_)) => {
+                    panic!("FnPtr globals not supported in prepare_entry_point");
+                }
                 GlobalDef::Array(indices, elem_type) => {
                     // Each index refers to an already-initialized global
                     let elems: Vec<ValueId> = indices
@@ -118,6 +121,7 @@ impl PrepareEntryPoint {
             GlobalDef::Const(Const::Field(_)) => Type::field(Empty),
             GlobalDef::Const(Const::U(s, _)) => Type::u(*s, Empty),
             GlobalDef::Const(Const::WitnessRef(_)) => Type::witness_ref(Empty),
+            GlobalDef::Const(Const::FnPtr(_)) => Type::function(Empty),
             GlobalDef::Array(indices, elem_type) => {
                 elem_type.clone().array_of(indices.len(), Empty)
             }
@@ -128,6 +132,7 @@ impl PrepareEntryPoint {
         match global {
             GlobalDef::Const(Const::Field(_)) | GlobalDef::Const(Const::U(_, _)) => false,
             GlobalDef::Const(Const::WitnessRef(_)) => true,
+            GlobalDef::Const(Const::FnPtr(_)) => false,
             GlobalDef::Array(_, _) => true,
         }
     }
@@ -302,7 +307,7 @@ impl PrepareEntryPoint {
                 let mut map = HashMap::new();
                 for (_, block) in func.get_blocks() {
                     for instr in block.get_instructions() {
-                        if let OpCode::Call { function: called_fn, is_unconstrained: true, .. } = instr {
+                        if let OpCode::Call { function: CallTarget::Static(called_fn), is_unconstrained: true, .. } = instr {
                             if !map.contains_key(called_fn) {
                                 map.insert(*called_fn, ssa.get_function(*called_fn).get_returns().to_vec());
                             }
@@ -326,7 +331,7 @@ impl PrepareEntryPoint {
 
                 for instr in old_instructions {
                     match instr {
-                        OpCode::Call { results, function: called_fn, args, is_unconstrained: true } => {
+                        OpCode::Call { results, function: CallTarget::Static(called_fn), args, is_unconstrained: true } => {
                             let return_types = called_fn_returns.get(&called_fn).unwrap();
 
                             // For each return: Field types use original ID directly,
@@ -348,7 +353,7 @@ impl PrepareEntryPoint {
                             // Emit call
                             new_instructions.push(OpCode::Call {
                                 results: call_results,
-                                function: called_fn,
+                                function: CallTarget::Static(called_fn),
                                 args,
                                 is_unconstrained: true,
                             });

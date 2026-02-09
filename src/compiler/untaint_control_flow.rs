@@ -5,7 +5,7 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Empty, Type, TypeExpr},
-    ssa::{BinaryArithOpKind, Block, Function, FunctionId, OpCode, SSA, Terminator, TupleIdx},
+    ssa::{BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator, TupleIdx},
     taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType},
 };
 
@@ -138,15 +138,18 @@ impl UntaintControlFlow {
                     }
                     OpCode::Call {
                         results: r,
-                        function: l,
+                        function: CallTarget::Static(l),
                         args: h,
                         is_unconstrained,
                     } => OpCode::Call {
                         results: r,
-                        function: l,
+                        function: CallTarget::Static(l),
                         args: h,
                         is_unconstrained,
                     },
+                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                        panic!("Dynamic call targets are not supported in untaint_control_flow")
+                    }
                     OpCode::AssertEq { lhs: r, rhs: l } => OpCode::AssertEq { lhs: r, rhs: l },
                     OpCode::AssertR1C { a: r, b: l, c: h } => {
                         OpCode::AssertR1C { a: r, b: l, c: h }
@@ -598,7 +601,7 @@ impl UntaintControlFlow {
 
                     OpCode::Call {
                         results: ret,
-                        function: tgt,
+                        function: CallTarget::Static(tgt),
                         mut args,
                         is_unconstrained,
                     } => {
@@ -610,10 +613,13 @@ impl UntaintControlFlow {
                         }
                         new_instructions.push(OpCode::Call {
                             results: ret,
-                            function: tgt,
+                            function: CallTarget::Static(tgt),
                             args: args,
                             is_unconstrained,
                         });
+                    }
+                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                        panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
 
                     OpCode::Todo { payload, results, result_types } => {
@@ -844,6 +850,10 @@ impl UntaintControlFlow {
                 annotation: ConstantTaint::Pure,
             },
             TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Function => Type {
+                expr: TypeExpr::Function,
+                annotation: ConstantTaint::Pure,
+            },
         }
     }
 }

@@ -136,6 +136,7 @@ impl GlobalFrameLayouter {
                     1
                 }
                 ssa::GlobalDef::Const(ssa::Const::WitnessRef(_)) => 1,
+                ssa::GlobalDef::Const(ssa::Const::FnPtr(_)) => panic!("FnPtr globals not supported in codegen"),
                 ssa::GlobalDef::Array(_, _) => 1, // Ptr (BoxedValue)
             };
             offsets.push(next_free);
@@ -268,6 +269,7 @@ impl CodeGen {
                         data: *v,
                     });
                 }
+                Const::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
             }
         }
 
@@ -737,7 +739,7 @@ impl CodeGen {
                 }
                 ssa::OpCode::Call {
                     results: r,
-                    function: fnid,
+                    function: ssa::CallTarget::Static(fnid),
                     args: params,
                     is_unconstrained: _,
                 } => {
@@ -760,6 +762,12 @@ impl CodeGen {
                         args: args,
                         ret: r,
                     });
+                }
+                ssa::OpCode::Call {
+                    function: ssa::CallTarget::Dynamic(_),
+                    ..
+                } => {
+                    panic!("Dynamic call targets are not supported in codegen")
                 }
                 ssa::OpCode::MemOp {
                     kind: MemOp::Drop,

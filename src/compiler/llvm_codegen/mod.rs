@@ -268,6 +268,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Const::WitnessRef(_) => {
                 todo!("WitnessRef constants not yet supported in LLVM codegen")
             }
+            Const::FnPtr(_) => {
+                todo!("FnPtr constants not yet supported in LLVM codegen")
+            }
         }
     }
 
@@ -283,7 +286,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         instruction: &crate::compiler::ssa::OpCode<ConstantTaint>,
         type_info: &FunctionTypeInfo<ConstantTaint>,
     ) {
-        use crate::compiler::ssa::OpCode;
+        use crate::compiler::ssa::{CallTarget, OpCode};
 
         match instruction {
             OpCode::BinaryArithOp {
@@ -357,7 +360,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             }
 
-            OpCode::Call { results, function, args, is_unconstrained: _ } => {
+            OpCode::Call { results, function: CallTarget::Static(function), args, is_unconstrained: _ } => {
                 let callee = self.function_map[function];
                 let vm_ptr = self.vm_ptr.unwrap();
 
@@ -387,6 +390,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         self.value_map.insert(*result_id, val.into());
                     }
                 }
+            }
+
+            OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                panic!("Dynamic call targets are not supported in LLVM codegen")
             }
 
             // All other opcodes are not yet supported

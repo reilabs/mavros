@@ -1,4 +1,5 @@
 pub mod arithmetic_simplifier;
+pub mod defunctionalize;
 pub mod witness_to_ref;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;
@@ -10,6 +11,7 @@ pub mod mem2reg;
 pub mod pull_into_assert;
 pub mod rc_insertion;
 pub mod remove_unreachable_blocks;
+pub mod remove_unreachable_functions;
 pub mod specializer;
 pub mod witness_write_to_fresh;
 pub mod witness_write_to_void;

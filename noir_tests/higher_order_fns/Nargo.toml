@@ -1,0 +1,6 @@
+[package]
+name = "higher_order_fns"
+type = "bin"
+authors = [""]
+
+[dependencies]

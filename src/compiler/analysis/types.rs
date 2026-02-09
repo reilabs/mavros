@@ -6,7 +6,7 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{CommutativeMonoid, Type},
-    ssa::{CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
+    ssa::{CallTarget, CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
 };
 
 pub struct TypeInfo<V> {
@@ -16,6 +16,10 @@ pub struct TypeInfo<V> {
 impl<V> TypeInfo<V> {
     pub fn get_function(&self, function_id: FunctionId) -> &FunctionTypeInfo<V> {
         self.functions.get(&function_id).unwrap()
+    }
+
+    pub fn has_function(&self, function_id: FunctionId) -> bool {
+        self.functions.contains_key(&function_id)
     }
 }
 
@@ -71,20 +75,23 @@ impl Types {
 
         for (value_id, const_) in function.iter_consts() {
             match const_ {
-                Const::U(size, _) => function_info
-                    .values
-                    .insert(*value_id, Type::u(*size, V::empty())),
-                Const::Field(_) => function_info
-                    .values
-                    .insert(*value_id, Type::field(V::empty())),
-                Const::WitnessRef(_) => function_info
-                    .values
-                    .insert(*value_id, Type::witness_ref(V::empty())),
-            };
+                Const::U(size, _) => {
+                    function_info.values.insert(*value_id, Type::u(*size, V::empty()));
+                }
+                Const::Field(_) => {
+                    function_info.values.insert(*value_id, Type::field(V::empty()));
+                }
+                Const::WitnessRef(_) => {
+                    function_info.values.insert(*value_id, Type::witness_ref(V::empty()));
+                }
+                Const::FnPtr(_) => {
+                    function_info.values.insert(*value_id, Type::function(V::empty()));
+                }
+            }
         }
 
-        for block in cfg.get_domination_pre_order() {
-            let block = function.get_block(block);
+        for block_id in cfg.get_domination_pre_order() {
+            let block = function.get_block(block_id);
 
             for param in block.get_parameters() {
                 function_info.values.insert(param.0, param.1.clone());
@@ -172,42 +179,49 @@ impl Types {
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function: fn_id, args, is_unconstrained } => {
-                let (param_types, return_types) = function_types
-                    .get(fn_id)
-                    .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
+            OpCode::Call { results: result, function, args, is_unconstrained } => {
+                match function {
+                    CallTarget::Static(fn_id) => {
+                        let (param_types, return_types) = function_types
+                            .get(fn_id)
+                            .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
 
-                if args.len() != param_types.len() {
-                    return Err(format!(
-                        "Function {:?} expects {} arguments, got {}",
-                        fn_id,
-                        param_types.len(),
-                        args.len()
-                    ));
-                }
-
-                if result.len() != return_types.len() {
-                    return Err(format!(
-                        "Function {:?} expects {} return values, got {}",
-                        fn_id,
-                        return_types.len(),
-                        result.len()
-                    ));
-                }
-
-                for (ret, ret_type) in result.iter().zip(return_types.iter()) {
-                    let ret_type = if *is_unconstrained {
-                        // Unconstrained call results are always witness values
-                        Type {
-                            expr: ret_type.expr.clone(),
-                            annotation: V::witness(),
+                        if args.len() != param_types.len() {
+                            return Err(format!(
+                                "Function {:?} expects {} arguments, got {}",
+                                fn_id,
+                                param_types.len(),
+                                args.len()
+                            ));
                         }
-                    } else {
-                        ret_type.clone()
-                    };
-                    function_info.values.insert(*ret, ret_type);
+
+                        if result.len() != return_types.len() {
+                            return Err(format!(
+                                "Function {:?} expects {} return values, got {}",
+                                fn_id,
+                                return_types.len(),
+                                result.len()
+                            ));
+                        }
+
+                        for (ret, ret_type) in result.iter().zip(return_types.iter()) {
+                            let ret_type = if *is_unconstrained {
+                                // Unconstrained call results are always witness values
+                                Type {
+                                    expr: ret_type.expr.clone(),
+                                    annotation: V::witness(),
+                                }
+                            } else {
+                                ret_type.clone()
+                            };
+                            function_info.values.insert(*ret, ret_type);
+                        }
+                        Ok(())
+                    }
+                    CallTarget::Dynamic(_) => {
+                        panic!("Dynamic calls should be eliminated by defunctionalization before type analysis");
+                    }
                 }
-                Ok(())
             }
             OpCode::ArrayGet { result, array, index: _ } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {

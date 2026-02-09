@@ -160,6 +160,7 @@ impl SymbolicExecutor {
                 Const::U(s, v) => V::of_u(*s, *v, ctx),
                 Const::Field(f) => V::of_field(f.clone(), ctx),
                 Const::WitnessRef(_) => todo!(),
+                Const::FnPtr(_) => todo!(),
             };
             scope[val.0 as usize] = Some(v);
         }
@@ -272,7 +273,7 @@ impl SymbolicExecutor {
                     }
                     crate::compiler::ssa::OpCode::Call {
                         results: returns,
-                        function: function_id,
+                        function: crate::compiler::ssa::CallTarget::Static(function_id),
                         args: arguments,
                         is_unconstrained,
                     } => {
@@ -294,6 +295,12 @@ impl SymbolicExecutor {
                                 scope[val.0 as usize] = Some(outputs[i].clone());
                             }
                         }
+                    }
+                    crate::compiler::ssa::OpCode::Call {
+                        function: crate::compiler::ssa::CallTarget::Dynamic(_),
+                        ..
+                    } => {
+                        panic!("Dynamic call targets are not supported in symbolic execution")
                     }
                     crate::compiler::ssa::OpCode::ArrayGet {
                         result: r,

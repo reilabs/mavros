@@ -185,6 +185,7 @@ pub enum Const {
     U(usize, u128),
     Field(ark_bn254::Fr),
     WitnessRef(ark_bn254::Fr),
+    FnPtr(FunctionId),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -192,6 +193,12 @@ pub enum TupleIdx<V>
 {
   Static(usize),
   Dynamic(ValueId, Type<V>),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CallTarget {
+    Static(FunctionId),
+    Dynamic(ValueId),
 }
 
 #[derive(Clone)]
@@ -391,6 +398,10 @@ impl<V: Clone> Function<V> {
 
     pub fn push_field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
         self.push_const(Const::Field(value))
+    }
+
+    pub fn push_fn_ptr_const(&mut self, fn_id: FunctionId) -> ValueId {
+        self.push_const(Const::FnPtr(fn_id))
     }
 
 
@@ -599,9 +610,35 @@ impl<V: Clone> Function<V> {
             .instructions
             .push(OpCode::Call {
                 results: return_values.clone(),
-                function: fn_id,
+                function: CallTarget::Static(fn_id),
                 args: args,
                 is_unconstrained,
+            });
+        return_values
+    }
+
+    pub fn push_call_indirect(
+        &mut self,
+        block_id: BlockId,
+        fn_ptr: ValueId,
+        args: Vec<ValueId>,
+        return_size: usize,
+    ) -> Vec<ValueId> {
+        let mut return_values = Vec::new();
+        for _ in 0..return_size {
+            let value_id = ValueId(self.next_value);
+            self.next_value += 1;
+            return_values.push(value_id);
+        }
+        self.blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .instructions
+            .push(OpCode::Call {
+                results: return_values.clone(),
+                function: CallTarget::Dynamic(fn_ptr),
+                args,
+                is_unconstrained: false,
             });
         return_values
     }
@@ -980,6 +1017,14 @@ impl<V: Clone> Function<V> {
         self.consts_to_val.remove(&v.unwrap());
     }
 
+    pub fn replace_const(&mut self, value_id: ValueId, new_const: Const) {
+        if let Some(old_const) = self.consts.remove(&value_id) {
+            self.consts_to_val.remove(&old_const);
+        }
+        self.consts.insert(value_id, new_const.clone());
+        self.consts_to_val.insert(new_const, value_id);
+    }
+
     pub fn take_returns(&mut self) -> Vec<Type<V>> {
         std::mem::take(&mut self.returns)
     }
@@ -1283,7 +1328,7 @@ pub enum OpCode<V> {
     },
     Call {
         results: Vec<ValueId>,
-        function: FunctionId,
+        function: CallTarget,
         args: Vec<ValueId>,
         is_unconstrained: bool,
     },
@@ -1497,7 +1542,7 @@ impl<V: Display + Clone> OpCode<V> {
             }
             OpCode::Call {
                 results: result,
-                function: fn_id,
+                function,
                 args,
                 is_unconstrained,
             } => {
@@ -1506,14 +1551,26 @@ impl<V: Display + Clone> OpCode<V> {
                     .iter()
                     .map(|v| format!("v{}{}", v.0, annotate(value_annotator, *v)))
                     .join(", ");
-                format!(
-                    "{} = {} call {}@{}({})",
-                    result_str,
-                    if *is_unconstrained { "unconstrained" } else { "" },
-                    ssa.get_function(*fn_id).get_name(),
-                    fn_id.0,
-                    args_str
-                )
+                match function {
+                    CallTarget::Static(fn_id) => {
+                        format!(
+                            "{} = {} call {}@{}({})",
+                            result_str,
+                            if *is_unconstrained { "unconstrained" } else { "" },
+                            ssa.get_function(*fn_id).get_name(),
+                            fn_id.0,
+                            args_str
+                        )
+                    }
+                    CallTarget::Dynamic(fn_ptr) => {
+                        format!(
+                            "{} = call_indirect v{}({})",
+                            result_str,
+                            fn_ptr.0,
+                            args_str
+                        )
+                    }
+                }
             }
             OpCode::ArrayGet {
                 result,
@@ -1969,11 +2026,14 @@ impl<V> OpCode<V> {
             }
             Self::Call {
                 results: r,
-                function: _,
+                function,
                 args: a,
                 is_unconstrained: _,
             } => {
                 let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
                 let args_vec = a.iter_mut().collect::<Vec<_>>();
                 ret_vec.extend(args_vec);
                 ret_vec.into_iter()
@@ -2166,10 +2226,17 @@ impl<V> OpCode<V> {
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
-                function: _,
+                function,
                 args: a,
                 is_unconstrained: _,
-            } => a.iter_mut().collect::<Vec<_>>().into_iter(),
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter_mut());
+                ret_vec.into_iter()
+            }
             Self::MkSeq {
                 result: _,
                 elems: inputs,
@@ -2349,10 +2416,17 @@ impl<V> OpCode<V> {
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
-                function: _,
+                function,
                 args: a,
                 is_unconstrained: _,
-            } => a.iter().collect::<Vec<_>>().into_iter(),
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter());
+                ret_vec.into_iter()
+            }
             Self::MkSeq {
                 result: _,
                 elems: inputs,

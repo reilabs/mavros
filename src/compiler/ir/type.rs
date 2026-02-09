@@ -38,6 +38,7 @@ pub enum TypeExpr<V> {
     Slice(Box<Type<V>>),
     Ref(Box<Type<V>>),
     Tuple(Vec<Type<V>>),
+    Function,
 }
 
 impl<V> TypeExpr<V> {
@@ -53,6 +54,7 @@ impl<V> TypeExpr<V> {
             }
             (TypeExpr::Ref(inner1), TypeExpr::Ref(inner2)) => inner1.equal_up_to_annotation(inner2),
             (TypeExpr::WitnessRef, TypeExpr::WitnessRef) => true,
+            (TypeExpr::Function, TypeExpr::Function) => true,
             _ => false,
         }
     }
@@ -66,6 +68,7 @@ impl<V> TypeExpr<V> {
             TypeExpr::Slice(inner) => TypeExpr::Slice(Box::new(inner.as_pure())),
             TypeExpr::Ref(inner) => TypeExpr::Ref(Box::new(inner.as_pure())),
             TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Function => TypeExpr::Function,
         }
     }
 }
@@ -107,6 +110,7 @@ impl<V: Display> Display for Type<V> {
             TypeExpr::Tuple(elements) => write!(
                 f, "Tuple{}<{}>", format_annotation(&self.annotation), elements.iter().map(|e| format!("{}", e)).collect::<Vec<_>>().join(", ")
             ),
+            TypeExpr::Function => write!(f, "Function{}", format_annotation(&self.annotation)),
         }
     }
 }
@@ -142,6 +146,7 @@ impl<V: CommutativeMonoid + Display> Type<V> {
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
             TypeExpr::WitnessRef => false,
+            TypeExpr::Function => false,
             TypeExpr::Tuple(elements) => {
                 for elem in elements {
                     if elem.contains_ptrs() {
@@ -222,6 +227,13 @@ impl<V> Type<V> {
         Type::u(32, annotation)
     }
 
+    pub fn function(annotation: V) -> Self {
+        Type {
+            expr: TypeExpr::Function,
+            annotation,
+        }
+    }
+
     pub fn array_of(self, size: usize, annotation: V) -> Self {
         Type {
             expr: TypeExpr::Array(Box::new(self), size),
@@ -286,6 +298,10 @@ impl<V> Type<V> {
         matches!(self.expr, TypeExpr::WitnessRef | TypeExpr::Array(_, _) | TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_))
     }
 
+    pub fn is_function(&self) -> bool {
+        matches!(self.expr, TypeExpr::Function)
+    }
+
     pub fn has_eq(&self) -> bool {
         matches!(self.expr, TypeExpr::Field | TypeExpr::U(_))
     }
@@ -335,7 +351,9 @@ impl<V> Type<V> {
             TypeExpr::Tuple(inner_types) => {
                 inner_types.iter().map(|t| t.calculate_type_size()).sum()
             }
-            _ => panic!("Cannot currently calculate size for types other than Field, Array, and Tuple"),
+            TypeExpr::Function => 1,
+            TypeExpr::U(_) => 1,
+            _ => panic!("Cannot currently calculate size for types other than Field, U, Function, Array, and Tuple"),
         }
     }
 }

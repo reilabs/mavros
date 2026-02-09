@@ -83,12 +83,14 @@ impl FunctionConverter {
                         let left_value = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             left_id,
                             left_value,
                         );
                         let right_value = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             right_id,
                             right_value,
                         );
@@ -131,6 +133,7 @@ impl FunctionConverter {
                                 let converted_arg = self.convert_value(
                                     &mut custom_function,
                                     custom_block_id,
+                                    function_mapper,
                                     *arg_id,
                                     arg_value,
                                 );
@@ -174,6 +177,7 @@ impl FunctionConverter {
                                     let input_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         input_id,
                                         input_value,
                                     );
@@ -208,6 +212,7 @@ impl FunctionConverter {
                                     let input_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         input_id,
                                         input_value,
                                     );
@@ -215,6 +220,7 @@ impl FunctionConverter {
                                     let radix_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         radix_id,
                                         radix_value,
                                     );
@@ -237,6 +243,7 @@ impl FunctionConverter {
                                     let to_assert_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         to_assert,
                                         to_assert_value,
                                     );
@@ -262,6 +269,7 @@ impl FunctionConverter {
                                     let slice_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         slice_id,
                                         slice_value,
                                     );
@@ -274,6 +282,7 @@ impl FunctionConverter {
                                             self.convert_value(
                                                 &mut custom_function,
                                                 custom_block_id,
+                                                function_mapper,
                                                 *arg_id,
                                                 arg_value,
                                             )
@@ -317,6 +326,7 @@ impl FunctionConverter {
                                     let slice_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         slice_id,
                                         slice_value,
                                     );
@@ -329,6 +339,7 @@ impl FunctionConverter {
                                             self.convert_value(
                                                 &mut custom_function,
                                                 custom_block_id,
+                                                function_mapper,
                                                 *arg_id,
                                                 arg_value,
                                             )
@@ -356,10 +367,43 @@ impl FunctionConverter {
                                 _ => panic!("Unsupported intrinsic: {:?}", intrinsic),
                             }
                         } else {
-                            panic!(
-                                "Call instruction with non-constant function value not supported: {:?}",
-                                function_value
+                            // Dynamic (indirect) call — the callee is a value
+                            let result_ids =
+                                noir_function.dfg.instruction_results(*noir_instruction_id);
+
+                            let fn_ptr = self.convert_value(
+                                &mut custom_function,
+                                custom_block_id,
+                                function_mapper,
+                                *func,
+                                function_value,
                             );
+
+                            let mut converted_args = Vec::new();
+                            for arg_id in arguments {
+                                let arg_value = &noir_function.dfg.values[*arg_id];
+                                let converted_arg = self.convert_value(
+                                    &mut custom_function,
+                                    custom_block_id,
+                                    function_mapper,
+                                    *arg_id,
+                                    arg_value,
+                                );
+                                converted_args.push(converted_arg);
+                            }
+
+                            let return_values = custom_function.push_call_indirect(
+                                custom_block_id,
+                                fn_ptr,
+                                converted_args,
+                                result_ids.len(),
+                            );
+
+                            for (result_id, return_value) in
+                                result_ids.iter().zip(return_values.iter())
+                            {
+                                self.value_mapper.insert(*result_id, *return_value);
+                            }
                         }
                     }
 
@@ -368,6 +412,7 @@ impl FunctionConverter {
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -381,6 +426,7 @@ impl FunctionConverter {
                         let input_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *input,
                             input_value,
                         );
@@ -404,6 +450,7 @@ impl FunctionConverter {
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -423,12 +470,14 @@ impl FunctionConverter {
                         let left_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *l,
                             left_value,
                         );
                         let right_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *r,
                             right_value,
                         );
@@ -466,12 +515,14 @@ impl FunctionConverter {
                         let address_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *address,
                             address_value,
                         );
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -490,6 +541,7 @@ impl FunctionConverter {
                                 self.convert_value(
                                     &mut custom_function,
                                     custom_block_id,
+                                    function_mapper,
                                     *e,
                                     &noir_function.dfg.values[*e],
                                 )
@@ -536,12 +588,14 @@ impl FunctionConverter {
                         let array_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *array,
                             array_value,
                         );
                         let index_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *index,
                             index_value,
                         );
@@ -638,18 +692,21 @@ impl FunctionConverter {
                         let array_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *array,
                             array_value,
                         );
                         let index_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *index,
                             index_value,
                         );
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -671,6 +728,7 @@ impl FunctionConverter {
                         let address_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *address,
                             address_value,
                         );
@@ -692,6 +750,7 @@ impl FunctionConverter {
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -703,6 +762,9 @@ impl FunctionConverter {
                         );
                     }
                     NoirInstruction::IncrementRc { .. } => {
+                        // Ignored, we do our own memory management
+                    }
+                    NoirInstruction::DecrementRc { .. } => {
                         // Ignored, we do our own memory management
                     }
                     _ => panic!("Unsupported instruction: {:?}", noir_instruction),
@@ -719,6 +781,7 @@ impl FunctionConverter {
                     let condition_converted = self.convert_value(
                         &mut custom_function,
                         custom_block_id,
+                        function_mapper,
                         *condition,
                         &noir_function.dfg.values[*condition],
                     );
@@ -745,6 +808,7 @@ impl FunctionConverter {
                             self.convert_value(
                                 &mut custom_function,
                                 custom_block_id,
+                                function_mapper,
                                 *id,
                                 &noir_function.dfg.values[*id],
                             )
@@ -763,6 +827,7 @@ impl FunctionConverter {
                             self.convert_value(
                                 &mut custom_function,
                                 custom_block_id,
+                                function_mapper,
                                 *id,
                                 &noir_function.dfg.values[*id],
                             )
@@ -782,6 +847,7 @@ impl FunctionConverter {
         &mut self,
         custom_function: &mut Function<Empty>,
         block: BlockId,
+        function_mapper: &HashMap<NoirFunctionId, FunctionId>,
         noir_value_id: NoirValueId,
         noir_value: &Value,
     ) -> ValueId {
@@ -810,6 +876,14 @@ impl FunctionConverter {
                 *self.global_value_mapper.get(&noir_value_id).unwrap() as u64,
                 self.type_converter.convert_type(global),
             ),
+            Value::Function(noir_fn_id) => {
+                let mapped_fn_id = *function_mapper.get(noir_fn_id).expect(
+                    &format!("Function not found in mapper: {:?}", noir_fn_id),
+                );
+                let custom_value_id = custom_function.push_fn_ptr_const(mapped_fn_id);
+                self.value_mapper.insert(noir_value_id, custom_value_id);
+                custom_value_id
+            }
             _ => *self.value_mapper.get(&noir_value_id).expect(&format!(
                 "Value not found: {:?} {:?} {:?}",
                 block, noir_value_id, noir_value

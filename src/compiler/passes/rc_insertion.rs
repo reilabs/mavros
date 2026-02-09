@@ -656,6 +656,7 @@ impl RCInsertion {
             TypeExpr::U(_) => false,
             TypeExpr::WitnessRef => true,
             TypeExpr::Tuple(_) => true,
+            TypeExpr::Function => false,
         }
     }
 }
