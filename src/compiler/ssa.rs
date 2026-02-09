@@ -1,7 +1,4 @@
-use crate::compiler::{
-    ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr},
-    ssa_gen::SsaConverter,
-};
+use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
 use crate::compiler::taint_analysis::ConstantTaint;
@@ -185,13 +182,6 @@ where
         self.globals_deinit_fn
     }
 
-}
-
-impl SSA<Empty> {
-    pub fn from_noir(noir_ssa: &noirc_evaluator::ssa::ssa_gen::Ssa) -> SSA<Empty> {
-        let mut converter = SsaConverter::new();
-        converter.convert_noir_ssa(noir_ssa)
-    }
 }
 
 impl<V: Display + Clone> SSA<V> {
