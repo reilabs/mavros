@@ -113,6 +113,25 @@ pub fn run_witgen_from_binary(
     interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
 }
 
+/// Phase 1: execute the VM and produce the pre-commitment witness. Returns
+/// intermediate state needed by [`run_witgen_phase2`].
+pub fn run_witgen_phase1(
+    binary: &mut [u64],
+    r1cs: &R1CS,
+    params: &[InputValue],
+) -> interpreter::Phase1Result {
+    interpreter::run_phase1(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
+}
+
+/// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
+pub fn run_witgen_phase2(
+    phase1: interpreter::Phase1Result,
+    challenges: &[Field],
+    r1cs: &R1CS,
+) -> interpreter::WitgenResult {
+    interpreter::run_phase2(phase1, challenges, r1cs.witness_layout, r1cs.constraints_layout)
+}
+
 pub fn compile_witgen(driver: &Driver) -> Result<Vec<u64>, ApiError> {
     Ok(driver
         .compile_witgen()
