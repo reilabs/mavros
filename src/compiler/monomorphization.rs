@@ -29,6 +29,22 @@ impl Monomorphization {
         }
     }
 
+    fn make_pure_taint(taint_type: &TaintType) -> TaintType {
+        let pure = Taint::Constant(ConstantTaint::Pure);
+        match taint_type {
+            TaintType::Primitive(_) => TaintType::Primitive(pure),
+            TaintType::NestedImmutable(_, inner) => {
+                TaintType::NestedImmutable(pure, Box::new(Self::make_pure_taint(inner)))
+            }
+            TaintType::NestedMutable(_, inner) => {
+                TaintType::NestedMutable(pure, Box::new(Self::make_pure_taint(inner)))
+            }
+            TaintType::Tuple(_, children) => {
+                TaintType::Tuple(pure, children.iter().map(Self::make_pure_taint).collect())
+            }
+        }
+    }
+
     pub fn run(&mut self, ssa: &mut SSA<Empty>, taint_analysis: &mut TaintAnalysis) -> Result<(), String> {
         let unspecialized_fns = ssa.get_function_ids().collect::<Vec<_>>();
         // Track functions called as unconstrained - these shouldn't be removed
@@ -119,13 +135,12 @@ impl Monomorphization {
             // but solve their constraints with all-Pure assumptions
             if unconstrained_fns.contains(&fn_id) {
                 let function_taint = taint_analysis.get_function_taint(fn_id);
-                let pure_taint = TaintType::Primitive(Taint::Constant(ConstantTaint::Pure));
 
                 // Create a signature with all Pure taints
                 let pure_signature = Signature {
                     cfg_taint: Taint::Constant(ConstantTaint::Pure),
-                    param_taints: function_taint.parameters.iter().map(|_| pure_taint.clone()).collect(),
-                    return_taints: function_taint.returns_taint.iter().map(|_| pure_taint.clone()).collect(),
+                    param_taints: function_taint.parameters.iter().map(Self::make_pure_taint).collect(),
+                    return_taints: function_taint.returns_taint.iter().map(Self::make_pure_taint).collect(),
                 };
 
                 // Solve constraints with Pure assumptions
