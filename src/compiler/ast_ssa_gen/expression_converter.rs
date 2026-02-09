@@ -746,14 +746,9 @@ impl<'a> ExpressionConverter<'a> {
                         }
                     }
                 }
-                // Non-mutable-local: evaluate and alloc a fresh Ref
-                let value = self.convert_expression(&unary.rhs, function).into_value();
-                let inner_type = self.type_converter.convert_type(
-                    &unary.rhs.return_type().expect("Reference operand must have a type")
-                );
-                let ptr = function.push_alloc(self.current_block, inner_type, Empty);
-                function.push_store(self.current_block, ptr, value);
-                ExprResult::Value(ptr)
+                // TODO: support &mut on non-mutable-local expressions
+                // (e.g., &mut (expr), &mut a.field, &mut *ptr)
+                todo!("&mut on non-mutable-local not yet supported: {:?}", unary.rhs)
             }
             noirc_frontend::ast::UnaryOp::Dereference { .. } => {
                 // *x — load from the pointer
