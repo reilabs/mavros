@@ -71,6 +71,7 @@ where
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type<Taint>>, ctx: &mut Context) -> Self;
     fn fresh_witness(ctx: &mut Context) -> Self;
+    fn witness_of_type(tp: &Type<Taint>, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
 }
@@ -281,8 +282,9 @@ impl SymbolicExecutor {
                             // For unconstrained calls, create fresh witness values for returns
                             // instead of executing the function symbolically.
                             // The actual execution happens in Brillig VM.
-                            for val in returns.iter() {
-                                scope[val.0 as usize] = Some(V::fresh_witness(ctx));
+                            let return_types = ssa.get_function(*function_id).get_returns();
+                            for (val, ret_type) in returns.iter().zip(return_types.iter()) {
+                                scope[val.0 as usize] = Some(V::witness_of_type(ret_type, ctx));
                             }
                         } else {
                             let params = arguments

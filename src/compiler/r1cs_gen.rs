@@ -686,6 +686,32 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
 
+    fn witness_of_type(tp: &Type<V>, ctx: &mut R1CGen) -> Self {
+        match &tp.expr {
+            TypeExpr::U(_) | TypeExpr::Field | TypeExpr::WitnessRef => {
+                let witness_var = ctx.next_witness();
+                Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
+            }
+            TypeExpr::Array(elem_type, size) => {
+                let mut elements = Vec::with_capacity(*size);
+                for _ in 0..*size {
+                    elements.push(Self::witness_of_type(elem_type.as_ref(), ctx));
+                }
+                Value::mk_array(elements)
+            }
+            TypeExpr::Tuple(elem_types) => {
+                let elements: Vec<Value> = elem_types
+                    .iter()
+                    .map(|t| Self::witness_of_type(t, ctx))
+                    .collect();
+                Value::mk_tuple(elements)
+            }
+            TypeExpr::Slice(_) => panic!("Cannot create witness of slice type"),
+            TypeExpr::Ref(_) => panic!("Cannot create witness of ref type"),
+            TypeExpr::Function => panic!("Cannot create witness of function type"),
+        }
+    }
+
     fn mem_op(&self, _kind: MemOp, _ctx: &mut R1CGen) {}
 
     fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) {

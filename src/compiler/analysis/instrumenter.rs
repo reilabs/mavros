@@ -931,6 +931,13 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
+    fn witness_of_type(tp: &Type<ConstantTaint>, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: Value::witness_of(tp),
+            specialized: Value::witness_of(tp),
+        }
+    }
+
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
 }
 

@@ -426,6 +426,10 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         todo!()
     }
 
+    fn witness_of_type(_tp: &Type<ConstantTaint>, _ctx: &mut SpecializationState) -> Self {
+        todo!()
+    }
+
     fn mem_op(&self, kind: MemOp, ctx: &mut SpecializationState) {
         ctx.function
             .push_mem_op(ctx.function.get_entry_id(), self.0, kind);
