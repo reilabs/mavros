@@ -77,8 +77,9 @@ impl ExplicitWitness {
                             args,
                             is_unconstrained,
                         } => {
-                            if is_unconstrained {
-                                // For unconstrained calls, create fresh result IDs for the call,
+                            if is_unconstrained && !function.is_unconstrained() {
+                                // For unconstrained calls from constrained functions,
+                                // create fresh result IDs for the call,
                                 // then write each result to witness.
                                 let raw_results: Vec<_> = results
                                     .iter()

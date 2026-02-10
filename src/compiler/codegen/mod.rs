@@ -592,6 +592,9 @@ impl CodeGen {
                         a: layouter.get_value(*v),
                     });
                 }
+                ssa::OpCode::AssertR1C { .. } => {
+                    // TODO
+                }
                 ssa::OpCode::Constrain { a, b, c } => {
                     let a_type = type_info.get_value_type(*a);
                     let b_type = type_info.get_value_type(*b);
