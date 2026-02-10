@@ -710,6 +710,26 @@ impl ExplicitWitness {
         func: &mut Function<ConstantTaint>,
     ) -> ValueId {
         match &tp.expr {
+            TypeExpr::U(size) => {
+                let as_field = func.fresh_value();
+                instruction_collector.push(OpCode::Cast {
+                    result: as_field,
+                    value: raw_id,
+                    target: CastTarget::Field,
+                });
+                let witness_field = func.fresh_value();
+                instruction_collector.push(OpCode::WriteWitness {
+                    result: Some(witness_field),
+                    value: as_field,
+                    witness_annotation: ConstantTaint::Witness,
+                });
+                instruction_collector.push(OpCode::Cast {
+                    result: result_id,
+                    value: witness_field,
+                    target: CastTarget::U(*size),
+                });
+                result_id
+            }
             TypeExpr::Field => {
                 instruction_collector.push(OpCode::WriteWitness { result: Some(result_id), value: raw_id, witness_annotation: ConstantTaint::Witness });
                 result_id
