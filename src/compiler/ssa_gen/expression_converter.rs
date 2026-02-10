@@ -652,14 +652,13 @@ impl<'a> ExpressionConverter<'a> {
                 function.push_store(self.current_block, ptr, value);
                 Some(ptr)
             }
-            noirc_frontend::ast::UnaryOp::Dereference { .. } => {
-                // *x — load from the pointer
-                let value = self.convert_expression(&unary.rhs, function).unwrap();
-                Some(function.push_load(self.current_block, value))
-            }
             _ => {
                 let value = self.convert_expression(&unary.rhs, function).unwrap();
                 let result = match unary.operator {
+                    noirc_frontend::ast::UnaryOp::Dereference { .. } => {
+                        // *x — load from the pointer
+                        function.push_load(self.current_block, value)
+                    }
                     noirc_frontend::ast::UnaryOp::Not => {
                         function.push_not(self.current_block, value)
                     }
