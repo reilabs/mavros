@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
-    ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, ValueId},
+    ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, TupleIdx, ValueId},
     taint_analysis::ConstantTaint,
 };
 
@@ -488,6 +488,36 @@ impl WitnessToRef {
                     function,
                     new_blocks,
                 )
+            }
+            (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
+                assert_eq!(src_fields.len(), tgt_fields.len(), "Tuple field count mismatch in witness_to_ref conversion");
+                let mut converted_elems = vec![];
+                for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
+                    let proj = function.fresh_value();
+                    new_instructions.push(OpCode::TupleProj {
+                        result: proj,
+                        tuple: value,
+                        idx: TupleIdx::Static(i),
+                    });
+                    let converted = self.emit_value_conversion(
+                        proj,
+                        src_ft,
+                        tgt_ft,
+                        current_block_id,
+                        current_block,
+                        new_instructions,
+                        function,
+                        new_blocks,
+                    );
+                    converted_elems.push(converted);
+                }
+                let result = function.fresh_value();
+                new_instructions.push(OpCode::MkTuple {
+                    result,
+                    elems: converted_elems,
+                    element_types: tgt_fields.clone(),
+                });
+                result
             }
             _ => panic!(
                 "witness_to_ref value conversion not supported: {:?} -> {:?}",
