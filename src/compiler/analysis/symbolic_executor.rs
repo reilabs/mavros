@@ -25,6 +25,7 @@ where
     fn assert_eq(&self, other: &Self, ctx: &mut Context);
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn array_get(&self, index: &Self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
+    fn tuple_get(&self, index: usize, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
     fn array_set(
         &self,
         index: &Self,
@@ -58,6 +59,11 @@ where
         ctx: &mut Context,
         seq_type: SeqType,
         elem_type: &Type<Taint>,
+    ) -> Self;
+    fn mk_tuple(
+        elems: Vec<Self>,
+        ctx: &mut Context,
+        elem_types: &[Type<Taint>],
     ) -> Self;
     fn alloc(ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
@@ -96,11 +102,11 @@ pub trait Context<V, Taint> {
         panic!("Todo opcode encountered: {}", payload);
     }
 
-    fn slice_push(&mut self, slice: &V, values: &[V], dir: SliceOpDir) -> V {
+    fn slice_push(&mut self, _slice: &V, _values: &[V], _dir: SliceOpDir) -> V {
         panic!("ICE: backend does not implement slice_push");
     }
 
-    fn slice_len(&mut self, slice: &V) -> V {
+    fn slice_len(&mut self, _slice: &V) -> V {
         panic!("ICE: backend does not implement slice_len");
     }
 }
@@ -125,35 +131,9 @@ impl SymbolicExecutor {
         Ctx: Context<V, T>,
         T: Clone + CommutativeMonoid,
     {
-        let mut globals = vec![];
+        let mut globals: Vec<Option<V>> = vec![None; ssa.get_globals().len()];
 
-        for global in ssa.get_globals().iter() {
-            match global {
-                GlobalDef::Const(Const::U(s, v)) => {
-                    globals.push(V::of_u(*s, *v, context));
-                }
-                GlobalDef::Const(Const::Field(f)) => {
-                    globals.push(V::of_field(f.clone(), context));
-                }
-                GlobalDef::Const(Const::BoxedField(_)) => {
-                    todo!()
-                }
-                GlobalDef::Array(items, typ) => {
-                    let items = items
-                        .iter()
-                        .map(|id| globals[*id].clone())
-                        .collect::<Vec<_>>();
-                    globals.push(V::mk_array(
-                        items.clone(),
-                        context,
-                        SeqType::Array(items.len()),
-                        &typ.as_pure(),
-                    ));
-                }
-            }
-        }
-
-        self.run_fn(ssa, type_info, entry_point, params, &globals, context);
+        self.run_fn(ssa, type_info, entry_point, params, &mut globals, context);
     }
 
     // #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
@@ -163,7 +143,7 @@ impl SymbolicExecutor {
         type_info: &TypeInfo<T>,
         fn_id: FunctionId,
         mut inputs: Vec<V>,
-        globals: &[V],
+        globals: &mut Vec<Option<V>>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
@@ -180,7 +160,8 @@ impl SymbolicExecutor {
             let v = match cst {
                 Const::U(s, v) => V::of_u(*s, *v, ctx),
                 Const::Field(f) => V::of_field(f.clone(), ctx),
-                Const::BoxedField(_) => todo!(),
+                Const::WitnessRef(_) => todo!(),
+                Const::FnPtr(_) => todo!(),
             };
             scope[val.0 as usize] = Some(v);
         }
@@ -293,7 +274,7 @@ impl SymbolicExecutor {
                     }
                     crate::compiler::ssa::OpCode::Call {
                         results: returns,
-                        function: function_id,
+                        function: crate::compiler::ssa::CallTarget::Static(function_id),
                         args: arguments,
                     } => {
                         let params = arguments
@@ -305,6 +286,12 @@ impl SymbolicExecutor {
                         for (i, val) in returns.iter().enumerate() {
                             scope[val.0 as usize] = Some(outputs[i].clone());
                         }
+                    }
+                    crate::compiler::ssa::OpCode::Call {
+                        function: crate::compiler::ssa::CallTarget::Dynamic(_),
+                        ..
+                    } => {
+                        panic!("Dynamic call targets are not supported in symbolic execution")
                     }
                     crate::compiler::ssa::OpCode::ArrayGet {
                         result: r,
@@ -440,7 +427,7 @@ impl SymbolicExecutor {
                     } => {
                         todo!()
                     }
-                    crate::compiler::ssa::OpCode::BoxField {
+                    crate::compiler::ssa::OpCode::PureToWitnessRef {
                         result: _,
                         value: _,
                         result_annotation: _,
@@ -469,8 +456,21 @@ impl SymbolicExecutor {
                         offset,
                         result_type: _,
                     } => {
-                        let r = globals[*offset as usize].clone();
+                        let r = globals[*offset as usize].as_ref()
+                            .expect("ReadGlobal: global slot not initialized")
+                            .clone();
                         scope[result.0 as usize] = Some(r);
+                    }
+                    crate::compiler::ssa::OpCode::InitGlobal {
+                        global,
+                        value,
+                    } => {
+                        globals[*global] = Some(scope[value.0 as usize].as_ref().unwrap().clone());
+                    }
+                    crate::compiler::ssa::OpCode::DropGlobal {
+                        global,
+                    } => {
+                        globals[*global] = None;
                     }
                     crate::compiler::ssa::OpCode::Lookup {
                         target,
@@ -519,6 +519,30 @@ impl SymbolicExecutor {
                             .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
                             .collect::<Vec<_>>();
                         ctx.dlookup(target, keys, results);
+                    }
+                    crate::compiler::ssa::OpCode::TupleProj {
+                        result: r,
+                        tuple: a,
+                        idx: i,
+                    } => {
+                        if let crate::compiler::ssa::TupleIdx::Static(index) = i {
+                            let a = scope[a.0 as usize].as_ref().unwrap();
+                            scope[r.0 as usize] =
+                                Some(a.tuple_get(*index, &fn_type_info.get_value_type(*r), ctx));
+                        } else {
+                            panic!("Dynamic tuple indexing should not appear here");
+                        }
+                    },
+                    crate::compiler::ssa::OpCode::MkTuple { 
+                        result, 
+                        elems, 
+                        element_types,
+                    } => {
+                        let elems = elems
+                            .iter()
+                            .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
+                            .collect::<Vec<_>>();
+                        scope[result.0 as usize] = Some(V::mk_tuple(elems, ctx, element_types));
                     }
                     crate::compiler::ssa::OpCode::Todo {
                         payload,

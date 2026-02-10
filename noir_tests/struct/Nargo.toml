@@ -1,0 +1,5 @@
+[package]
+name = "structs"
+type = "bin"
+
+[dependencies]

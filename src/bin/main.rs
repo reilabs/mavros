@@ -1,11 +1,12 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use spartan_vm::api::{self, ApiError};
-use spartan_vm::compiler::Field;
+use mavros::api::{self, ApiError};
 use tracing::{error, info, warn};
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
+use mavros::{Error, Project, abi_helpers, compiler::Field, driver::Driver, vm::interpreter};
+use noirc_abi::input_parser::Format;
 
 /// The default Noir project path for the CLI to extract from.
 const DEFAULT_NOIR_PROJECT_PATH: &str = "./";
@@ -16,15 +17,21 @@ pub struct ProgramOptions {
     #[arg(long, value_name = "PATH", default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
     pub root: PathBuf,
 
-    #[arg(long, value_name = "PUBLIC WITNESS", default_value = "", num_args = 0..)]
-    pub public_witness: Vec<String>,
-
     /// Enable debugging mode which will generate graphs
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub draw_graphs: bool,
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub pprint_r1cs: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub emit_llvm: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub emit_wasm: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub skip_vm: bool,
 }
 
 /// The main function for the CLI utility, responsible for parsing program
@@ -135,7 +142,6 @@ pub fn run_execute(
 /// - [`ApiError`] if the extraction process fails for any reason.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
     let (driver, r1cs) = api::compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
-
     // info!(
     //     "R1CS {:?}",
     //     r1cs
@@ -151,6 +157,34 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
 
     let params = api::read_prover_inputs(&args.root, driver.abi())?;
     let mut binary = api::compile_witgen(&driver)?;
+    if args.emit_llvm || args.emit_wasm {
+        let wasm_config = if args.emit_wasm {
+            let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
+            info!(message = %"Generating WebAssembly", path = %wasm_path.display());
+            Some((wasm_path, &r1cs))
+        } else {
+            None
+        };
+
+        if args.emit_llvm {
+            info!(message = %"Generating LLVM IR");
+        }
+
+        driver.compile_llvm_targets(args.emit_llvm, wasm_config).unwrap();
+    }
+
+    // Skip VM execution if requested
+    if args.skip_vm {
+        info!(message = %"Skipping VM execution as requested");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let file_path = args.root.join("Prover.toml");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap();
+    let format = Format::from_ext(ext).unwrap();
+    let inputs = std::fs::read_to_string(file_path).unwrap();
+    let inputs = format.parse(&inputs, driver.abi()).unwrap();
+    let ordered_params = abi_helpers::ordered_params_from_btreemap(driver.abi(), &inputs);
 
     let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params);
 

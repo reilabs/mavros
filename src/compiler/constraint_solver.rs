@@ -401,10 +401,14 @@ impl ConstraintSolver {
                 self.judgements.push(Judgement::Eq(l.clone(), r.clone()));
                 self.push_deep_eq(inner_l, inner_r);
             }
-            _ => panic!(
-                "Cannot unify different taint types {:?} and {:?}",
-                left_type, right_type
-            ),
+            (TaintType::Tuple(l, child_taints_l), TaintType::Tuple(r, child_taints_r)) => {
+                self.judgements.push(Judgement::Eq(l.clone(), r.clone()));
+                assert_eq!(child_taints_l.len(), child_taints_r.len(), "Tuple arity mismatch in deep equality");
+                for (child_l, child_r) in child_taints_l.iter().zip(child_taints_r.iter()) {
+                    self.push_deep_eq(child_l, child_r);
+                }
+            }
+            _ => panic!("Cannot unify different taint types {:?} and {:?}", left_type, right_type),
         }
     }
 

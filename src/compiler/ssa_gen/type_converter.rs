@@ -26,15 +26,17 @@ impl TypeConverter {
                 Type::ref_of(inner_converted, Empty)
             }
             NoirType::Array(element_types, size) => {
-                if element_types.len() != 1 {
-                    panic!(
-                        "Only single-type arrays are supported, got element_types = {:?}",
-                        element_types
-                    )
-                }
-                let element_type = &element_types[0];
-                let converted_element = self.convert_type(element_type);
-                Type::array_of(converted_element, (*size).try_into().unwrap(), Empty)
+                let tp = if element_types.len() == 1 {
+                    let element_type = &element_types[0];
+                    let converted_element = self.convert_type(element_type);
+                    Type::array_of(converted_element, (*size).try_into().unwrap(), Empty)
+                } else {
+                    let converted_types: Vec<Type<Empty>> = element_types.iter()
+                        .map(|t| self.convert_type(t))
+                        .collect();
+                    Type::array_of(Type::tuple_of(converted_types, Empty), (*size).try_into().unwrap(), Empty)
+                };
+                tp
             }
             NoirType::Slice(element_types) => {
                 if element_types.len() != 1 {
@@ -47,9 +49,7 @@ impl TypeConverter {
                 let converted_element = self.convert_type(element_type);
                 Type::slice_of(converted_element, Empty)
             }
-            NoirType::Function => {
-                panic!("Function types are not supported in custom SSA")
-            }
+            NoirType::Function => Type::function(Empty),
         }
     }
 }

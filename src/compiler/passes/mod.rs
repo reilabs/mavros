@@ -1,5 +1,6 @@
 pub mod arithmetic_simplifier;
-pub mod box_fields;
+pub mod defunctionalize;
+pub mod witness_to_ref;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;
 pub mod dead_code_elimination;
@@ -9,6 +10,10 @@ pub mod fix_double_jumps;
 pub mod mem2reg;
 pub mod pull_into_assert;
 pub mod rc_insertion;
+pub mod remove_unreachable_blocks;
+pub mod remove_unreachable_functions;
 pub mod specializer;
 pub mod witness_write_to_fresh;
 pub mod witness_write_to_void;
+pub mod struct_access_simplifier;
+pub mod prepare_entry_point;

@@ -14,20 +14,7 @@ use crate::{
         monomorphization::Monomorphization,
         pass_manager::PassManager,
         passes::{
-            arithmetic_simplifier::ArithmeticSimplifier,
-            box_fields::BoxFields,
-            common_subexpression_elimination::CSE,
-            condition_propagation::ConditionPropagation,
-            dead_code_elimination::{self, DCE},
-            deduplicate_phis::DeduplicatePhis,
-            explicit_witness::ExplicitWitness,
-            fix_double_jumps::FixDoubleJumps,
-            mem2reg::Mem2Reg,
-            pull_into_assert::PullIntoAssert,
-            rc_insertion::RCInsertion,
-            specializer::Specializer,
-            witness_write_to_fresh::WitnessWriteToFresh,
-            witness_write_to_void::WitnessWriteToVoid,
+            arithmetic_simplifier::ArithmeticSimplifier, defunctionalize::Defunctionalize, witness_to_ref::WitnessToRef, common_subexpression_elimination::CSE, condition_propagation::ConditionPropagation, dead_code_elimination::{self, DCE}, deduplicate_phis::DeduplicatePhis, explicit_witness::ExplicitWitness, fix_double_jumps::FixDoubleJumps, mem2reg::Mem2Reg, prepare_entry_point::PrepareEntryPoint, pull_into_assert::PullIntoAssert, rc_insertion::RCInsertion, remove_unreachable_blocks::RemoveUnreachableBlocks, remove_unreachable_functions::RemoveUnreachableFunctions, specializer::Specializer, struct_access_simplifier::MakeStructAccessStatic, witness_write_to_fresh::WitnessWriteToFresh, witness_write_to_void::WitnessWriteToVoid
         },
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, SSA},
@@ -39,9 +26,11 @@ use crate::{
 pub struct Driver {
     project: Project,
     initial_ssa: Option<SSA<Empty>>,
+    static_struct_access_ssa: Option<SSA<Empty>>,
     monomorphized_ssa: Option<SSA<ConstantTaint>>,
     explicit_witness_ssa: Option<SSA<ConstantTaint>>,
     r1cs_ssa: Option<SSA<ConstantTaint>>,
+    base_witgen_ssa: Option<SSA<ConstantTaint>>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
 }
@@ -53,7 +42,7 @@ pub enum Error {
 
 impl Driver {
     pub fn new(project: Project, draw_cfg: bool) -> Self {
-        let dir = project.get_only_crate().root_dir.join("spartan_vm_debug");
+        let dir = project.get_only_crate().root_dir.join("mavros_debug");
         if dir.exists() {
             fs::remove_dir_all(&dir).unwrap();
         }
@@ -61,9 +50,11 @@ impl Driver {
         Self {
             project,
             initial_ssa: None,
+            static_struct_access_ssa: None,
             monomorphized_ssa: None,
             explicit_witness_ssa: None,
             r1cs_ssa: None,
+            base_witgen_ssa: None,
             abi: None,
             draw_cfg,
         }
@@ -74,7 +65,7 @@ impl Driver {
             .project
             .get_only_crate()
             .root_dir
-            .join("spartan_vm_debug");
+            .join("mavros_debug");
         dir
     }
 
@@ -117,19 +108,6 @@ impl Driver {
         )
         .unwrap();
 
-        let passes = vec![
-            noirc_evaluator::ssa::SsaPass::new(
-                noirc_evaluator::ssa::ssa_gen::Ssa::defunctionalize,
-                "Defunctionalization",
-            ),
-            noirc_evaluator::ssa::SsaPass::new(
-                noirc_evaluator::ssa::ssa_gen::Ssa::remove_unreachable_functions,
-                "Removing Unreachable Functions",
-            ),
-        ];
-
-        let ssa = ssa.run_passes(&&passes).unwrap();
-
         self.initial_ssa = Some(SSA::from_noir(&ssa.ssa));
 
         fs::write(
@@ -145,8 +123,32 @@ impl Driver {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn monomorphize(&mut self) -> Result<(), Error> {
+    pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
+        let mut pass_manager = PassManager::<Empty>::new(
+            "make_struct_access_static".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(Defunctionalize::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
+                Box::new(PrepareEntryPoint::new()),
+                Box::new(RemoveUnreachableBlocks::new()),
+                Box::new(MakeStructAccessStatic::new()),
+                // Use preserve_blocks() to keep empty intermediate blocks intact.
+                // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
+                Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
+            ],
+        );
+
+        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         let mut ssa = self.initial_ssa.clone().unwrap();
+        pass_manager.run(&mut ssa);
+        self.static_struct_access_ssa = Some(ssa);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn monomorphize(&mut self) -> Result<(), Error> {
+        let mut ssa = self.static_struct_access_ssa.clone().unwrap();
         let flow_analysis = FlowAnalysis::run(&ssa);
         // let type_info = Types::new().run(ssa, &flow_analysis);
         let call_loops = flow_analysis.get_call_graph().detect_loops();
@@ -294,24 +296,12 @@ impl Driver {
         Ok(r1cs)
     }
 
-    pub fn compile_witgen(&self) -> Result<Vec<u64>, Error> {
-        let mut ssa = self.explicit_witness_ssa.clone().unwrap();
+    pub fn compile_witgen(&mut self) -> Result<Vec<u64>, Error> {
+        self.prepare_base_witgen_ssa();
+        let ssa = self.base_witgen_ssa.as_ref().unwrap();
 
-        let mut pass_manager = PassManager::<ConstantTaint>::new(
-            "witgen".to_string(),
-            self.draw_cfg,
-            vec![
-                Box::new(WitnessWriteToVoid::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
-                Box::new(RCInsertion::new()),
-                Box::new(FixDoubleJumps::new()),
-            ],
-        );
-        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
-
-        let flow_analysis = FlowAnalysis::run(&ssa);
-        let type_info = Types::new().run(&ssa, &flow_analysis);
+        let flow_analysis = FlowAnalysis::run(ssa);
+        let type_info = Types::new().run(ssa, &flow_analysis);
 
         let codegen = CodeGen::new();
         let program = codegen.run(&ssa, &flow_analysis, &type_info);
@@ -334,7 +324,7 @@ impl Driver {
             "ad".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(BoxFields::new()),
+                Box::new(WitnessToRef::new()),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
@@ -360,5 +350,112 @@ impl Driver {
 
     pub fn abi(&self) -> &noirc_abi::Abi {
         self.abi.as_ref().unwrap()
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn prepare_base_witgen_ssa(&mut self) {
+        if self.base_witgen_ssa.is_some() {
+            return;
+        }
+
+        let mut ssa = self.explicit_witness_ssa.clone().unwrap();
+
+        let mut pass_manager = PassManager::<ConstantTaint>::new(
+            "base_witgen".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(WitnessWriteToVoid::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(RCInsertion::new()),
+                Box::new(FixDoubleJumps::new()),
+            ],
+        );
+        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
+        pass_manager.run(&mut ssa);
+
+        self.base_witgen_ssa = Some(ssa);
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn compile_llvm_targets(
+        &mut self,
+        emit_llvm: bool,
+        wasm_config: Option<(std::path::PathBuf, &R1CS)>,
+    ) -> Result<Option<String>, Error> {
+        use crate::compiler::llvm_codegen::LLVMCodeGen;
+        use inkwell::context::Context;
+        use inkwell::OptimizationLevel;
+
+        self.prepare_base_witgen_ssa();
+        let ssa = self.base_witgen_ssa.as_ref().unwrap();
+
+        let flow_analysis = FlowAnalysis::run(ssa);
+        let type_info = Types::new().run(ssa, &flow_analysis);
+
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "mavros_module");
+        codegen.compile(ssa, &flow_analysis, &type_info);
+
+        let llvm_ir = if emit_llvm {
+            let ir = codegen.get_ir();
+            fs::write(self.get_debug_output_dir().join("witgen.ll"), &ir).unwrap();
+            info!(message = %"LLVM IR generated", ir_size = ir.len());
+            Some(ir)
+        } else {
+            None
+        };
+
+        if let Some((wasm_path, r1cs)) = wasm_config {
+            codegen.write_ir(&wasm_path.with_extension("ll"));
+            codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+            info!(message = %"WASM object generated", path = %wasm_path.display());
+            self.write_wasm_metadata(&wasm_path, r1cs)?;
+        }
+
+        Ok(llvm_ir)
+    }
+
+    /// Write WASM metadata JSON file
+    fn write_wasm_metadata(&self, wasm_path: &std::path::PathBuf, r1cs: &R1CS) -> Result<(), Error> {
+        let abi = self.abi.as_ref().unwrap();
+
+        // Build parameter info
+        let mut parameters = Vec::new();
+        for param in &abi.parameters {
+            let element_count = count_abi_type_elements(&param.typ);
+            parameters.push(serde_json::json!({
+                "name": param.name,
+                "elementCount": element_count
+            }));
+        }
+
+        let metadata = serde_json::json!({
+            "witnessCount": r1cs.witness_layout.size(),
+            "constraintCount": r1cs.constraints.len(),
+            "parameters": parameters
+        });
+
+        let metadata_path = format!("{}.meta.json", wasm_path.display());
+        fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+        info!(message = %"WASM metadata generated", path = %metadata_path);
+
+        Ok(())
+    }
+}
+
+/// Count the number of field elements in an ABI type
+fn count_abi_type_elements(typ: &noirc_abi::AbiType) -> usize {
+    use noirc_abi::AbiType;
+    match typ {
+        AbiType::Field => 1,
+        AbiType::Integer { .. } => 1,
+        AbiType::Boolean => 1,
+        AbiType::String { length } => *length as usize,
+        AbiType::Array { length, typ } => (*length as usize) * count_abi_type_elements(typ),
+        AbiType::Struct { fields, .. } => {
+            fields.iter().map(|(_, t)| count_abi_type_elements(t)).sum()
+        }
+        AbiType::Tuple { fields } => fields.iter().map(count_abi_type_elements).sum(),
     }
 }

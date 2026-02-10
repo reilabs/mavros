@@ -2,7 +2,7 @@ use itertools::Itertools;
 
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
-use crate::compiler::ssa::{BlockId, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, ValueId};
+use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId};
 use crate::compiler::union_find::UnionFind;
 use std::collections::{HashMap, HashSet};
 
@@ -161,6 +161,7 @@ pub enum TaintType {
     Primitive(Taint),
     NestedImmutable(Taint, Box<TaintType>),
     NestedMutable(Taint, Box<TaintType>),
+    Tuple(Taint, Vec<TaintType>),
 }
 
 impl TaintType {
@@ -172,6 +173,9 @@ impl TaintType {
             }
             TaintType::NestedMutable(taint, inner) => {
                 format!("[*{} of {}]", taint.to_string(), inner.to_string())
+            }
+            TaintType::Tuple(taint, child_taints) => {
+                format!("({} of <{}>)", taint.to_string(), child_taints.iter().map(|child_taint| child_taint.to_string()).join(", "))
             }
         }
     }
@@ -189,6 +193,14 @@ impl TaintType {
                 let inner_union = inner1.union(inner2);
                 TaintType::NestedMutable(t1.union(t2), Box::new(inner_union))
             }
+            (TaintType::Tuple(t1, children1), TaintType::Tuple(t2, children2)) => {
+                let children_union = children1
+                    .iter()
+                    .zip(children2.iter())
+                    .map(|(c1, c2)| c1.union(c2))
+                    .collect();
+                TaintType::Tuple(t1.union(t2), children_union)
+            }
             _ => panic!("Cannot union different taint types"),
         }
     }
@@ -198,6 +210,7 @@ impl TaintType {
             TaintType::Primitive(taint) => taint.clone(),
             TaintType::NestedImmutable(taint, _) => taint.clone(),
             TaintType::NestedMutable(taint, _) => taint.clone(),
+            TaintType::Tuple(taint, _) => {taint.clone()}
         }
     }
 
@@ -206,6 +219,7 @@ impl TaintType {
             TaintType::NestedImmutable(_, inner) => Some(*inner.clone()),
             TaintType::NestedMutable(_, inner) => Some(*inner.clone()),
             TaintType::Primitive(_) => None,
+            TaintType::Tuple(_, _) => panic!("Error: child_taint_type shouldn't be called for Tuple values")
         }
     }
 
@@ -216,6 +230,7 @@ impl TaintType {
                 TaintType::NestedImmutable(toplevel, inner.clone())
             }
             TaintType::NestedMutable(_, inner) => TaintType::NestedMutable(toplevel, inner.clone()),
+            TaintType::Tuple(_, inner) => TaintType::Tuple(toplevel, inner.clone()),
         }
     }
 
@@ -231,6 +246,10 @@ impl TaintType {
             TaintType::NestedMutable(t, inner) => {
                 t.gather_vars(result);
                 inner.gather_vars(result);
+            }
+            TaintType::Tuple(t, field_taints) => {
+                t.gather_vars(result);
+                field_taints.iter().for_each(|inner| inner.gather_vars(result));
             }
         }
     }
@@ -248,6 +267,10 @@ impl TaintType {
                 t.substitute(varmap);
                 inner.substitute(varmap);
             }
+            TaintType::Tuple(t, field_taints) => {
+                t.substitute(varmap);
+                field_taints.iter_mut().for_each(|inner| inner.substitute(varmap));
+            }
         }
     }
 
@@ -262,6 +285,10 @@ impl TaintType {
                 taint.simplify_and_default(),
                 Box::new(inner.simplify_and_default()),
             ),
+            TaintType::Tuple(taint, child_taints) => TaintType::Tuple(
+                taint.simplify_and_default(),
+                child_taints.iter().map(|child_taint| child_taint.simplify_and_default()).collect()
+            )
         }
     }
 }
@@ -677,6 +704,8 @@ impl TaintAnalysis {
                     }
                     OpCode::AssertEq { lhs: _, rhs: _ } => {}
                     OpCode::AssertR1C { a: _, b: _, c: _ } => {}
+                    OpCode::InitGlobal { .. } => {}
+                    OpCode::DropGlobal { .. } => {}
                     OpCode::ArrayGet {
                         result: r,
                         array: arr,
@@ -735,7 +764,7 @@ impl TaintAnalysis {
                         result: r,
                         slice: sl,
                     } => {
-                        let slice_taint = function_taint.value_taints.get(sl).unwrap();
+                        let _slice_taint = function_taint.value_taints.get(sl).unwrap();
                         // Slice must always be Pure taint
                         // assert_eq!(
                         //     slice_taint.toplevel_taint(),
@@ -748,7 +777,7 @@ impl TaintAnalysis {
                     }
                     OpCode::Call {
                         results: outputs,
-                        function: func,
+                        function: CallTarget::Static(func),
                         args: inputs,
                     } => {
                         let return_types = ssa.get_function(*func).get_returns();
@@ -783,6 +812,9 @@ impl TaintAnalysis {
                             cfg_taint.clone(),
                             func_taint.cfg_taint.clone(),
                         ));
+                    }
+                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                        panic!("Dynamic call targets are not supported in taint analysis")
                     }
                     OpCode::MkSeq {
                         result,
@@ -872,7 +904,7 @@ impl TaintAnalysis {
                         sensitivity: _,
                     }
                     | OpCode::NextDCoeff { result: _ }
-                    | OpCode::BoxField {
+                    | OpCode::PureToWitnessRef {
                         result: _,
                         value: _,
                         result_annotation: _,
@@ -896,8 +928,47 @@ impl TaintAnalysis {
                         keys: _,
                         results: _,
                     }
-                    | OpCode::Todo { .. } => {
+                    | OpCode::Todo { .. }
+                    => {
                         panic!("Should not be present at this stage {:?}", instruction);
+                    }
+                    OpCode::TupleProj {
+                        result,
+                        tuple,
+                        idx,
+                    } => {
+                        if let TupleIdx::Static(child_index) = idx {
+                            let tuple_taint = function_taint.value_taints.get(tuple).unwrap();
+                            if let TaintType::Tuple(_, child_taints) = tuple_taint {
+                                let elem_taint = &child_taints[*child_index];
+                                let result_taint = elem_taint.with_toplevel_taint(
+                                tuple_taint.toplevel_taint()
+                                        .union(&elem_taint.toplevel_taint()),
+                                );
+                                function_taint.value_taints.insert(*result, result_taint);
+                            } else {
+                                panic!("Taint should be of tuple type")
+                            }
+                        } else {
+                            panic!("Tuple index should be static at this stage")
+                        }
+                    },
+                    OpCode::MkTuple {
+                        result,
+                        elems: inputs,
+                        element_types: _,
+                    } => {
+                        let inputs_taint = inputs
+                            .iter()
+                            .map(|v| function_taint.value_taints.get(v).unwrap().clone())
+                            .collect::<Vec<_>>();
+                        function_taint.value_taints.insert(
+                            *result,
+                            TaintType::Tuple(
+                                Taint::Constant(ConstantTaint::Pure),
+                                inputs_taint,
+                            ),
+                        );
                     }
                 }
             }
@@ -1003,7 +1074,18 @@ impl TaintAnalysis {
                 judgements.push(Judgement::Le(lhs.clone(), rhs.clone()));
                 self.deep_le(inner_lhs, inner_rhs, judgements);
             }
-            _ => panic!("Cannot compare different taint types"),
+            (
+                TaintType::Tuple(lhs, inner_lhs),
+                TaintType::Tuple(rhs, inner_rhs),
+            ) => {
+                judgements.push(Judgement::Le(lhs.clone(), rhs.clone()));
+                for (l, r) in inner_lhs.iter().zip(inner_rhs.iter()) {
+                    self.deep_le(l, r, judgements);
+                }
+            }
+            _ => {
+                panic!("Cannot compare different taint types: {:?} vs {:?}", lhs, rhs)
+            }
         }
     }
 
@@ -1030,9 +1112,17 @@ impl TaintAnalysis {
                 Taint::Variable(self.fresh_ty_var()),
                 Box::new(self.construct_free_taint_for_type(i)),
             ),
-            TypeExpr::BoxedField => {
+            TypeExpr::WitnessRef => {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
+            TypeExpr::Tuple(elements) => TaintType::Tuple(
+                Taint::Variable(self.fresh_ty_var()),
+                elements
+                    .iter()
+                    .map(|e| self.construct_free_taint_for_type(e))
+                    .collect(),
+            ),
+            TypeExpr::Function => TaintType::Primitive(Taint::Constant(ConstantTaint::Pure)),
         }
     }
 
@@ -1053,9 +1143,17 @@ impl TaintAnalysis {
                 Taint::Constant(ConstantTaint::Pure),
                 Box::new(self.construct_pure_taint_for_type(i)),
             ),
-            TypeExpr::BoxedField => {
+            TypeExpr::WitnessRef => {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
+            TypeExpr::Tuple(elements) => TaintType::Tuple(
+                Taint::Constant(ConstantTaint::Pure),
+                elements
+                    .iter()
+                    .map(|e| self.construct_pure_taint_for_type(e))
+                    .collect(),
+            ),
+            TypeExpr::Function => TaintType::Primitive(Taint::Constant(ConstantTaint::Pure)),
         }
     }
 }

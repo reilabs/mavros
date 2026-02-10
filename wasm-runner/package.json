@@ -1,0 +1,23 @@
+{
+  "name": "mavros-wasm-runner",
+  "version": "0.1.0",
+  "description": "Node.js runner for Mavros WASM outputs",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mavros-wasm-runner": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "koffi": "^2.15.0",
+    "toml": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

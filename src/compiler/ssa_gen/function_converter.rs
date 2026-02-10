@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use super::TypeConverter;
 use crate::compiler::{
     ir::r#type::{Empty, TypeExpr},
-    ssa::{
-        BlockId, CastTarget, Endianness, Function, FunctionId, Radix, SeqType, SliceOpDir, ValueId,
-    },
+    ssa::{BlockId, CastTarget, Endianness, Function, FunctionId, Radix, SeqType, SliceOpDir, TupleIdx, ValueId},
 };
 use noirc_evaluator::ssa::ir::{
     basic_block::BasicBlockId,
@@ -84,12 +82,14 @@ impl FunctionConverter {
                         let left_value = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             left_id,
                             left_value,
                         );
                         let right_value = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             right_id,
                             right_value,
                         );
@@ -132,6 +132,7 @@ impl FunctionConverter {
                                 let converted_arg = self.convert_value(
                                     &mut custom_function,
                                     custom_block_id,
+                                    function_mapper,
                                     *arg_id,
                                     arg_value,
                                 );
@@ -173,6 +174,7 @@ impl FunctionConverter {
                                     let input_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         input_id,
                                         input_value,
                                     );
@@ -207,6 +209,7 @@ impl FunctionConverter {
                                     let input_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         input_id,
                                         input_value,
                                     );
@@ -214,6 +217,7 @@ impl FunctionConverter {
                                     let radix_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         radix_id,
                                         radix_value,
                                     );
@@ -236,6 +240,7 @@ impl FunctionConverter {
                                     let to_assert_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         to_assert,
                                         to_assert_value,
                                     );
@@ -271,6 +276,7 @@ impl FunctionConverter {
                                     let slice_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         slice_id,
                                         slice_value,
                                     );
@@ -283,6 +289,7 @@ impl FunctionConverter {
                                             self.convert_value(
                                                 &mut custom_function,
                                                 custom_block_id,
+                                                function_mapper,
                                                 *arg_id,
                                                 arg_value,
                                             )
@@ -330,6 +337,7 @@ impl FunctionConverter {
                                     let slice_converted = self.convert_value(
                                         &mut custom_function,
                                         custom_block_id,
+                                        function_mapper,
                                         slice_id,
                                         slice_value,
                                     );
@@ -342,6 +350,7 @@ impl FunctionConverter {
                                             self.convert_value(
                                                 &mut custom_function,
                                                 custom_block_id,
+                                                function_mapper,
                                                 *arg_id,
                                                 arg_value,
                                             )
@@ -367,10 +376,43 @@ impl FunctionConverter {
                                 _ => panic!("Unsupported intrinsic: {:?}", intrinsic),
                             }
                         } else {
-                            panic!(
-                                "Call instruction with non-constant function value not supported: {:?}",
-                                function_value
+                            // Dynamic (indirect) call — the callee is a value
+                            let result_ids =
+                                noir_function.dfg.instruction_results(*noir_instruction_id);
+
+                            let fn_ptr = self.convert_value(
+                                &mut custom_function,
+                                custom_block_id,
+                                function_mapper,
+                                *func,
+                                function_value,
                             );
+
+                            let mut converted_args = Vec::new();
+                            for arg_id in arguments {
+                                let arg_value = &noir_function.dfg.values[*arg_id];
+                                let converted_arg = self.convert_value(
+                                    &mut custom_function,
+                                    custom_block_id,
+                                    function_mapper,
+                                    *arg_id,
+                                    arg_value,
+                                );
+                                converted_args.push(converted_arg);
+                            }
+
+                            let return_values = custom_function.push_call_indirect(
+                                custom_block_id,
+                                fn_ptr,
+                                converted_args,
+                                result_ids.len(),
+                            );
+
+                            for (result_id, return_value) in
+                                result_ids.iter().zip(return_values.iter())
+                            {
+                                self.value_mapper.insert(*result_id, *return_value);
+                            }
                         }
                     }
 
@@ -379,6 +421,7 @@ impl FunctionConverter {
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -392,6 +435,7 @@ impl FunctionConverter {
                         let input_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *input,
                             input_value,
                         );
@@ -415,6 +459,7 @@ impl FunctionConverter {
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -434,12 +479,14 @@ impl FunctionConverter {
                         let left_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *l,
                             left_value,
                         );
                         let right_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *r,
                             right_value,
                         );
@@ -477,12 +524,14 @@ impl FunctionConverter {
                         let address_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *address,
                             address_value,
                         );
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -495,12 +544,13 @@ impl FunctionConverter {
                     }
 
                     NoirInstruction::MakeArray { elements, typ } => {
-                        let elements_converted = elements
+                        let elements_converted: Vec<ValueId> = elements
                             .iter()
                             .map(|e| {
                                 self.convert_value(
                                     &mut custom_function,
                                     custom_block_id,
+                                    function_mapper,
                                     *e,
                                     &noir_function.dfg.values[*e],
                                 )
@@ -514,9 +564,28 @@ impl FunctionConverter {
                             TypeExpr::Slice(inner) => (SeqType::Slice, inner),
                             _ => panic!("Unexpected type in array conversion: {:?}", converted_typ),
                         };
+
+                        // If the element type is a tuple, group flat elements into MkTuple instructions
+                        let final_elements = match &tp.expr {
+                            TypeExpr::Tuple(field_types) => {
+                                let chunk_size = field_types.len();
+                                elements_converted
+                                    .chunks(chunk_size)
+                                    .map(|chunk| {
+                                        custom_function.push_mk_tuple(
+                                            custom_block_id,
+                                            chunk.to_vec(),
+                                            field_types.clone(),
+                                        )
+                                    })
+                                    .collect()
+                            }
+                            _ => elements_converted,
+                        };
+
                         let result_converted = custom_function.push_mk_array(
                             custom_block_id,
-                            elements_converted,
+                            final_elements,
                             stp,
                             *tp,
                         );
@@ -528,12 +597,14 @@ impl FunctionConverter {
                         let array_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *array,
                             array_value,
                         );
                         let index_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *index,
                             index_value,
                         );
@@ -541,13 +612,82 @@ impl FunctionConverter {
                         let result_id =
                             noir_function.dfg.instruction_results(*noir_instruction_id)[0];
 
-                        let array_get_result = custom_function.push_array_get(
-                            custom_block_id,
-                            array_converted,
-                            index_converted,
-                        );
+                        let array_type = array_value.get_type();
+                        let converted_array_type = self.type_converter.convert_type(&array_type);
+                        
+                        match converted_array_type.expr {
+                            TypeExpr::Array(array_inner_type, _) | TypeExpr::Slice(array_inner_type) => {
+                                match array_inner_type.expr {
+                                    TypeExpr::Tuple(_) => {
+                                        let tuple_size = array_inner_type.calculate_type_size();
+                                        let stride = custom_function.push_u_const(32, tuple_size as u128);
 
-                        self.value_mapper.insert(result_id, array_get_result);
+                                        if let Value::NumericConstant { constant, typ: NumericType::Unsigned { bit_size: s } } = index_value {
+                                            let tuple_index = custom_function
+                                                .push_u_const(*s as usize, constant.to_string().parse::<u128>().unwrap() / (tuple_size as u128));
+
+                                            let tuple_id = custom_function.push_array_get(
+                                                custom_block_id,
+                                                array_converted,
+                                                tuple_index,
+                                            );
+
+                                            let tuple_get_result = custom_function.push_tuple_proj(
+                                                custom_block_id,
+                                                tuple_id,
+                                                TupleIdx::Static((constant.to_string().parse::<u128>().unwrap() % (tuple_size as u128)) as usize ),
+                                            );
+
+                                            self.value_mapper.insert(result_id, tuple_get_result);
+                                        } else {
+                                            let tuple_index = custom_function.push_div(
+                                                custom_block_id,
+                                                index_converted,
+                                                stride,
+                                            );
+
+                                            let tuple_id = custom_function.push_array_get(
+                                                custom_block_id,
+                                                array_converted,
+                                                tuple_index,
+                                            );
+
+                                            let tuple_starting_address = custom_function.push_mul(
+                                                custom_block_id,
+                                                tuple_index,
+                                                stride,
+                                            );
+
+                                            let tuple_element_index = custom_function.push_sub(
+                                                custom_block_id,
+                                                index_converted,
+                                                tuple_starting_address,
+                                            );
+
+                                            let result_type = noir_function.dfg.values[result_id].get_type();
+                                            let converted_result_type = self.type_converter.convert_type(&result_type);
+                                            let tuple_get_result = custom_function.push_tuple_proj(
+                                                custom_block_id,
+                                                tuple_id,
+                                                TupleIdx::Dynamic(tuple_element_index, converted_result_type),
+                                            );
+
+                                            self.value_mapper.insert(result_id, tuple_get_result);
+                                        }
+                                    }
+                                    _ => {
+                                        let array_get_result = custom_function.push_array_get(
+                                            custom_block_id,
+                                            array_converted,
+                                            index_converted,
+                                        );
+                                        self.value_mapper.insert(result_id, array_get_result);
+                                    }
+                                }
+                            }
+                            _ => panic!("ICE: Unexpected type of indexed collection")
+                        }
+
                     }
                     NoirInstruction::ArraySet {
                         array,
@@ -561,18 +701,21 @@ impl FunctionConverter {
                         let array_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *array,
                             array_value,
                         );
                         let index_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *index,
                             index_value,
                         );
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -594,6 +737,7 @@ impl FunctionConverter {
                         let address_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *address,
                             address_value,
                         );
@@ -615,6 +759,7 @@ impl FunctionConverter {
                         let value_converted = self.convert_value(
                             &mut custom_function,
                             custom_block_id,
+                            function_mapper,
                             *value,
                             value_value,
                         );
@@ -626,6 +771,9 @@ impl FunctionConverter {
                         );
                     }
                     NoirInstruction::IncrementRc { .. } => {
+                        // Ignored, we do our own memory management
+                    }
+                    NoirInstruction::DecrementRc { .. } => {
                         // Ignored, we do our own memory management
                     }
                     _ => panic!("Unsupported instruction: {:?}", noir_instruction),
@@ -642,6 +790,7 @@ impl FunctionConverter {
                     let condition_converted = self.convert_value(
                         &mut custom_function,
                         custom_block_id,
+                        function_mapper,
                         *condition,
                         &noir_function.dfg.values[*condition],
                     );
@@ -668,6 +817,7 @@ impl FunctionConverter {
                             self.convert_value(
                                 &mut custom_function,
                                 custom_block_id,
+                                function_mapper,
                                 *id,
                                 &noir_function.dfg.values[*id],
                             )
@@ -686,6 +836,7 @@ impl FunctionConverter {
                             self.convert_value(
                                 &mut custom_function,
                                 custom_block_id,
+                                function_mapper,
                                 *id,
                                 &noir_function.dfg.values[*id],
                             )
@@ -705,6 +856,7 @@ impl FunctionConverter {
         &mut self,
         custom_function: &mut Function<Empty>,
         block: BlockId,
+        function_mapper: &HashMap<NoirFunctionId, FunctionId>,
         noir_value_id: NoirValueId,
         noir_value: &Value,
     ) -> ValueId {
@@ -733,6 +885,14 @@ impl FunctionConverter {
                 *self.global_value_mapper.get(&noir_value_id).unwrap() as u64,
                 self.type_converter.convert_type(global),
             ),
+            Value::Function(noir_fn_id) => {
+                let mapped_fn_id = *function_mapper.get(noir_fn_id).expect(
+                    &format!("Function not found in mapper: {:?}", noir_fn_id),
+                );
+                let custom_value_id = custom_function.push_fn_ptr_const(mapped_fn_id);
+                self.value_mapper.insert(noir_value_id, custom_value_id);
+                custom_value_id
+            }
             _ => *self.value_mapper.get(&noir_value_id).expect(&format!(
                 "Value not found: {:?} {:?} {:?}",
                 block, noir_value_id, noir_value

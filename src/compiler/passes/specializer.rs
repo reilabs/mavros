@@ -28,6 +28,7 @@ enum ConstVal {
     U(usize, u128),
     Field(Field),
     Array(Vec<ValueId>),
+    Tuple(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
@@ -63,7 +64,6 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
                     ctx.const_vals.insert(res, ConstVal::U(1, res_u));
                     Self(res)
                 }
-                _ => todo!("{:?}", cmp_kind),
             },
             (None, _) | (_, None) => {
                 let res = ctx
@@ -218,6 +218,22 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         }
     }
 
+    fn tuple_get(
+        &self,
+        index: usize,
+        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        ctx: &mut SpecializationState,
+    ) -> Self {
+        let a_const = ctx.const_vals.get(&self.0);
+        match a_const {
+            Some(ConstVal::Tuple(a)) => {
+                let res = a[index as usize];
+                Self(res)
+            }
+            _ => panic!("Not yet implemented {:?}", a_const),
+        }
+    }
+
     fn array_set(
         &self,
         _index: &Self,
@@ -258,6 +274,9 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
                     let res_v = ctx.function.push_field_const(res);
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
+                }
+                CastTarget::Nop => {
+                    self.clone()
                 }
             },
             _ => todo!(),
@@ -330,6 +349,21 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
             elem_type.clone(),
         );
         ctx.const_vals.insert(val, ConstVal::Array(a));
+        Self(val)
+    }
+
+    fn mk_tuple(
+        elems: Vec<Self>,
+        ctx: &mut SpecializationState,
+        elem_types: &[Type<ConstantTaint>],
+    ) -> Self {
+        let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
+        let val = ctx.function.push_mk_tuple(
+            ctx.function.get_entry_id(),
+            a.clone(),
+            elem_types.to_vec(),
+        );
+        ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
 
@@ -562,6 +596,10 @@ impl Specializer {
                     call_params.push(Val(val));
                     state.const_vals.insert(val, ConstVal::U(*size, *v));
                 }
+                ValueSignature::Tuple(_) => {
+                    info!("TODO: Aborting specialization on a tuple value");
+                    return;
+                }
             }
         }
 
@@ -650,6 +688,9 @@ impl Specializer {
                     let cst = dispatcher.push_u_const(*s, *v);
                     let is_eq = dispatcher.push_eq(entry_block, *pval, cst);
                     should_call_spec = dispatcher.push_and(entry_block, should_call_spec, is_eq);
+                }
+                ValueSignature::Tuple(_) => {
+                    todo!();
                 }
             }
         }

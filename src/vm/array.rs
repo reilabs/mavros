@@ -4,9 +4,11 @@ use std::{
     ptr,
 };
 
+use tracing::field;
+
 use crate::{
     compiler::Field,
-    vm::bytecode::{AllocationType, VM},
+    vm::{bytecode::{AllocationType, VM}, interpreter::InputValueOrdered},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -20,6 +22,7 @@ pub enum DataType {
     ADWitness = 3,
     ADSum = 4,
     ADMulConst = 5,
+    Struct = 6,
 }
 
 // BoxedLayout packing scheme:
@@ -43,6 +46,19 @@ impl BoxedLayout {
         } else {
             Self::new_sized(DataType::PrimArray, size)
         }
+    }
+
+    pub fn new_struct(field_sizes: Vec<usize>, is_refcounted: Vec<bool>) -> Self {
+        assert!(field_sizes.len() <= 14);
+        let mut size = 0;
+        for (field_size, is_refcounted) in field_sizes.iter().zip(is_refcounted.iter()) {
+            assert!(*field_size < 8);
+            assert!(0 < *field_size);
+            let field_metadata = (*is_refcounted as usize) << 3 | *field_size;
+            size = (size << 4) | field_metadata;
+        }
+        assert!(size < (1 << 56));
+        Self::new_sized(DataType::Struct, size)
     }
 
     pub fn ad_const() -> Self {
@@ -70,6 +86,43 @@ impl BoxedLayout {
         self.0 as usize >> 8
     }
 
+    pub fn struct_field_count(&self) -> usize {
+        self.child_sizes().len()
+    }
+
+    pub fn struct_size(&self) -> usize {
+        self.child_sizes().iter().sum()
+    }
+
+    /// Returns the size of each field in the struct.
+    /// Each field's 4-bit metadata encodes: [1 bit: refcounted][3 bits: size]
+    pub fn child_sizes(&self) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        for field_index in 0..14 {
+            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xF) as usize;
+            let field_size = field_metadata & 0x7;
+            if field_size > 0 {
+                sizes.push(field_size);
+            }
+        }
+        sizes
+    }
+
+    /// Returns a vector indicating which fields are reference-counted (heap-allocated).
+    /// Each field's 4-bit metadata encodes: [1 bit: refcounted][3 bits: size]
+    pub fn refcounted_flags(&self) -> Vec<bool> {
+        let mut flags = Vec::new();
+        for field_index in 0..14 {
+            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xF) as usize;
+            let field_size = field_metadata & 0x7;
+            let is_refcounted = (field_metadata & 0x8) != 0;
+            if field_size > 0 {
+                flags.push(is_refcounted);
+            }
+        }
+        flags
+    }
+
     pub fn is_boxed_array(&self) -> bool {
         self.data_type() == DataType::BoxedArray
     }
@@ -85,6 +138,7 @@ impl BoxedLayout {
             DataType::ADMulConst => size_of::<ADMulConst>(),
             DataType::ADSum => size_of::<ADSum>(),
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
+            DataType::Struct => 8 * self.struct_size(),
         };
         let arr_size = ((base_byte_size + 7) / 8) + 2;
         arr_size
@@ -190,6 +244,9 @@ impl BoxedValue {
             DataType::BoxedArray => {
                 panic!("bump_da for BoxedArray")
             }
+            DataType::Struct => {
+                panic!("bump_da for Struct")
+            }
         }
     }
 
@@ -218,6 +275,9 @@ impl BoxedValue {
             }
             DataType::BoxedArray => {
                 panic!("bump_da for BoxedArray")
+            }
+            DataType::Struct => {
+                panic!("bump_db for Struct")
             }
         }
     }
@@ -248,6 +308,9 @@ impl BoxedValue {
             DataType::BoxedArray => {
                 panic!("bump_dc for BoxedArray")
             }
+            DataType::Struct => {
+                panic!("bump_dc for Struct")
+            }
         }
     }
 
@@ -259,14 +322,16 @@ impl BoxedValue {
         unsafe { self.data().offset(idx as isize * stride as isize) }
     }
 
+    pub fn tuple_idx(&self, idx: usize, child_sizes: &[usize]) -> *mut u64 {
+        let mut offset = 0;
+        for i in 0..idx {
+            offset += child_sizes[i];
+        }
+        unsafe { self.data().offset(offset as isize) }
+    }
+
     pub fn inc_rc(&self, by: u64) {
         let rc = self.rc();
-        // println!(
-        //     "inc_array_rc from {} by {} at {:?}",
-        //     unsafe { *rc },
-        //     by,
-        //     self.0
-        // );
         unsafe {
             *rc += by;
         }
@@ -274,7 +339,6 @@ impl BoxedValue {
 
     fn free(&self, vm: &mut VM) {
         let arr_size = self.layout().underlying_array_size();
-        // println!("freeing {:?} of size {} ({:?})", self.0, arr_size, self.layout().data_type());
         unsafe {
             alloc::dealloc(self.0 as *mut u8, Layout::array::<u64>(arr_size).unwrap());
             vm.allocation_instrumenter
@@ -288,18 +352,29 @@ impl BoxedValue {
         queue.push_back(*self);
         while let Some(item) = queue.pop_front() {
             let rc = item.rc();
-            // println!("dec_rc: val={:?} rc={} ({:?})", item.0, unsafe { *rc }, item.layout().data_type());
-            // println!("dec_rc: array={:?} rc={}", item.0, unsafe { *rc });
             let rc_val = unsafe { *rc };
             if rc_val == 1 {
                 let layout = item.layout();
                 match layout.data_type() {
-                    DataType::PrimArray => item.free(vm),
+                    DataType::PrimArray => {
+                        item.free(vm);
+                    }
                     DataType::BoxedArray => {
-                        // println!("freeing boxed array");
                         for i in 0..layout.array_size() {
                             let elem = unsafe { *(item.array_idx(i, 1) as *mut BoxedValue) };
                             queue.push_back(elem);
+                        }
+                        item.free(vm);
+
+                    }
+                    DataType::Struct => {
+                        let child_sizes = layout.child_sizes();
+                        let refcounted_flags = layout.refcounted_flags();
+                        for i in 0..layout.struct_field_count() {
+                            if refcounted_flags[i] {
+                                let elem = unsafe { *(item.tuple_idx(i, &child_sizes) as *mut BoxedValue) };
+                                queue.push_back(elem);
+                            }
                         }
                         item.free(vm);
                     }
@@ -342,7 +417,6 @@ impl BoxedValue {
                 }
             }
         }
-
         // let rc = self.rc();
         // let rc_val = unsafe { *rc };
         // // println!("dec_array_rc from {} at {:?}", unsafe { *rc }, self.0);

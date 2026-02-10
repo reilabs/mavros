@@ -5,7 +5,7 @@ use std::{
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, Const, Function, OpCode, SSA, ValueId},
+    ssa::{BinaryArithOpKind, BlockId, CmpKind, Const, Function, OpCode, SSA, TupleIdx, ValueId},
 };
 use crate::compiler::{pass_manager::Pass, passes::fix_double_jumps::ValueReplacements};
 
@@ -23,6 +23,7 @@ enum Expr {
     And(Vec<Expr>),
     Select(Box<Expr>, Box<Expr>, Box<Expr>),
     ArrayGet(Box<Expr>, Box<Expr>),
+    TupleGet(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     ReadGlobal(u64),
 }
@@ -98,6 +99,10 @@ impl Expr {
         Self::ArrayGet(Box::new(self.clone()), Box::new(index.clone()))
     }
 
+    pub fn tuple_get(&self, index: &Self) -> Self {
+        Self::TupleGet(Box::new(self.clone()), Box::new(index.clone()))
+    }
+
     pub fn select(&self, then: &Self, otherwise: &Self) -> Self {
         Self::Select(
             Box::new(self.clone()),
@@ -152,6 +157,7 @@ impl Display for Expr {
                 write!(f, "({} ? {} : {})", cond, then, otherwise)
             }
             Self::ArrayGet(array, index) => write!(f, "{}[{}]", array, index),
+            Self::TupleGet(tuple, index) => write!(f, "{}.{}", tuple, index),
             Self::Not(value) => write!(f, "(~{})", value),
             Self::ReadGlobal(index) => write!(f, "g{}", index),
         }
@@ -277,7 +283,8 @@ impl CSE {
             match const_ {
                 Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
                 Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
-                Const::BoxedField(_) => todo!(),
+                Const::WitnessRef(_) => todo!(),
+                Const::FnPtr(_) => None,
             };
         }
 
@@ -414,6 +421,7 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }
@@ -425,8 +433,10 @@ impl CSE {
                     | OpCode::ToRadix { .. }
                     | OpCode::Lookup { target: _, keys: _, results: _ }
                     | OpCode::DLookup { target: _, keys: _, results: _ }
-                    | OpCode::Todo { .. } => {}
-                     OpCode::BoxField { result: _, value: _, result_annotation: _ }
+                    | OpCode::Todo { .. }
+                    | OpCode::InitGlobal { .. }
+                    | OpCode::DropGlobal { .. } => {}
+                     OpCode::PureToWitnessRef { result: _, value: _, result_annotation: _ }
                     | OpCode::UnboxField { result: _, value: _ }
                     | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
                     OpCode::Not { result: r, value } => {
@@ -439,6 +449,24 @@ impl CSE {
                             *r,
                         ));
                     }
+                    OpCode::TupleProj {
+                        result: r,
+                        tuple,
+                        idx,
+                    } => {
+                        let tuple_expr = get_expr(&exprs, tuple);
+                        let index_expr = match idx {
+                            TupleIdx::Static(i) => Expr::UConst(64, *i as u128),
+                            TupleIdx::Dynamic(idx_value, _) => get_expr(&exprs, idx_value),
+                        };
+                        let result_expr = tuple_expr.tuple_get(&index_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    },
                 }
             }
         }

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fmt::{Debug, Display}, fs, path::PathBuf};
 
 use crate::compiler::{
     analysis::{
@@ -7,9 +7,40 @@ use crate::compiler::{
         value_definitions::ValueDefinitions,
     },
     flow_analysis::FlowAnalysis,
+    ir::r#type::{CommutativeMonoid, Empty},
     ssa::{DefaultSsaAnnotator, SSA},
     taint_analysis::ConstantTaint,
 };
+
+/// Trait for type-specific pass manager behavior.
+/// This allows sharing the common pass manager logic while customizing
+/// constraint instrumentation support per type.
+pub trait PassManagerExt: CommutativeMonoid + Display + Eq + Clone + Debug {
+    fn initialize_constraint_instrumentation(
+        pm: &mut PassManager<Self>,
+        ssa: &mut SSA<Self>,
+    );
+}
+
+impl PassManagerExt for ConstantTaint {
+    fn initialize_constraint_instrumentation(
+        pm: &mut PassManager<Self>,
+        ssa: &mut SSA<Self>,
+    ) {
+        let cost_estimator = CostEstimator::new();
+        let cost_analysis = cost_estimator.run(ssa, pm.type_info.as_ref().unwrap());
+        pm.constraint_instrumentation = Some(cost_analysis.summarize());
+    }
+}
+
+impl PassManagerExt for Empty {
+    fn initialize_constraint_instrumentation(
+        _pm: &mut PassManager<Self>,
+        _ssa: &mut SSA<Self>,
+    ) {
+        panic!("Constraint instrumentation is not supported for Empty");
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataPoint {
@@ -54,11 +85,11 @@ pub struct PassManager<V> {
     phase_label: String,
 }
 
-impl PassManager<ConstantTaint> {
+impl<V: PassManagerExt> PassManager<V> {
     pub fn new(
         phase_label: String,
         draw_cfg: bool,
-        passes: Vec<Box<dyn Pass<ConstantTaint>>>,
+        passes: Vec<Box<dyn Pass<V>>>,
     ) -> Self {
         Self {
             passes,
@@ -82,7 +113,7 @@ impl PassManager<ConstantTaint> {
     }
 
     #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
-    pub fn run(&mut self, ssa: &mut SSA<ConstantTaint>) {
+    pub fn run(&mut self, ssa: &mut SSA<V>) {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
                 fs::remove_dir_all(&debug_output_dir).unwrap();
@@ -101,8 +132,8 @@ impl PassManager<ConstantTaint> {
     #[tracing::instrument(skip_all, fields(pass = %pass.pass_info().name))]
     fn run_pass(
         &mut self,
-        ssa: &mut SSA<ConstantTaint>,
-        pass: &dyn Pass<ConstantTaint>,
+        ssa: &mut SSA<V>,
+        pass: &dyn Pass<V>,
         pass_index: usize,
     ) {
         self.initialize_pass_data(ssa, &pass.pass_info());
@@ -114,7 +145,7 @@ impl PassManager<ConstantTaint> {
 
     fn output_debug_info(
         &mut self,
-        ssa: &SSA<ConstantTaint>,
+        ssa: &SSA<V>,
         pass_index: usize,
         pass_info: &PassInfo,
     ) {
@@ -139,7 +170,7 @@ impl PassManager<ConstantTaint> {
         }
     }
 
-    fn output_final_debug_info(&mut self, ssa: &mut SSA<ConstantTaint>) {
+    fn output_final_debug_info(&mut self, ssa: &mut SSA<V>) {
         if self.cfg.is_none() {
             self.cfg = Some(FlowAnalysis::run(ssa));
         }
@@ -162,7 +193,7 @@ impl PassManager<ConstantTaint> {
         }
     }
 
-    fn initialize_pass_data(&mut self, ssa: &mut SSA<ConstantTaint>, pass_info: &PassInfo) {
+    fn initialize_pass_data(&mut self, ssa: &mut SSA<V>, pass_info: &PassInfo) {
         if (pass_info.needs.contains(&DataPoint::CFG)
             || pass_info.needs.contains(&DataPoint::Types)
             || pass_info
@@ -176,24 +207,22 @@ impl PassManager<ConstantTaint> {
             || pass_info
                 .needs
                 .contains(&DataPoint::ConstraintInstrumentation))
-            && !self.type_info.is_some()
+            && self.type_info.is_none()
         {
-            self.type_info = Some(Types::new().run(ssa, &self.cfg.as_ref().unwrap()));
+            self.type_info = Some(Types::new().run(ssa, self.cfg.as_ref().unwrap()));
         }
         if pass_info
             .needs
             .contains(&DataPoint::ConstraintInstrumentation)
         {
-            let cost_estimator = CostEstimator::new();
-            let cost_analysis = cost_estimator.run(ssa, self.type_info.as_ref().unwrap());
-            self.constraint_instrumentation = Some(cost_analysis.summarize());
+            V::initialize_constraint_instrumentation(self, ssa);
         }
         if pass_info.needs.contains(&DataPoint::ValueDefinitions) {
             self.value_definitions = Some(ValueDefinitions::from_ssa(ssa));
         }
     }
 
-    fn tear_down_pass_data(&mut self, pass: &dyn Pass<ConstantTaint>) {
+    fn tear_down_pass_data(&mut self, pass: &dyn Pass<V>) {
         if pass.invalidates_cfg() {
             self.cfg = None;
         }

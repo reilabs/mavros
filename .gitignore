@@ -1,6 +1,10 @@
 target
 **/target/**
-spartan_vm_debug
+mavros_debug
 .DS_store
 Cargo.lock
 .idea/
+settings.local.json
+dist
+node_modules
+.cargo

@@ -96,7 +96,7 @@ impl WitnessWriteToFresh {
                         | OpCode::FreshWitness { .. }
                         | OpCode::Constrain { .. }
                         | OpCode::NextDCoeff { .. }
-                        | OpCode::BoxField { .. }
+                        | OpCode::PureToWitnessRef { .. }
                         | OpCode::UnboxField { .. }
                         | OpCode::MulConst { .. }
                         | OpCode::BumpD { .. }
@@ -104,7 +104,12 @@ impl WitnessWriteToFresh {
                         | OpCode::Lookup { .. }
                         | OpCode::DLookup { .. }
                         | OpCode::ReadGlobal { .. }
-                        | OpCode::Todo { .. } => instruction.clone(),
+                        | OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. }
+                        | OpCode::Todo { .. }
+                        | OpCode::TupleProj { .. }
+                        | OpCode::MkTuple { .. }
+                        => instruction.clone(),
                     };
                     *instruction = new_instruction;
                 }
@@ -141,10 +146,25 @@ impl WitnessWriteToFresh {
                     seq_type: SeqType::Array(*size),
                     elem_type: *inner_type.clone(),
                 });
-            }
-            _ => panic!(
-                "Unsupported parameter type for witness write to fresh. We only support fields and nested arrays of fields for now"
-            ),
+            }    
+            TypeExpr::Tuple(child_types) => {
+                let mut value_ids = vec![];
+                for child_type in child_types.iter() {
+                    let new_value_id = Self::generate_fresh_witness_for_parameter(
+                        None,
+                        child_type.clone(),
+                        main_function,
+                        instruction_collector,
+                    );
+                    value_ids.push(new_value_id);
+                }
+                instruction_collector.push(OpCode::MkTuple {
+                    result: r,
+                    elems: value_ids,
+                    element_types: child_types.clone(),
+                });
+            }    
+            _ => panic!("Unsupported parameter type for witness write to fresh. We only support fields and nested arrays of fields for now"), 
         }
         r
     }

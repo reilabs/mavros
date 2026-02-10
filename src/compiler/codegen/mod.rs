@@ -6,8 +6,7 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function,
-            FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, ValueId,
+            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function, FunctionId, GlobalDef, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId
         },
         taint_analysis::ConstantTaint,
     },
@@ -70,7 +69,8 @@ impl FrameLayouter {
             }
             TypeExpr::Array(_, _) => 1, // Ptr
             TypeExpr::Slice(_) => 1,    // Ptr
-            TypeExpr::BoxedField => 1,  // Ptr
+            TypeExpr::WitnessRef => 1,  // Ptr
+            TypeExpr::Tuple(_) => 1, // Ptr
             _ => todo!(),
         }
     }
@@ -116,6 +116,49 @@ impl EmitterState {
     }
 }
 
+struct GlobalFrameLayouter {
+    offsets: Vec<usize>,
+    sizes: Vec<usize>,
+    total_size: usize,
+}
+
+impl GlobalFrameLayouter {
+    fn new(ssa: &SSA<ConstantTaint>) -> Self {
+        let globals = ssa.get_globals();
+        let mut offsets = Vec::new();
+        let mut sizes = Vec::new();
+        let mut next_free = 0usize;
+        for global in globals.iter() {
+            let size = match global {
+                ssa::GlobalDef::Const(ssa::Const::Field(_)) => bytecode::LIMBS,
+                ssa::GlobalDef::Const(ssa::Const::U(bits, _)) => {
+                    assert!(*bits <= 64);
+                    1
+                }
+                ssa::GlobalDef::Const(ssa::Const::WitnessRef(_)) => 1,
+                ssa::GlobalDef::Const(ssa::Const::FnPtr(_)) => panic!("FnPtr globals not supported in codegen"),
+                ssa::GlobalDef::Array(_, _) => 1, // Ptr (BoxedValue)
+            };
+            offsets.push(next_free);
+            sizes.push(size);
+            next_free += size;
+        }
+        GlobalFrameLayouter {
+            offsets,
+            sizes,
+            total_size: next_free,
+        }
+    }
+
+    fn get_offset(&self, global: usize) -> usize {
+        self.offsets[global]
+    }
+
+    fn get_size(&self, global: usize) -> usize {
+        self.sizes[global]
+    }
+}
+
 pub struct CodeGen {}
 
 impl CodeGen {
@@ -129,11 +172,14 @@ impl CodeGen {
         cfg: &FlowAnalysis,
         type_info: &TypeInfo<ConstantTaint>,
     ) -> bytecode::Program {
+        let global_layouter = GlobalFrameLayouter::new(ssa);
+
         let function = ssa.get_main();
         let function = self.run_function(
             function,
             cfg.get_function_cfg(ssa.get_main_id()),
             type_info.get_function(ssa.get_main_id()),
+            &global_layouter,
         );
 
         let mut functions = vec![function];
@@ -151,6 +197,7 @@ impl CodeGen {
                 function,
                 cfg.get_function_cfg(*function_id),
                 type_info.get_function(*function_id),
+                &global_layouter,
             );
             function_ids.insert(*function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
@@ -179,6 +226,7 @@ impl CodeGen {
 
         bytecode::Program {
             functions: functions,
+            global_frame_size: global_layouter.total_size,
         }
     }
 
@@ -187,6 +235,7 @@ impl CodeGen {
         function: &Function<ConstantTaint>,
         cfg: &CFG,
         type_info: &FunctionTypeInfo<ConstantTaint>,
+        global_layouter: &GlobalFrameLayouter,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
@@ -214,12 +263,13 @@ impl CodeGen {
                         })
                     }
                 }
-                Const::BoxedField(v) => {
-                    emitter.push_op(bytecode::OpCode::BoxedFieldAlloc {
+                Const::WitnessRef(v) => {
+                    emitter.push_op(bytecode::OpCode::WitnessRefAlloc {
                         res: layouter.alloc_ptr(*val),
                         data: *v,
                     });
                 }
+                Const::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
             }
         }
 
@@ -230,6 +280,7 @@ impl CodeGen {
             type_info,
             &mut layouter,
             &mut emitter,
+            global_layouter,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -247,6 +298,7 @@ impl CodeGen {
                 type_info,
                 &mut layouter,
                 &mut emitter,
+                global_layouter,
             );
         }
 
@@ -301,6 +353,7 @@ impl CodeGen {
         type_info: &FunctionTypeInfo<ConstantTaint>,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
+        global_layouter: &GlobalFrameLayouter,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -327,7 +380,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::BoxedField => {
+                    TypeExpr::WitnessRef => {
                         let result = layouter.alloc_ptr(*val);
                         emitter.push_op(bytecode::OpCode::AddBoxed {
                             res: result,
@@ -495,8 +548,13 @@ impl CodeGen {
                 ssa::OpCode::Cast {
                     result: r,
                     value: v,
-                    target: _tgt,
+                    target: tgt,
                 } => {
+                    if *tgt == ssa::CastTarget::Nop {
+                        let pos = layouter.variables[v];
+                        layouter.variables.insert(*r, pos);
+                        continue;
+                    }
                     let result = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
@@ -573,6 +631,25 @@ impl CodeGen {
                             .type_size(&type_info.get_value_type(*arr).get_array_element()),
                     });
                 }
+                ssa::OpCode::TupleProj {
+                    result: r,
+                    tuple: t,
+                    idx,
+                } => {
+                    if let TupleIdx::Static(i) = idx {
+                        let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                        emitter.push_op(bytecode::OpCode::TupleProj {
+                            res,
+                            tuple: layouter.get_value(*t),
+                            index: *i as u64,
+                            child_sizes: type_info.get_value_type(*t).get_tuple_elements().iter().map(
+                                |elem_type| layouter.type_size(elem_type)    
+                            ).collect(),
+                        });
+                    } else {
+                        panic!("Dynamic tuple indexing should not appear here");
+                    }
+                }
                 ssa::OpCode::ArraySet {
                     result: r,
                     array: arr,
@@ -590,16 +667,16 @@ impl CodeGen {
                     });
                 }
                 ssa::OpCode::SlicePush {
-                    result: r,
-                    slice: sl,
+                    result: _r,
+                    slice: _sl,
                     values: _vals,
                     dir: _,
                 } => {
                     panic!("SlicePush bytecode opcode not yet implemented");
                 }
                 ssa::OpCode::SliceLen {
-                    result: r,
-                    slice: sl,
+                    result: _r,
+                    slice: _sl,
                 } => {
                     panic!("SliceLen bytecode opcode not yet implemented");
                 }
@@ -614,10 +691,7 @@ impl CodeGen {
                         .iter()
                         .map(|a| layouter.get_value(*a))
                         .collect::<Vec<_>>();
-                    let is_ptr = eltype.is_ref()
-                        || eltype.is_slice()
-                        || eltype.is_array()
-                        || eltype.is_boxed_field();
+                    let is_ptr = eltype.is_heap_allocated();
                     let stride = layouter.type_size(eltype);
                     emitter.push_op(bytecode::OpCode::ArrayAlloc {
                         res,
@@ -626,9 +700,45 @@ impl CodeGen {
                         items: args,
                     });
                 }
+                ssa::OpCode::MkTuple {
+                    result,
+                    elems,
+                    element_types
+                } => {
+                    assert!(
+                        element_types.len() <= 14,
+                        "Struct has {} fields, but maximum is 14",
+                        element_types.len()
+                    );
+                    let res = layouter.alloc_value(*result, &type_info.get_value_type(*result));
+                    let fields = elems
+                        .iter()
+                        .map(|a| layouter.get_value(*a))
+                        .collect::<Vec<_>>();
+                    let field_sizes: Vec<usize> = element_types.iter().map(|elem_type| {
+                        let size = layouter.type_size(elem_type);
+                        assert!(
+                            size <= 8,
+                            "Struct field has {} bits, but maximum is 512",
+                            size * 64
+                        );
+                        size
+                    }).collect();
+                    let reference_counting = element_types.iter().map(
+                        |elem_type| elem_type.is_heap_allocated()
+                    ).collect();
+                    emitter.push_op(bytecode::OpCode::TupleAlloc {
+                        res,
+                        meta: vm::array::BoxedLayout::new_struct(
+                            field_sizes,
+                            reference_counting,
+                        ),
+                        fields,
+                    });
+                }
                 ssa::OpCode::Call {
                     results: r,
-                    function: fnid,
+                    function: ssa::CallTarget::Static(fnid),
                     args: params,
                 } => {
                     let r = layouter.alloc_many_contiguous(
@@ -650,6 +760,12 @@ impl CodeGen {
                         args: args,
                         ret: r,
                     });
+                }
+                ssa::OpCode::Call {
+                    function: ssa::CallTarget::Dynamic(_),
+                    ..
+                } => {
+                    panic!("Dynamic call targets are not supported in codegen")
                 }
                 ssa::OpCode::MemOp {
                     kind: MemOp::Drop,
@@ -733,17 +849,17 @@ impl CodeGen {
                     result: r,
                     result_type: tp,
                 } => {
-                    assert!(matches!(tp.expr, TypeExpr::BoxedField));
+                    assert!(matches!(tp.expr, TypeExpr::WitnessRef));
                     emitter.push_op(bytecode::OpCode::FreshWitness {
                         res: layouter.alloc_ptr(*r),
                     });
                 }
-                ssa::OpCode::BoxField {
+                ssa::OpCode::PureToWitnessRef {
                     result: r,
                     value: v,
                     result_annotation: _,
                 } => {
-                    emitter.push_op(bytecode::OpCode::BoxField {
+                    emitter.push_op(bytecode::OpCode::PureToWitnessRef {
                         res: layouter.alloc_ptr(*r),
                         v: layouter.get_value(*v),
                     });
@@ -796,13 +912,34 @@ impl CodeGen {
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
-                    assert!(type_info.get_value_type(keys[0]).is_boxed_field());
+                    assert!(type_info.get_value_type(keys[0]).is_witness_ref());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
                         val: layouter.get_value(keys[0]),
                     });
                 }
                 ssa::OpCode::Todo { payload, .. } => {
                     panic!("Todo opcode encountered in Codegen: {}", payload);
+                }
+                ssa::OpCode::InitGlobal { global, value } => {
+                    emitter.push_op(bytecode::OpCode::InitGlobal {
+                        src: layouter.get_value(*value),
+                        global_offset: global_layouter.get_offset(*global),
+                        size: global_layouter.get_size(*global),
+                    });
+                }
+                ssa::OpCode::DropGlobal { global } => {
+                    emitter.push_op(bytecode::OpCode::DropGlobal {
+                        global_offset: global_layouter.get_offset(*global),
+                    });
+                }
+                ssa::OpCode::ReadGlobal { result: r, offset, result_type: _ } => {
+                    let global_idx = *offset as usize;
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    emitter.push_op(bytecode::OpCode::ReadGlobal {
+                        res,
+                        global_offset: global_layouter.get_offset(global_idx),
+                        size: global_layouter.get_size(global_idx),
+                    });
                 }
                 other => panic!("Unsupported instruction: {:?}", other),
             }

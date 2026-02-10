@@ -1,11 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::compiler::{
-    constraint_solver::ConstraintSolver,
-    ir::r#type::Empty,
-    ssa::{FunctionId, OpCode, SSA},
-    taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType},
-};
+use crate::compiler::{constraint_solver::ConstraintSolver, ir::r#type::Empty, ssa::{CallTarget, FunctionId, OpCode, SSA}, taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType}};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct Signature {
@@ -90,11 +85,7 @@ impl Monomorphization {
             for (block_id, block) in func.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
-                        OpCode::Call {
-                            results: returns,
-                            function: func_id,
-                            args,
-                        } => {
+                        OpCode::Call { results: returns, function: CallTarget::Static(func_id), args } => {
                             let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
                             let args_taints = args
                                 .iter()
@@ -110,9 +101,11 @@ impl Monomorphization {
                                 return_taints: ret_taints,
                             };
 
-                            let specialized_func_id =
-                                self.request_specialization(ssa, *func_id, signature);
+                            let specialized_func_id = self.request_specialization(ssa, *func_id, signature);
                             *func_id = specialized_func_id;
+                        }
+                        OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                            panic!("Dynamic call targets are not supported in monomorphization")
                         }
                         _ => {}
                     }
@@ -177,6 +170,10 @@ impl Monomorphization {
             TaintType::NestedImmutable(_, inner) => TaintType::NestedImmutable(
                 Taint::Constant(ConstantTaint::Pure),
                 Box::new(self.monomorphize_main_taint(inner)),
+            ),
+            TaintType::Tuple(_, child_taints) => TaintType::Tuple(
+                Taint::Constant(ConstantTaint::Pure), 
+                child_taints.iter().map(|child_taint| self.monomorphize_main_taint(child_taint)).collect()
             ),
             _ => panic!("Pointer in main signature: {:?}", taint),
         }

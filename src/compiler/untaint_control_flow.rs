@@ -5,7 +5,7 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Empty, Type, TypeExpr},
-    ssa::{BinaryArithOpKind, Block, Function, FunctionId, OpCode, SSA, Terminator},
+    ssa::{BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator, TupleIdx},
     taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType},
 };
 
@@ -138,13 +138,16 @@ impl UntaintControlFlow {
                     }
                     OpCode::Call {
                         results: r,
-                        function: l,
+                        function: CallTarget::Static(l),
                         args: h,
                     } => OpCode::Call {
                         results: r,
-                        function: l,
+                        function: CallTarget::Static(l),
                         args: h,
                     },
+                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                        panic!("Dynamic call targets are not supported in untaint_control_flow")
+                    }
                     OpCode::AssertEq { lhs: r, rhs: l } => OpCode::AssertEq { lhs: r, rhs: l },
                     OpCode::AssertR1C { a: r, b: l, c: h } => {
                         OpCode::AssertR1C { a: r, b: l, c: h }
@@ -263,11 +266,11 @@ impl UntaintControlFlow {
                         kind: kind,
                         value: value,
                     },
-                    OpCode::BoxField {
+                    OpCode::PureToWitnessRef {
                         result: r,
                         value: l,
                         result_annotation: _c,
-                    } => OpCode::BoxField {
+                    } => OpCode::PureToWitnessRef {
                         result: r,
                         value: l,
                         result_annotation: function_taint
@@ -325,7 +328,46 @@ impl UntaintControlFlow {
                         keys,
                         results,
                     },
-                    OpCode::Todo {
+                    OpCode::TupleProj {
+                        result,
+                        tuple,
+                        idx,
+                    } => {
+                        match &idx {
+                            TupleIdx::Static(sz) => {
+                                OpCode::TupleProj { 
+                                    result, 
+                                    tuple, 
+                                    idx: TupleIdx::Static(*sz),
+                                }
+                            }
+                            TupleIdx::Dynamic{..} => {
+                                panic!("Dynamic TupleProj should not appear here")
+                            }
+                        }
+                    } 
+                    OpCode::MkTuple {
+                        result: r,
+                        elems: l,
+                        element_types: tps,
+                    } => {
+                        let r_taint = function_taint.get_value_taint(r);
+                        let child_taints = if let TaintType::Tuple(_, children) = r_taint {
+                            children
+                        } else {
+                            panic!("MkTuple result should have Tuple taint type")
+                        };
+                        OpCode::MkTuple {
+                            result: r,
+                            elems: l,
+                            element_types: tps
+                                .iter()
+                                .zip(child_taints.iter())
+                                .map(|(tp, taint)| self.typify_taint(tp.clone(), taint))
+                                .collect(),
+                        }
+                    }
+                    OpCode::Todo { payload, results, result_types } => OpCode::Todo {
                         payload,
                         results,
                         result_types,
@@ -337,6 +379,8 @@ impl UntaintControlFlow {
                             .map(|tp| self.pure_taint_for_type(tp.clone()))
                             .collect(),
                     },
+                    OpCode::InitGlobal { global, value } => OpCode::InitGlobal { global, value },
+                    OpCode::DropGlobal { global } => OpCode::DropGlobal { global },
                 };
                 new_instructions.push(new);
             }
@@ -395,6 +439,7 @@ impl UntaintControlFlow {
                         seq_type: _,
                         elem_type: _,
                     }
+                    | OpCode::MkTuple {..}
                     | OpCode::Cast {
                         result: _,
                         value: _,
@@ -559,7 +604,7 @@ impl UntaintControlFlow {
 
                     OpCode::Call {
                         results: ret,
-                        function: tgt,
+                        function: CallTarget::Static(tgt),
                         mut args,
                     } => {
                         match block_taint {
@@ -570,9 +615,12 @@ impl UntaintControlFlow {
                         }
                         new_instructions.push(OpCode::Call {
                             results: ret,
-                            function: tgt,
+                            function: CallTarget::Static(tgt),
                             args: args,
                         });
+                    }
+                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                        panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
 
                     OpCode::Todo {
@@ -585,6 +633,13 @@ impl UntaintControlFlow {
                             results,
                             result_types,
                         });
+                    }
+                    
+                    OpCode::TupleProj {..} => {
+                        new_instructions.push(instruction);
+                    }
+                    OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                        new_instructions.push(instruction);
                     }
                     _ => {
                         panic!("Unhandled instruction {:?}", instruction);
@@ -763,6 +818,12 @@ impl UntaintControlFlow {
                 expr: TypeExpr::Ref(Box::new(self.typify_taint(*inner, inner_taint.as_ref()))),
                 annotation: top.expect_constant(),
             },
+            (TypeExpr::Tuple(child_types), TaintType::Tuple(top, child_taints)) => Type {
+                expr: TypeExpr::Tuple(
+                    child_types.iter().zip(child_taints.iter()).map(|(child_type, child_taint)| self.typify_taint(child_type.clone(), child_taint)).collect()
+                ),
+                annotation: top.expect_constant(),
+            },
             (tp, taint) => panic!("Unexpected type {:?} with taint {:?}", tp, taint),
         }
     }
@@ -789,8 +850,13 @@ impl UntaintControlFlow {
                 expr: TypeExpr::Ref(Box::new(self.pure_taint_for_type(*inner))),
                 annotation: ConstantTaint::Pure,
             },
-            TypeExpr::BoxedField => Type {
-                expr: TypeExpr::BoxedField,
+            TypeExpr::WitnessRef => Type {
+                expr: TypeExpr::WitnessRef,
+                annotation: ConstantTaint::Pure,
+            },
+            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Function => Type {
+                expr: TypeExpr::Function,
                 annotation: ConstantTaint::Pure,
             },
         }

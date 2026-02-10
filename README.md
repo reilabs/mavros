@@ -1,9 +1,13 @@
-Spartan VM project
+# Mavros
 
-Noir code -> R1CS and witness
+Noir to R1CS compiler, with bells and whistles for Spartan.
+
+## Test status
+
+[Latest test status](https://github.com/reilabs/mavros/blob/main/STATUS.md)
 
 ## How to install
- 
+
 We currently need a custom Noir branch located in the shared parent folder (see Cargo.toml to see where exactly)
  - https://github.com/reilabs/noir/tree/spartan-vm
 
@@ -27,12 +31,12 @@ RUST_LOG=info RUST_BACKTRACE=1 cargo run --release -- --root=noir_examples/power
 
 ### Optional
 
-- **--draw-cfg**: Generate CFG and call graph images to `spartan_vm_debug`.
+- **--draw-cfg**: Generate CFG and call graph images to `mavros_debug`.
   - Requires Graphviz (`dot`) installed and available on PATH.
 
 ## Debugging instruction
 
-Running the VM creates a folder in the provided root path, called `spartan_vm_debug`.
+Running Mavros creates a folder in the provided root path, called `mavros_debug`.
 It generates a folder structure of the executed passes and creates the diagrams of SSA, which allows for easier debugging.
 
 ![Debugging Overview](debugging.png)

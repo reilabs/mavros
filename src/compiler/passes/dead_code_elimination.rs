@@ -25,18 +25,31 @@ enum ValueDefinition {
 
 pub struct Config {
     pub witness_shape_frozen: bool,
+    /// When true, all blocks are marked as live, preventing removal of empty intermediate blocks.
+    /// This is a workaround for untaint_control_flow not handling multiple merge predecessors.
+    /// TODO: Remove this option once untaint_control_flow properly handles multiple jumps into merge blocks.
+    pub preserve_all_blocks: bool,
 }
 
 impl Config {
     pub fn pre_r1c() -> Self {
         Self {
             witness_shape_frozen: false,
+            preserve_all_blocks: false,
         }
     }
 
     pub fn post_r1c() -> Self {
         Self {
             witness_shape_frozen: true,
+            preserve_all_blocks: false,
+        }
+    }
+
+    pub fn preserve_blocks() -> Self {
+        Self {
+            witness_shape_frozen: false,
+            preserve_all_blocks: true,
         }
     }
 }
@@ -76,6 +89,14 @@ impl DCE {
             for (parameter, _) in function.get_entry().get_parameters() {
                 // All function parameters are live
                 worklist.push(WorkItem::LiveValue(*parameter));
+            }
+
+            // Workaround: mark all blocks as live to preserve empty intermediate blocks.
+            // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
+            if self.config.preserve_all_blocks {
+                for (block_id, _) in function.get_blocks() {
+                    worklist.push(WorkItem::LiveBlock(*block_id));
+                }
             }
 
             for (block_id, block) in function.get_blocks() {
@@ -161,13 +182,14 @@ impl DCE {
                         | OpCode::Select { .. }
                         | OpCode::ArrayGet { .. }
                         | OpCode::ArraySet { .. }
+                        | OpCode::TupleProj { .. }
                         | OpCode::SlicePush { .. }
                         | OpCode::SliceLen { .. }
                         | OpCode::MkSeq { .. }
                         | OpCode::Cast { .. }
                         | OpCode::Truncate { .. }
                         | OpCode::Not { .. }
-                        | OpCode::BoxField {
+                        | OpCode::PureToWitnessRef {
                             result: _,
                             value: _,
                             result_annotation: _,
@@ -185,7 +207,11 @@ impl DCE {
                             result: _,
                             offset: _,
                             result_type: _,
-                        } => {}
+                        }
+                        | OpCode::MkTuple { .. } => {},
+                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                        }
                     }
                 }
 

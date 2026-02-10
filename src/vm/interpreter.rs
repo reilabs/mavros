@@ -7,7 +7,7 @@ use std::{
 
 use ark_ff::{AdditiveGroup, BigInt, Field as _, Fp, PrimeField as _};
 use noirc_abi::input_parser::InputValue;
-use tracing::instrument;
+use tracing::{field, instrument};
 
 use crate::{
     compiler::{
@@ -145,7 +145,8 @@ impl Frame {
 }
 
 fn prepare_dispatch(program: &mut [u64]) {
-    let mut current_offset = 0;
+    // Skip the global_frame_size header at index 0
+    let mut current_offset = 1;
     while current_offset < program.len() {
         let opcode = program[current_offset];
         if opcode == u64::MAX {
@@ -189,6 +190,46 @@ fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) 
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum InputValueOrdered {
+    Field(Field),
+    String(String),
+    Vec(Vec<InputValueOrdered>),
+    Struct(Vec<(String, InputValueOrdered)>),
+}
+
+impl InputValueOrdered {
+    pub fn field_sizes (&self) -> Vec<usize> {
+        match self {
+            InputValueOrdered::Field(_) => vec![4],
+            InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
+            InputValueOrdered::Vec(_) => vec![1],
+            InputValueOrdered::Struct(fields) => {
+                let mut total_size = vec![];
+                for (_field_name, field_value) in fields {
+                    total_size.extend(field_value.field_sizes());
+                }
+                total_size
+            }
+        }
+    }
+
+    pub fn need_reference_counting(&self) -> Vec<bool> {
+        match self {
+            InputValueOrdered::Field(_) => vec![false],
+            InputValueOrdered::String(_) => panic!("Strings are not supported in need_reference_counting"),
+            InputValueOrdered::Vec(_) => vec![true], 
+            InputValueOrdered::Struct(fields) => {
+                let mut reference_counting = vec![];
+                for (_field_name, field_value) in fields {
+                    reference_counting.extend(field_value.need_reference_counting());
+                }
+                reference_counting
+            }
+        }
+    }
+}
+
 /// Phase 1 of witness generation: executes the VM to produce the
 /// pre-commitment witness and captures all intermediate state needed for
 /// phase 2.
@@ -199,6 +240,7 @@ pub fn run_phase1(
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValue],
 ) -> Phase1Result {
+    let global_frame_size = program[0] as usize;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
     let mut out_b = vec![Field::ZERO; constraints_layout.size()];
     let mut out_c = vec![Field::ZERO; constraints_layout.size()];
@@ -208,7 +250,8 @@ pub fn run_phase1(
     for i in 0..flat_inputs.len() {
         out_wit_pre_comm[1 + i] = flat_inputs[i];
     }
-    let out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
+    let mut out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
+    let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
         out_a.as_mut_ptr(),
         out_b.as_mut_ptr(),
@@ -235,27 +278,25 @@ pub fn run_phase1(
         },
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
+        global_frame.as_mut_ptr(),
     );
 
     let frame = Frame::push(
-        program[1],
+        program[2],
         Frame {
             data: std::ptr::null_mut(),
         },
         &mut vm,
     );
 
-    let mut current_offset = 2 as isize;
-    for (_, el) in ordered_inputs.iter().enumerate() {
-        unsafe {
-            current_offset += write_input_value(frame.data.offset(current_offset), el, &mut vm)
-        };
+    for (input_index, el) in flat_inputs.iter().enumerate() {
+        unsafe { *(frame.data.offset(2 + (4 * (input_index as isize))) as *mut Field) = el.clone(); }
     }
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program);
 
-    let pc = unsafe { program.as_mut_ptr().offset(2) };
+    let pc = unsafe { program.as_mut_ptr().offset(3) };
 
     dispatch(pc, frame, &mut vm);
 
@@ -406,9 +447,11 @@ pub fn run_ad(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> (Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter) {
+    let global_frame_size = program[0] as usize;
     let mut out_da = vec![Field::ZERO; witness_layout.size()];
     let mut out_db = vec![Field::ZERO; witness_layout.size()];
     let mut out_dc = vec![Field::ZERO; witness_layout.size()];
+    let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_ad(
         out_da.as_mut_ptr(),
         out_db.as_mut_ptr(),
@@ -416,83 +459,28 @@ pub fn run_ad(
         coeffs.as_ptr(),
         witness_layout,
         constraints_layout,
+        global_frame.as_mut_ptr(),
     );
 
     let frame = Frame::push(
-        program[1],
+        program[2],
         Frame {
             data: std::ptr::null_mut(),
         },
         &mut vm,
     );
 
-    // for (i, el) in bytecode::DISPATCH.iter().enumerate() {
-    //     println!("{}: {:?}", i, el);
-    // }
-
     let mut program = program.to_vec();
     prepare_dispatch(&mut program);
 
-    let pc = unsafe { program.as_mut_ptr().offset(2) };
+    let pc = unsafe { program.as_mut_ptr().offset(3) };
 
     dispatch(pc, frame, &mut vm);
 
     (out_da, out_db, out_dc, vm.allocation_instrumenter)
 }
 
-fn write_input_value(ptr: *mut u64, el: &InputValue, vm: &mut VM) -> isize {
-    match el {
-        InputValue::Field(field_element) => {
-            unsafe {
-                *(ptr as *mut Field) = field_element.into_repr();
-            }
-            return 4;
-        }
-        InputValue::Vec(vec) => {
-            if vec.len() == 0 {
-                let layout = BoxedLayout::array(0, false);
-                let array = BoxedValue::alloc(layout, vm);
-                unsafe {
-                    *(ptr as *mut BoxedValue) = array;
-                }
-            } else {
-                match &vec[0] {
-                    InputValue::Field(_) => {
-                        let layout = BoxedLayout::array(vec.len() * 4, false);
-                        let array = BoxedValue::alloc(layout, vm);
-
-                        for (elem_ind, input) in vec.iter().enumerate() {
-                            let ptr = array.array_idx(elem_ind, 4);
-                            write_input_value(ptr, input, vm);
-                        }
-                        unsafe {
-                            *(ptr as *mut BoxedValue) = array;
-                        }
-                    }
-                    InputValue::Vec(_) => {
-                        let layout = BoxedLayout::array(vec.len(), true);
-                        let array = BoxedValue::alloc(layout, vm);
-
-                        for (elem_ind, input) in vec.iter().enumerate() {
-                            let ptr = array.array_idx(elem_ind, 1);
-                            write_input_value(ptr, input, vm);
-                        }
-                        unsafe {
-                            *(ptr as *mut BoxedValue) = array;
-                        }
-                    }
-                    _ => panic!("Only field elements are supported in arrays for now"),
-                }
-            }
-            return 1;
-        }
-        _ => panic!(
-            "Unsupported input value type. We only support Field and nested Vecs of Fields for now."
-        ),
-    }
-}
-
-fn flatten_param_vec(vec: &[InputValue]) -> Vec<Field> {
+fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
     let mut encoded_value = Vec::new();
     for elem in vec {
         encoded_value.extend(flatten_params(elem));
@@ -500,18 +488,23 @@ fn flatten_param_vec(vec: &[InputValue]) -> Vec<Field> {
     encoded_value
 }
 
-fn flatten_params(value: &InputValue) -> Vec<Field> {
+fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
     let mut encoded_value = Vec::new();
     match value {
-        InputValue::Field(elem) => encoded_value.push(elem.into_repr()),
+        InputValueOrdered::Field(elem) => encoded_value.push(*elem),
 
-        InputValue::Vec(vec_elements) => {
+        InputValueOrdered::Vec(vec_elements) => {
             for elem in vec_elements {
                 encoded_value.extend(flatten_params(elem));
             }
+        },
+        InputValueOrdered::Struct(fields) => {
+            for (_field_name, field_value) in fields {
+                encoded_value.extend(flatten_params(field_value));
+            }
         }
         _ => panic!(
-            "Unsupported input value type. We only support Field and nested Vecs of Fields for now."
+            "Unsupported input value type. We only support Field, Vecs, and Structs for now."
         ),
     }
     encoded_value

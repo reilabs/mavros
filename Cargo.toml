@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["opcode-gen", "ssa-builder"]
+members = ["opcode-gen", "ssa-builder", "wasm-runtime"]
 
 [package]
-name = "spartan-vm"
+name = "mavros"
 version = "0.1.0"
 edition = "2024"
 
@@ -26,11 +26,15 @@ tempfile = "3.19.1"
 petgraph = "0.6.5" # Cannot bump as it is currently required to be this version by a dependency
 convert_case = "0.8.0"
 serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0"
 toml = { version = "0.8.20" }
 ark-bn254 = { version = "0.5.0" }
 ark-ff = { version = "0.5.0" }
 ark-serialize = { version = "0.5.0", features = ["derive"] }
 bincode = "1.3"
+
+# LLVM codegen
+inkwell = { version = "0.5", features = ["llvm18-0"] }
 graphviz-rust = "0.6.0"
 plotters = "0.3.5"
 tracing = "0.1.41"
@@ -40,14 +44,21 @@ rand = "0.8"
 
 opcode-gen = { path = "opcode-gen" }
 ssa-builder = { path = "ssa-builder" }
+cargo_metadata = "0.23.1"
+wasmtime = "31"
+
 [dev-dependencies]
 anyhow = "1.0.87"
 tempfile = "3.8.1"
 walkdir = "2.5.0"
 
 [[bin]]
-name = "spartan-vm"
+name = "mavros"
 path = "src/bin/main.rs"
+
+[[bin]]
+name = "test-runner"
+path = "src/bin/test_runner.rs"
 
 [profile.release]
 debug = true

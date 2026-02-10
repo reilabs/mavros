@@ -26,6 +26,7 @@ pub enum ValueSignature {
     PointerTo(Box<ValueSignature>),
     FWitness,
     UWitness(usize),
+    Tuple(Vec<ValueSignature>),
 }
 
 impl ValueSignature {
@@ -39,6 +40,9 @@ impl ValueSignature {
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
             ValueSignature::FWitness => Value::FWitness,
             ValueSignature::UWitness(s) => Value::UWitness(*s),
+            ValueSignature::Tuple(elements) => {
+                Value::Tuple(elements.iter().map(|e| e.to_value()).collect())
+            }
         }
     }
 
@@ -57,6 +61,14 @@ impl ValueSignature {
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
             ValueSignature::FWitness => "W".to_string(),
             ValueSignature::UWitness(_) => "W".to_string(),
+            ValueSignature::Tuple(elements) => {
+                if full {
+                    let elements = elements.iter().map(|e| e.pretty_print(full)).join(", ");
+                    format!("({})", elements)
+                } else {
+                    format!("(...)")
+                }       
+            }
         }
     }
 }
@@ -69,6 +81,7 @@ pub enum Value {
     Pointer(Rc<RefCell<Value>>),
     FWitness,
     UWitness(usize),
+    Tuple(Vec<Value>),
 }
 
 impl Value {
@@ -154,6 +167,14 @@ impl Value {
                 }
                 _ => todo!("{:?}", binary_arith_op_kind),
             },
+            (Value::UWitness(s), _) | (_, Value::UWitness(s)) => match binary_arith_op_kind {
+                BinaryArithOpKind::Mul => {
+                    instrumenter.record_constraints(2); // compute result && check the digital decomposition
+                    instrumenter.record_rangechecks(*s as u8, 2);
+                    Value::UWitness(*s)
+                }
+                _ => todo!("{:?}", binary_arith_op_kind),
+            },
             (_, _) => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
         }
     }
@@ -194,6 +215,23 @@ impl Value {
                 };
                 val.borrow_mut().blind_from(&item_tp);
             }
+            (Value::Tuple(_), ConstantTaint::Witness, _) => {
+                panic!("Witness tuples not supported yet")
+            }
+            (Value::Tuple(_), _, tp) => {
+                let element_tps = match tp {
+                    TypeExpr::Tuple(elements) => elements,
+                    _ => panic!("Unexpected tuple type: {:?}", tp),
+                };
+                match self {
+                    Value::Tuple(vals) => {
+                        for (val, element_tp) in vals.iter_mut().zip(element_tps.iter()) {
+                            val.blind_from(element_tp);
+                        }
+                    }
+                    _ => panic!("Unexpected tuple type: {:?}", tp),
+                }
+            }
         }
     }
 
@@ -229,6 +267,21 @@ impl Value {
             }
             (Value::Pointer(_), ConstantTaint::Witness, _) => {
                 panic!("Witness pointers not supported yet")
+            }
+            (Value::Tuple(vals), ConstantTaint::Pure, tp) => {
+                let element_tps = match tp {
+                    TypeExpr::Tuple(elements) => elements,
+                    _ => panic!("Unexpected tuple type: {:?}", tp),
+                };
+                ValueSignature::Tuple(
+                    vals.iter()
+                        .zip(element_tps.iter())
+                        .map(|(v, element_tp)| v.make_unspecialized_sig(element_tp))
+                        .collect(),
+                )
+            }
+            (Value::Tuple(_), ConstantTaint::Witness, _) => {
+                panic!("Witness tuples not supported yet")
             }
         }
     }
@@ -266,6 +319,21 @@ impl Value {
                 instrumenter.record_lookups(vals.len(), 1, 1);
                 Value::witness_of(tp)
             }
+            _ => panic!(
+                "Cannot get array element from {:?} with index {:?}",
+                self, index
+            ),
+        }
+    }
+
+    fn tuple_get(
+        &self,
+        index: usize,
+        _tp: &Type<ConstantTaint>,
+        _instrumenter: &mut dyn OpInstrumenter,
+    ) -> Value {
+        match self {
+            Value::Tuple(vals) => vals[index as usize].clone(),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
@@ -330,6 +398,7 @@ impl Value {
 
                 Value::U(*s, bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64))
             }
+            (Value::FWitness, CastTarget::U(s)) => Value::UWitness(*s),
             _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
         }
     }
@@ -423,7 +492,7 @@ impl Value {
         match &tp.expr {
             TypeExpr::U(s) => Value::UWitness(*s),
             TypeExpr::Field => Value::FWitness,
-            TypeExpr::BoxedField => Value::FWitness,
+            TypeExpr::WitnessRef => Value::FWitness,
             TypeExpr::Array(tp, size) => {
                 let mut values = vec![];
                 for _ in 0..*size {
@@ -433,6 +502,8 @@ impl Value {
             }
             TypeExpr::Slice(_) => panic!("Cannot witness slice type"),
             TypeExpr::Ref(_) => panic!("Cannot witness pointer type"),
+            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Function => panic!("Cannot witness function type"),
         }
     }
 
@@ -597,6 +668,21 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
+    fn mk_tuple (
+        values: Vec<SpecSplitValue>,
+        _ctx: &mut CostAnalysis,
+        _elem_types: &[Type<ConstantTaint>],
+    ) -> SpecSplitValue {
+        let (uns, spec) = values
+            .into_iter()
+            .map(|v| (v.unspecialized, v.specialized))
+            .unzip();
+        SpecSplitValue {
+            unspecialized: Value::Tuple(uns),
+            specialized: Value::Tuple(spec),
+        }
+    }
+
     fn assert_r1c(
         a: &SpecSplitValue,
         b: &SpecSplitValue,
@@ -631,6 +717,28 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
             ),
             specialized: self.specialized.array_get(
                 &i.specialized,
+                tp,
+                instrumenter.get_specialized(),
+            ),
+        };
+        res.blind_unspecialized_from(tp);
+        res
+    }
+
+    fn tuple_get(
+        &self,
+        index: usize,
+        tp: &Type<ConstantTaint>,
+        instrumenter: &mut CostAnalysis,
+    ) -> SpecSplitValue {
+        let mut res = SpecSplitValue {
+            unspecialized: self.unspecialized.tuple_get(
+                index,
+                tp,
+                instrumenter.get_unspecialized(),
+            ),
+            specialized: self.specialized.tuple_get(
+                index,
                 tp,
                 instrumenter.get_specialized(),
             ),
@@ -1291,9 +1399,13 @@ impl CostEstimator {
             TypeExpr::Array(internal, size) => {
                 ValueSignature::Array(vec![self.make_witness_sig(internal); *size])
             }
-            TypeExpr::BoxedField => ValueSignature::FWitness,
+            TypeExpr::WitnessRef => ValueSignature::FWitness,
             TypeExpr::Slice(_) => panic!("slice not possible here"),
             TypeExpr::Ref(_) => panic!("ref not possible here"),
+            TypeExpr::Tuple(elements) => {
+                ValueSignature::Tuple(elements.iter().map(|e| self.make_witness_sig(e)).collect())
+            }
+            TypeExpr::Function => panic!("function type not possible here"),
         }
     }
 }

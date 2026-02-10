@@ -306,6 +306,7 @@ pub struct VM {
     pub allocation_instrumenter: AllocationInstrumenter,
     pub tables: Vec<TableInfo>,
     pub rgchk_8: Option<usize>,
+    pub globals: *mut u64,
 }
 
 impl VM {
@@ -319,6 +320,7 @@ impl VM {
         lookups_b: *mut Field,
         elem_inverses_constraint_section_offset: usize,
         elem_inverses_witness_section_offset: usize,
+        globals: *mut u64,
     ) -> Self {
         Self {
             data: Arrays {
@@ -337,6 +339,7 @@ impl VM {
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_8: None,
+            globals,
         }
     }
 
@@ -348,6 +351,7 @@ impl VM {
 
         witness_layout: WitnessLayout,
         constraints_layout: ConstraintsLayout,
+        globals: *mut u64,
     ) -> Self {
         Self {
             data: Arrays {
@@ -369,6 +373,7 @@ impl VM {
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_8: None,
+            globals,
         }
     }
 
@@ -652,6 +657,24 @@ mod def {
     }
 
     #[opcode]
+    fn tuple_alloc(
+        #[out] res: *mut BoxedValue,
+        meta: BoxedLayout,
+        fields: &[FramePosition],
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let tuple = BoxedValue::alloc(meta, vm);
+        for (i, field) in fields.iter().enumerate() {
+            let tgt = tuple.tuple_idx(i, &meta.child_sizes());
+            frame.write_to(tgt, field.0 as isize, meta.child_sizes()[i]);
+        }
+        unsafe {
+            *res = tuple;
+        }
+    }
+
+    #[opcode]
     fn array_get(
         #[out] res: *mut u64,
         #[frame] array: BoxedValue,
@@ -666,6 +689,20 @@ mod def {
         let src = array.array_idx(index as usize, stride);
         unsafe {
             ptr::copy_nonoverlapping(src, res, stride);
+        }
+    }
+
+    #[opcode]
+    fn tuple_proj(
+        #[out] res: *mut u64,
+        #[frame] tuple: BoxedValue,
+        index: u64,
+        child_sizes: &[usize],
+        vm: &mut VM,
+    ) {
+        let src = tuple.tuple_idx(index as usize, child_sizes);
+        unsafe {
+            ptr::copy_nonoverlapping(src, res, child_sizes[index as usize]);
         }
     }
 
@@ -720,7 +757,7 @@ mod def {
     }
 
     #[opcode]
-    fn boxed_field_alloc(#[out] res: *mut BoxedValue, data: Field, vm: &mut VM) {
+    fn witness_ref_alloc(#[out] res: *mut BoxedValue, data: Field, vm: &mut VM) {
         let val = BoxedValue::alloc(BoxedLayout::ad_const(), vm);
         let d = val.as_ad_const();
         unsafe {
@@ -769,7 +806,7 @@ mod def {
     }
 
     #[opcode]
-    fn box_field(#[out] res: *mut BoxedValue, #[frame] v: Field, vm: &mut VM) {
+    fn pure_to_witness_ref(#[out] res: *mut BoxedValue, #[frame] v: Field, vm: &mut VM) {
         let val = BoxedValue::alloc(BoxedLayout::ad_const(), vm);
         let d = val.as_ad_const();
         unsafe {
@@ -1005,6 +1042,37 @@ mod def {
         // unsafe {}
         // panic!("TODO: implement drngchk_8_field");
     }
+
+    #[opcode]
+    fn init_global(vm: &mut VM, frame: Frame, src: FramePosition, global_offset: usize, size: usize) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                frame.data.offset(src.0 as isize),
+                vm.globals.offset(global_offset as isize),
+                size,
+            );
+        }
+    }
+
+    #[opcode]
+    fn read_global(#[out] res: *mut u64, vm: &mut VM, global_offset: usize, size: usize) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                vm.globals.offset(global_offset as isize),
+                res,
+                size,
+            );
+        }
+    }
+
+    #[opcode]
+    #[inline(never)]
+    fn drop_global(vm: &mut VM, global_offset: usize) {
+        unsafe {
+            let boxed = *(vm.globals.offset(global_offset as isize) as *mut BoxedValue);
+            boxed.dec_rc(vm);
+        }
+    }
 }
 
 pub struct Function {
@@ -1025,6 +1093,7 @@ impl Display for Function {
 
 pub struct Program {
     pub functions: Vec<Function>,
+    pub global_frame_size: usize,
 }
 
 impl Display for Program {
@@ -1052,6 +1121,7 @@ impl Display for Program {
 impl Program {
     pub fn to_binary(&self) -> Vec<u64> {
         let mut binary = Vec::new();
+        binary.push(self.global_frame_size as u64);
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
 
