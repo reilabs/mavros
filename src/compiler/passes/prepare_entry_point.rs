@@ -359,8 +359,6 @@ impl PrepareEntryPoint {
                                 is_unconstrained: true,
                             });
 
-                            println!("To constrain {}", to_constrain.len());
-
                             // Constrain non-Field return values
                             for (orig_id, raw_id, typ) in to_constrain {
                                 let constrain_instrs = Self::constrain_value(

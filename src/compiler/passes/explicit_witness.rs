@@ -9,7 +9,7 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget, OpCode, Radix, SSA, SeqType, ValueId
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget, OpCode, Radix, SSA, SeqType, TupleIdx, ValueId
     },
     taint_analysis::ConstantTaint,
 };
@@ -762,7 +762,33 @@ impl ExplicitWitness {
                 });
                 result_id
             }
-            _ => panic!("Unsupported parameter type for witness write to fresh. We only support fields and nested arrays of fields for now"),
+            TypeExpr::Tuple(element_types) => {
+                let mut value_ids = Vec::new();
+                for (i, elem_type) in element_types.iter().enumerate() {
+                    let child_raw_id = func.fresh_value();
+                    instruction_collector.push(OpCode::TupleProj {
+                        result: child_raw_id,
+                        tuple: raw_id,
+                        idx: TupleIdx::Static(i),
+                    });
+                    let child_result_id = func.fresh_value();
+                    let new_value_id = Self::generate_witness_for_type(
+                        child_raw_id,
+                        child_result_id,
+                        elem_type.clone(),
+                        instruction_collector,
+                        func,
+                    );
+                    value_ids.push(new_value_id);
+                }
+                instruction_collector.push(OpCode::MkTuple {
+                    result: result_id,
+                    elems: value_ids,
+                    element_types: element_types.clone(),
+                });
+                result_id
+            }
+            _ => panic!("Unsupported parameter type for witness write to fresh"),
         }
     }
 }
