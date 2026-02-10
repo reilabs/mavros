@@ -1,4 +1,4 @@
-use std::{collections::HashMap, os::linux::raw};
+use std::collections::HashMap;
 
 use ark_ff::{AdditiveGroup, Field as _};
 use ssa_builder::{ssa_append};
