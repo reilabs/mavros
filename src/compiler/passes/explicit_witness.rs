@@ -87,9 +87,22 @@ impl ExplicitWitness {
                                 match kind {
                                     CmpKind::Eq => {
                                         let u1 = CastTarget::U(1);
+                                        // Conditionally cast operands to Field (skip if already Field)
+                                        let l_field = if matches!(function_type_info.get_value_type(lhs).expr, TypeExpr::Field) {
+                                            lhs
+                                        } else {
+                                            let v = function.fresh_value();
+                                            new_instructions.push(OpCode::mk_cast_to_field(v, lhs));
+                                            v
+                                        };
+                                        let r_field = if matches!(function_type_info.get_value_type(rhs).expr, TypeExpr::Field) {
+                                            rhs
+                                        } else {
+                                            let v = function.fresh_value();
+                                            new_instructions.push(OpCode::mk_cast_to_field(v, rhs));
+                                            v
+                                        };
                                         ssa_append!(function, new_instructions, {
-                                            l_field := cast_to_field(lhs);
-                                            r_field := cast_to_field(rhs);
                                             lr_diff := sub(l_field, r_field);
 
                                             div_hint := div(lr_diff, lr_diff);
@@ -100,10 +113,11 @@ impl ExplicitWitness {
                                             out_hint_witness := write_witness(out_hint_field);
                                             #result := cast_to(u1, out_hint_witness);
 
-                                            not_res := sub(! Field::ONE : Field, result);
+                                            result_field := cast_to_field(result);
+                                            not_res := sub(! Field::ONE : Field, result_field);
 
                                             constrain(lr_diff, div_hint_witness, not_res);
-                                            constrain(lr_diff, result, ! Field::ZERO : Field);
+                                            constrain(lr_diff, result_field, ! Field::ZERO : Field);
 
 
                                         } ->);

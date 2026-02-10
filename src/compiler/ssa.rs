@@ -1,8 +1,5 @@
 use crate::compiler::taint_analysis::ConstantTaint;
-use crate::compiler::{
-    ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr},
-    ssa_gen::SsaConverter,
-};
+use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
 
@@ -48,15 +45,14 @@ impl<'a> LocalFunctionAnnotator<'a> {
 }
 
 #[derive(Clone)]
-pub enum GlobalDef {
-    Const(Const),
-    Array(Vec<usize>, Type<Empty>),
-}
-
-#[derive(Clone)]
 pub struct SSA<V> {
     functions: HashMap<FunctionId, Function<V>>,
-    globals: Vec<GlobalDef>,
+    /// Type of each global slot (indexed by slot number)
+    global_types: Vec<Type<V>>,
+    /// Function that initializes all globals (emits InitGlobal opcodes)
+    globals_init_fn: Option<FunctionId>,
+    /// Function that drops all globals (emits DropGlobal opcodes)
+    globals_deinit_fn: Option<FunctionId>,
     main_id: FunctionId,
     next_function_id: u64,
 }
@@ -72,21 +68,26 @@ where
         functions.insert(main_id, main_function);
         SSA {
             functions,
-            globals: Vec::new(),
+            global_types: Vec::new(),
+            globals_init_fn: None,
+            globals_deinit_fn: None,
             main_id,
             next_function_id: 1,
         }
     }
 
-    pub fn prepare_rebuild<V2>(self) -> (SSA<V2>, HashMap<FunctionId, Function<V>>) {
+    pub fn prepare_rebuild<V2>(self) -> (SSA<V2>, HashMap<FunctionId, Function<V>>, Vec<Type<V>>) {
         (
             SSA {
                 functions: HashMap::new(),
-                globals: self.globals,
+                global_types: Vec::new(),
+                globals_init_fn: self.globals_init_fn,
+                globals_deinit_fn: self.globals_deinit_fn,
                 main_id: self.main_id,
                 next_function_id: self.next_function_id,
             },
             self.functions,
+            self.global_types,
         )
     }
 
@@ -153,21 +154,34 @@ where
         self.functions.keys().copied()
     }
 
-    pub fn set_globals(&mut self, globals: Vec<GlobalDef>) {
-        self.globals = globals;
+    pub fn set_global_types(&mut self, types: Vec<Type<V>>) {
+        self.global_types = types;
     }
 
-    pub fn get_globals(&self) -> &[GlobalDef] {
-        &self.globals
+    pub fn get_global_types(&self) -> &[Type<V>] {
+        &self.global_types
     }
 
-}
-
-impl SSA<Empty> {
-    pub fn from_noir(noir_ssa: &noirc_evaluator::ssa::ssa_gen::Ssa) -> SSA<Empty> {
-        let mut converter = SsaConverter::new();
-        converter.convert_noir_ssa(noir_ssa)
+    pub fn num_globals(&self) -> usize {
+        self.global_types.len()
     }
+
+    pub fn set_globals_init_fn(&mut self, id: FunctionId) {
+        self.globals_init_fn = Some(id);
+    }
+
+    pub fn set_globals_deinit_fn(&mut self, id: FunctionId) {
+        self.globals_deinit_fn = Some(id);
+    }
+
+    pub fn get_globals_init_fn(&self) -> Option<FunctionId> {
+        self.globals_init_fn
+    }
+
+    pub fn get_globals_deinit_fn(&self) -> Option<FunctionId> {
+        self.globals_deinit_fn
+    }
+
 }
 
 impl<V: Display + Clone> SSA<V> {
@@ -329,6 +343,10 @@ impl<V: Clone> Function<V> {
         let block = Block::empty();
         self.blocks.insert(new_id, block);
         new_id
+    }
+
+    pub fn block_is_terminated(&self, block_id: BlockId) -> bool {
+        self.blocks.get(&block_id).unwrap().get_terminator().is_some()
     }
 
     pub fn next_virtual_block(&mut self) -> (BlockId, Block<V>) {

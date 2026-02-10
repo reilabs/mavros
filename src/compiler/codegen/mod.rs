@@ -6,7 +6,7 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function, FunctionId, GlobalDef, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId
+            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function, FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId
         },
         taint_analysis::ConstantTaint,
     },
@@ -124,21 +124,12 @@ struct GlobalFrameLayouter {
 
 impl GlobalFrameLayouter {
     fn new(ssa: &SSA<ConstantTaint>) -> Self {
-        let globals = ssa.get_globals();
+        let global_types = ssa.get_global_types();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
-        for global in globals.iter() {
-            let size = match global {
-                ssa::GlobalDef::Const(ssa::Const::Field(_)) => bytecode::LIMBS,
-                ssa::GlobalDef::Const(ssa::Const::U(bits, _)) => {
-                    assert!(*bits <= 64);
-                    1
-                }
-                ssa::GlobalDef::Const(ssa::Const::WitnessRef(_)) => 1,
-                ssa::GlobalDef::Const(ssa::Const::FnPtr(_)) => panic!("FnPtr globals not supported in codegen"),
-                ssa::GlobalDef::Array(_, _) => 1, // Ptr (BoxedValue)
-            };
+        for typ in global_types.iter() {
+            let size = Self::type_frame_size(typ);
             offsets.push(next_free);
             sizes.push(size);
             next_free += size;
@@ -147,6 +138,16 @@ impl GlobalFrameLayouter {
             offsets,
             sizes,
             total_size: next_free,
+        }
+    }
+
+    fn type_frame_size(typ: &Type<ConstantTaint>) -> usize {
+        use crate::compiler::ir::r#type::TypeExpr;
+        match &typ.expr {
+            TypeExpr::Field => bytecode::LIMBS,
+            TypeExpr::U(bits) => { assert!(*bits <= 64); 1 }
+            // Heap-allocated types are pointers (1 word)
+            _ => 1,
         }
     }
 
@@ -550,7 +551,9 @@ impl CodeGen {
                     value: v,
                     target: tgt,
                 } => {
-                    if *tgt == ssa::CastTarget::Nop {
+                    let is_nop = *tgt == ssa::CastTarget::Nop
+                        || type_info.get_value_type(*v).expr == type_info.get_value_type(*r).expr;
+                    if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);
                         continue;
@@ -675,10 +678,18 @@ impl CodeGen {
                     panic!("SlicePush bytecode opcode not yet implemented");
                 }
                 ssa::OpCode::SliceLen {
-                    result: _r,
-                    slice: _sl,
+                    result: r,
+                    slice: sl,
                 } => {
-                    panic!("SliceLen bytecode opcode not yet implemented");
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let slice_type = type_info.get_value_type(*sl);
+                    let elem_type = slice_type.get_array_element();
+                    let stride = layouter.type_size(&elem_type);
+                    emitter.push_op(bytecode::OpCode::SliceLen {
+                        res,
+                        array: layouter.get_value(*sl),
+                        stride,
+                    });
                 }
                 ssa::OpCode::MkSeq {
                     result: r,

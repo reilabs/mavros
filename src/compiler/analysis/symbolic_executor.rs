@@ -5,7 +5,7 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     ir::r#type::{CommutativeMonoid, Type},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, GlobalDef,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId,
         LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator,
     },
 };
@@ -131,7 +131,7 @@ impl SymbolicExecutor {
         Ctx: Context<V, T>,
         T: Clone + CommutativeMonoid,
     {
-        let mut globals: Vec<Option<V>> = vec![None; ssa.get_globals().len()];
+        let mut globals: Vec<Option<V>> = vec![None; ssa.num_globals()];
 
         self.run_fn(ssa, type_info, entry_point, params, &mut globals, context);
     }
