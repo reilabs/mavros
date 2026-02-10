@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, os::linux::raw};
 
 use ark_ff::{AdditiveGroup, Field as _};
 use ssa_builder::{ssa_append};
@@ -94,11 +94,8 @@ impl ExplicitWitness {
 
                                 // Write each return value to witness
                                 for (orig_id, raw_id) in results.iter().zip(raw_results.iter()) {
-                                    new_instructions.push(OpCode::WriteWitness {
-                                        result: Some(*orig_id),
-                                        value: *raw_id,
-                                        witness_annotation: ConstantTaint::Witness,
-                                    });
+                                    let tp = function_type_info.get_value_type(*orig_id).clone();
+                                    Self::generate_witness_for_type(*raw_id, *orig_id, tp, &mut new_instructions, function);
                                 }
                             } else {
                                 new_instructions.push(OpCode::Call {
@@ -703,5 +700,49 @@ impl ExplicitWitness {
             b: one,
             c: value,
         });
+    }
+
+    fn generate_witness_for_type(
+        raw_id: ValueId,
+        result_id: ValueId,
+        tp: Type<ConstantTaint>,
+        instruction_collector: &mut Vec<OpCode<ConstantTaint>>,
+        func: &mut Function<ConstantTaint>,
+    ) -> ValueId {
+        match &tp.expr {
+            TypeExpr::Field => {
+                instruction_collector.push(OpCode::WriteWitness { result: Some(result_id), value: raw_id, witness_annotation: ConstantTaint::Witness });
+                result_id
+            }
+            TypeExpr::Array(inner_type, size) => {
+                let mut value_ids = Vec::new();
+                for i in 0..*size {
+                    let idx_const = func.push_u_const(32, i as u128);
+                    let child_raw_id = func.fresh_value();
+                    instruction_collector.push(OpCode::ArrayGet {
+                        result: child_raw_id,
+                        array: raw_id,
+                        index: idx_const,
+                    });
+                    let child_result_id = func.fresh_value();
+                    let new_value_id = Self::generate_witness_for_type(
+                        child_raw_id,
+                        child_result_id,
+                        *inner_type.clone(),
+                        instruction_collector,
+                        func,
+                    );
+                    value_ids.push(new_value_id);
+                }
+                instruction_collector.push(OpCode::MkSeq {
+                    result: result_id,
+                    elems: value_ids,
+                    seq_type: SeqType::Array(*size),
+                    elem_type: *inner_type.clone(),
+                });
+                result_id
+            }
+            _ => panic!("Unsupported parameter type for witness write to fresh. We only support fields and nested arrays of fields for now"),
+        }
     }
 }
