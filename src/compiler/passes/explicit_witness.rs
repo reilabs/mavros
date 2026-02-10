@@ -436,8 +436,14 @@ impl ExplicitWitness {
                                 lhs: res,
                                 rhs: neg_r,
                             });
+                            let cond_field = function.fresh_value();
+                            new_instructions.push(OpCode::Cast {
+                                result: cond_field,
+                                value: cond,
+                                target: CastTarget::Field,
+                            });
                             new_instructions.push(OpCode::Constrain {
-                                a: cond,
+                                a: cond_field,
                                 b: l_sub_r,
                                 c: res_sub_r,
                             });

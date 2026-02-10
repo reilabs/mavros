@@ -488,6 +488,20 @@ mod def {
     fn nop() {}
 
     #[opcode]
+    fn select_u64(#[out] res: *mut u64, #[frame] cond: u64, #[frame] if_t: u64, #[frame] if_f: u64) {
+        unsafe {
+            *res = if cond != 0 { if_t } else { if_f };
+        }
+    }
+
+    #[opcode]
+    fn select_field(#[out] res: *mut Field, #[frame] cond: u64, #[frame] if_t: Field, #[frame] if_f: Field) {
+        unsafe {
+            *res = if cond != 0 { if_t } else { if_f };
+        }
+    }
+
+    #[opcode]
     fn mov_const(#[out] res: *mut u64, val: u64) {
         unsafe {
             *res = val;
