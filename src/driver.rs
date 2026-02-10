@@ -94,16 +94,8 @@ impl Driver {
 
         self.abi = Some(noirc_driver::gen_abi(&context, &main, program.return_visibility(), BTreeMap::default()));
 
-        let ssa = noirc_evaluator::ssa::SsaBuilder::from_program(
-            program,
-            noirc_evaluator::ssa::SsaLogging::None,
-            true,
-            &None,
-            None,
-        )
-        .unwrap();
-
-        self.initial_ssa = Some(SSA::from_noir(&ssa.ssa));
+        // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
+        self.initial_ssa = Some(SSA::from_program(&program));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
@@ -124,8 +116,8 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(PrepareEntryPoint::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 Box::new(MakeStructAccessStatic::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
