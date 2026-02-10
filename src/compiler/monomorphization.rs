@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::compiler::{constraint_solver::ConstraintSolver, ir::r#type::Empty, ssa::{CallTarget, FunctionId, OpCode, SSA}, taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType}};
 
@@ -47,11 +47,6 @@ impl Monomorphization {
 
     pub fn run(&mut self, ssa: &mut SSA<Empty>, taint_analysis: &mut TaintAnalysis) -> Result<(), String> {
         let unspecialized_fns = ssa.get_function_ids().collect::<Vec<_>>();
-        let unconstrained_fns: HashSet<FunctionId> = unspecialized_fns
-            .iter()
-            .filter(|fn_id| ssa.get_function(**fn_id).is_unconstrained())
-            .cloned()
-            .collect();     
         let entry_point = ssa.get_main_id();
         let entry_point_taint = taint_analysis.get_function_taint(entry_point);
         let entry_point_signature = self.monomorphize_main_signature(entry_point_taint);
@@ -102,19 +97,24 @@ impl Monomorphization {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
                         OpCode::Call { results: returns, function: CallTarget::Static(func_id), args, is_unconstrained } => {
-                            // Skip specialization for unconstrained calls - they run in Brillig VM
-                            // and don't need taint-based specialization.
-                            if *is_unconstrained {
-                                continue;
-                            }
-
-                            let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
-                            let args_taints = args.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
-                            let ret_taints = returns.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
-                            let signature = Signature {
-                                cfg_taint: cfg_taint.clone(),
-                                param_taints: args_taints,
-                                return_taints: ret_taints,
+                            let signature = if *is_unconstrained {
+                                // Unconstrained calls run in Brillig VM and don't generate
+                                // constraints, so specialize with all-Pure taints.
+                                let callee_taint = taint_analysis.get_function_taint(*func_id);
+                                Signature {
+                                    cfg_taint: Taint::Constant(ConstantTaint::Pure),
+                                    param_taints: callee_taint.parameters.iter().map(Self::make_pure_taint).collect(),
+                                    return_taints: callee_taint.returns_taint.iter().map(Self::make_pure_taint).collect(),
+                                }
+                            } else {
+                                let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
+                                let args_taints = args.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
+                                let ret_taints = returns.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
+                                Signature {
+                                    cfg_taint: cfg_taint.clone(),
+                                    param_taints: args_taints,
+                                    return_taints: ret_taints,
+                                }
                             };
 
                             let specialized_func_id = self.request_specialization(ssa, *func_id, signature);
@@ -132,44 +132,6 @@ impl Monomorphization {
         }
 
         for fn_id in unspecialized_fns {
-            // Keep unconstrained functions - they're still referenced by unconstrained calls
-            // but solve their constraints with all-Pure assumptions
-            if unconstrained_fns.contains(&fn_id) {
-                let function_taint = taint_analysis.get_function_taint(fn_id);
-
-                // Create a signature with all Pure taints
-                let pure_signature = Signature {
-                    cfg_taint: Taint::Constant(ConstantTaint::Pure),
-                    param_taints: function_taint.parameters.iter().map(Self::make_pure_taint).collect(),
-                    return_taints: function_taint.returns_taint.iter().map(Self::make_pure_taint).collect(),
-                };
-
-                // Solve constraints with Pure assumptions
-                let mut constraint_solver = ConstraintSolver::new(&function_taint);
-                constraint_solver.add_assumption(
-                    &TaintType::Primitive(function_taint.cfg_taint.clone()),
-                    &TaintType::Primitive(pure_signature.cfg_taint.clone()),
-                );
-                for (original_param, specialized_param) in pure_signature
-                    .param_taints
-                    .iter()
-                    .zip(function_taint.parameters.iter())
-                {
-                    constraint_solver.add_assumption(original_param, specialized_param);
-                }
-                for (original_return, specialized_return) in pure_signature
-                    .return_taints
-                    .iter()
-                    .zip(function_taint.returns_taint.iter())
-                {
-                    constraint_solver.add_assumption(original_return, specialized_return);
-                }
-
-                constraint_solver.solve();
-                let resolved_taint = function_taint.update_from_unification(&constraint_solver.unification);
-                taint_analysis.set_function_taint(fn_id, resolved_taint);
-                continue;
-            }
             ssa.take_function(fn_id);
             taint_analysis.remove_function_taint(fn_id);
         }
