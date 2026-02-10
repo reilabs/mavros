@@ -83,7 +83,7 @@ pub fn run_execute(
 
     let debug_dir = output_dir
         .cloned()
-        .unwrap_or_else(|| args.root.join("spartan_vm_debug"));
+        .unwrap_or_else(|| args.root.join("mavros_debug"));
 
     if !debug_dir.exists() {
         fs::create_dir_all(&debug_dir).unwrap();
@@ -141,7 +141,7 @@ pub fn run_execute(
 ///
 /// - [`ApiError`] if the extraction process fails for any reason.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
-    let (driver, r1cs) = api::compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
+    let (mut driver, r1cs) = api::compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
     // info!(
     //     "R1CS {:?}",
     //     r1cs
@@ -154,9 +154,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
             writeln!(r1cs_file, "{}", r1c).unwrap();
         }
     }
-
-    let params = api::read_prover_inputs(&args.root, driver.abi())?;
-    let mut binary = api::compile_witgen(&driver)?;
+    
     if args.emit_llvm || args.emit_wasm {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
@@ -179,12 +177,8 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let file_path = args.root.join("Prover.toml");
-    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap();
-    let format = Format::from_ext(ext).unwrap();
-    let inputs = std::fs::read_to_string(file_path).unwrap();
-    let inputs = format.parse(&inputs, driver.abi()).unwrap();
-    let ordered_params = abi_helpers::ordered_params_from_btreemap(driver.abi(), &inputs);
+    let params = api::read_prover_inputs(&args.root, driver.abi())?;
+    let mut binary = api::compile_witgen(&mut driver)?;
 
     let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params);
 

@@ -5,7 +5,6 @@ use crate::compiler::{
 };
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
-use crate::compiler::taint_analysis::ConstantTaint;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ValueId(pub u64);

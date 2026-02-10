@@ -9,6 +9,8 @@ use crate::{
     compiler::{Field, r1cs_gen::R1CS},
     driver::{Driver, Error as DriverError},
     vm::interpreter,
+    api::interpreter::InputValueOrdered,
+    abi_helpers::ordered_params_from_btreemap,
 };
 use noirc_abi::input_parser::{Format, InputValue};
 
@@ -52,16 +54,18 @@ pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS
     let mut driver = Driver::new(project, draw_graphs);
     driver
         .run_noir_compiler()
-        .map_err(|e| ApiError::Driver { inner: e })?;
+        .unwrap();
+    driver
+        .make_struct_access_static()
+        .unwrap();
     driver
         .monomorphize()
-        .map_err(|e| ApiError::Driver { inner: e })?;
+        .unwrap();
     driver
         .explictize_witness()
-        .map_err(|e| ApiError::Driver { inner: e })?;
-    let r1cs = driver
-        .generate_r1cs()
-        .map_err(|e| ApiError::Driver { inner: e })?;
+        .unwrap();
+
+    let r1cs = driver.generate_r1cs().unwrap();
     Ok((driver, r1cs))
 }
 
@@ -69,8 +73,8 @@ pub fn compile_to_artifacts(
     root: PathBuf,
     draw_graphs: bool,
 ) -> Result<CompiledArtifacts, ApiError> {
-    let (driver, r1cs) = compile_to_r1cs(root, draw_graphs)?;
-    let witgen_binary = compile_witgen(&driver)?;
+    let (mut driver, r1cs) = compile_to_r1cs(root, draw_graphs)?;
+    let witgen_binary = compile_witgen(&mut driver)?;
     let ad_binary = compile_ad(&driver)?;
     Ok(CompiledArtifacts::new(r1cs, witgen_binary, ad_binary))
 }
@@ -87,7 +91,7 @@ pub fn load_artifacts<P: AsRef<Path>>(path: P) -> Result<CompiledArtifacts, ApiE
     Ok(CompiledArtifacts::load_from_file(path)?)
 }
 
-pub fn read_prover_inputs(root: &Path, abi: &noirc_abi::Abi) -> Result<Vec<InputValue>, ApiError> {
+pub fn read_prover_inputs(root: &Path, abi: &noirc_abi::Abi) -> Result<Vec<InputValueOrdered>, ApiError> {
     let file_path = root.join("Prover.toml");
     let ext = file_path
         .extension()
@@ -100,7 +104,7 @@ pub fn read_prover_inputs(root: &Path, abi: &noirc_abi::Abi) -> Result<Vec<Input
 
     let inputs_src = fs::read_to_string(&file_path).map_err(ApiError::Io)?;
     let inputs = format.parse(&inputs_src, abi).unwrap();
-    let ordered_params = ordered_params(abi, &inputs);
+    let ordered_params = ordered_params_from_btreemap(abi, &inputs);
 
     Ok(ordered_params)
 }
@@ -108,7 +112,7 @@ pub fn read_prover_inputs(root: &Path, abi: &noirc_abi::Abi) -> Result<Vec<Input
 pub fn run_witgen_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
-    params: &[InputValue],
+    params: &[InputValueOrdered],
 ) -> interpreter::WitgenResult {
     interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
 }
@@ -118,7 +122,7 @@ pub fn run_witgen_from_binary(
 pub fn run_witgen_phase1(
     binary: &mut [u64],
     r1cs: &R1CS,
-    params: &[InputValue],
+    params: &[InputValueOrdered],
 ) -> interpreter::Phase1Result {
     interpreter::run_phase1(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
 }
@@ -132,7 +136,7 @@ pub fn run_witgen_phase2(
     interpreter::run_phase2(phase1, challenges, r1cs.witness_layout, r1cs.constraints_layout)
 }
 
-pub fn compile_witgen(driver: &Driver) -> Result<Vec<u64>, ApiError> {
+pub fn compile_witgen(driver: &mut Driver) -> Result<Vec<u64>, ApiError> {
     Ok(driver
         .compile_witgen()
         .map_err(|e| ApiError::Driver { inner: e })?)
@@ -181,18 +185,4 @@ pub fn check_ad(r1cs: &R1CS, coeffs: &[Field], a: &[Field], b: &[Field], c: &[Fi
 
 pub fn debug_output_dir(driver: &Driver) -> PathBuf {
     driver.get_debug_output_dir()
-}
-
-fn ordered_params(
-    abi: &noirc_abi::Abi,
-    unordered_params: &std::collections::BTreeMap<String, InputValue>,
-) -> Vec<InputValue> {
-    let mut ordered_params = Vec::new();
-    for param_mame in abi.parameter_names() {
-        let param = unordered_params
-            .get(param_mame)
-            .expect("Parameter not found in unordered params");
-        ordered_params.push(param.clone());
-    }
-    ordered_params
 }

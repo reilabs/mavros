@@ -238,7 +238,7 @@ pub fn run_phase1(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValue],
+    ordered_inputs: &[InputValueOrdered],
 ) -> Phase1Result {
     let global_frame_size = program[0] as usize;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
@@ -423,7 +423,7 @@ pub fn run(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValue],
+    ordered_inputs: &[InputValueOrdered],
 ) -> WitgenResult {
     let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs);
 
