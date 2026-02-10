@@ -303,6 +303,14 @@ impl Types {
                     CastTarget::Field => Type::field(value_type.get_annotation().clone()),
                     CastTarget::U(size) => Type::u(*size, value_type.get_annotation().clone()),
                     CastTarget::Nop => value_type.clone(),
+                    CastTarget::ArrayToSlice => {
+                        match &value_type.expr {
+                            crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {
+                                Type::slice_of(elem.as_ref().clone(), value_type.get_annotation().clone())
+                            }
+                            _ => panic!("ArrayToSlice cast on non-array type"),
+                        }
+                    }
                 };
 
                 function_info.values.insert(*result, result_type);
