@@ -1,7 +1,7 @@
-//! Direct AST to SSA conversion, bypassing Noir's SSA generation.
+//! SSA generation from Noir's monomorphized program.
 //!
-//! This module converts the monomorphized AST directly to mavros SSA format,
-//! avoiding the intermediate Noir SSA representation.
+//! This module converts the monomorphized program directly to mavros SSA format,
+//! bypassing the intermediate Noir SSA representation.
 
 mod expression_converter;
 mod type_converter;
@@ -17,10 +17,10 @@ use crate::compiler::ir::r#type::Empty;
 use crate::compiler::ssa::{FunctionId, Function, SSA};
 
 use expression_converter::ExpressionConverter;
-use type_converter::AstTypeConverter;
+use type_converter::TypeConverter;
 
-/// Converts a monomorphized AST Program to SSA.
-pub struct AstSsaConverter {
+/// Converts a monomorphized Program to SSA.
+pub struct SsaConverter {
     /// Maps AST function IDs to SSA function IDs (constrained context)
     constrained_mapper: HashMap<AstFuncId, FunctionId>,
     /// Maps AST function IDs to SSA function IDs (unconstrained context).
@@ -30,16 +30,16 @@ pub struct AstSsaConverter {
     /// Maps GlobalId to global slot index
     global_slots: HashMap<GlobalId, usize>,
     /// Type converter
-    type_converter: AstTypeConverter,
+    type_converter: TypeConverter,
 }
 
-impl AstSsaConverter {
+impl SsaConverter {
     pub fn new() -> Self {
         Self {
             constrained_mapper: HashMap::new(),
             unconstrained_mapper: HashMap::new(),
             global_slots: HashMap::new(),
-            type_converter: AstTypeConverter::new(),
+            type_converter: TypeConverter::new(),
         }
     }
 
@@ -191,7 +191,7 @@ impl AstSsaConverter {
             in_stack.insert(gid);
             let (_name, _typ, init_expr) = &program.globals[&gid];
             let mut deps = Vec::new();
-            AstSsaConverter::collect_global_deps(init_expr, &mut deps);
+            SsaConverter::collect_global_deps(init_expr, &mut deps);
             for dep in deps {
                 topo_visit(dep, program, visited, in_stack, ordered);
             }
@@ -305,9 +305,9 @@ impl AstSsaConverter {
 }
 
 impl SSA<Empty> {
-    /// Create SSA directly from a monomorphized AST program.
-    pub fn from_ast(program: &Program) -> SSA<Empty> {
-        let mut converter = AstSsaConverter::new();
+    /// Create SSA directly from a monomorphized program.
+    pub fn from_program(program: &Program) -> SSA<Empty> {
+        let mut converter = SsaConverter::new();
         converter.convert_program(program)
     }
 }

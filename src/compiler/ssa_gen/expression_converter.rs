@@ -10,7 +10,7 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::ir::r#type::{Empty, Type};
 use crate::compiler::ssa::{BlockId, CastTarget, Endianness, Function, FunctionId, Radix, SeqType, TupleIdx, ValueId};
 
-use super::type_converter::AstTypeConverter;
+use super::type_converter::TypeConverter;
 
 
 /// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
@@ -41,7 +41,7 @@ pub struct ExpressionConverter<'a> {
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
     /// Type converter
-    type_converter: AstTypeConverter,
+    type_converter: TypeConverter,
     /// Current block we're building
     current_block: BlockId,
     /// Stack of enclosing loop contexts for break/continue
@@ -63,7 +63,7 @@ impl<'a> ExpressionConverter<'a> {
             bindings: HashMap::new(),
             mutable_locals: HashSet::new(),
             function_mapper,
-            type_converter: AstTypeConverter::new(),
+            type_converter: TypeConverter::new(),
             current_block: entry_block,
             loop_stack: Vec::new(),
             in_unconstrained,

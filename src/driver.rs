@@ -95,7 +95,7 @@ impl Driver {
         self.abi = Some(noirc_driver::gen_abi(&context, &main, program.return_visibility(), BTreeMap::default()));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(SSA::from_ast(&program));
+        self.initial_ssa = Some(SSA::from_program(&program));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),

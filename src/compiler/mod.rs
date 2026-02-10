@@ -1,5 +1,5 @@
 pub mod analysis;
-pub mod ast_ssa_gen;
+pub mod ssa_gen;
 pub mod codegen;
 pub mod constraint_solver;
 pub mod flow_analysis;

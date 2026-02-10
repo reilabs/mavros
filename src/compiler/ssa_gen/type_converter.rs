@@ -6,9 +6,9 @@ use noirc_frontend::shared::Signedness;
 use crate::compiler::ir::r#type::{Empty, Type};
 
 /// Converts AST types to SSA types.
-pub struct AstTypeConverter;
+pub struct TypeConverter;
 
-impl AstTypeConverter {
+impl TypeConverter {
     pub fn new() -> Self {
         Self
     }
