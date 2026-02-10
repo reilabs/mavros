@@ -54,7 +54,9 @@ impl ArithmeticSimplifier {
                                 ValueDefinition::Instruction(_, _, OpCode::Cast { result: _, value: v, target: CastTarget::Field }) => {
                                     let v_type = type_info.get_value_type(*v);
                                     if !matches!(v_type.annotation, ConstantTaint::Pure) {
-                                        panic!("Rangecheck on impure value");
+                                        // Witness-tainted rangechecks are handled by explicit_witness
+                                        new_instructions.push(instruction);
+                                        continue;
                                     }
                                     match &v_type.expr {
                                         TypeExpr::U(s) => {

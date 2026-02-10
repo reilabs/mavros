@@ -67,7 +67,7 @@ impl<V> TypeExpr<V> {
             TypeExpr::Array(inner, size) => TypeExpr::Array(Box::new(inner.as_pure()), *size),
             TypeExpr::Slice(inner) => TypeExpr::Slice(Box::new(inner.as_pure())),
             TypeExpr::Ref(inner) => TypeExpr::Ref(Box::new(inner.as_pure())),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(elements) => TypeExpr::Tuple(elements.iter().map(|e| e.as_pure()).collect()),
             TypeExpr::Function => TypeExpr::Function,
         }
     }

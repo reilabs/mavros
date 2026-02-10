@@ -503,7 +503,9 @@ impl Value {
             }
             TypeExpr::Slice(_) => panic!("Cannot witness slice type"),
             TypeExpr::Ref(_) => panic!("Cannot witness pointer type"),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(elements) => {
+                Value::Tuple(elements.iter().map(|e| Self::witness_of(e)).collect())
+            }
             TypeExpr::Function => panic!("Cannot witness function type"),
         }
     }

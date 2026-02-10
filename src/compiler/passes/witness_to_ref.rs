@@ -243,19 +243,27 @@ impl WitnessToRef {
                                         panic!("Div is not supported for witness-pure arithmetic")
                                     }
                                     BinaryArithOpKind::Sub => {
+                                        // a - b  =>  a + (-1)*b
                                         let pure_refed = function.fresh_value();
                                         new_instructions.push(OpCode::PureToWitnessRef {
                                             result: pure_refed,
                                             value: pure,
                                             result_annotation: ConstantTaint::Witness,
                                         });
-                                        let a = if a == wit { wit } else { pure_refed };
-                                        let b = if b == wit { wit } else { pure_refed };
+                                        let lhs_ref = if a == wit { wit } else { pure_refed };
+                                        let rhs_ref = if b == wit { wit } else { pure_refed };
+                                        let neg_one = function.push_field_const(-ark_bn254::Fr::from(1u64));
+                                        let neg_rhs = function.fresh_value();
+                                        new_instructions.push(OpCode::MulConst {
+                                            result: neg_rhs,
+                                            const_val: neg_one,
+                                            var: rhs_ref,
+                                        });
                                         new_instructions.push(OpCode::BinaryArithOp {
-                                            kind: kind,
+                                            kind: BinaryArithOpKind::Add,
                                             result: r,
-                                            lhs: a,
-                                            rhs: b,
+                                            lhs: lhs_ref,
+                                            rhs: neg_rhs,
                                         });
                                     }
                                     BinaryArithOpKind::And => {
