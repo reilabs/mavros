@@ -1115,6 +1115,10 @@ impl<'a> ExpressionConverter<'a> {
                 let result = function.push_to_bits(self.current_block, input, Endianness::Big, output_size);
                 Some(result)
             }
+            "as_vector" => {
+                let array = self.convert_expression(&call.arguments[0], function).unwrap();
+                Some(function.push_cast(self.current_block, array, CastTarget::ArrayToSlice))
+            }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
     }
