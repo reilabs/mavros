@@ -114,22 +114,24 @@ impl Types {
     ) -> Result<(), String> {
         match opcode {
             OpCode::Cmp { kind: _kind, result, lhs, rhs } => {
-                let _lhs_type = function_info.values.get(lhs).ok_or_else(|| {
+                let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
                     format!(
                         "Left-hand side value {:?} not found in type assignments",
                         lhs
                     )
                 })?;
-                let _rhs_type = function_info.values.get(rhs).ok_or_else(|| {
+                let rhs_type = function_info.values.get(rhs).ok_or_else(|| {
                     format!(
                         "Right-hand side value {:?} not found in type assignments",
                         rhs
                     )
                 })?;
-                function_info.values.insert(
-                    *result,
-                    Type::u(1),
-                );
+                let result_type = if lhs_type.is_witness_of() || rhs_type.is_witness_of() {
+                    Type::witness_of(Type::u(1))
+                } else {
+                    Type::u(1)
+                };
+                function_info.values.insert(*result, result_type);
                 Ok(())
             }
             OpCode::BinaryArithOp { kind: _kind, result, lhs, rhs } => {
@@ -297,8 +299,20 @@ impl Types {
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
                 let result_type = match target {
-                    CastTarget::Field => Type::field(),
-                    CastTarget::U(size) => Type::u(*size),
+                    CastTarget::Field => {
+                        if value_type.is_witness_of() {
+                            Type::witness_of(Type::field())
+                        } else {
+                            Type::field()
+                        }
+                    }
+                    CastTarget::U(size) => {
+                        if value_type.is_witness_of() {
+                            Type::witness_of(Type::u(*size))
+                        } else {
+                            Type::u(*size)
+                        }
+                    }
                     CastTarget::Nop => value_type.clone(),
                     CastTarget::ArrayToSlice => {
                         match &value_type.expr {
@@ -351,7 +365,7 @@ impl Types {
             }
             OpCode::Rangecheck { value: v, max_bits: _ } => {
                 let v_type = function_info.values.get(v).unwrap();
-                if !v_type.is_field() {
+                if !v_type.strip_witness().is_field() {
                     return Err(format!(
                         "only field types are supported for rangecheck, got {}",
                         v_type

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::compiler::{
     pass_manager::{Pass, PassInfo, PassManager}, passes::fix_double_jumps::ValueReplacements, ssa::{OpCode, SSA}
 };
@@ -46,17 +47,28 @@ impl WitnessWriteToVoid {
                 }
             }
 
+            // Collect entry block param ValueIds so we can distinguish
+            // entry-param WriteWitness (which must be removed) from
+            // byte-decomposition WriteWitness (which must be kept).
+            let entry_param_ids: HashSet<_> = if is_main {
+                function.get_entry().get_parameters().map(|(id, _)| *id).collect()
+            } else {
+                HashSet::new()
+            };
+
             for (block_id, block) in function.get_blocks_mut() {
-                // In the main function's entry block, remove voided WriteWitness entirely.
-                // These correspond to the entry param Field→WitnessOf conversions whose
-                // witness slots overlap with the input value positions filled by the
-                // interpreter. Generating write_witness bytecodes for them would write
-                // past the allocated witness buffer.
+                // In the main function's entry block, remove only the voided WriteWitness
+                // that correspond to entry param Field→WitnessOf conversions. Their witness
+                // slots overlap with input positions filled by the interpreter. Other voided
+                // WriteWitness (e.g. byte decomposition from rangechecks) must be kept so
+                // their values are written to the witness tape at the correct positions.
                 if is_main && *block_id == entry_id {
                     let old_instructions = block.take_instructions();
                     let new_instructions = old_instructions
                         .into_iter()
-                        .filter(|instr| !matches!(instr, OpCode::WriteWitness { result: None, .. }))
+                        .filter(|instr| {
+                            !matches!(instr, OpCode::WriteWitness { result: None, value } if entry_param_ids.contains(value))
+                        })
                         .collect();
                     block.put_instructions(new_instructions);
                 }

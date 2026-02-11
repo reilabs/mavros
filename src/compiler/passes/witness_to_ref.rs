@@ -162,7 +162,7 @@ impl WitnessToRef {
                             let mut new_keys = vec![];
                             for key in keys.iter() {
                                 let key_type = type_info.get_value_type(*key);
-                                assert!(key_type.is_field(), "Keys of lookup must be fields");
+                                assert!(key_type.strip_witness().is_field(), "Keys of lookup must be fields");
                                 if !key_type.is_witness_of() {
                                     let refed = function.fresh_value();
                                     new_instructions.push(OpCode::Cast { result: refed, value: *key, target: CastTarget::WitnessOf });
@@ -174,7 +174,7 @@ impl WitnessToRef {
                             let mut new_results = vec![];
                             for result in results.iter() {
                                 let result_type = type_info.get_value_type(*result);
-                                assert!(result_type.is_field(), "Results of lookup must be fields");
+                                assert!(result_type.strip_witness().is_field(), "Results of lookup must be fields");
                                 if !result_type.is_witness_of() {
                                     let refed = function.fresh_value();
                                     new_instructions.push(OpCode::Cast { result: refed, value: *result, target: CastTarget::WitnessOf });
@@ -495,6 +495,12 @@ impl WitnessToRef {
                     element_types: tgt_fields.clone(),
                 });
                 result
+            }
+            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => {
+                // Both source and target are WitnessOf — same runtime representation.
+                // The inner types may differ (e.g. WitnessOf(Field) vs WitnessOf(U(1)))
+                // but all WitnessOf values are witness references in the AD VM.
+                value
             }
             _ => panic!(
                 "witness_to_ref value conversion not supported: {:?} -> {:?}",

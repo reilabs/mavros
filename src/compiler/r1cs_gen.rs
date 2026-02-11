@@ -435,7 +435,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
-        match &out_type.expr {
+        match &out_type.strip_witness().expr {
             TypeExpr::U(1) => {
                 let a = self.expect_u1();
                 let b = b.expect_u1();

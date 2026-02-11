@@ -86,14 +86,14 @@ impl ExplicitWitness {
                                     CmpKind::Eq => {
                                         let u1 = CastTarget::U(1);
                                         // Conditionally cast operands to Field (skip if already Field)
-                                        let l_field = if matches!(function_type_info.get_value_type(lhs).expr, TypeExpr::Field) {
+                                        let l_field = if function_type_info.get_value_type(lhs).strip_witness().is_field() {
                                             lhs
                                         } else {
                                             let v = function.fresh_value();
                                             new_instructions.push(OpCode::mk_cast_to_field(v, lhs));
                                             v
                                         };
-                                        let r_field = if matches!(function_type_info.get_value_type(rhs).expr, TypeExpr::Field) {
+                                        let r_field = if function_type_info.get_value_type(rhs).strip_witness().is_field() {
                                             rhs
                                         } else {
                                             let v = function.fresh_value();
@@ -121,7 +121,7 @@ impl ExplicitWitness {
                                         } ->);
                                     }
                                     CmpKind::Lt => {
-                                        let TypeExpr::U(s) = function_type_info.get_value_type(rhs).expr else {
+                                        let TypeExpr::U(s) = function_type_info.get_value_type(rhs).strip_witness().expr else {
                                             panic!("ICE: rhs is not a U type");
                                         };
                                         let u1 = CastTarget::U(1);
@@ -244,7 +244,7 @@ impl ExplicitWitness {
                                 continue;
                             }
                             let one = function.push_field_const(ark_ff::Fp::from(1));
-                            let l = if l_type.is_field() {
+                            let l = if l_type.strip_witness().is_field() {
                                 l
                             } else {
                                 let casted = function.fresh_value();
@@ -255,7 +255,7 @@ impl ExplicitWitness {
                                 });
                                 casted
                             };
-                            let r = if r_type.is_field() {
+                            let r = if r_type.strip_witness().is_field() {
                                 r
                             } else {
                                 let casted = function.fresh_value();
@@ -448,30 +448,30 @@ impl ExplicitWitness {
                             new_instructions.push(instruction);
                         }
                         OpCode::Not { result, value } => {
-                            match &function_type_info.get_value_type(value).expr {
-                                TypeExpr::U(s) => {
-                                    let ones = function.push_field_const(Field::from((1u128 << *s) - 1));
-                                    let casted = function.fresh_value();
-                                    new_instructions.push(OpCode::Cast {
-                                        result: casted,
-                                        value: value,
-                                        target: CastTarget::Field,
-                                    });
-                                    let subbed = function.fresh_value();
-                                    new_instructions.push(OpCode::BinaryArithOp {
-                                        kind: BinaryArithOpKind::Sub,
-                                        result: subbed,
-                                        lhs: ones,
-                                        rhs: casted,
-                                    });
-                                    new_instructions.push(OpCode::Cast {
-                                        result: result,
-                                        value: subbed,
-                                        target: CastTarget::U(*s),
-                                    });
-                                }
+                            let value_type = function_type_info.get_value_type(value);
+                            let s = match &value_type.strip_witness().expr {
+                                TypeExpr::U(s) => *s,
                                 e => todo!("Unsupported type for negation: {:?}", e),
-                            }
+                            };
+                            let ones = function.push_field_const(Field::from((1u128 << s) - 1));
+                            let casted = function.fresh_value();
+                            new_instructions.push(OpCode::Cast {
+                                result: casted,
+                                value: value,
+                                target: CastTarget::Field,
+                            });
+                            let subbed = function.fresh_value();
+                            new_instructions.push(OpCode::BinaryArithOp {
+                                kind: BinaryArithOpKind::Sub,
+                                result: subbed,
+                                lhs: ones,
+                                rhs: casted,
+                            });
+                            new_instructions.push(OpCode::Cast {
+                                result: result,
+                                value: subbed,
+                                target: CastTarget::U(s),
+                            });
                         }
                         OpCode::ToBits {
                             result: _,

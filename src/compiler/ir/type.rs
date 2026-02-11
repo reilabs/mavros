@@ -154,6 +154,10 @@ impl Type {
         match &self.expr {
             TypeExpr::Array(inner, _) => *inner.clone(),
             TypeExpr::Slice(inner) => *inner.clone(),
+            TypeExpr::WitnessOf(inner) => {
+                let elem = inner.get_array_element();
+                Type::witness_of(elem)
+            }
             _ => panic!("Type is not an array: {}", self),
         }
     }
@@ -168,13 +172,20 @@ impl Type {
     pub fn get_tuple_element(&self, index: usize) -> Self {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements[index].clone(),
+            TypeExpr::WitnessOf(inner) => {
+                let elem = inner.get_tuple_element(index);
+                Type::witness_of(elem)
+            }
             _ => panic!("Type is not a tuple: {}", self),
         }
     }
 
-    pub fn get_tuple_elements(&self) -> &Vec<Self> {
+    pub fn get_tuple_elements(&self) -> Vec<Self> {
         match &self.expr {
-            TypeExpr::Tuple(elements) => elements,
+            TypeExpr::Tuple(elements) => elements.clone(),
+            TypeExpr::WitnessOf(inner) => {
+                inner.get_tuple_elements().into_iter().map(Type::witness_of).collect()
+            }
             _ => panic!("Type is not a tuple: {}", self),
         }
     }
