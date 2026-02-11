@@ -318,6 +318,8 @@ impl SsaConverter {
         let return_values = result.into_iter().collect();
         function.terminate_block_with_return(current_block, return_values);
 
+        function.set_unconstrained(in_unconstrained);
+
         function
     }
 }

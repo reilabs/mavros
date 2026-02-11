@@ -580,7 +580,6 @@ impl TaintAnalysis {
 
         // initialize block params
         if func.is_unconstrained() {
-            println!("Function {:?} is unconstrained, assigning pure taints", func_id);
             for (_, block) in func.get_blocks() {
                 for (value, tp) in block.get_parameters() {
                     let taint = self.construct_pure_taint_for_type(tp);
@@ -599,7 +598,6 @@ impl TaintAnalysis {
                     .push(Judgement::Le(function_taint.cfg_taint.clone(), cfg_taint));
             }
         } else {
-            println!("Function {:?} is constrained, assigning free taints", func_id);
             for (_, block) in func.get_blocks() {
                 for (value, tp) in block.get_parameters() {
                     let taint = self.construct_free_taint_for_type(tp);
