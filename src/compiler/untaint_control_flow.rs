@@ -638,6 +638,9 @@ impl UntaintControlFlow {
                     OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                         new_instructions.push(instruction);
                     }
+                    OpCode::WriteWitness { .. } => {
+                        new_instructions.push(instruction);
+                    }
                     _ => {
                         panic!("Unhandled instruction {:?}", instruction);
                     }

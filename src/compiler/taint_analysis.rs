@@ -913,8 +913,7 @@ impl TaintAnalysis {
                         max_bits: _,
                     } => {}
                     OpCode::MemOp { kind: _, value: _ } => {}
-                    OpCode::WriteWitness { .. }
-                    | OpCode::Constrain { .. }
+                    OpCode::Constrain { .. }
                     | OpCode::FreshWitness {
                         result: _,
                         result_type: _,
@@ -952,6 +951,18 @@ impl TaintAnalysis {
                     | OpCode::Todo { .. }
                     => {
                         panic!("Should not be present at this stage {:?}", instruction);
+                    }
+                    OpCode::WriteWitness {
+                        result,
+                        value: _,
+                        witness_annotation: _,
+                    } => {
+                        if let Some(r) = result {
+                            function_taint.value_taints.insert(
+                                *r,
+                                TaintType::Primitive(Taint::Constant(ConstantTaint::Witness)),
+                            );
+                        }
                     }
                     OpCode::TupleProj {
                         result,

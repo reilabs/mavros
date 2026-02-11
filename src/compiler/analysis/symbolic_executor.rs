@@ -278,16 +278,14 @@ impl SymbolicExecutor {
                         args: arguments,
                         is_unconstrained,
                     } => {
-                        if !*is_unconstrained {                            
-                            let params = arguments
-                                .iter()
-                                .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
-                                .collect::<Vec<_>>();
-                            let outputs =
-                                self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
-                            for (i, val) in returns.iter().enumerate() {
-                                scope[val.0 as usize] = Some(outputs[i].clone());
-                            }
+                        let params = arguments
+                            .iter()
+                            .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
+                            .collect::<Vec<_>>();
+                        let outputs =
+                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
+                        for (i, val) in returns.iter().enumerate() {
+                            scope[val.0 as usize] = Some(outputs[i].clone());
                         }
                     }
                     crate::compiler::ssa::OpCode::Call {
