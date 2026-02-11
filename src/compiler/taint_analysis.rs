@@ -807,13 +807,11 @@ impl TaintAnalysis {
                             for (output, ret) in
                                 outputs_taint.iter().zip(func_taint.returns_taint.iter())
                             {
-                                self.deep_le(ret, output, &mut function_taint.judgements);
-                                self.deep_le(output, ret, &mut function_taint.judgements);
+                                self.deep_eq(ret, output, &mut function_taint.judgements);
                             }
                             for (input, param) in inputs_taint.iter().zip(func_taint.parameters.iter())
                             {
-                                self.deep_le(input, param, &mut function_taint.judgements);
-                                self.deep_le(param, input, &mut function_taint.judgements);
+                                self.deep_eq(input, param, &mut function_taint.judgements);
                             }
                             function_taint.judgements.extend(func_taint.judgements);
                             function_taint.judgements.push(Judgement::Le(
@@ -1076,6 +1074,40 @@ impl TaintAnalysis {
         }
 
         self.functions.insert(func_id, function_taint);
+    }
+
+    fn deep_eq(&self, lhs: &TaintType, rhs: &TaintType, judgements: &mut Vec<Judgement>) {
+        match (lhs, rhs) {
+            (TaintType::Primitive(lhs), TaintType::Primitive(rhs)) => {
+                judgements.push(Judgement::Eq(lhs.clone(), rhs.clone()));
+            }
+            (
+                TaintType::NestedImmutable(lhs, inner_lhs),
+                TaintType::NestedImmutable(rhs, inner_rhs),
+            ) => {
+                judgements.push(Judgement::Eq(lhs.clone(), rhs.clone()));
+                self.deep_eq(inner_lhs, inner_rhs, judgements);
+            }
+            (
+                TaintType::NestedMutable(lhs, inner_lhs),
+                TaintType::NestedMutable(rhs, inner_rhs),
+            ) => {
+                judgements.push(Judgement::Eq(lhs.clone(), rhs.clone()));
+                self.deep_eq(inner_lhs, inner_rhs, judgements);
+            }
+            (
+                TaintType::Tuple(lhs, inner_lhs),
+                TaintType::Tuple(rhs, inner_rhs),
+            ) => {
+                judgements.push(Judgement::Eq(lhs.clone(), rhs.clone()));
+                for (l, r) in inner_lhs.iter().zip(inner_rhs.iter()) {
+                    self.deep_eq(l, r, judgements);
+                }
+            }
+            _ => {
+                panic!("Cannot compare different taint types: {:?} vs {:?}", lhs, rhs)
+            }
+        }
     }
 
     fn deep_le(&self, lhs: &TaintType, rhs: &TaintType, judgements: &mut Vec<Judgement>) {
