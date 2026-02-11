@@ -14,45 +14,55 @@ external annotation.
 ## Key Ideas
 
 1. **`WitnessOf(X)`** is a new type constructor: `WitnessOf(Field)` means "a witness
-   observation of a field element." The subtyping relation `X < WitnessOf(X)` means any
-   pure value can be used where a witness is expected (implicit upcast).
+   observation of a field element." During type inference and monomorphization, the
+   subtyping relation `X < WitnessOf(X)` holds, allowing implicit upcasts.
 
-2. **`WriteWitness` is typed as `X -> WitnessOf(X)`**: it promotes a pure value into the
+2. **After monomorphization + cast insertion, subtyping disappears.** `WitnessOf(X)` and `X`
+   become fully independent types with no implicit conversion. `Cast(WitnessOf)` is a real
+   runtime conversion (like current `PureToWitnessRef`), not a no-op.
+
+3. **`WriteWitness` is typed as `X -> WitnessOf(X)`**: it promotes a pure value into the
    witness domain. There is no inverse operation.
 
-3. **Type inference replaces taint analysis**: instead of a separate constraint system over
+4. **Type inference replaces taint analysis**: instead of a separate constraint system over
    taints, we re-infer types under the subtyping relation `X < WitnessOf(X)`. Since main
    parameters are already wrapped with `WriteWitness`, witness types propagate naturally.
 
-4. **Monomorphization specializes functions**: duplicates function definitions based on
+5. **Monomorphization specializes functions**: duplicates function definitions based on
    their WitnessOf-augmented type signatures, as the current system does with taint
    signatures.
 
-5. **A separate cast insertion pass makes subtyping explicit**: after monomorphization,
+6. **A separate cast insertion pass makes subtyping explicit**: after monomorphization,
    `WitnessCastInsertion` inserts explicit `Cast` operations where a value of type `X`
-   is used in a context requiring `WitnessOf(X)` (e.g., storing into an array typed
-   `Array<WitnessOf(Field)>`, passing arguments to specialized functions).
+   is used in a context requiring `WitnessOf(X)`. These are real conversions, not type
+   annotations.
 
-6. **Control-flow untainting is deferred**: for now, we panic if a `JmpIf` condition has a
-   `WitnessOf` type. A separate pass (modified `UntaintControlFlow`) handles CFG taint
-   tracking and function taint parameters.
+7. **The `V` annotation parameter is eliminated.** Types become plain `TypeExpr` (no
+   generic annotation). `WitnessOf` in `TypeExpr` carries all witness information.
+   `Empty`, `ConstantTaint`, and the `CommutativeMonoid` trait are removed.
+
+8. **UntaintControlFlow is fully reworked.** It reads WitnessOf types directly (no
+   ConstantTaint conversion), handles witness-dependent branches (JmpIf→Select, guarded
+   stores), and adds CFG witness parameters — full feature parity with current.
 
 ## What Changes
 
 | Component | Current | New |
 |-----------|---------|-----|
 | Witness tracking | Separate `TaintType` overlay | `WitnessOf(X)` in `TypeExpr` |
-| Type annotation `V` | `Empty` / `ConstantTaint` | Kept for now (minimize blast radius) |
+| Type annotation `V` | `Empty` / `ConstantTaint` | **Eliminated** — types have no annotation parameter |
 | `WitnessRef` type | Separate `TypeExpr::WitnessRef` | Replaced by `WitnessOf(X)` |
+| `SSA<V>` | Generic over annotation type | Plain `SSA` (no type parameter) |
 | Taint analysis | `taint_analysis.rs` | New `witness_type_inference.rs` |
 | Constraint solver | Union-find over `Taint` variables | Similar, but over WitnessOf type lattice |
-| Monomorphization | Specializes by `TaintType` signature | Specializes by `Type` signature (with WitnessOf); no casts |
-| WitnessCastInsertion | (did not exist) | NEW: inserts explicit Cast at type boundaries after monomorphization |
-| UntaintControlFlow | Converts `SSA<Empty>` to `SSA<ConstantTaint>`, handles witness branches | Simplified: verifies no witness JmpIf, infers CFG taint, adds taint params |
+| Monomorphization | Specializes by `TaintType` signature | Specializes by `Type` signature (with WitnessOf) |
+| WitnessCastInsertion | (did not exist) | NEW: inserts real Cast conversions at type boundaries |
+| UntaintControlFlow | Converts `SSA<Empty>` to `SSA<ConstantTaint>`, handles witness branches | Fully reworked: reads WitnessOf types, handles witness branches, adds CFG witness params |
 | ExplicitWitness | Checks `ConstantTaint` annotations | Checks for `WitnessOf` in types |
 | WitnessToRef | Converts witness types to `WitnessRef` | Reworked: lowering pass operates on `WitnessOf` types |
-| Cast opcode | `Field <-> U(n)` | Extended with `WitnessOf` target |
+| Cast opcode | `Field <-> U(n)` | Extended with `WitnessOf` target (real conversion) |
 | `PureToWitnessRef` | Separate opcode | Replaced by `Cast` with WitnessOf target |
+| Subtyping `X < WitnessOf(X)` | N/A | **Only exists during inference and monomorphization.** Gone after cast insertion. |
 
 ## Pipeline (Before vs After)
 
@@ -67,11 +77,11 @@ SSA<Empty>
 
 ### New Pipeline
 ```
-SSA<Empty>
+SSA  (no type parameter — WitnessOf is in TypeExpr)
   -> Defunctionalize -> PrepareEntryPoint -> RemoveUnreachable -> MakeStructAccessStatic -> DCE
   -> FlowAnalysis -> WitnessTypeInference -> Monomorphization (specialization only)
-  -> WitnessCastInsertion (insert explicit Cast ops at type boundaries)
-  -> UntaintControlFlow (CFG taint + verification; produces SSA<ConstantTaint>)
+  -> WitnessCastInsertion (insert real Cast conversions — subtyping disappears here)
+  -> UntaintControlFlow (reads WitnessOf types, handles witness branches, adds CFG params)
   -> ExplicitWitness (checks WitnessOf types) -> ... -> WitnessLowering -> R1CS / CodeGen
 ```
 

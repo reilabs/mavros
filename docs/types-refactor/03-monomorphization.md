@@ -28,8 +28,8 @@ struct Signature {
 ### New system
 ```rust
 struct Signature {
-    param_types: Vec<Type<Empty>>,    // Types with WitnessOf
-    return_types: Vec<Type<Empty>>,   // Types with WitnessOf
+    param_types: Vec<Type>,    // Types with WitnessOf
+    return_types: Vec<Type>,   // Types with WitnessOf
     // No cfg_taint — that's handled by UntaintControlFlow
 }
 ```
@@ -114,11 +114,12 @@ enum CastTarget {
 }
 ```
 
-The `Cast` with `CastTarget::WitnessOf` is a **type-level** operation during this phase:
-- It marks the subtyping coercion explicitly in the IR
-- It has no operational effect yet (the value is the same bits)
-- Later passes (WitnessLowering / ExplicitWitness) will lower this to actual witness
-  operations where needed
+The `Cast` with `CastTarget::WitnessOf` is a **real runtime conversion**:
+- It converts a pure value into its witness representation (like current `PureToWitnessRef`)
+- After cast insertion, `WitnessOf(X)` and `X` are fully independent types — the subtyping
+  relation `X < WitnessOf(X)` no longer exists
+- Downstream passes (ExplicitWitness, WitnessLowering, codegen) treat `WitnessOf(X)` as a
+  distinct runtime kind (witness tape reference)
 
 ### Algorithm
 
@@ -240,9 +241,9 @@ a clear error message. This can be revisited later if needed.
 - Values may be used at boundaries with type mismatches (implicit subtyping)
 
 ### After cast insertion: UntaintControlFlow
-- Receives `SSA<Empty>` with WitnessOf types and explicit casts
-- Determines CFG taint, converts to `SSA<ConstantTaint>`
-- Verifies no witness JmpIf
+- Receives `SSA` with WitnessOf types and explicit casts
+- Linearizes witness branches (JmpIf → Jmp + Select, guarded stores)
+- Outputs `SSA` with WitnessOf types, branches linearized
 
 ### Relationship to current WitnessToRef
 - Current WitnessToRef does cast insertion + instruction lowering

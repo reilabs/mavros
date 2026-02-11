@@ -2,36 +2,59 @@
 
 ## 1. TypeExpr Changes
 
+### Eliminating the `V` annotation parameter
+
+The generic annotation parameter `V` on `Type<V>` and `TypeExpr<V>` is **removed entirely**.
+Types become plain structs with no generic parameter. The `CommutativeMonoid` trait, `Empty`,
+and `ConstantTaint` types are all removed.
+
+Before:
+```rust
+struct Type<V> { expr: TypeExpr<V>, annotation: V }
+enum TypeExpr<V> { Field, U(usize), WitnessRef, Array(Box<Type<V>>, usize), ... }
+```
+
+After:
+```rust
+struct Type { expr: TypeExpr }
+enum TypeExpr { Field, U(usize), WitnessOf(Box<Type>), Array(Box<Type>, usize), ... }
+```
+
+This is a large mechanical change (every `Type<V>`, `SSA<V>`, `Function<V>`, `Block<V>`,
+`OpCode<V>` loses its type parameter) but simplifies the codebase significantly.
+
 ### New variant
 
 ```rust
-enum TypeExpr<V> {
+enum TypeExpr {
     Field,
     U(usize),
-    WitnessOf(Box<Type<V>>),   // NEW: replaces WitnessRef
-    Array(Box<Type<V>>, usize),
-    Slice(Box<Type<V>>),
-    Ref(Box<Type<V>>),
-    Tuple(Vec<Type<V>>),
+    WitnessOf(Box<Type>),   // NEW: replaces WitnessRef
+    Array(Box<Type>, usize),
+    Slice(Box<Type>),
+    Ref(Box<Type>),
+    Tuple(Vec<Type>),
     Function,
     // WitnessRef — REMOVED
 }
 ```
 
 `WitnessOf(X)` wraps any type `X` and denotes a witness representation of `X`.
+After monomorphization + cast insertion, `WitnessOf(X)` is a fully independent type from
+`X` — it represents a distinct runtime kind (witness tape reference), exactly as `WitnessRef`
+does today.
 
 ### Idempotency
 
 `WitnessOf(WitnessOf(X)) = WitnessOf(X)` — enforced by a normalizing constructor:
 
 ```rust
-impl<V> Type<V> {
-    fn witness_of(inner: Type<V>, annotation: V) -> Type<V> {
+impl Type {
+    fn witness_of(inner: Type) -> Type {
         match inner.expr {
             TypeExpr::WitnessOf(_) => inner,  // idempotent
             _ => Type {
                 expr: TypeExpr::WitnessOf(Box::new(inner)),
-                annotation,
             },
         }
     }
@@ -41,11 +64,31 @@ impl<V> Type<V> {
 ### Removing WitnessRef
 
 Every occurrence of `TypeExpr::WitnessRef` is replaced:
-- `Type::witness_ref(annotation)` → `Type::witness_of(Type::field(V::empty()), annotation)`
-- `Const::WitnessRef(fr)` — remains as a runtime value kind (it's about the VM representation,
-  not the type system); alternatively renamed to `Const::Witness(fr)`.
+- `Type::witness_ref()` → `Type::witness_of(Type::field())`
+- `Const::WitnessRef(fr)` → `Const::Witness(fr)` (renamed for clarity)
 
-## 2. Subtyping Rules
+### Impact of removing `V`
+
+All generic type parameters are removed:
+- `SSA<V>` → `SSA`
+- `Function<V>` → `Function`
+- `Block<V>` → `Block`
+- `OpCode<V>` → `OpCode`
+- `Type<V>` → `Type`
+- `TypeExpr<V>` → `TypeExpr`
+- `prepare_rebuild::<ConstantTaint>()` → just `prepare_rebuild()`
+- The `CommutativeMonoid` trait is deleted
+- `get_arithmetic_result_type`, `combine_with_annotation`, etc. — simplified or removed
+
+## 2. Subtyping Rules (Pre-Monomorphization Only)
+
+**Important:** The subtyping relation `X <: WitnessOf(X)` only exists during type inference
+and monomorphization. After `WitnessCastInsertion` inserts explicit `Cast(WitnessOf)` ops,
+subtyping disappears. From that point on, `WitnessOf(X)` and `X` are fully independent types
+with no implicit conversion — just like `Field` and `U(32)` are independent today.
+
+`Cast(WitnessOf)` is a **real runtime conversion** (like current `PureToWitnessRef`), not
+a type-level no-op.
 
 The subtyping relation `<:` is defined as follows:
 
@@ -223,7 +266,8 @@ tuple_proj(t: Tuple<T1,...,Tn>, i) : Ti
 For select (ternary):
 ```
 select(cond: C, if_t: T, if_f: F) : join(C_scalar, T, F)
-  — condition's witness-ness propagates to result
+  — condition's witness-ness propagates to top level of result
+  — may produce WitnessOf(Array<...>) — panics downstream (acceptable for now)
 ```
 
 ## 7. Const Values

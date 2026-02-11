@@ -13,36 +13,51 @@
 
 ## Phase 1: Type System Foundation
 
-### Step 1.1: Add WitnessOf to TypeExpr
+### Step 1.1: Eliminate `V` annotation parameter and add WitnessOf
 
 **File:** `src/compiler/ir/type.rs`
 
-- Add `WitnessOf(Box<Type<V>>)` variant to `TypeExpr<V>`
-- Add normalizing constructor `Type::witness_of(inner, annotation)` (enforces idempotency)
+This is the largest single step. The generic annotation parameter `V` on `Type<V>`,
+`TypeExpr<V>`, and all dependent types is removed entirely:
+
+- `Type<V>` → `Type` (struct with just `expr: TypeExpr`, no `annotation` field)
+- `TypeExpr<V>` → `TypeExpr`
+- Remove `CommutativeMonoid` trait, `Empty` struct, `ConstantTaint` enum
+- Remove `annotation` field and all annotation-related methods (`as_pure()`,
+  `combine_with_annotation()`, `pure_taint_for_type()`, etc.)
+- Add `WitnessOf(Box<Type>)` variant to `TypeExpr`
+- Remove `WitnessRef` variant from `TypeExpr`
+- Add normalizing constructor `Type::witness_of(inner)` (enforces idempotency)
 - Add helper methods:
   - `is_witness_of() -> bool`
-  - `unwrap_witness_of() -> &Type<V>` (returns inner if WitnessOf, panics otherwise)
-  - `try_unwrap_witness_of() -> Option<&Type<V>>`
-  - `strip_witness() -> Type<V>` (strips one level of WitnessOf)
-  - `strip_all_witness() -> Type<V>` (recursively strips all WitnessOf)
+  - `unwrap_witness_of() -> &Type` (returns inner if WitnessOf, panics otherwise)
+  - `try_unwrap_witness_of() -> Option<&Type>`
+  - `strip_witness() -> Type` (strips one level of WitnessOf)
+  - `strip_all_witness() -> Type` (recursively strips all WitnessOf)
 - Update ALL pattern matches on TypeExpr to handle WitnessOf:
-  - `equal_up_to_annotation`: WitnessOf(X) == WitnessOf(Y) iff X == Y
-  - `as_pure`: WitnessOf(inner) → WitnessOf(inner.as_pure())
   - `contains_ptrs`: WitnessOf(inner) → inner.contains_ptrs()
   - `get_arithmetic_result_type`: delegate through WitnessOf
   - `is_numeric`: WitnessOf(numeric) → true
   - `is_heap_allocated`: WitnessOf(_) → true (witness values live on tape)
   - `calculate_type_size`: WitnessOf(inner) → 1 (pointer-sized)
   - Display: `WitnessOf(Field)`, `WitnessOf(Array<...>)`, etc.
-- Keep `WitnessRef` variant for now (coexistence)
 
-**Test:** Compiles, existing tests pass (WitnessOf not yet used anywhere).
+**Cascading changes:** Removing `V` propagates to every file that uses `Type<V>`:
+- `SSA<V>` → `SSA`, `Function<V>` → `Function`, `Block<V>` → `Block`, `OpCode<V>` → `OpCode`
+- All pass signatures lose their generic parameter
+- `prepare_rebuild::<ConstantTaint>()` → `prepare_rebuild()`
+- All `where V: CommutativeMonoid` bounds are removed
 
-### Step 1.2: Add CastTarget::WitnessOf
+**Test:** Compiles (with many downstream updates), existing tests pass.
+
+### Step 1.2: Add CastTarget::WitnessOf and remove old opcodes
 
 **File:** `src/compiler/ssa.rs`
 
 - Add `WitnessOf` variant to `CastTarget` enum
+- Remove `OpCode::PureToWitnessRef` (replaced by `Cast { target: WitnessOf }`)
+- Remove `OpCode::UnboxField` (replaced by appropriate Cast or identity)
+- Rename `Const::WitnessRef` → `Const::Witness`
 - Update Cast handling in all passes to handle the new variant
   (most passes can just pass it through unchanged)
 
@@ -52,10 +67,11 @@
 
 **File:** `src/compiler/ir/type.rs`
 
-- Implement `Type::join(a: &Type<V>, b: &Type<V>) -> Type<V>` as described in
+- Implement `Type::join(a: &Type, b: &Type) -> Type` as described in
   [01-type-system.md](01-type-system.md) section 3
 - Implement `Type::is_subtype_of(a, b) -> bool` for checking subtyping relation
-- Add unit tests for join and subtyping
+- Implement `needs_witness_cast(from, to) -> bool` for cast insertion
+- Add unit tests for join, subtyping, and needs_witness_cast
 
 **Test:** Unit tests for join/subtyping pass.
 
@@ -72,7 +88,6 @@
 - Define `WitnessJudgement` enum (Eq, Le) — same as current `Judgement`
 - Implement all helper methods (union, gather_vars, substitute, simplify_and_default,
   toplevel_info, child_type, with_toplevel_info)
-- Implement conversion: `WitnessType` → `TaintType` (for compatibility during migration)
 
 Note: This can mostly be a copy-rename of the relevant parts of `taint_analysis.rs`.
 
@@ -91,10 +106,11 @@ Note: This can mostly be a copy-rename of the relevant parts of `taint_analysis.
   - Iterate: analyze each function, solve constraints, check for changes
   - Converge
 - `analyze_function(func_id)`: constraint generation
-  - Same logic as current `TaintAnalysis::analyze_function()` but:
-    - No `cfg_taint` tracking
-    - No `block_cfg_taints`
-    - No `Le(cfg_taint, inner)` on Store
+  - Same logic as current `TaintAnalysis::analyze_function()` with renamed types:
+    - Tracks `cfg_witness` per-function and `block_cfg_witness` per-block
+      (same as current `cfg_taint` / `block_cfg_taints`)
+    - Includes `Le(block_cfg_witness, inner.toplevel)` on Store
+      (needed for correct Ref typing under witness branches)
   - For Call: look up callee's current signature (from Mycroft state or already-analyzed)
 
 ### Step 2.3: Create WitnessConstraintSolver
@@ -124,7 +140,8 @@ parallel solver in `witness_constraint_solver.rs`.
 
 **File:** `src/compiler/monomorphization.rs`
 
-- Change `Signature` to use `Vec<Type<Empty>>` for params/returns
+- Change `Signature` to use `Vec<Type>` for params/returns (no `V` parameter)
+- Remove `cfg_taint` from Signature (CFG witness-ness is handled by UntaintControlFlow)
 - Update `monomorphize_main_signature` to produce WitnessOf types
 - Update `specialize_function` to use WitnessTypeInference results
 - Keep using current ConstraintSolver for resolving per-function constraints
@@ -160,48 +177,55 @@ UntaintControlFlow).
 
 ---
 
-## Phase 4: UntaintControlFlow Update
+## Phase 4: UntaintControlFlow Full Rework
 
-### Step 4.1: Update UntaintControlFlow for WitnessOf types
+### Step 4.1: Rework UntaintControlFlow for WitnessOf types
 
 **File:** `src/compiler/untaint_control_flow.rs`
 
-- Input: `SSA<Empty>` where types contain WitnessOf
-- Walk each function:
-  1. For each value, convert its type: WitnessOf(X) → X with annotation Witness;
-     plain X → X with annotation Pure
-  2. For each JmpIf, check condition type: if WitnessOf, **panic**
-  3. Determine CFG taint (for now: always Pure because we panicked on witness JmpIf)
-  4. No function taint parameters needed (for now)
-- Output: `SSA<ConstantTaint>` where types have ConstantTaint annotations
+With `V` eliminated, there is no `SSA<Empty>` → `SSA<ConstantTaint>` conversion. UCF now
+operates directly on `SSA` with WitnessOf types baked into TypeExpr.
 
-Key function:
-```rust
-fn convert_type(typ: &Type<Empty>) -> Type<ConstantTaint> {
-    match &typ.expr {
-        TypeExpr::WitnessOf(inner) => {
-            // Recursively convert inner, then mark outer as Witness
-            let inner_conv = convert_type_inner(inner);
-            Type { expr: inner_conv.expr, annotation: ConstantTaint::Witness }
-        }
-        TypeExpr::Field => Type::field(ConstantTaint::Pure),
-        TypeExpr::U(n) => Type::u(*n, ConstantTaint::Pure),
-        TypeExpr::Array(inner, size) => {
-            let inner_conv = convert_type(inner);
-            Type {
-                expr: TypeExpr::Array(Box::new(inner_conv), *size),
-                annotation: ConstantTaint::Pure,
-            }
-        }
-        // ... etc.
-    }
-}
-```
+- **Input:** `SSA` with WitnessOf types (after monomorphization + cast insertion)
+- **Output:** `SSA` with WitnessOf types, witness branches linearized
 
-### Step 4.2: Remove TaintAnalysis dependency from UntaintControlFlow
+**Full witness branch handling (same transformations as current pass):**
 
-- UntaintControlFlow no longer needs `TaintAnalysis` as input
-- It derives ConstantTaint annotations directly from WitnessOf types
+1. **Determine block CFG witness-ness** from the WitnessTypeInference results
+   (`block_cfg_witness` map). A block is witness-conditional if its `cfg_witness` resolved
+   to `Witness`.
+
+2. **Linearize witness JmpIf**: Replace `JmpIf(cond, then_block, else_block)` with
+   `Jmp(merge_block)`, insert `Select(cond, then_val, else_val)` for merge parameters.
+   Select result types contain `WitnessOf` (condition is WitnessOf → result is WitnessOf).
+
+3. **Guard stores** in witness-conditional blocks:
+   ```
+   // Original: store(ref, new_value)
+   // Becomes:
+   old = load(ref)
+   guarded = select(cfg_flag, new_value, old)
+   store(ref, guarded)
+   ```
+
+4. **Guard assert_eq** in witness-conditional blocks.
+
+5. **Add CFG witness parameters**: thread the "which branch was taken" flag as
+   `WitnessOf(U(1))` block parameters (replaces current `u(1, ConstantTaint::Witness)`).
+
+**Key differences from current:**
+- No type annotation conversion (no `V`, no `ConstantTaint`)
+- Checks `WitnessOf` in `TypeExpr` instead of `ConstantTaint` annotations
+- All existing linearization logic is preserved, just operating on different type representation
+
+### Step 4.2: Update downstream passes to check WitnessOf directly
+
+Since `ConstantTaint` is eliminated, all downstream passes that currently check
+`annotation.is_witness()` must instead check `type.is_witness_of()`:
+
+- `ExplicitWitness`: check `WitnessOf` in TypeExpr instead of ConstantTaint annotation
+- `WitnessLowering` (ex-WitnessToRef): check `WitnessOf` in TypeExpr
+- R1CGen, CodeGen: check `WitnessOf` in TypeExpr
 
 **Test:** Full pipeline works. All 20 tests pass.
 
@@ -215,24 +239,7 @@ fn convert_type(typ: &Type<Empty>) -> Type<ConstantTaint> {
 - Remove all references to `TaintType`, `FunctionTaint`, `Taint` enum
 - Remove the validation harness from Phase 2
 
-### Step 5.2: Remove WitnessRef from TypeExpr
-
-- Delete `TypeExpr::WitnessRef` variant
-- Update all pattern matches (will be compiler-guided via exhaustive match)
-- Rename `Const::WitnessRef` → `Const::Witness`
-
-### Step 5.3: Remove PureToWitnessRef opcode
-
-- Delete `OpCode::PureToWitnessRef` variant
-- All uses should have been replaced by `Cast { target: WitnessOf }`
-- Update all pattern matches
-
-### Step 5.4: Clean up UnboxField
-
-- Delete `OpCode::UnboxField` variant
-- Replace uses with appropriate Cast or identity
-
-### Step 5.5: Rename/clean up constraint solver and union find
+### Step 5.2: Rename/clean up constraint solver and union find
 
 - Update types in constraint_solver.rs and union_find.rs to use WitnessInfo
 - Or: if we created parallel files in Phase 2, delete the old ones
@@ -243,32 +250,32 @@ fn convert_type(typ: &Type<Empty>) -> Type<ConstantTaint> {
 
 ## Phase 6: Downstream Pass Updates
 
-### Step 6.1: Update ExplicitWitness
+Note: Some of these may be absorbed into earlier phases (e.g., Step 4.2 already handles
+the WitnessOf checks). This phase covers any remaining downstream updates.
 
-**File:** `src/compiler/passes/explicit_witness.rs`
-
-- Replace `is_witness_ref()` checks with WitnessOf-aware checks
-- Since this pass operates on `SSA<ConstantTaint>` (after UntaintControlFlow), it
-  still uses ConstantTaint annotations. **Minimal changes needed.**
-- Main change: where it currently checks for `WitnessRef` type, check for WitnessOf.
-
-### Step 6.2: Rework WitnessToRef → WitnessLowering
+### Step 6.1: Rework WitnessToRef → WitnessLowering
 
 **File:** `src/compiler/passes/witness_to_ref.rs` (rename to `witness_lowering.rs`)
 
-- Input: `SSA<ConstantTaint>` with WitnessOf types
+- Input: `SSA` with WitnessOf types
 - Instead of converting `Field[Witness]` → `WitnessRef`, now:
   - `WitnessOf(Field)` values are already typed correctly
-  - Cast operations (`Cast { target: WitnessOf }`) are lowered here
+  - `Cast { target: WitnessOf }` is lowered here to runtime conversion for AD
   - Instruction lowering (Sub→Add+MulConst, etc.) stays the same
-  - Array/tuple conversion loops: adapt to check WitnessOf instead of ConstantTaint
+  - Array/tuple conversion loops: check WitnessOf in TypeExpr
 - The `Constrain` → `NextDCoeff + BumpD` expansion stays the same
 
-### Step 6.3: Update R1CGen and CodeGen
+### Step 6.2: Update R1CGen and CodeGen
 
 - Replace `WitnessRef` type checks with `WitnessOf` checks
 - `Const::Witness` instead of `Const::WitnessRef`
 - VM representation: `WitnessOf(X)` values → witness tape references (same as before)
+
+### Step 6.3: Update minor passes
+
+- WitnessWriteToVoid, WitnessWriteToFresh, PrepareEntryPoint, DCE,
+  FixDoubleJumps, Mem2Reg, RCInsertion: pattern match updates for
+  removed `V` parameter and WitnessOf instead of WitnessRef
 
 **Test:** All 20 tests pass with full pipeline.
 

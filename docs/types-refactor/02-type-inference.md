@@ -2,13 +2,13 @@
 
 ## 1. Overview
 
-The type inference pass replaces the current `TaintAnalysis`. Given an `SSA<Empty>` where all
+The type inference pass replaces the current `TaintAnalysis`. Given an `SSA` where all
 types are "pure" (no `WitnessOf`), it determines which values should have `WitnessOf`-wrapped
 types based on how witness values flow through the program.
 
-**Input:** `SSA<Empty>` (types without WitnessOf)
+**Input:** `SSA` (types without WitnessOf)
 **Output:** `WitnessTypeAnalysis` — a map from each `(FunctionId, ValueId)` to its inferred
-type (which may contain WitnessOf).
+type (which may contain WitnessOf), plus per-block CFG witness-ness.
 
 ## 2. Internal Representation
 
@@ -55,7 +55,8 @@ struct FunctionWitnessType {
     parameters: Vec<WitnessType>,
     returns: Vec<WitnessType>,
     value_types: HashMap<ValueId, WitnessType>,
-    // NOTE: NO cfg_taint — that's now handled by UntaintControlFlow
+    cfg_witness: WitnessInfo,                    // function-level CFG witness-ness
+    block_cfg_witness: HashMap<BlockId, WitnessInfo>, // per-block CFG witness-ness
     judgements: Vec<Judgement>,
 }
 ```
@@ -96,6 +97,9 @@ result_witness_type = join(lhs_witness_type, rhs_witness_type)
 ```
 result = join(cond_type, then_type, else_type)
 ```
+Note: condition's witness-ness propagates to the top level of the result only. This may
+produce `WitnessOf(Array<...>)` types, which will panic downstream — that's acceptable
+for now.
 
 **Alloc:**
 ```
@@ -106,8 +110,11 @@ result = Ref(Pure, fresh_type_for_element)
 ```
 Given: store(ptr: Ref(_, inner), value)
 Constraint: value <: inner   (deep)
+Constraint: Le(block_cfg_witness, inner.toplevel)
 ```
-No CFG taint constraint — we panic on witness JmpIf, so all stores are unconditional.
+The second constraint ensures that if the store occurs in a witness-conditional block, the
+ref's element type is widened to WitnessOf at the top level. This is needed because
+UntaintControlFlow will guard the store with a Select using the CFG witness flag.
 
 **Load:**
 ```
@@ -188,24 +195,31 @@ For each (passed_value, block_param) pair:
 If loop entry:
   Constraint: condition.toplevel <: Pure  (loop conditions must be pure)
 Else (if-then-else):
+  // Propagate condition's witness-ness to target block CFG witness-ness
+  Constraint: Le(condition.toplevel, then_block.cfg_witness)
+  Constraint: Le(condition.toplevel, else_block.cfg_witness)
+  // Propagate condition's witness-ness to merge point phi params (top-level only)
   For each merge point parameter:
-    Constraint: condition.toplevel <: merge_param.toplevel
-  // This propagates the condition's witness-ness to merge point values
+    Constraint: Le(condition.toplevel, merge_param.toplevel)
 ```
 
+Note: top-level propagation may produce `WitnessOf(Array<...>)` types at merge points,
+which will panic downstream. This is acceptable for now — deep propagation into compound
+types can be added later if needed.
+
 Note: the condition being WitnessOf at a non-loop JmpIf is NOT rejected during type
-inference. We simply propagate the information. The later UntaintControlFlow pass will
-panic if it encounters a witness JmpIf.
+inference. We propagate the information via CFG witness-ness. The later UntaintControlFlow
+pass handles witness branches by linearizing them (JmpIf → Jmp + Select, guarded stores).
 
 ### Differences from Current TaintAnalysis
 
-1. **No `cfg_taint` tracking.** CFG taint (which blocks run under witness control flow)
-   is not inferred here. It's deferred to the modified UntaintControlFlow pass.
+1. **Same CFG witness tracking.** The inference tracks per-block CFG witness-ness
+   (`block_cfg_witness`) just like the current system tracks `block_cfg_taints`. This is
+   needed for correct Store typing under witness-conditional branches.
 
-2. **No `block_cfg_taints`.** Block-level CFG taint is also deferred.
-
-3. **Store constraint simplified.** No `Le(cfg_taint, inner.toplevel)` constraint for
-   stores under witness control flow (since we panic on witness JmpIf).
+2. **Semantic rename only.** The inference is structurally identical to TaintAnalysis with
+   renamed types (Taint → WitnessInfo, TaintType → WitnessType, cfg_taint → cfg_witness).
+   The algorithms and constraints are the same.
 
 ## 4. Constraint Solving
 
@@ -251,7 +265,7 @@ gives us the Mycroft "bottom" for free. The solver implicitly computes the least
 ### Algorithm
 
 ```
-function infer_all_types(ssa: SSA<Empty>, flow: FlowAnalysis):
+function infer_all_types(ssa: SSA, flow: FlowAnalysis):
     call_graph = flow.get_call_graph()
     sccs = call_graph.get_sccs_in_reverse_topological_order()
     // Reverse topological order = bottom-up: callees before callers.
@@ -448,24 +462,24 @@ Both `f` and `g` form an SCC. If called from main with `WitnessOf(Field)`:
 ## 6. Applying Inference Results
 
 After inference, each value has a `WitnessType` that describes its WitnessOf structure.
-To convert this back to actual `Type<V>` values:
+To convert this back to actual `Type` values:
 
 ```rust
-fn apply_witness_type(base_type: Type<Empty>, wt: &WitnessType) -> Type<Empty> {
+fn apply_witness_type(base_type: Type, wt: &WitnessType) -> Type {
     let inner_type = match (&base_type.expr, wt) {
         (TypeExpr::Field, WitnessType::Scalar(info)) |
         (TypeExpr::U(_), WitnessType::Scalar(info)) => {
             if info.is_witness() {
-                Type::witness_of(base_type, Empty)
+                Type::witness_of(base_type)
             } else {
                 base_type
             }
         }
         (TypeExpr::Array(inner, size), WitnessType::Array(top_info, inner_wt)) => {
             let inner_applied = apply_witness_type(*inner, inner_wt);
-            let arr = Type::array(inner_applied, *size, Empty);
+            let arr = Type::array(inner_applied, *size);
             if top_info.is_witness() {
-                Type::witness_of(arr, Empty)
+                Type::witness_of(arr)
             } else {
                 arr
             }
@@ -482,11 +496,11 @@ This produces types like `WitnessOf(Field)`, `Array<WitnessOf(Field), 5>`, etc.
 
 | Aspect | Old (TaintAnalysis) | New (WitnessTypeInference) |
 |--------|---------------------|---------------------------|
-| Representation | `TaintType` overlay on `Type<Empty>` | `WitnessType` (same structure, different semantics) |
+| Representation | `TaintType` overlay on `Type` | `WitnessType` (same structure, different semantics) |
 | Variables | `Taint::Variable(TypeVariable)` | `WitnessInfo::Variable(TypeVar)` |
 | Join | `Taint::Union` | `WitnessInfo::Join` |
-| CFG taint | Tracked per-block | Not tracked (deferred to UntaintControlFlow) |
-| Store constraints | Includes `Le(cfg_taint, inner)` | Only `Le(value, inner)` |
+| CFG witness | Tracked per-block (`block_cfg_taints`) | Tracked per-block (`block_cfg_witness`) — same |
+| Store constraints | Includes `Le(cfg_taint, inner)` | Includes `Le(cfg_witness, inner)` — same |
 | Recursion | Post-order only (breaks on SCC) | Mycroft fixpoint on SCCs |
 | Output | `FunctionTaint` with value_taints | `FunctionWitnessType` with value_types |
 | Applied to types | Separate `typify_taint()` in UntaintControlFlow | `apply_witness_type()` produces actual types with WitnessOf |
