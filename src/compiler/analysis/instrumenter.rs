@@ -105,9 +105,13 @@ impl Value {
                 instrumenter.record_rangechecks(*i as u8, 1);
                 Value::UWitness(1)
             }
-            (Value::FWitness, _) | (_, Value::FWitness) => {
-                todo!();
-            }
+            (Value::FWitness, _) | (_, Value::FWitness) => match cmp_kind {
+                CmpKind::Eq => {
+                    instrumenter.record_constraints(1);
+                    Value::UWitness(1)
+                }
+                CmpKind::Lt => panic!("Cannot compare Field witnesses with Lt"),
+            },
             (_, _) => {
                 panic!("Cannot compare {:?} and {:?}", self, b);
             }
@@ -400,6 +404,7 @@ impl Value {
                 Value::U(*s, bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64))
             }
             (Value::FWitness, CastTarget::U(s)) => Value::UWitness(*s),
+            (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
             _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
         }
     }

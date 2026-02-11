@@ -274,7 +274,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
-                CastTarget::Nop => {
+                CastTarget::Nop | CastTarget::ArrayToSlice => {
                     self.clone()
                 }
             },
@@ -504,6 +504,21 @@ impl<T> symbolic_executor::Context<Val, T> for SpecializationState {
         _result_types: &[crate::compiler::ir::r#type::Type<T>],
     ) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
+    }
+
+    fn slice_len(&mut self, slice: &Val) -> Val {
+        if let Some(ConstVal::Array(elements)) = self.const_vals.get(&slice.0) {
+            let len = elements.len() as u128;
+            let val = self.function.push_u_const(32, len);
+            self.const_vals.insert(val, ConstVal::U(32, len));
+            Val(val)
+        } else {
+            let val = self.function.push_slice_len(
+                self.function.get_entry_id(),
+                slice.0,
+            );
+            Val(val)
+        }
     }
 }
 

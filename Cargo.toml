@@ -8,14 +8,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-fm = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "fm" }
-nargo = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "nargo" }
-nargo_toml = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "nargo_toml" }
-noirc_driver = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "noirc_frontend" }
-noirc_evaluator = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "noirc_evaluator" }
-noirc_abi = { git = "https://github.com/reilabs/noir.git", branch = "spartan-vm", package = "noirc_abi" }
+fm = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "fm" }
+nargo = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "nargo" }
+nargo_toml = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "nargo_toml" }
+noirc_driver = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_frontend" }
+noirc_evaluator = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_evaluator" }
+noirc_abi = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_abi" }
 
 clap = { version = "4.5.17", features = ["unstable-v5"] }
 derivative = "2.2.0"

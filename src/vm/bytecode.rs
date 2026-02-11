@@ -607,7 +607,7 @@ mod def {
     #[opcode]
     fn div_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
-            *res = a / b;
+            *res = if b == Field::ZERO { Field::ZERO } else { a / b };
         }
     }
 
@@ -691,10 +691,11 @@ mod def {
         stride: usize,
         vm: &mut VM,
     ) {
-        // println!(
-        //     "array_get: array={:?} index={} stride={}",
-        //     array.0, index, stride
-        // );
+        assert!(
+            (index as usize) * stride < array.layout().array_size(),
+            "array_get: index {} out of bounds for array of length {}",
+            index, array.layout().array_size() / stride
+        );
         let src = array.array_idx(index as usize, stride);
         unsafe {
             ptr::copy_nonoverlapping(src, res, stride);
@@ -726,6 +727,11 @@ mod def {
         frame: Frame,
         vm: &mut VM,
     ) {
+        assert!(
+            (index as usize) * stride < array.layout().array_size(),
+            "array_set: index {} out of bounds for array of length {}",
+            index, array.layout().array_size() / stride
+        );
         let new_array = array.copy_if_reused(vm);
         let target = new_array.array_idx(index as usize, stride);
         if new_array.layout().data_type() == DataType::BoxedArray {
@@ -747,6 +753,18 @@ mod def {
         frame.write_to(target, source.0 as isize, stride);
         unsafe {
             *res = new_array;
+        }
+    }
+
+    #[opcode]
+    fn slice_len(
+        #[out] res: *mut u64,
+        #[frame] array: BoxedValue,
+        stride: usize,
+    ) {
+        let len = array.layout().array_size() / stride;
+        unsafe {
+            *res = len as u64;
         }
     }
 

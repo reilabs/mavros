@@ -195,7 +195,7 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*tuple);
                     }
-                    OpCode::Cast { result: r, value: v, target: CastTarget::Nop } => {
+                    OpCode::Cast { result: r, value: v, target: CastTarget::Nop | CastTarget::ArrayToSlice } => {
                         // Nop cast aliases result to input in codegen (same frame position).
                         if self.needs_rc(type_info, v) {
                             if !currently_live.contains(r) {

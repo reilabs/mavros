@@ -131,7 +131,7 @@ impl SymbolicExecutor {
         Ctx: Context<V, T>,
         T: Clone + CommutativeMonoid,
     {
-        let mut globals: Vec<Option<V>> = vec![None; ssa.get_globals().len()];
+        let mut globals: Vec<Option<V>> = vec![None; ssa.num_globals()];
 
         self.run_fn(ssa, type_info, entry_point, params, &mut globals, context);
     }

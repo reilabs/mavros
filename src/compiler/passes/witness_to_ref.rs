@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
-    ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, ValueId},
+    ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, TupleIdx, ValueId},
     taint_analysis::ConstantTaint,
 };
 
@@ -214,7 +214,28 @@ impl WitnessToRef {
                                 b,
                                 b_type.get_annotation().is_witness(),
                             ) {
-                                (_, true, _, true) | (_, false, _, false) => {
+                                (_, true, _, true) => match kind {
+                                    BinaryArithOpKind::Sub => {
+                                        // Lower Sub(wit, wit) to Add(a, MulConst(-1, b))
+                                        let neg_one = function.push_field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_b = function.fresh_value();
+                                        new_instructions.push(OpCode::MulConst {
+                                            result: neg_b,
+                                            const_val: neg_one,
+                                            var: b,
+                                        });
+                                        new_instructions.push(OpCode::BinaryArithOp {
+                                            kind: BinaryArithOpKind::Add,
+                                            result: r,
+                                            lhs: a,
+                                            rhs: neg_b,
+                                        });
+                                    }
+                                    _ => {
+                                        new_instructions.push(instruction);
+                                    }
+                                },
+                                (_, false, _, false) => {
                                     new_instructions.push(instruction);
                                 }
                                 (wit, true, pure, false) | (pure, false, wit, true) => match kind {
@@ -243,7 +264,8 @@ impl WitnessToRef {
                                         panic!("Div is not supported for witness-pure arithmetic")
                                     }
                                     BinaryArithOpKind::Sub => {
-                                        // a - b  =>  a + (-1)*b
+                                        // Lower Sub(a, b) where one is pure/one is witness
+                                        // to Add(a_ref, MulConst(-1, b_ref))
                                         let pure_refed = function.fresh_value();
                                         new_instructions.push(OpCode::PureToWitnessRef {
                                             result: pure_refed,
@@ -252,7 +274,7 @@ impl WitnessToRef {
                                         });
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
-                                        let neg_one = function.push_field_const(-ark_bn254::Fr::from(1u64));
+                                        let neg_one = function.push_field_const(ark_bn254::Fr::from(-1i64));
                                         let neg_rhs = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_rhs,
@@ -466,6 +488,36 @@ impl WitnessToRef {
                     function,
                     new_blocks,
                 )
+            }
+            (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
+                assert_eq!(src_fields.len(), tgt_fields.len(), "Tuple field count mismatch in witness_to_ref conversion");
+                let mut converted_elems = vec![];
+                for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
+                    let proj = function.fresh_value();
+                    new_instructions.push(OpCode::TupleProj {
+                        result: proj,
+                        tuple: value,
+                        idx: TupleIdx::Static(i),
+                    });
+                    let converted = self.emit_value_conversion(
+                        proj,
+                        src_ft,
+                        tgt_ft,
+                        current_block_id,
+                        current_block,
+                        new_instructions,
+                        function,
+                        new_blocks,
+                    );
+                    converted_elems.push(converted);
+                }
+                let result = function.fresh_value();
+                new_instructions.push(OpCode::MkTuple {
+                    result,
+                    elems: converted_elems,
+                    element_types: tgt_fields.clone(),
+                });
+                result
             }
             _ => panic!(
                 "witness_to_ref value conversion not supported: {:?} -> {:?}",
