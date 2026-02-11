@@ -523,7 +523,7 @@ fn build_dispatch_function(
             variant_id,
             forwarded_params.clone(),
             return_types.len(),
-            false,
+            func.is_unconstrained(),
         );
         func.terminate_block_with_jmp(entry_block, merge_block, call_results);
     } else {
@@ -540,7 +540,7 @@ fn build_dispatch_function(
                     variant_id,
                     forwarded_params.clone(),
                     return_types.len(),
-                    false,
+                    func.is_unconstrained(),
                 );
                 func.terminate_block_with_jmp(current_block, merge_block, call_results);
             } else {
@@ -562,7 +562,7 @@ fn build_dispatch_function(
                     variant_id,
                     forwarded_params.clone(),
                     return_types.len(),
-                    false,
+                    func.is_unconstrained(),
                 );
                 func.terminate_block_with_jmp(call_block, merge_block, call_results);
 
