@@ -838,20 +838,32 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
                 self.convert_array_literal(array_lit, function)
             }
-            Literal::Repeated { element, length, is_vector, typ } => {
+            Literal::Repeated {
+                element,
+                length,
+                is_vector,
+                typ,
+            } => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
                 let elem_val = self.convert_expression(element, function).unwrap();
-                let elements: Vec<ValueId> = std::iter::repeat(elem_val).take(*length as usize).collect();
+                let elements: Vec<ValueId> =
+                    std::iter::repeat(elem_val).take(*length as usize).collect();
                 let elem_ast_type = match typ {
                     AstType::Array(_, elem_type) => elem_type.as_ref(),
                     AstType::Vector(elem_type) => elem_type.as_ref(),
-                    _ => panic!("Expected array/vector type for repeated literal, got {:?}", typ),
+                    _ => panic!(
+                        "Expected array/vector type for repeated literal, got {:?}",
+                        typ
+                    ),
                 };
-                let seq_type = if *is_vector { SeqType::Slice } else { SeqType::Array(*length as usize) };
+                let seq_type = if *is_vector {
+                    SeqType::Slice
+                } else {
+                    SeqType::Array(*length as usize)
+                };
                 let elem_type = self.type_converter.convert_type(elem_ast_type);
-                let result = function.push_mk_array(
-                    self.current_block, elements, seq_type, elem_type,
-                );
+                let result =
+                    function.push_mk_array(self.current_block, elements, seq_type, elem_type);
                 Some(result)
             }
             Literal::Str(s) => {
@@ -918,9 +930,16 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         // Get the element type from the array/slice type
         let (arr_len, elem_ast_type) = match &array_lit.typ {
-            noirc_frontend::monomorphization::ast::Type::Array(len, elem_type) => (Some(*len), elem_type.as_ref()),
-            noirc_frontend::monomorphization::ast::Type::Vector(elem_type) => (None, elem_type.as_ref()),
-            _ => panic!("Expected array/slice type for array literal, got {:?}", array_lit.typ),
+            noirc_frontend::monomorphization::ast::Type::Array(len, elem_type) => {
+                (Some(*len), elem_type.as_ref())
+            }
+            noirc_frontend::monomorphization::ast::Type::Vector(elem_type) => {
+                (None, elem_type.as_ref())
+            }
+            _ => panic!(
+                "Expected array/slice type for array literal, got {:?}",
+                array_lit.typ
+            ),
         };
 
         let elements: Vec<ValueId> = array_lit
@@ -1087,7 +1106,9 @@ impl<'a> ExpressionConverter<'a> {
                         Some(value)
                     }
                     noirc_frontend::monomorphization::ast::Type::Vector(_) => {
-                        let slice = self.convert_expression(&call.arguments[0], function).unwrap();
+                        let slice = self
+                            .convert_expression(&call.arguments[0], function)
+                            .unwrap();
                         let value = function.push_slice_len(self.current_block, slice);
                         Some(value)
                     }
@@ -1202,7 +1223,9 @@ impl<'a> ExpressionConverter<'a> {
                 Some(result)
             }
             "as_vector" => {
-                let array = self.convert_expression(&call.arguments[0], function).unwrap();
+                let array = self
+                    .convert_expression(&call.arguments[0], function)
+                    .unwrap();
                 Some(function.push_cast(self.current_block, array, CastTarget::ArrayToSlice))
             }
             _ => todo!("Builtin function '{}' not yet supported", name),

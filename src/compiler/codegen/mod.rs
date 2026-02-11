@@ -555,8 +555,10 @@ impl CodeGen {
                     value: v,
                     target: tgt,
                 } => {
-                    let is_nop = matches!(tgt, ssa::CastTarget::Nop | ssa::CastTarget::ArrayToSlice)
-                        || type_info.get_value_type(*v).expr == type_info.get_value_type(*r).expr;
+                    let is_nop =
+                        matches!(tgt, ssa::CastTarget::Nop | ssa::CastTarget::ArrayToSlice)
+                            || type_info.get_value_type(*v).expr
+                                == type_info.get_value_type(*r).expr;
                     if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);
