@@ -17,7 +17,7 @@ impl Pass<Empty> for MakeStructAccessStatic {
     fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
         crate::compiler::pass_manager::PassInfo {
             name: "make_struct_access_static",
-            needs: vec![DataPoint::ValueDefinitions],
+            needs: vec![DataPoint::CFG, DataPoint::ValueDefinitions],
         }
     }
 

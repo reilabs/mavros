@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SeqType, TupleIdx, ValueId, SSA}};
+use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{DataPoint, Pass, PassInfo}, ssa::{BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SeqType, TupleIdx, ValueId, SSA}};
 
 pub struct WitnessUnconstrainedReturns {}
 
@@ -15,7 +15,7 @@ impl Pass<Empty> for WitnessUnconstrainedReturns {
     fn pass_info(&self) -> PassInfo {
         PassInfo {
             name: "witness_unconstrained_returns",
-            needs: vec![],
+            needs: vec![DataPoint::CFG],
         }
     }
 }

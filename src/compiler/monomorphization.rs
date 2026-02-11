@@ -97,17 +97,23 @@ impl Monomorphization {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
                         OpCode::Call { results: returns, function: CallTarget::Static(func_id), args, is_unconstrained } => {
-                            let param_taints = if *is_unconstrained {
-                                taint_analysis.get_function_taint(*func_id).parameters.iter().map(Self::make_pure_taint).collect()
-                            } else {
-                                args.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect()
-                            };
-                            let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
                             let return_taints = returns.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
-                            let signature = Signature {
-                                cfg_taint: cfg_taint.clone(),
-                                param_taints,
-                                return_taints,
+                            let signature = if *is_unconstrained {
+                                let param_taints = taint_analysis.get_function_taint(*func_id).parameters.iter().map(Self::make_pure_taint).collect();
+                                let cfg_taint = Taint::Constant(ConstantTaint::Pure);
+                                Signature {
+                                    cfg_taint,
+                                    param_taints,
+                                    return_taints,
+                                }
+                            } else {
+                                let param_taints: Vec<TaintType> = args.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
+                                let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
+                                Signature {
+                                    cfg_taint: cfg_taint.clone(),
+                                    param_taints,
+                                    return_taints,
+                                }
                             };
                             let specialized_func_id = self.request_specialization(ssa, *func_id, signature);
                             *func_id = specialized_func_id;

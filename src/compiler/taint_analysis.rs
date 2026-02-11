@@ -579,10 +579,46 @@ impl TaintAnalysis {
         };
 
         // initialize block params
-        for (_, block) in func.get_blocks() {
-            for (value, tp) in block.get_parameters() {
-                let taint = self.construct_free_taint_for_type(tp);
-                function_taint.value_taints.insert(*value, taint);
+        if func.is_unconstrained() {
+            println!("Function {:?} is unconstrained, assigning pure taints", func_id);
+            for (_, block) in func.get_blocks() {
+                for (value, tp) in block.get_parameters() {
+                    let taint = self.construct_pure_taint_for_type(tp);
+                    function_taint.value_taints.insert(*value, taint);
+                }
+            }
+
+            // initialize block cfg taints
+            for (block_id, _) in func.get_blocks() {
+                let cfg_taint = Taint::Constant(ConstantTaint::Pure);
+                function_taint
+                    .block_cfg_taints
+                    .insert(*block_id, cfg_taint.clone());
+                function_taint
+                    .judgements
+                    .push(Judgement::Le(function_taint.cfg_taint.clone(), cfg_taint));
+            }
+        } else {
+            println!("Function {:?} is constrained, assigning free taints", func_id);
+            for (_, block) in func.get_blocks() {
+                for (value, tp) in block.get_parameters() {
+                    let taint = self.construct_free_taint_for_type(tp);
+                    function_taint.value_taints.insert(*value, taint);
+                }
+                
+            }
+
+            // initialize block cfg taints
+            for (block_id, _) in func.get_blocks() {
+                let cfg_taint = Taint::Variable(self.fresh_ty_var());
+                function_taint
+                    .block_cfg_taints
+                    .insert(*block_id, cfg_taint.clone());
+                // Every block runs under the global function CFG taint, so its local must be
+                // a supertype.
+                function_taint
+                    .judgements
+                    .push(Judgement::Le(function_taint.cfg_taint.clone(), cfg_taint));
             }
         }
 
@@ -599,18 +635,6 @@ impl TaintAnalysis {
             function_taint.returns_taint.push(taint);
         }
 
-        // initialize block cfg taints
-        for (block_id, _) in func.get_blocks() {
-            let cfg_taint = Taint::Variable(self.fresh_ty_var());
-            function_taint
-                .block_cfg_taints
-                .insert(*block_id, cfg_taint.clone());
-            // Every block runs under the global function CFG taint, so its local must be
-            // a supertype.
-            function_taint
-                .judgements
-                .push(Judgement::Le(function_taint.cfg_taint.clone(), cfg_taint));
-        }
 
         for (value_id, _) in func.iter_consts() {
             function_taint.value_taints.insert(
