@@ -106,10 +106,13 @@ impl SsaConverter {
             Expression::Literal(lit) => {
                 use noirc_frontend::monomorphization::ast::Literal;
                 match lit {
-                    Literal::Array(arr) | Literal::Slice(arr) => {
+                    Literal::Array(arr) | Literal::Vector(arr) => {
                         for e in &arr.contents {
                             Self::collect_global_deps(e, deps);
                         }
+                    }
+                    Literal::Repeated { element, .. } => {
+                        Self::collect_global_deps(element, deps);
                     }
                     _ => {}
                 }

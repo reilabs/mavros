@@ -1223,6 +1223,7 @@ pub enum CastTarget {
     Field,
     U(usize),
     Nop,
+    ArrayToSlice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1243,6 +1244,7 @@ impl Display for CastTarget {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::U(size) => write!(f, "u{}", size),
             CastTarget::Nop => write!(f, "Nop"),
+            CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
         }
     }
 }

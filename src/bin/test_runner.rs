@@ -589,7 +589,7 @@ fn find_noir_execution_success_dir() -> Option<PathBuf> {
     let noir_pkg = metadata.packages.iter().find(|p| {
         p.source
             .as_ref()
-            .is_some_and(|s| s.repr.contains("reilabs/noir"))
+            .is_some_and(|s| s.repr.contains("noir-lang/noir") || s.repr.contains("reilabs/noir"))
     })?;
     // Walk up from the package manifest to find the repo root containing
     // `test_programs/execution_success`.

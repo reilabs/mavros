@@ -30,7 +30,7 @@ impl TypeConverter {
                 let elem = self.convert_type(elem_type);
                 elem.array_of(*len as usize, Empty)
             }
-            AstType::Slice(elem_type) => {
+            AstType::Vector(elem_type) => {
                 let elem = self.convert_type(elem_type);
                 elem.slice_of(Empty)
             }

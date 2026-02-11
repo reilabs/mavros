@@ -220,7 +220,7 @@ impl RCInsertion {
                     OpCode::Cast {
                         result: r,
                         value: v,
-                        target: CastTarget::Nop,
+                        target: CastTarget::Nop | CastTarget::ArrayToSlice
                     } => {
                         // Nop cast aliases result to input in codegen (same frame position).
                         if self.needs_rc(type_info, v) {
