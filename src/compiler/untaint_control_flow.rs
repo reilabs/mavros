@@ -4,7 +4,8 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    ir::r#type::{Empty, Type, TypeExpr},
+    ir::r#type::{Type, TypeExpr},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator, TupleIdx},
     taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType},
 };
@@ -19,11 +20,11 @@ impl UntaintControlFlow {
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
     pub fn run(
         &mut self,
-        ssa: SSA<Empty>,
+        ssa: SSA,
         taint_analysis: &TaintAnalysis,
         flow_analysis: &FlowAnalysis,
-    ) -> SSA<ConstantTaint> {
-        let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild::<ConstantTaint>();
+    ) -> SSA {
+        let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
 
         // Convert global types from Empty to ConstantTaint
         let new_global_types: Vec<_> = old_global_types.into_iter()
@@ -37,6 +38,13 @@ impl UntaintControlFlow {
                 self.run_function(function_id, function, function_taint, flow_analysis);
             result_ssa.put_function(function_id, new_function);
         }
+
+        // Post-process: wrapper_main's entry params should be plain Field/U types,
+        // not WitnessOf. The VM writes concrete values to these positions.
+        // Insert WriteWitness to bridge Field → WitnessOf(Field) before passing
+        // to original_main.
+        Self::fix_main_entry_params(&mut result_ssa);
+
         result_ssa
     }
 
@@ -44,13 +52,13 @@ impl UntaintControlFlow {
     fn run_function(
         &mut self,
         function_id: FunctionId,
-        function: Function<Empty>,
+        function: Function,
         function_taint: &FunctionTaint,
         flow_analysis: &FlowAnalysis,
-    ) -> Function<ConstantTaint> {
+    ) -> Function {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
-        let (mut function, blocks, returns) = function.prepare_rebuild::<ConstantTaint>();
+        let (mut function, blocks, returns) = function.prepare_rebuild();
 
         for (block_id, mut block) in blocks.into_iter() {
             let mut new_block = Block::empty();
@@ -62,7 +70,7 @@ impl UntaintControlFlow {
             }
             new_block.put_parameters(new_parameters);
 
-            let mut new_instructions = Vec::<OpCode<ConstantTaint>>::new();
+            let mut new_instructions = Vec::<OpCode>::new();
             for instruction in block.take_instructions() {
                 let new = match instruction {
                     OpCode::BinaryArithOp {
@@ -130,16 +138,13 @@ impl UntaintControlFlow {
                     OpCode::Alloc {
                         result: r,
                         elem_type: l,
-                        result_annotation: _,
                     } => {
                         let r_taint = function_taint.get_value_taint(r);
                         let child = r_taint.child_taint_type().unwrap();
                         let child_typ = self.typify_taint(l, &child);
-                        let self_taint = r_taint.toplevel_taint().expect_constant();
                         OpCode::Alloc {
                             result: r,
                             elem_type: child_typ,
-                            result_annotation: self_taint,
                         }
                     }
                     OpCode::Call {
@@ -172,11 +177,9 @@ impl UntaintControlFlow {
                     OpCode::WriteWitness {
                         result: r,
                         value: l,
-                        witness_annotation: _,
                     } => OpCode::WriteWitness {
                         result: r,
                         value: l,
-                        witness_annotation: ConstantTaint::Witness,
                     },
                     OpCode::FreshWitness {
                         result: r,
@@ -272,24 +275,14 @@ impl UntaintControlFlow {
                         kind: kind,
                         value: value,
                     },
-                    OpCode::PureToWitnessRef {
+                    OpCode::Cast {
                         result: r,
                         value: l,
-                        result_annotation: _c,
-                    } => OpCode::PureToWitnessRef {
+                        target: crate::compiler::ssa::CastTarget::WitnessOf,
+                    } => OpCode::Cast {
                         result: r,
                         value: l,
-                        result_annotation: function_taint
-                            .get_value_taint(r)
-                            .toplevel_taint()
-                            .expect_constant(),
-                    },
-                    OpCode::UnboxField {
-                        result: r,
-                        value: l,
-                    } => OpCode::UnboxField {
-                        result: r,
-                        value: l,
+                        target: crate::compiler::ssa::CastTarget::WitnessOf,
                     },
                     OpCode::MulConst {
                         result: r,
@@ -400,7 +393,7 @@ impl UntaintControlFlow {
             Taint::Constant(ConstantTaint::Witness)
         ) {
             Some(
-                function.add_parameter(function.get_entry_id(), Type::u(1, ConstantTaint::Witness)),
+                function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))),
             )
         } else {
             None
@@ -598,7 +591,6 @@ impl UntaintControlFlow {
                     OpCode::Alloc {
                         result: _,
                         elem_type: _,
-                        result_annotation: _,
                     } => {
                         new_instructions.push(instruction);
                     }
@@ -790,72 +782,90 @@ impl UntaintControlFlow {
         function
     }
 
-    fn typify_taint(&self, typ: Type<Empty>, taint: &TaintType) -> Type<ConstantTaint> {
+    /// Fix wrapper_main entry params: strip WitnessOf from param types
+    /// and insert WriteWitness instructions to convert Field → WitnessOf(Field).
+    /// This is needed because the VM writes concrete Field values (4 limbs) to
+    /// entry params, but WitnessOf(Field) is pointer-sized (1 slot).
+    fn fix_main_entry_params(ssa: &mut SSA) {
+        let main_id = ssa.get_main_id();
+        let main_fn = ssa.get_function_mut(main_id);
+        let entry_id = main_fn.get_entry_id();
+        let entry_block = main_fn.get_block_mut(entry_id);
+
+        let old_params = entry_block.take_parameters();
+        let old_instructions = entry_block.take_instructions();
+
+        let mut new_params = Vec::new();
+        let mut write_witness_instructions = Vec::new();
+        let mut replacements = ValueReplacements::new();
+
+        for (value_id, typ) in &old_params {
+            if typ.is_witness_of() {
+                // Strip WitnessOf from param type — entry params are concrete values
+                let inner_type = typ.strip_witness();
+                new_params.push((*value_id, inner_type));
+
+                // Create WriteWitness to bridge Field → WitnessOf(Field)
+                let witness_val = main_fn.fresh_value();
+                write_witness_instructions.push(OpCode::WriteWitness {
+                    result: Some(witness_val),
+                    value: *value_id,
+                });
+                replacements.insert(*value_id, witness_val);
+            } else {
+                new_params.push((*value_id, typ.clone()));
+            }
+        }
+
+        // Rebuild entry block: params + WriteWitness instructions + original instructions
+        let entry_block = main_fn.get_block_mut(entry_id);
+
+        let mut new_instructions = write_witness_instructions;
+        for mut instruction in old_instructions {
+            replacements.replace_instruction(&mut instruction);
+            new_instructions.push(instruction);
+        }
+
+        entry_block.put_parameters(new_params);
+        // Also fix the terminator (e.g., return args)
+        replacements.replace_terminator(entry_block.get_terminator_mut());
+        entry_block.put_instructions(new_instructions);
+    }
+
+    fn typify_taint(&self, typ: Type, taint: &TaintType) -> Type {
         match (typ.expr, taint) {
-            (TypeExpr::Field, TaintType::Primitive(taint)) => Type {
-                expr: TypeExpr::Field,
-                annotation: taint.expect_constant(),
+            (TypeExpr::Field, TaintType::Primitive(taint)) => {
+                let base = Type::field();
+                if taint.expect_constant().is_witness() { Type::witness_of(base) } else { base }
             },
-            (TypeExpr::U(size), TaintType::Primitive(taint)) => Type {
-                expr: TypeExpr::U(size),
-                annotation: taint.expect_constant(),
+            (TypeExpr::U(size), TaintType::Primitive(taint)) => {
+                let base = Type::u(size);
+                if taint.expect_constant().is_witness() { Type::witness_of(base) } else { base }
             },
-            (TypeExpr::Array(inner, size), TaintType::NestedImmutable(top, inner_taint)) => Type {
-                expr: TypeExpr::Array(
-                    Box::new(self.typify_taint(*inner, inner_taint.as_ref())),
-                    size,
-                ),
-                annotation: top.expect_constant(),
+            (TypeExpr::Array(inner, size), TaintType::NestedImmutable(top, inner_taint)) => {
+                let base = self.typify_taint(*inner, inner_taint.as_ref()).array_of(size);
+                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
             },
-            (TypeExpr::Slice(inner), TaintType::NestedImmutable(top, inner_taint)) => Type {
-                expr: TypeExpr::Slice(Box::new(self.typify_taint(*inner, inner_taint.as_ref()))),
-                annotation: top.expect_constant(),
+            (TypeExpr::Slice(inner), TaintType::NestedImmutable(top, inner_taint)) => {
+                let base = self.typify_taint(*inner, inner_taint.as_ref()).slice_of();
+                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
             },
-            (TypeExpr::Ref(inner), TaintType::NestedMutable(top, inner_taint)) => Type {
-                expr: TypeExpr::Ref(Box::new(self.typify_taint(*inner, inner_taint.as_ref()))),
-                annotation: top.expect_constant(),
+            (TypeExpr::Ref(inner), TaintType::NestedMutable(top, inner_taint)) => {
+                let base = self.typify_taint(*inner, inner_taint.as_ref()).ref_of();
+                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
             },
-            (TypeExpr::Tuple(child_types), TaintType::Tuple(top, child_taints)) => Type {
-                expr: TypeExpr::Tuple(
+            (TypeExpr::Tuple(child_types), TaintType::Tuple(top, child_taints)) => {
+                let base = Type::tuple_of(
                     child_types.iter().zip(child_taints.iter()).map(|(child_type, child_taint)| self.typify_taint(child_type.clone(), child_taint)).collect()
-                ),
-                annotation: top.expect_constant(),
+                );
+                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
             },
             (tp, taint) => panic!("Unexpected type {:?} with taint {:?}", tp, taint),
         }
     }
 
-    fn pure_taint_for_type(&self, typ: Type<Empty>) -> Type<ConstantTaint> {
-        match typ.expr {
-            TypeExpr::Field => Type {
-                expr: TypeExpr::Field,
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::U(size) => Type {
-                expr: TypeExpr::U(size),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Array(inner, size) => Type {
-                expr: TypeExpr::Array(Box::new(self.pure_taint_for_type(*inner)), size),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Slice(inner) => Type {
-                expr: TypeExpr::Slice(Box::new(self.pure_taint_for_type(*inner))),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Ref(inner) => Type {
-                expr: TypeExpr::Ref(Box::new(self.pure_taint_for_type(*inner))),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::WitnessRef => Type {
-                expr: TypeExpr::WitnessRef,
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
-            TypeExpr::Function => Type {
-                expr: TypeExpr::Function,
-                annotation: ConstantTaint::Pure,
-            },
-        }
+    fn pure_taint_for_type(&self, typ: Type) -> Type {
+        // Types no longer have annotations; a "pure" type is just the type itself
+        typ
     }
 }

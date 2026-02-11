@@ -5,7 +5,7 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    ir::r#type::{CommutativeMonoid, Type, TypeExpr},
+    ir::r#type::{Type, TypeExpr},
     ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, MemOp, Radix, SSA, SliceOpDir},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
@@ -301,19 +301,19 @@ pub struct R1CGen {
     next_witness: usize,
 }
 
-impl<V: Clone> symbolic_executor::Context<Value, V> for R1CGen {
+impl symbolic_executor::Context<Value> for R1CGen {
     fn on_call(
         &mut self,
         _func: FunctionId,
         _params: &mut [Value],
-        _param_types: &[&Type<V>],
+        _param_types: &[&Type],
     ) -> Option<Vec<Value>> {
         None
     }
 
-    fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type<V>]) {}
+    fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type]) {}
 
-    fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type<V>]) {}
+    fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
 
     fn lookup(
         &mut self,
@@ -395,7 +395,7 @@ impl<V: Clone> symbolic_executor::Context<Value, V> for R1CGen {
         }
     }
 
-    fn todo(&mut self, payload: &str, _result_types: &[Type<V>]) -> Vec<Value> {
+    fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Value> {
         panic!("Todo opcode encountered in R1CSGen: {}", payload);
     }
 
@@ -420,8 +420,8 @@ impl<V: Clone> symbolic_executor::Context<Value, V> for R1CGen {
     }
 }
 
-impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
-    fn cmp(&self, b: &Self, cmp_kind: CmpKind, _out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+impl symbolic_executor::Value<R1CGen> for Value {
+    fn cmp(&self, b: &Self, cmp_kind: CmpKind, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         match cmp_kind {
             CmpKind::Eq => self.eq(b),
             CmpKind::Lt => self.lt(b),
@@ -432,7 +432,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         &self,
         b: &Self,
         binary_arith_op_kind: BinaryArithOpKind,
-        out_type: &Type<V>,
+        out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
         match &out_type.expr {
@@ -499,7 +499,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
             TypeExpr::U(size) => {
                 panic!("Unsupported unsigned integer size in R1CS arith: u{size}")
             }
-            TypeExpr::Field | TypeExpr::WitnessRef => match binary_arith_op_kind {
+            TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind {
                 BinaryArithOpKind::Add => self.add(b),
                 BinaryArithOpKind::Sub => self.sub(b),
                 BinaryArithOpKind::Mul => self.mul(b),
@@ -523,13 +523,13 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         assert!(a * b == c);
     }
 
-    fn array_get(&self, index: &Self, _out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+    fn array_get(&self, index: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let index = index.expect_u32();
         let value = self.expect_array().borrow().data[index as usize].clone();
         value
     }
 
-    fn tuple_get(&self, index: usize, _out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+    fn tuple_get(&self, index: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let value = self.expect_tuple().borrow().data[index as usize].clone();
         value
     }
@@ -538,7 +538,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         &self,
         index: &Self,
         value: &Self,
-        _out_type: &Type<V>,
+        _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
         let array = self.expect_array();
@@ -548,7 +548,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         Value::mk_array(new_array)
     }
 
-    fn truncate(&self, _from: usize, to: usize, _out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+    fn truncate(&self, _from: usize, to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let new_value = self
             .expect_constant()
             .into_bigint()
@@ -563,7 +563,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
     fn cast(
         &self,
         _cast_target: &super::ssa::CastTarget,
-        _out_type: &Type<V>,
+        _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
         self.clone()
@@ -580,7 +580,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         &self,
         endianness: super::ssa::Endianness,
         size: usize,
-        _out_type: &Type<V>,
+        _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
         let value_const = self.expect_constant();
@@ -615,7 +615,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         Value::mk_array(bit_values)
     }
 
-    fn not(&self, out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+    fn not(&self, out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let value_const = self.expect_constant();
         let bits = value_const.into_bigint().to_bits_le();
         let bit_size = out_type.get_bit_size();
@@ -639,7 +639,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         a: Vec<Self>,
         _ctx: &mut R1CGen,
         _seq_type: super::ssa::SeqType,
-        _elem_type: &Type<V>,
+        _elem_type: &Type,
     ) -> Self {
         Value::mk_array(a)
     }
@@ -647,7 +647,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
     fn mk_tuple(
         elems: Vec<Self>,
         _ctx: &mut R1CGen,
-        _elem_types: &[Type<V>],
+        _elem_types: &[Type],
     ) -> Self {
         Value::mk_tuple(elems)
     }
@@ -661,7 +661,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         *ptr.borrow_mut() = value.clone();
     }
 
-    fn ptr_read(&self, _out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+    fn ptr_read(&self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let ptr = self.expect_ptr();
         let value = ptr.borrow().clone();
         value
@@ -671,12 +671,12 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         self.expect_constant() == ark_bn254::Fr::ONE
     }
 
-    fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type<V>, _ctx: &mut R1CGen) -> Self {
+    fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         self.mul(if_t)
             .add(&Value::Const(ark_bn254::Fr::ONE).sub(self).mul(if_f))
     }
 
-    fn write_witness(&self, _tp: Option<&Type<V>>, ctx: &mut R1CGen) -> Self {
+    fn write_witness(&self, _tp: Option<&Type>, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
@@ -704,7 +704,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         _radix: &Radix<Self>,
         _endianness: crate::compiler::ssa::Endianness,
         _size: usize,
-        _out_type: &Type<V>,
+        _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
         todo!("ToRadix R1CS generation not yet implemented")
@@ -862,7 +862,7 @@ impl R1CGen {
     }
 
     #[instrument(skip_all, name = "R1CGen::run")]
-    pub fn run<V: Clone + CommutativeMonoid>(&mut self, ssa: &SSA<V>, type_info: &TypeInfo<V>) {
+    pub fn run(&mut self, ssa: &SSA, type_info: &TypeInfo) {
         let entry_point = ssa.get_main_id();
         assert!(ssa.get_function(entry_point).get_param_types().len() == 0, "Main should not have parameters as WitnessWriteToFresh pass should remove them");
         let main_params = vec![];

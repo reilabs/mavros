@@ -1,7 +1,7 @@
 use itertools::Itertools;
 
 use crate::compiler::flow_analysis::FlowAnalysis;
-use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
+use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId};
 use crate::compiler::union_find::UnionFind;
 use std::collections::{HashMap, HashSet};
@@ -21,18 +21,6 @@ pub enum ConstantTaint {
     Witness,
 }
 
-impl CommutativeMonoid for ConstantTaint {
-    fn empty() -> Self {
-        ConstantTaint::Pure
-    }
-
-    fn op(&self, other: &Self) -> Self {
-        match (self, other) {
-            (ConstantTaint::Pure, ConstantTaint::Pure) => ConstantTaint::Pure,
-            _ => ConstantTaint::Witness,
-        }
-    }
-}
 
 impl std::fmt::Display for ConstantTaint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -551,7 +539,7 @@ impl TaintAnalysis {
         }
     }
 
-    pub fn run(&mut self, ssa: &SSA<Empty>, cfg: &FlowAnalysis) -> Result<(), String> {
+    pub fn run(&mut self, ssa: &SSA, cfg: &FlowAnalysis) -> Result<(), String> {
         let fns_post_order = cfg.get_call_graph().get_post_order(ssa.get_main_id());
         for fn_id in fns_post_order {
             self.analyze_function(ssa, cfg, fn_id);
@@ -559,7 +547,7 @@ impl TaintAnalysis {
         Ok(())
     }
 
-    fn analyze_function(&mut self, ssa: &SSA<Empty>, cfg: &FlowAnalysis, func_id: FunctionId) {
+    fn analyze_function(&mut self, ssa: &SSA, cfg: &FlowAnalysis, func_id: FunctionId) {
         let func = ssa.get_function(func_id);
 
         let cfg = cfg.get_function_cfg(func_id);
@@ -654,7 +642,6 @@ impl TaintAnalysis {
                     OpCode::Alloc {
                         result: r,
                         elem_type: t,
-                        result_annotation: _,
                     } => {
                         let free = self.construct_free_taint_for_type(t);
                         function_taint.value_taints.insert(
@@ -904,15 +891,6 @@ impl TaintAnalysis {
                         sensitivity: _,
                     }
                     | OpCode::NextDCoeff { result: _ }
-                    | OpCode::PureToWitnessRef {
-                        result: _,
-                        value: _,
-                        result_annotation: _,
-                    }
-                    | OpCode::UnboxField {
-                        result: _,
-                        value: _,
-                    }
                     | OpCode::MulConst {
                         result: _,
                         const_val: _,
@@ -1095,7 +1073,7 @@ impl TaintAnalysis {
         var
     }
 
-    fn construct_free_taint_for_type(&mut self, typ: &Type<Empty>) -> TaintType {
+    fn construct_free_taint_for_type(&mut self, typ: &Type) -> TaintType {
         match &typ.expr {
             TypeExpr::U(_) | TypeExpr::Field => {
                 TaintType::Primitive(Taint::Variable(self.fresh_ty_var()))
@@ -1112,7 +1090,7 @@ impl TaintAnalysis {
                 Taint::Variable(self.fresh_ty_var()),
                 Box::new(self.construct_free_taint_for_type(i)),
             ),
-            TypeExpr::WitnessRef => {
+            TypeExpr::WitnessOf(_) => {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
             TypeExpr::Tuple(elements) => TaintType::Tuple(
@@ -1126,7 +1104,7 @@ impl TaintAnalysis {
         }
     }
 
-    fn construct_pure_taint_for_type(&mut self, typ: &Type<Empty>) -> TaintType {
+    fn construct_pure_taint_for_type(&mut self, typ: &Type) -> TaintType {
         match &typ.expr {
             TypeExpr::U(_) | TypeExpr::Field => {
                 TaintType::Primitive(Taint::Constant(ConstantTaint::Pure))
@@ -1143,7 +1121,7 @@ impl TaintAnalysis {
                 Taint::Constant(ConstantTaint::Pure),
                 Box::new(self.construct_pure_taint_for_type(i)),
             ),
-            TypeExpr::WitnessRef => {
+            TypeExpr::WitnessOf(_) => {
                 panic!("ICE: WitnessVal should not be present at this stage");
             }
             TypeExpr::Tuple(elements) => TaintType::Tuple(

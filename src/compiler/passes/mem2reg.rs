@@ -13,8 +13,8 @@ use crate::compiler::{
 
 pub struct Mem2Reg {}
 
-impl<V: Clone> Pass<V> for Mem2Reg {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &PassManager<V>) {
+impl Pass for Mem2Reg {
+    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
         self.do_run(ssa, pass_manager.get_cfg(), pass_manager.get_type_info());
     }
 
@@ -31,7 +31,7 @@ impl Mem2Reg {
         Self {}
     }
 
-    pub fn do_run<V: Clone>(&self, ssa: &mut SSA<V>, cfg: &FlowAnalysis, type_info: &TypeInfo<V>) {
+    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis, type_info: &TypeInfo) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
             if self.escape_safe(function, function_type_info) {
@@ -46,16 +46,16 @@ impl Mem2Reg {
     }
 
     #[instrument(skip_all, level = Level::DEBUG, fields(function = %function.get_name()))]
-    fn run_function<V: Clone>(&self, function: &mut Function<V>, cfg: &CFG, type_info: &FunctionTypeInfo<V>) {
+    fn run_function(&self, function: &mut Function, cfg: &CFG, type_info: &FunctionTypeInfo) {
         let (writes, defs) = self.find_pointer_writes_and_defs(function);
         let phi_blocks = self.find_phi_blocks(&writes, &defs, cfg);
         let phi_args = self.initialize_phis(function, &phi_blocks, type_info);
         self.remove_ptrs(function, cfg, &phi_args);
     }
 
-    fn remove_ptrs<V: Clone>(
+    fn remove_ptrs(
         &self,
-        function: &mut Function<V>,
+        function: &mut Function,
         cfg: &CFG,
         phi_map: &HashMap<BlockId, Vec<(ValueId, ValueId)>>,
     ) {
@@ -87,7 +87,7 @@ impl Mem2Reg {
 
             for mut instruction in instructions {
                 match instruction {
-                    OpCode::Alloc { result: _, elem_type: _, result_annotation: _ } => {}
+                    OpCode::Alloc { result: _, elem_type: _ } => {}
                     OpCode::Store { ptr: lhs, value: rhs } => {
                         values.insert(lhs, rhs);
                     }
@@ -166,11 +166,11 @@ impl Mem2Reg {
 
     // returns for each block the vector of (param_id, value_id), where param_id is the id of a new parameter,
     // and value_id is the id of the pointer that is being replaced
-    fn initialize_phis<V: Clone>(
+    fn initialize_phis(
         &self,
-        function: &mut Function<V>,
+        function: &mut Function,
         phi_blocks: &HashMap<ValueId, HashSet<BlockId>>,
-        type_info: &FunctionTypeInfo<V>,
+        type_info: &FunctionTypeInfo,
     ) -> HashMap<BlockId, Vec<(ValueId, ValueId)>> {
         let mut result: HashMap<BlockId, Vec<(ValueId, ValueId)>> = HashMap::new();
         for (value, blocks) in phi_blocks {
@@ -185,9 +185,9 @@ impl Mem2Reg {
         result
     }
 
-    fn find_pointer_writes_and_defs<V: Clone>(
+    fn find_pointer_writes_and_defs(
         &self,
-        function: &Function<V>,
+        function: &Function,
     ) -> (HashMap<ValueId, HashSet<BlockId>>, HashMap<ValueId, BlockId>) {
         let mut writes: HashMap<ValueId, HashSet<BlockId>> = HashMap::new();
         let mut defs: HashMap<ValueId, BlockId> = HashMap::new();
@@ -197,7 +197,7 @@ impl Mem2Reg {
                     OpCode::Store { ptr: lhs, value: _ } => {
                         writes.entry(*lhs).or_default().insert(*block_id);
                     }
-                    OpCode::Alloc { result: lhs, elem_type: _, result_annotation: _ } => {
+                    OpCode::Alloc { result: lhs, elem_type: _ } => {
                         defs.insert(*lhs, *block_id);
                     }
                     _ => {}
@@ -246,7 +246,7 @@ impl Mem2Reg {
     // This is _very_ crude. We give up on mem2reg for the entire function
     // if we detect _any_ pointer escaping or entering the function, or being
     // written to another pointer. Obviously this needs a better implementation.
-    fn escape_safe<V: Clone>(&self, function: &Function<V>, type_info: &FunctionTypeInfo<V>) -> bool {
+    fn escape_safe(&self, function: &Function, type_info: &FunctionTypeInfo) -> bool {
         for (_, block) in function.get_blocks() {
             for (_, typ) in block.get_parameters() {
                 if self.type_contains_ptr(typ) {
@@ -321,7 +321,7 @@ impl Mem2Reg {
         true
     }
 
-    fn type_contains_ptr<V>(&self, typ: &Type<V>) -> bool {
+    fn type_contains_ptr(&self, typ: &Type) -> bool {
         match typ {
             Type {
                 expr: TypeExpr::Ref(_),

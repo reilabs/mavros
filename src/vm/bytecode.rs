@@ -431,8 +431,6 @@ mod def {
             current_child = unsafe { current_child.offset(*arg_size as isize) };
         }
 
-        // println!("call: func={:?} (size={})", func_pc, unsafe {*func_pc.offset(-1)});
-
         dispatch(func_pc, new_frame, vm);
     }
 
@@ -441,10 +439,8 @@ mod def {
         let ret_address = unsafe { *frame.data.offset(1) } as *mut u64;
         let new_frame = frame.pop(vm);
         if new_frame.data.is_null() {
-            // println!("finish return");
             return;
         }
-        // println!("ret");
         dispatch(ret_address, new_frame, vm);
     }
 

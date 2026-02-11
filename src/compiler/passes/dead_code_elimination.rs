@@ -54,8 +54,8 @@ impl Config {
     }
 }
 
-impl<V: Clone> Pass<V> for DCE {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &crate::compiler::pass_manager::PassManager<V>) {
+impl Pass for DCE {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa, pass_manager.get_cfg());
     }
 
@@ -72,7 +72,7 @@ impl DCE {
         Self { config }
     }
 
-    pub fn do_run<V: Clone>(&self, ssa: &mut SSA<V>, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let definitions = self.generate_definitions(function);
@@ -189,15 +189,7 @@ impl DCE {
                         | OpCode::Cast { .. }
                         | OpCode::Truncate { .. }
                         | OpCode::Not { .. }
-                        | OpCode::PureToWitnessRef {
-                            result: _,
-                            value: _,
-                            result_annotation: _,
-                        }
-                        | OpCode::UnboxField {
-                            result: _,
-                            value: _,
-                        }
+                        /* PureToWitnessRef removed - Cast already handled above */
                         | OpCode::MulConst {
                             result: _,
                             const_val: _,
@@ -426,9 +418,9 @@ impl DCE {
         }
     }
 
-    fn generate_definitions<V: Clone>(
+    fn generate_definitions(
         &self,
-        ssa: &Function<V>,
+        ssa: &Function,
     ) -> HashMap<ValueId, ValueDefinition> {
         let mut definitions = HashMap::new();
 

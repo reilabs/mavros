@@ -15,7 +15,6 @@ use crate::compiler::{
         BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, MemOp, Radix, SSA, SeqType,
         SliceOpDir,
     },
-    taint_analysis::ConstantTaint,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -183,109 +182,117 @@ impl Value {
         }
     }
 
-    fn blind_from(&mut self, tp: &Type<ConstantTaint>) {
-        match (&self, tp.get_annotation(), &tp.expr) {
-            (Value::UWitness(_), _, _) => {}
-            (Value::FWitness, _, _) => {}
-            (Value::U(s, _), ConstantTaint::Witness, _) => *self = Value::UWitness(*s),
-            (Value::U { .. }, _, _) => {}
-            (Value::Field { .. }, ConstantTaint::Witness, _) => *self = Value::FWitness,
-            (Value::Field { .. }, _, _) => {}
-            (Value::Array(_), ConstantTaint::Witness, _) => {
-                panic!("Witness arrays not supported yet")
+    fn blind_from(&mut self, tp: &Type) {
+        if tp.is_witness_of() {
+            // Type is WitnessOf — blind the value
+            match &self {
+                Value::UWitness(_) | Value::FWitness => {} // already witness
+                Value::U(s, _) => *self = Value::UWitness(*s),
+                Value::Field { .. } => *self = Value::FWitness,
+                Value::Array(_) => panic!("Witness arrays not supported yet"),
+                Value::Pointer(_) => panic!("Witness pointers not supported yet"),
+                Value::Tuple(_) => panic!("Witness tuples not supported yet"),
             }
-            (Value::Array(_), _, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Array(tp, _) => tp,
-                    TypeExpr::Slice(tp) => tp,
-                    _ => panic!("Unexpected array type: {:?}", tp),
-                };
-                match self {
-                    Value::Array(vals) => {
-                        for val in vals {
-                            val.blind_from(&item_tp);
+        } else {
+            // Type is pure — recurse structurally
+            match (&self, &tp.expr) {
+                (Value::UWitness(_), _) | (Value::FWitness, _) => {}
+                (Value::U { .. }, _) | (Value::Field { .. }, _) => {}
+                (Value::Array(_), tp_expr) => {
+                    let item_tp = match tp_expr {
+                        TypeExpr::Array(tp, _) => tp,
+                        TypeExpr::Slice(tp) => tp,
+                        _ => panic!("Unexpected array type: {:?}", tp_expr),
+                    };
+                    match self {
+                        Value::Array(vals) => {
+                            for val in vals {
+                                val.blind_from(&item_tp);
+                            }
                         }
+                        _ => panic!("Unexpected array type: {:?}", tp_expr),
                     }
-                    _ => panic!("Unexpected array type: {:?}", tp),
                 }
-            }
-            (Value::Pointer(_), ConstantTaint::Witness, _) => {
-                panic!("Witness pointers not supported yet");
-            }
-            (Value::Pointer(val), ConstantTaint::Pure, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Ref(tp) => tp,
-                    _ => panic!("Unexpected pointer type: {:?}", tp),
-                };
-                val.borrow_mut().blind_from(&item_tp);
-            }
-            (Value::Tuple(_), ConstantTaint::Witness, _) => {
-                panic!("Witness tuples not supported yet")
-            }
-            (Value::Tuple(_), _, tp) => {
-                let element_tps = match tp {
-                    TypeExpr::Tuple(elements) => elements,
-                    _ => panic!("Unexpected tuple type: {:?}", tp),
-                };
-                match self {
-                    Value::Tuple(vals) => {
-                        for (val, element_tp) in vals.iter_mut().zip(element_tps.iter()) {
-                            val.blind_from(element_tp);
+                (Value::Pointer(val), tp_expr) => {
+                    let item_tp = match tp_expr {
+                        TypeExpr::Ref(tp) => tp,
+                        _ => panic!("Unexpected pointer type: {:?}", tp_expr),
+                    };
+                    val.borrow_mut().blind_from(&item_tp);
+                }
+                (Value::Tuple(_), tp_expr) => {
+                    let element_tps = match tp_expr {
+                        TypeExpr::Tuple(elements) => elements,
+                        _ => panic!("Unexpected tuple type: {:?}", tp_expr),
+                    };
+                    match self {
+                        Value::Tuple(vals) => {
+                            for (val, element_tp) in vals.iter_mut().zip(element_tps.iter()) {
+                                val.blind_from(element_tp);
+                            }
                         }
+                        _ => panic!("Unexpected tuple type: {:?}", tp_expr),
                     }
-                    _ => panic!("Unexpected tuple type: {:?}", tp),
                 }
             }
         }
     }
 
-    fn make_unspecialized_sig(&self, tp: &Type<ConstantTaint>) -> ValueSignature {
-        match (self, tp.get_annotation(), &tp.expr) {
-            (Value::UWitness(s), _, _) => ValueSignature::UWitness(*s),
-            (Value::FWitness, _, _) => ValueSignature::FWitness,
-            (Value::U(s, v), ConstantTaint::Pure, _) => ValueSignature::U(*s, *v),
-            (Value::U(s, _), ConstantTaint::Witness, _) => ValueSignature::UWitness(*s),
-            (Value::Field(f), ConstantTaint::Pure, _) => ValueSignature::Field(f.clone()),
-            (Value::Field(_), ConstantTaint::Witness, _) => ValueSignature::FWitness,
-            (Value::Array(vals), ConstantTaint::Pure, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Array(tp, _) => tp,
-                    TypeExpr::Slice(tp) => tp,
-                    _ => panic!("Unexpected array type: {:?}", tp),
-                };
-                ValueSignature::Array(
-                    vals.iter()
-                        .map(|v| v.make_unspecialized_sig(&item_tp))
-                        .collect(),
-                )
+    fn make_unspecialized_sig(&self, tp: &Type) -> ValueSignature {
+        // If already witness values, return witness sig directly
+        match self {
+            Value::UWitness(s) => return ValueSignature::UWitness(*s),
+            Value::FWitness => return ValueSignature::FWitness,
+            _ => {}
+        }
+
+        if tp.is_witness_of() {
+            // Type is WitnessOf — produce witness signature
+            match self {
+                Value::U(s, _) => ValueSignature::UWitness(*s),
+                Value::Field(_) => ValueSignature::FWitness,
+                Value::Array(_) => panic!("Witness arrays not supported yet"),
+                Value::Pointer(_) => panic!("Witness pointers not supported yet"),
+                Value::Tuple(_) => panic!("Witness tuples not supported yet"),
+                _ => unreachable!(),
             }
-            (Value::Array(_), ConstantTaint::Witness, _) => {
-                panic!("Witness arrays not supported yet")
-            }
-            (Value::Pointer(val), ConstantTaint::Pure, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Ref(tp) => tp,
-                    _ => panic!("Unexpected pointer type: {:?}", tp),
-                };
-                ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig(&item_tp)))
-            }
-            (Value::Pointer(_), ConstantTaint::Witness, _) => {
-                panic!("Witness pointers not supported yet")
-            }
-            (Value::Tuple(vals), ConstantTaint::Pure, tp) => {
-                let element_tps = match tp {
-                    TypeExpr::Tuple(elements) => elements,
-                    _ => panic!("Unexpected tuple type: {:?}", tp),
-                };
-                ValueSignature::Tuple(
-                    vals.iter()
-                        .zip(element_tps.iter())
-                        .map(|(v, element_tp)| v.make_unspecialized_sig(element_tp))
-                        .collect(),
-                )
-            }
-            (Value::Tuple(_), ConstantTaint::Witness, _) => {
-                panic!("Witness tuples not supported yet")
+        } else {
+            // Type is pure — produce concrete signature
+            match (self, &tp.expr) {
+                (Value::U(s, v), _) => ValueSignature::U(*s, *v),
+                (Value::Field(f), _) => ValueSignature::Field(f.clone()),
+                (Value::Array(vals), tp_expr) => {
+                    let item_tp = match tp_expr {
+                        TypeExpr::Array(tp, _) => tp,
+                        TypeExpr::Slice(tp) => tp,
+                        _ => panic!("Unexpected array type: {:?}", tp_expr),
+                    };
+                    ValueSignature::Array(
+                        vals.iter()
+                            .map(|v| v.make_unspecialized_sig(&item_tp))
+                            .collect(),
+                    )
+                }
+                (Value::Pointer(val), tp_expr) => {
+                    let item_tp = match tp_expr {
+                        TypeExpr::Ref(tp) => tp,
+                        _ => panic!("Unexpected pointer type: {:?}", tp_expr),
+                    };
+                    ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig(&item_tp)))
+                }
+                (Value::Tuple(vals), tp_expr) => {
+                    let element_tps = match tp_expr {
+                        TypeExpr::Tuple(elements) => elements,
+                        _ => panic!("Unexpected tuple type: {:?}", tp_expr),
+                    };
+                    ValueSignature::Tuple(
+                        vals.iter()
+                            .zip(element_tps.iter())
+                            .map(|(v, element_tp)| v.make_unspecialized_sig(element_tp))
+                            .collect(),
+                    )
+                }
+                _ => unreachable!(),
             }
         }
     }
@@ -313,7 +320,7 @@ impl Value {
     fn array_get(
         &self,
         index: &Value,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match (self, index) {
@@ -333,7 +340,7 @@ impl Value {
     fn tuple_get(
         &self,
         index: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
@@ -471,7 +478,7 @@ impl Value {
         }
     }
 
-    fn ptr_read(&self, _tp: &Type<ConstantTaint>, _instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn ptr_read(&self, _tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             Value::Pointer(val) => val.borrow().clone(),
             _ => panic!("Cannot read from {:?}", self),
@@ -493,11 +500,11 @@ impl Value {
         }
     }
 
-    fn witness_of(tp: &Type<ConstantTaint>) -> Value {
+    fn witness_of(tp: &Type) -> Value {
         match &tp.expr {
             TypeExpr::U(s) => Value::UWitness(*s),
             TypeExpr::Field => Value::FWitness,
-            TypeExpr::WitnessRef => Value::FWitness,
+            TypeExpr::WitnessOf(_) => Value::FWitness,
             TypeExpr::Array(tp, size) => {
                 let mut values = vec![];
                 for _ in 0..*size {
@@ -516,7 +523,7 @@ impl Value {
         &self,
         if_true: &Value,
         if_false: &Value,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         get_specialized: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
@@ -540,26 +547,26 @@ pub struct SpecSplitValue {
 }
 
 impl SpecSplitValue {
-    fn blind_unspecialized_from(&mut self, tp: &Type<ConstantTaint>) {
+    fn blind_unspecialized_from(&mut self, tp: &Type) {
         self.unspecialized.blind_from(tp);
     }
 
-    fn blind_from(&mut self, tp: &Type<ConstantTaint>) {
+    fn blind_from(&mut self, tp: &Type) {
         self.unspecialized.blind_from(tp);
         self.specialized.blind_from(tp);
     }
 
-    fn make_unspecialized_sig(&self, tp: &Type<ConstantTaint>) -> ValueSignature {
+    fn make_unspecialized_sig(&self, tp: &Type) -> ValueSignature {
         self.unspecialized.make_unspecialized_sig(tp)
     }
 }
 
-impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
+impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn cmp(
         &self,
         b: &SpecSplitValue,
         cmp_kind: CmpKind,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let unspecialized = self.unspecialized.cmp_op(
@@ -580,7 +587,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         b: &SpecSplitValue,
         binary_arith_op_kind: BinaryArithOpKind,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let unspecialized = self.unspecialized.binary_arith_op(
@@ -602,7 +609,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn cast(
         &self,
         cast_target: &crate::compiler::ssa::CastTarget,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -619,7 +626,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         from: usize,
         to: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -634,7 +641,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
-    fn not(&self, _tp: &Type<ConstantTaint>, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
+    fn not(&self, _tp: &Type, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
             unspecialized: self.unspecialized.not_op(instrumenter.get_unspecialized()),
             specialized: self.specialized.not_op(instrumenter.get_specialized()),
@@ -648,7 +655,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
             .ptr_write(&val.specialized, _instrumenter.get_specialized());
     }
 
-    fn ptr_read(&self, tp: &Type<ConstantTaint>, ctx: &mut CostAnalysis) -> SpecSplitValue {
+    fn ptr_read(&self, tp: &Type, ctx: &mut CostAnalysis) -> SpecSplitValue {
         let mut res = SpecSplitValue {
             unspecialized: self.unspecialized.ptr_read(tp, ctx.get_unspecialized()),
             specialized: self.specialized.ptr_read(tp, ctx.get_specialized()),
@@ -661,7 +668,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
         _seq_type: SeqType,
-        _elem_type: &Type<ConstantTaint>,
+        _elem_type: &Type,
     ) -> SpecSplitValue {
         let (uns, spec) = values
             .into_iter()
@@ -676,7 +683,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn mk_tuple (
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
-        _elem_types: &[Type<ConstantTaint>],
+        _elem_types: &[Type],
     ) -> SpecSplitValue {
         let (uns, spec) = values
             .into_iter()
@@ -711,7 +718,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn array_get(
         &self,
         i: &SpecSplitValue,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let mut res = SpecSplitValue {
@@ -733,7 +740,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn tuple_get(
         &self,
         index: usize,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let mut res = SpecSplitValue {
@@ -756,7 +763,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         i: &SpecSplitValue,
         v: &SpecSplitValue,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -777,7 +784,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         if_t: &SpecSplitValue,
         if_f: &SpecSplitValue,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -834,7 +841,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         endianness: Endianness,
         size: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -856,7 +863,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         radix: &Radix<SpecSplitValue>,
         endianness: Endianness,
         size: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let spec_radix = match radix {
@@ -917,7 +924,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
-    fn write_witness(&self, tp: Option<&Type<ConstantTaint>>, _ctx: &mut CostAnalysis) -> Self {
+    fn write_witness(&self, tp: Option<&Type>, _ctx: &mut CostAnalysis) -> Self {
         match tp {
             Some(tp) => {
                 let mut res = self.clone();
@@ -945,7 +952,7 @@ pub struct FunctionSignature {
 }
 
 impl FunctionSignature {
-    pub fn pretty_print(&self, ssa: &SSA<ConstantTaint>, all_params: bool) -> String {
+    pub fn pretty_print(&self, ssa: &SSA, all_params: bool) -> String {
         let fn_body = ssa.get_function(self.id);
         let name = fn_body.get_name();
         let params = self
@@ -1066,12 +1073,12 @@ pub struct CostAnalysis {
     stack: Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
 }
 
-impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis {
+impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     fn on_call(
         &mut self,
         func: FunctionId,
         params: &mut [SpecSplitValue],
-        param_types: &[&Type<ConstantTaint>],
+        param_types: &[&Type],
     ) -> Option<Vec<SpecSplitValue>> {
         let mut inputs_sig = vec![];
         for (pval, ptype) in params.iter_mut().zip(param_types.iter()) {
@@ -1107,7 +1114,7 @@ impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis 
         None
     }
 
-    fn on_return(&mut self, returns: &mut [SpecSplitValue], return_types: &[Type<ConstantTaint>]) {
+    fn on_return(&mut self, returns: &mut [SpecSplitValue], return_types: &[Type]) {
         for (rval, rtype) in returns.iter_mut().zip(return_types.iter()) {
             rval.blind_from(rtype);
         }
@@ -1127,7 +1134,7 @@ impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis 
         &mut self,
         _target: crate::compiler::ssa::BlockId,
         params: &mut [SpecSplitValue],
-        param_types: &[&Type<ConstantTaint>],
+        param_types: &[&Type],
     ) {
         for (pval, ptype) in params.iter_mut().zip(param_types.iter()) {
             pval.blind_unspecialized_from(ptype);
@@ -1137,7 +1144,7 @@ impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis 
     fn todo(
         &mut self,
         payload: &str,
-        _result_types: &[Type<ConstantTaint>],
+        _result_types: &[Type],
     ) -> Vec<SpecSplitValue> {
         panic!("Todo opcode encountered in CostAnalysis: {}", payload);
     }
@@ -1201,7 +1208,7 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn pretty_print(&self, ssa: &SSA<ConstantTaint>) -> String {
+    pub fn pretty_print(&self, ssa: &SSA) -> String {
         let mut r = String::new();
         r += &format!("Total constraints: {}\n", self.total_constraints);
         r += &format!(
@@ -1286,7 +1293,7 @@ impl CostAnalysis {
         self.functions
     }
 
-    pub fn pretty_print(&self, ssa: &SSA<ConstantTaint>) -> String {
+    pub fn pretty_print(&self, ssa: &SSA) -> String {
         let mut r = String::new();
         for (sig, cost) in self.functions.iter() {
             r += &format!("Function {}\n", sig.pretty_print(ssa, false));
@@ -1351,8 +1358,8 @@ impl CostEstimator {
     #[instrument(skip_all, name = "CostEstimator::run")]
     pub fn run(
         &self,
-        ssa: &SSA<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        ssa: &SSA,
+        type_info: &TypeInfo,
     ) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
@@ -1369,8 +1376,8 @@ impl CostEstimator {
 
     fn run_fn_from_signature(
         &self,
-        ssa: &SSA<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        ssa: &SSA,
+        type_info: &TypeInfo,
         sig: FunctionSignature,
         costs: &mut CostAnalysis,
     ) {
@@ -1386,7 +1393,7 @@ impl CostEstimator {
         SymbolicExecutor::new().run(ssa, type_info, sig.id, inputs, costs);
     }
 
-    fn make_main_sig(&self, ssa: &SSA<ConstantTaint>) -> FunctionSignature {
+    fn make_main_sig(&self, ssa: &SSA) -> FunctionSignature {
         let id = ssa.get_main_id();
         let main_fn = ssa.get_function(id);
         let params = main_fn.get_param_types();
@@ -1397,14 +1404,14 @@ impl CostEstimator {
         FunctionSignature { id, params }
     }
 
-    fn make_witness_sig(&self, tp: &Type<ConstantTaint>) -> ValueSignature {
+    fn make_witness_sig(&self, tp: &Type) -> ValueSignature {
         match &tp.expr {
             TypeExpr::U(size) => ValueSignature::UWitness(*size),
             TypeExpr::Field => ValueSignature::FWitness,
             TypeExpr::Array(internal, size) => {
                 ValueSignature::Array(vec![self.make_witness_sig(internal); *size])
             }
-            TypeExpr::WitnessRef => ValueSignature::FWitness,
+            TypeExpr::WitnessOf(_) => ValueSignature::FWitness,
             TypeExpr::Slice(_) => panic!("slice not possible here"),
             TypeExpr::Ref(_) => panic!("ref not possible here"),
             TypeExpr::Tuple(elements) => {

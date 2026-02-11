@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::compiler::{constraint_solver::ConstraintSolver, ir::r#type::Empty, ssa::{CallTarget, FunctionId, OpCode, SSA}, taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType}};
+use crate::compiler::{constraint_solver::ConstraintSolver, ssa::{CallTarget, FunctionId, OpCode, SSA}, taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType}};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct Signature {
@@ -29,7 +29,7 @@ impl Monomorphization {
         }
     }
 
-    pub fn run(&mut self, ssa: &mut SSA<Empty>, taint_analysis: &mut TaintAnalysis) -> Result<(), String> {
+    pub fn run(&mut self, ssa: &mut SSA, taint_analysis: &mut TaintAnalysis) -> Result<(), String> {
         let unspecialized_fns = ssa.get_function_ids().collect::<Vec<_>>();
         let entry_point = ssa.get_main_id();
         let entry_point_taint = taint_analysis.get_function_taint(entry_point);
@@ -114,7 +114,7 @@ impl Monomorphization {
 
     fn request_specialization(
         &mut self,
-        ssa: &mut SSA<Empty>,
+        ssa: &mut SSA,
         function_id: FunctionId,
         signature: Signature,
     ) -> FunctionId {

@@ -3,43 +3,43 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
-    ir::r#type::{CommutativeMonoid, Type},
+    ir::r#type::Type,
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator
     },
 };
 
-pub trait Value<Context, Taint>
+pub trait Value<Context>
 where
     Self: Sized + Clone,
 {
-    fn cmp(&self, b: &Self, cmp_kind: CmpKind, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
+    fn cmp(&self, b: &Self, cmp_kind: CmpKind, out_type: &Type, ctx: &mut Context) -> Self;
     fn arith(
         &self,
         b: &Self,
         binary_arith_op_kind: BinaryArithOpKind,
-        out_type: &Type<Taint>,
+        out_type: &Type,
         ctx: &mut Context,
     ) -> Self;
     fn assert_eq(&self, other: &Self, ctx: &mut Context);
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
-    fn array_get(&self, index: &Self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
-    fn tuple_get(&self, index: usize, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
+    fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
+    fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(
         &self,
         index: &Self,
         value: &Self,
-        out_type: &Type<Taint>,
+        out_type: &Type,
         ctx: &mut Context,
     ) -> Self;
-    fn truncate(&self, _from: usize, to: usize, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
-    fn cast(&self, cast_target: &CastTarget, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
+    fn truncate(&self, _from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
+    fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn to_bits(
         &self,
         endianness: Endianness,
         size: usize,
-        out_type: &Type<Taint>,
+        out_type: &Type,
         ctx: &mut Context,
     ) -> Self;
     fn to_radix(
@@ -47,45 +47,45 @@ where
         radix: &Radix<Self>,
         endianness: Endianness,
         size: usize,
-        out_type: &Type<Taint>,
+        out_type: &Type,
         ctx: &mut Context,
     ) -> Self;
-    fn not(&self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
+    fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_field(f: Field, ctx: &mut Context) -> Self;
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut Context,
         seq_type: SeqType,
-        elem_type: &Type<Taint>,
+        elem_type: &Type,
     ) -> Self;
     fn mk_tuple(
         elems: Vec<Self>,
         ctx: &mut Context,
-        elem_types: &[Type<Taint>],
+        elem_types: &[Type],
     ) -> Self;
     fn alloc(ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
-    fn ptr_read(&self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
+    fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
-    fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
-    fn write_witness(&self, tp: Option<&Type<Taint>>, ctx: &mut Context) -> Self;
+    fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type, ctx: &mut Context) -> Self;
+    fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
 }
 
-pub trait Context<V, Taint> {
+pub trait Context<V> {
     // If this returns Some, the function execution will be skipped and the returned values will be used instead
     // as call results.
     fn on_call(
         &mut self,
         func: FunctionId,
         params: &mut [V],
-        param_types: &[&Type<Taint>],
+        param_types: &[&Type],
     ) -> Option<Vec<V>>;
-    fn on_return(&mut self, returns: &mut [V], return_types: &[Type<Taint>]);
-    fn on_jmp(&mut self, target: BlockId, params: &mut [V], param_types: &[&Type<Taint>]);
+    fn on_return(&mut self, returns: &mut [V], return_types: &[Type]);
+    fn on_jmp(&mut self, target: BlockId, params: &mut [V], param_types: &[&Type]);
 
     // TODO it looks odd that this is the only opcode implemented here.
     // This is the _new_ structure, so at some point we should migrate all other opcodes here.
@@ -97,7 +97,7 @@ pub trait Context<V, Taint> {
         panic!("ICE: backend does not implement dlookup");
     }
 
-    fn todo(&mut self, payload: &str, _result_types: &[Type<Taint>]) -> Vec<V> {
+    fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<V> {
         panic!("Todo opcode encountered: {}", payload);
     }
 
@@ -118,17 +118,16 @@ impl SymbolicExecutor {
     }
 
     #[instrument(skip_all, name = "SymbolicExecutor::run", level = Level::DEBUG)]
-    pub fn run<V, T, Ctx>(
+    pub fn run<V, Ctx>(
         &self,
-        ssa: &SSA<T>,
-        type_info: &TypeInfo<T>,
+        ssa: &SSA,
+        type_info: &TypeInfo,
         entry_point: FunctionId,
         params: Vec<V>,
         context: &mut Ctx,
     ) where
-        V: Value<Ctx, T>,
-        Ctx: Context<V, T>,
-        T: Clone + CommutativeMonoid,
+        V: Value<Ctx>,
+        Ctx: Context<V>,
     {
         let mut globals: Vec<Option<V>> = vec![None; ssa.num_globals()];
 
@@ -136,19 +135,18 @@ impl SymbolicExecutor {
     }
 
     #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
-    fn run_fn<V, T, Ctx>(
+    fn run_fn<V, Ctx>(
         &self,
-        ssa: &SSA<T>,
-        type_info: &TypeInfo<T>,
+        ssa: &SSA,
+        type_info: &TypeInfo,
         fn_id: FunctionId,
         mut inputs: Vec<V>,
         globals: &mut Vec<Option<V>>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
-        V: Value<Ctx, T>,
-        Ctx: Context<V, T>,
-        T: Clone,
+        V: Value<Ctx>,
+        Ctx: Context<V>,
     {
         let fn_body = ssa.get_function(fn_id);
         let fn_type_info = type_info.get_function(fn_id);
@@ -159,7 +157,7 @@ impl SymbolicExecutor {
             let v = match cst {
                 Const::U(s, v) => V::of_u(*s, *v, ctx),
                 Const::Field(f) => V::of_field(f.clone(), ctx),
-                Const::WitnessRef(_) => todo!(),
+                Const::Witness(_) => todo!(),
                 Const::FnPtr(_) => todo!(),
             };
             scope[val.0 as usize] = Some(v);
@@ -251,7 +249,6 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::OpCode::Alloc {
                         result: r,
                         elem_type: _,
-                        result_annotation: _,
                     } => {
                         scope[r.0 as usize] = Some(V::alloc(ctx));
                     }
@@ -384,7 +381,6 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::OpCode::WriteWitness {
                         result: r,
                         value: a,
-                        witness_annotation: _,
                     } => {
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         if let Some(r) = r {
@@ -422,19 +418,6 @@ impl SymbolicExecutor {
                         matrix: _matrix,
                         variable: _a,
                         sensitivity: _b,
-                    } => {
-                        todo!()
-                    }
-                    crate::compiler::ssa::OpCode::PureToWitnessRef {
-                        result: _,
-                        value: _,
-                        result_annotation: _,
-                    } => {
-                        todo!()
-                    }
-                    crate::compiler::ssa::OpCode::UnboxField {
-                        result: _,
-                        value: _,
                     } => {
                         todo!()
                     }

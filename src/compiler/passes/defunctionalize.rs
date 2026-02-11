@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
-    ir::r#type::{Empty, Type, TypeExpr},
+    ir::r#type::{Type, TypeExpr},
     pass_manager::{Pass, PassInfo, PassManager},
     ssa::{
         BlockId, CallTarget, Const, FunctionId, OpCode, Terminator, TupleIdx, ValueId, SSA,
@@ -16,7 +16,7 @@ impl Defunctionalize {
     }
 }
 
-impl Pass<Empty> for Defunctionalize {
+impl Pass for Defunctionalize {
     fn pass_info(&self) -> PassInfo {
         PassInfo {
             name: "defunctionalize",
@@ -32,7 +32,7 @@ impl Pass<Empty> for Defunctionalize {
         true
     }
 
-    fn run(&self, ssa: &mut SSA<Empty>, _pass_manager: &PassManager<Empty>) {
+    fn run(&self, ssa: &mut SSA, _pass_manager: &PassManager) {
         run_defunctionalize(ssa);
     }
 }
@@ -41,7 +41,7 @@ impl Pass<Empty> for Defunctionalize {
 /// concrete FunctionIds it can point to.
 type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
 
-fn run_defunctionalize(ssa: &mut SSA<Empty>) {
+fn run_defunctionalize(ssa: &mut SSA) {
     // Check if there are any FnPtrs at all
     let has_fn_ptrs = ssa.get_function_ids().collect::<Vec<_>>().iter().any(|fid| {
         ssa.get_function(*fid)
@@ -223,19 +223,19 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
 ///   - Static call argument edges (caller → callee params)
 ///   - Static call return edges (callee returns → caller results)
 ///   - Dynamic call return edges (resolved target returns → caller results)
-fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
+fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
     let mut reaching: ReachingFns = HashMap::new();
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
     // Check if a type contains Function anywhere (for alias-aware propagation)
-    fn contains_function(typ: &Type<Empty>) -> bool {
+    fn contains_function(typ: &Type) -> bool {
         match &typ.expr {
             TypeExpr::Function => true,
             TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) | TypeExpr::Ref(inner) => {
                 contains_function(inner)
             }
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessRef => false,
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessOf(_) => false,
         }
     }
 
@@ -482,10 +482,10 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
 
 /// Build a dispatch function for a specific call site's reachable targets.
 fn build_dispatch_function(
-    ssa: &mut SSA<Empty>,
+    ssa: &mut SSA,
     counter: u32,
-    param_types: &[Type<Empty>],
-    return_types: &[Type<Empty>],
+    param_types: &[Type],
+    return_types: &[Type],
     variants: &[FunctionId],
 ) -> FunctionId {
     let dispatch_fn_id = ssa.add_function(format!("apply_dispatch@{}", counter));
@@ -496,7 +496,7 @@ fn build_dispatch_function(
     }
 
     let entry_block = func.get_entry_id();
-    let fn_id_param = func.add_parameter(entry_block, Type::u32(Empty));
+    let fn_id_param = func.add_parameter(entry_block, Type::u32());
 
     let mut forwarded_params: Vec<ValueId> = Vec::new();
     for param_type in param_types {
@@ -570,7 +570,7 @@ fn build_dispatch_function(
 }
 
 /// Recursively replace `TypeExpr::Function` with `TypeExpr::U(32)` in a type.
-fn replace_function_type(typ: &mut Type<Empty>) {
+fn replace_function_type(typ: &mut Type) {
     match &mut typ.expr {
         TypeExpr::Function => {
             typ.expr = TypeExpr::U(32);
@@ -583,12 +583,12 @@ fn replace_function_type(typ: &mut Type<Empty>) {
                 replace_function_type(elem);
             }
         }
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessRef => {}
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessOf(_) => {}
     }
 }
 
 /// Replace `TypeExpr::Function` in all type annotations within an instruction.
-fn replace_function_types_in_instruction(instr: &mut OpCode<Empty>) {
+fn replace_function_types_in_instruction(instr: &mut OpCode) {
     match instr {
         OpCode::MkSeq { elem_type, .. } => replace_function_type(elem_type),
         OpCode::Alloc { elem_type, .. } => replace_function_type(elem_type),

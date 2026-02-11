@@ -16,7 +16,7 @@ use crate::compiler::{
 
 pub struct RCInsertion {}
 
-impl<V: Clone + Display + Debug> Pass<V> for RCInsertion {
+impl Pass for RCInsertion {
     fn pass_info(&self) -> PassInfo {
         PassInfo {
             name: "rc_insertion",
@@ -24,7 +24,7 @@ impl<V: Clone + Display + Debug> Pass<V> for RCInsertion {
         }
     }
 
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &PassManager<V>) {
+    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
         let cfg = pass_manager.get_cfg();
 
         let liveness = LivenessAnalysis::new().run(ssa, cfg);
@@ -44,11 +44,11 @@ impl RCInsertion {
     }
 
     #[instrument(skip_all, level = Level::DEBUG, name = "RCInsertion::run_function", fields(function = function.get_name()))]
-    fn run_function<V: Clone + Display + Debug>(
+    fn run_function(
         &self,
-        function: &mut Function<V>,
+        function: &mut Function,
         cfg: &CFG,
-        type_info: &FunctionTypeInfo<V>,
+        type_info: &FunctionTypeInfo,
         liveness: &FunctionLiveness,
     ) {
         for (block_id, block) in function.get_blocks_mut() {
@@ -132,16 +132,7 @@ impl RCInsertion {
                         }
                         currently_live.extend(rcd_inputs);
                     }
-                    OpCode::UnboxField { result: _, value: v } => {
-                        if !currently_live.contains(v) {
-                            new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
-                                value: *v
-                            });
-                        }
-                        new_instructions.push(instruction.clone());
-                        currently_live.insert(*v);
-                    }
+                    // UnboxField removed
                     OpCode::MulConst { result: r, const_val: _, var: v } => {
                         if currently_live.contains(v) {
                             new_instructions.push(OpCode::MemOp {
@@ -155,12 +146,7 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
                     }
-                    OpCode::PureToWitnessRef { result: r, value: _, result_annotation: _ } => {
-                        if !currently_live.contains(r) {
-                            panic!("ICE: Result of PureToWitnessRef is immediately dropped. This is a bug.")
-                        }
-                        new_instructions.push(instruction.clone());
-                    }
+                    // PureToWitnessRef removed - handled by Cast catch-all below
                     OpCode::TupleProj { 
                         result, tuple, idx: _,
                     } => {
@@ -220,7 +206,7 @@ impl RCInsertion {
                     | OpCode::Truncate { result: _, value: _, to_bits: _, from_bits: _ }
                     | OpCode::AssertR1C { a: _, b: _, c: _ }
                     | OpCode::Constrain { a: _, b: _, c: _ }
-                    | OpCode::WriteWitness { result: _, value: _, witness_annotation: _ }
+                    | OpCode::WriteWitness { result: _, value: _ }
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::Lookup { target: _, keys: _, results: _ }
                     | OpCode::DLookup { target: _, keys: _, results: _ }
@@ -299,7 +285,7 @@ impl RCInsertion {
                         }
                         currently_live.extend(inputs);
                     }
-                    OpCode::Alloc { result: _, elem_type: _, result_annotation: _ } => todo!(),
+                    OpCode::Alloc { result: _, elem_type: _ } => todo!(),
                     OpCode::Store { ptr: _, value: _ } => todo!(),
                     OpCode::Load { result: _, ptr: _ } => todo!(),
                     OpCode::Call { results: returns, function: _, args: params } => {
@@ -638,23 +624,23 @@ impl RCInsertion {
         }
     }
 
-    fn needs_rc<V: Clone + Display>(
+    fn needs_rc(
         &self,
-        type_info: &FunctionTypeInfo<V>,
+        type_info: &FunctionTypeInfo,
         value: &ValueId,
     ) -> bool {
         let value_type = type_info.get_value_type(*value);
         self.type_needs_rc(&value_type)
     }
 
-    fn type_needs_rc<V: Clone>(&self, value_type: &Type<V>) -> bool {
+    fn type_needs_rc(&self, value_type: &Type) -> bool {
         match &value_type.expr {
             TypeExpr::Ref(_) => true,
             TypeExpr::Array(_, _) => true,
             TypeExpr::Slice(_) => true,
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
-            TypeExpr::WitnessRef => true,
+            TypeExpr::WitnessOf(_) => true,
             TypeExpr::Tuple(_) => true,
             TypeExpr::Function => false,
         }

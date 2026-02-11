@@ -15,5 +15,6 @@ pub mod remove_unreachable_functions;
 pub mod specializer;
 pub mod witness_write_to_fresh;
 pub mod witness_write_to_void;
+pub mod strip_witness_of;
 pub mod struct_access_simplifier;
 pub mod prepare_entry_point;

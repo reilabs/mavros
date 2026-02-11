@@ -3,17 +3,17 @@ use std::collections::HashMap;
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, TupleIdx, ValueId},
-    taint_analysis::ConstantTaint,
 };
 
 pub struct WitnessToRef {}
 
-impl Pass<ConstantTaint> for WitnessToRef {
+impl Pass for WitnessToRef {
     fn run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA<ConstantTaint>,
-        pass_manager: &crate::compiler::pass_manager::PassManager<ConstantTaint>,
+        ssa: &mut crate::compiler::ssa::SSA,
+        pass_manager: &crate::compiler::pass_manager::PassManager,
     ) {
         self.do_run(ssa, pass_manager.get_type_info());
     }
@@ -37,8 +37,8 @@ impl WitnessToRef {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA<ConstantTaint>,
-        type_info: &crate::compiler::analysis::types::TypeInfo<ConstantTaint>,
+        ssa: &mut crate::compiler::ssa::SSA,
+        type_info: &crate::compiler::analysis::types::TypeInfo,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let type_info = type_info.get_function(*function_id);
@@ -46,7 +46,7 @@ impl WitnessToRef {
                 *rtp = self.witness_to_ref_in_type(rtp);
             }
             // Collect converted block parameter types before taking blocks
-            let block_param_types: HashMap<BlockId, Vec<Type<ConstantTaint>>> = function
+            let block_param_types: HashMap<BlockId, Vec<Type>> = function
                 .get_blocks()
                 .map(|(bid, block)| {
                     let types = block
@@ -57,6 +57,7 @@ impl WitnessToRef {
                 })
                 .collect();
 
+            let mut replacements = ValueReplacements::new();
             let mut new_blocks = HashMap::new();
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let old_params = block.take_parameters();
@@ -73,7 +74,8 @@ impl WitnessToRef {
                 let mut current_block = block;
                 let mut new_instructions = vec![];
 
-                for instruction in instructions.into_iter() {
+                for mut instruction in instructions.into_iter() {
+                    replacements.replace_instruction(&mut instruction);
                     match instruction {
                         OpCode::Cast {
                             result: r,
@@ -81,12 +83,12 @@ impl WitnessToRef {
                             target: t,
                         } => {
                             let v_type = type_info.get_value_type(v);
-                            if v_type.get_annotation().is_witness() {
-                                new_instructions.push(OpCode::Cast {
-                                    result: r,
-                                    value: v,
-                                    target: CastTarget::Nop,
-                                });
+                            if v_type.is_witness_of() {
+                                // The value is already WitnessOf — the cast strips it to Field.
+                                // Instead of emitting a Nop, alias the result to the original
+                                // value so ensure_witness_ref sees the WitnessOf type and
+                                // doesn't double-wrap.
+                                replacements.insert(r, v);
                             } else {
                                 new_instructions.push(instruction);
                             }
@@ -97,7 +99,7 @@ impl WitnessToRef {
                         } => {
                             let i = OpCode::FreshWitness {
                                 result: r,
-                                result_type: Type::witness_ref(tp.annotation.clone()),
+                                result_type: Type::witness_of(tp.clone()),
                             };
                             new_instructions.push(i);
                         }
@@ -123,15 +125,10 @@ impl WitnessToRef {
                             };
                             new_instructions.push(i);
                         }
-                        OpCode::Alloc {
-                            result: r,
-                            elem_type: tp,
-                            result_annotation: v,
-                        } => {
+                        OpCode::Alloc { result: r, elem_type: tp } => {
                             let i = OpCode::Alloc {
                                 result: r,
                                 elem_type: self.witness_to_ref_in_type(&tp),
-                                result_annotation: v,
                             };
                             new_instructions.push(i);
                         }
@@ -166,13 +163,9 @@ impl WitnessToRef {
                             for key in keys.iter() {
                                 let key_type = type_info.get_value_type(*key);
                                 assert!(key_type.is_field(), "Keys of lookup must be fields");
-                                if !key_type.get_annotation().is_witness() {
+                                if !key_type.is_witness_of() {
                                     let refed = function.fresh_value();
-                                    new_instructions.push(OpCode::PureToWitnessRef {
-                                        result: refed,
-                                        value: *key,
-                                        result_annotation: key_type.annotation.clone(),
-                                    });
+                                    new_instructions.push(OpCode::Cast { result: refed, value: *key, target: CastTarget::WitnessOf });
                                     new_keys.push(refed);
                                 } else {
                                     new_keys.push(*key);
@@ -182,13 +175,9 @@ impl WitnessToRef {
                             for result in results.iter() {
                                 let result_type = type_info.get_value_type(*result);
                                 assert!(result_type.is_field(), "Results of lookup must be fields");
-                                if !result_type.get_annotation().is_witness() {
+                                if !result_type.is_witness_of() {
                                     let refed = function.fresh_value();
-                                    new_instructions.push(OpCode::PureToWitnessRef {
-                                        result: refed,
-                                        value: *result,
-                                        result_annotation: result_type.annotation.clone(),
-                                    });
+                                    new_instructions.push(OpCode::Cast { result: refed, value: *result, target: CastTarget::WitnessOf });
                                     new_results.push(refed);
                                 } else {
                                     new_results.push(*result);
@@ -210,9 +199,9 @@ impl WitnessToRef {
                             let b_type = type_info.get_value_type(b);
                             match (
                                 a,
-                                a_type.get_annotation().is_witness(),
+                                a_type.is_witness_of(),
                                 b,
-                                b_type.get_annotation().is_witness(),
+                                b_type.is_witness_of(),
                             ) {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
@@ -241,11 +230,7 @@ impl WitnessToRef {
                                 (wit, true, pure, false) | (pure, false, wit, true) => match kind {
                                     BinaryArithOpKind::Add => {
                                         let pure_refed = function.fresh_value();
-                                        new_instructions.push(OpCode::PureToWitnessRef {
-                                            result: pure_refed,
-                                            value: pure,
-                                            result_annotation: ConstantTaint::Witness,
-                                        });
+                                        new_instructions.push(OpCode::Cast { result: pure_refed, value: pure, target: CastTarget::WitnessOf });
                                         new_instructions.push(OpCode::BinaryArithOp {
                                             kind: kind,
                                             result: r,
@@ -267,11 +252,7 @@ impl WitnessToRef {
                                         // Lower Sub(a, b) where one is pure/one is witness
                                         // to Add(a_ref, MulConst(-1, b_ref))
                                         let pure_refed = function.fresh_value();
-                                        new_instructions.push(OpCode::PureToWitnessRef {
-                                            result: pure_refed,
-                                            value: pure,
-                                            result_annotation: ConstantTaint::Witness,
-                                        });
+                                        new_instructions.push(OpCode::Cast { result: pure_refed, value: pure, target: CastTarget::WitnessOf });
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
                                         let neg_one = function.push_field_const(ark_bn254::Fr::from(-1i64));
@@ -387,8 +368,7 @@ impl WitnessToRef {
                         | OpCode::NextDCoeff { .. }
                         | OpCode::BumpD { .. }
                         | OpCode::DLookup { .. }
-                        | OpCode::PureToWitnessRef { .. }
-                        | OpCode::UnboxField { .. }
+                        /* PureToWitnessRef removed */
                         | OpCode::MulConst { .. }
                         | OpCode::Rangecheck { .. }
                         | OpCode::ReadGlobal { .. }
@@ -418,6 +398,7 @@ impl WitnessToRef {
 
                 // Handle terminator on current (possibly split) block
                 if let Some(mut terminator) = terminator {
+                    replacements.replace_terminator(&mut terminator);
                     match &mut terminator {
                         Terminator::Jmp(target, args) => {
                             let param_types = &block_param_types[target];
@@ -450,13 +431,13 @@ impl WitnessToRef {
     fn emit_value_conversion(
         &self,
         value: ValueId,
-        source_type: &Type<ConstantTaint>,
-        target_type: &Type<ConstantTaint>,
+        source_type: &Type,
+        target_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
-        function: &mut crate::compiler::ssa::Function<ConstantTaint>,
-        new_blocks: &mut HashMap<BlockId, Block<ConstantTaint>>,
+        current_block: &mut Block,
+        new_instructions: &mut Vec<OpCode>,
+        function: &mut crate::compiler::ssa::Function,
+        new_blocks: &mut HashMap<BlockId, Block>,
     ) -> ValueId {
         let converted_source = self.witness_to_ref_in_type(source_type);
         if converted_source == *target_type {
@@ -464,13 +445,9 @@ impl WitnessToRef {
         }
 
         match (&source_type.expr, &target_type.expr) {
-            (TypeExpr::Field, TypeExpr::WitnessRef) | (TypeExpr::U(_), TypeExpr::WitnessRef) => {
+            (TypeExpr::Field, TypeExpr::WitnessOf(_)) | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => {
                 let refed = function.fresh_value();
-                new_instructions.push(OpCode::PureToWitnessRef {
-                    result: refed,
-                    value,
-                    result_annotation: source_type.annotation.clone(),
-                });
+                new_instructions.push(OpCode::Cast { result: refed, value: value, target: CastTarget::WitnessOf });
                 refed
             }
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
@@ -534,16 +511,16 @@ impl WitnessToRef {
     fn emit_array_conversion_loop(
         &self,
         source_array: ValueId,
-        src_elem_type: &Type<ConstantTaint>,
-        tgt_elem_type: &Type<ConstantTaint>,
+        src_elem_type: &Type,
+        tgt_elem_type: &Type,
         array_len: usize,
-        _source_array_type: &Type<ConstantTaint>,
-        target_array_type: &Type<ConstantTaint>,
+        _source_array_type: &Type,
+        target_array_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
-        function: &mut crate::compiler::ssa::Function<ConstantTaint>,
-        new_blocks: &mut HashMap<BlockId, Block<ConstantTaint>>,
+        current_block: &mut Block,
+        new_instructions: &mut Vec<OpCode>,
+        function: &mut crate::compiler::ssa::Function,
+        new_blocks: &mut HashMap<BlockId, Block>,
     ) -> ValueId {
         // Create a properly-typed initial target array filled with dummy elements.
         // This ensures the dst array has the correct memory layout from the start.
@@ -580,7 +557,7 @@ impl WitnessToRef {
         let i_val = function.fresh_value();
         let dst_val = function.fresh_value();
         loop_header.put_parameters(vec![
-            (i_val, Type::u(32, ConstantTaint::Pure)),
+            (i_val, Type::u(32)),
             (dst_val, target_array_type.clone()),
         ]);
 
@@ -651,11 +628,11 @@ impl WitnessToRef {
     /// Used to initialize the dst array before the conversion loop.
     fn create_dummy_array(
         &self,
-        elem_type: &Type<ConstantTaint>,
+        elem_type: &Type,
         array_len: usize,
-        _array_type: &Type<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
-        function: &mut crate::compiler::ssa::Function<ConstantTaint>,
+        _array_type: &Type,
+        new_instructions: &mut Vec<OpCode>,
+        function: &mut crate::compiler::ssa::Function,
     ) -> ValueId {
         let dummy_elem = self.create_dummy_value(elem_type, new_instructions, function);
         let elems = vec![dummy_elem; array_len];
@@ -674,19 +651,15 @@ impl WitnessToRef {
     /// For arrays/tuples: recursively creates dummy elements.
     fn create_dummy_value(
         &self,
-        target_type: &Type<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
-        function: &mut crate::compiler::ssa::Function<ConstantTaint>,
+        target_type: &Type,
+        new_instructions: &mut Vec<OpCode>,
+        function: &mut crate::compiler::ssa::Function,
     ) -> ValueId {
         match &target_type.expr {
-            TypeExpr::WitnessRef => {
+            TypeExpr::WitnessOf(_) => {
                 let dummy_field = function.push_field_const(ark_bn254::Fr::from(0u64));
                 let refed = function.fresh_value();
-                new_instructions.push(OpCode::PureToWitnessRef {
-                    result: refed,
-                    value: dummy_field,
-                    result_annotation: target_type.annotation.clone(),
-                });
+                new_instructions.push(OpCode::Cast { result: refed, value: dummy_field, target: CastTarget::WitnessOf });
                 refed
             }
             TypeExpr::Array(inner, size) => {
@@ -717,13 +690,13 @@ impl WitnessToRef {
     fn convert_if_needed(
         &self,
         value: ValueId,
-        target_type: &Type<ConstantTaint>,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo<ConstantTaint>,
+        target_type: &Type,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
         current_block_id: &mut BlockId,
-        current_block: &mut Block<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
-        function: &mut crate::compiler::ssa::Function<ConstantTaint>,
-        new_blocks: &mut HashMap<BlockId, Block<ConstantTaint>>,
+        current_block: &mut Block,
+        new_instructions: &mut Vec<OpCode>,
+        function: &mut crate::compiler::ssa::Function,
+        new_blocks: &mut HashMap<BlockId, Block>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_to_ref_in_type(&value_type);
@@ -746,50 +719,46 @@ impl WitnessToRef {
     fn ensure_witness_ref(
         &self,
         val: ValueId,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
-        function: &mut crate::compiler::ssa::Function<ConstantTaint>,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        new_instructions: &mut Vec<OpCode>,
+        function: &mut crate::compiler::ssa::Function,
     ) -> ValueId {
         let val_type = type_info.get_value_type(val);
-        if val_type.get_annotation().is_witness() {
+        if val_type.is_witness_of() {
             val
         } else {
             let refed = function.fresh_value();
-            new_instructions.push(OpCode::PureToWitnessRef {
-                result: refed,
-                value: val,
-                result_annotation: val_type.annotation.clone(),
-            });
+            new_instructions.push(OpCode::Cast { result: refed, value: val, target: CastTarget::WitnessOf });
             refed
         }
     }
 
-    fn witness_to_ref_in_type(&self, tp: &Type<ConstantTaint>) -> Type<ConstantTaint> {
+    fn witness_to_ref_in_type(&self, tp: &Type) -> Type {
         match &tp.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
-                if tp.annotation == ConstantTaint::Witness {
-                    Type::witness_ref(tp.annotation.clone())
+                if tp.is_witness_of() {
+                    Type::witness_of(tp.clone())
                 } else {
                     tp.clone()
                 }
             }
             TypeExpr::Array(inner, size) => self
                 .witness_to_ref_in_type(inner)
-                .array_of(*size, tp.annotation.clone()),
+                .array_of(*size),
             TypeExpr::Slice(inner) => {
-                self.witness_to_ref_in_type(inner).slice_of(tp.annotation.clone())
+                self.witness_to_ref_in_type(inner).slice_of()
             }
             TypeExpr::Ref(inner) => {
-                self.witness_to_ref_in_type(inner).ref_of(tp.annotation.clone())
+                self.witness_to_ref_in_type(inner).ref_of()
             }
-            TypeExpr::WitnessRef => tp.clone(),
+            TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),
             TypeExpr::Tuple(elements) => {
                 let boxed_elements = elements
                     .iter()
                     .map(|elem| self.witness_to_ref_in_type(elem))
                     .collect();
-                Type::tuple_of(boxed_elements, tp.annotation.clone())
+                Type::tuple_of(boxed_elements)
             }
         }
     }

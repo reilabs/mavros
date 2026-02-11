@@ -30,7 +30,6 @@ use crate::compiler::ssa::{
     BinaryArithOpKind, Block, BlockId, CmpKind, Const, Function, FunctionId, Terminator, ValueId,
     SSA,
 };
-use crate::compiler::taint_analysis::ConstantTaint;
 
 use self::runtime::Runtime;
 use self::types::TypeConverter;
@@ -71,9 +70,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile SSA to LLVM IR
     pub fn compile(
         &mut self,
-        ssa: &SSA<ConstantTaint>,
+        ssa: &SSA,
         flow_analysis: &FlowAnalysis,
-        type_info: &TypeInfo<ConstantTaint>,
+        type_info: &TypeInfo,
     ) {
         // First pass: declare all functions
         let main_id = ssa.get_main_id();
@@ -93,8 +92,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn declare_function(
         &mut self,
         fn_id: FunctionId,
-        function: &Function<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        function: &Function,
+        type_info: &TypeInfo,
         main_id: FunctionId,
     ) {
         let fn_type_info = type_info.get_function(fn_id);
@@ -141,9 +140,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn compile_function(
         &mut self,
         fn_id: FunctionId,
-        function: &Function<ConstantTaint>,
+        function: &Function,
         cfg: &CFG,
-        type_info: &FunctionTypeInfo<ConstantTaint>,
+        type_info: &FunctionTypeInfo,
     ) {
         // Clear per-function state
         self.value_map.clear();
@@ -220,9 +219,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile a block, tracking phi nodes for later
     fn compile_block_with_phis(
         &mut self,
-        function: &Function<ConstantTaint>,
+        function: &Function,
         block_id: BlockId,
-        type_info: &FunctionTypeInfo<ConstantTaint>,
+        type_info: &FunctionTypeInfo,
         phi_nodes: &mut HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>>,
     ) {
         let block = function.get_block(block_id);
@@ -265,7 +264,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 // Field is represented as [4 x i64] in Montgomery form
                 self.runtime.const_field(field_val)
             }
-            Const::WitnessRef(_) => {
+            Const::Witness(_) => {
                 todo!("WitnessRef constants not yet supported in LLVM codegen")
             }
             Const::FnPtr(_) => {
@@ -283,8 +282,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// - WriteWitness
     fn compile_instruction(
         &mut self,
-        instruction: &crate::compiler::ssa::OpCode<ConstantTaint>,
-        type_info: &FunctionTypeInfo<ConstantTaint>,
+        instruction: &crate::compiler::ssa::OpCode,
+        type_info: &FunctionTypeInfo,
     ) {
         use crate::compiler::ssa::{CallTarget, OpCode};
 
@@ -437,7 +436,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile a terminator instruction
     fn compile_terminator(
         &mut self,
-        function: &Function<ConstantTaint>,
+        function: &Function,
         current_block_id: BlockId,
         terminator: &Terminator,
     ) {
