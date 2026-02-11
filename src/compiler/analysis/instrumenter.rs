@@ -474,6 +474,7 @@ impl Value {
         match self {
             Value::U(s, v) => Value::U(*s, !v),
             Value::UWitness(1) => Value::UWitness(1),
+            Value::FWitness => Value::FWitness,
             _ => panic!("Cannot perform not operation on {:?}", self),
         }
     }
