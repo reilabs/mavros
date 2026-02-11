@@ -141,7 +141,7 @@ impl ConstraintSolver {
                 Judgement::Eq(Taint::Variable(l), Taint::Constant(t))
                 | Judgement::Eq(Taint::Constant(t), Taint::Variable(l)) => {
                     // TODO: Occurs check
-                    self.unification.set_taint(*l, *t);
+                    self.unification.set_taint_for_variable(*l, *t);
                 }
                 Judgement::Eq(t1, t2) => {
                     let t1_substituted = self.unification.substitute_variables(t1);
