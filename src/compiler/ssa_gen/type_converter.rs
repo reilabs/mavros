@@ -18,12 +18,10 @@ impl TypeConverter {
         match ast_type {
             AstType::Field => Type::field(Empty),
             AstType::Bool => Type::bool(Empty),
-            AstType::Integer(signedness, bit_size) => {
-                match signedness {
-                    Signedness::Unsigned => Type::u(bit_size.bit_size() as usize, Empty),
-                    Signedness::Signed => panic!("Signed integers not supported"),
-                }
-            }
+            AstType::Integer(signedness, bit_size) => match signedness {
+                Signedness::Unsigned => Type::u(bit_size.bit_size() as usize, Empty),
+                Signedness::Signed => panic!("Signed integers not supported"),
+            },
             AstType::Unit => {
                 // Unit type is represented as an empty tuple
                 Type::tuple_of(vec![], Empty)
@@ -37,10 +35,8 @@ impl TypeConverter {
                 elem.slice_of(Empty)
             }
             AstType::Tuple(types) => {
-                let converted: Vec<Type<Empty>> = types
-                    .iter()
-                    .map(|t| self.convert_type(t))
-                    .collect();
+                let converted: Vec<Type<Empty>> =
+                    types.iter().map(|t| self.convert_type(t)).collect();
                 Type::tuple_of(converted, Empty)
             }
             AstType::Reference(inner, _mutable) => {
@@ -57,7 +53,8 @@ impl TypeConverter {
                 // Tuple(Array(U(32), N), ...T_fields)
                 let codepoints_array = Type::u(32, Empty).array_of(*len as usize, Empty);
                 let capture_fields = match captures_type.as_ref() {
-                    AstType::Tuple(fields) => fields.iter()
+                    AstType::Tuple(fields) => fields
+                        .iter()
                         .map(|t| self.convert_type(t))
                         .collect::<Vec<_>>(),
                     AstType::Unit => vec![],

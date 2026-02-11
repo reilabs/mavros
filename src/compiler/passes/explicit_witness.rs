@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ark_ff::{AdditiveGroup, Field as _};
-use ssa_builder::{ssa_append};
+use ssa_builder::ssa_append;
 
 use crate::compiler::{
     Field,
@@ -88,14 +88,20 @@ impl ExplicitWitness {
                                     CmpKind::Eq => {
                                         let u1 = CastTarget::U(1);
                                         // Conditionally cast operands to Field (skip if already Field)
-                                        let l_field = if matches!(function_type_info.get_value_type(lhs).expr, TypeExpr::Field) {
+                                        let l_field = if matches!(
+                                            function_type_info.get_value_type(lhs).expr,
+                                            TypeExpr::Field
+                                        ) {
                                             lhs
                                         } else {
                                             let v = function.fresh_value();
                                             new_instructions.push(OpCode::mk_cast_to_field(v, lhs));
                                             v
                                         };
-                                        let r_field = if matches!(function_type_info.get_value_type(rhs).expr, TypeExpr::Field) {
+                                        let r_field = if matches!(
+                                            function_type_info.get_value_type(rhs).expr,
+                                            TypeExpr::Field
+                                        ) {
                                             rhs
                                         } else {
                                             let v = function.fresh_value();
@@ -325,8 +331,12 @@ impl ExplicitWitness {
                                         TypeExpr::Ref(_) => {
                                             todo!("ref types in witnessed array reads")
                                         }
-                                        TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
-                                        TypeExpr::Function => panic!("Function type not expected in witnessed array reads"),
+                                        TypeExpr::Tuple(_elements) => {
+                                            todo!("Tuples not supported yet")
+                                        }
+                                        TypeExpr::Function => panic!(
+                                            "Function type not expected in witnessed array reads"
+                                        ),
                                     };
 
                                     ssa_append!(function, new_instructions, {
@@ -440,7 +450,7 @@ impl ExplicitWitness {
                         } => {
                             new_instructions.push(instruction);
                         }
-                        OpCode::MkTuple {..} => {
+                        OpCode::MkTuple { .. } => {
                             new_instructions.push(instruction);
                         }
                         OpCode::Cast {
@@ -463,7 +473,8 @@ impl ExplicitWitness {
                         OpCode::Not { result, value } => {
                             match &function_type_info.get_value_type(value).expr {
                                 TypeExpr::U(s) => {
-                                    let ones = function.push_field_const(Field::from((1u128 << *s) - 1));
+                                    let ones =
+                                        function.push_field_const(Field::from((1u128 << *s) - 1));
                                     let casted = function.fresh_value();
                                     new_instructions.push(OpCode::Cast {
                                         result: casted,
@@ -624,11 +635,7 @@ impl ExplicitWitness {
                                 result_types,
                             });
                         }
-                        OpCode::TupleProj {
-                            result,
-                            tuple,
-                            idx,
-                        } => {
+                        OpCode::TupleProj { result, tuple, idx } => {
                             if let crate::compiler::ssa::TupleIdx::Static(index) = idx {
                                 let tuple_taint =
                                     function_type_info.get_value_type(tuple).get_annotation();
@@ -641,7 +648,7 @@ impl ExplicitWitness {
                             } else {
                                 panic!("Dynamic tuple indexing should not appear here");
                             }
-                        },
+                        }
                         OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                             new_instructions.push(instruction);
                         }

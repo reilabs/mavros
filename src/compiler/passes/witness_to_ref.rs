@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
-    ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, TupleIdx, ValueId},
+    ssa::{
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType,
+        Terminator, TupleIdx, ValueId,
+    },
     taint_analysis::ConstantTaint,
 };
 
@@ -108,13 +111,21 @@ impl WitnessToRef {
                             elem_type: tp,
                         } => {
                             let new_elem_type = self.witness_to_ref_in_type(&tp);
-                            let new_vs = vs.iter().map(|v| {
-                                self.convert_if_needed(
-                                    *v, &new_elem_type, type_info,
-                                    &mut current_block_id, &mut current_block,
-                                    &mut new_instructions, function, &mut new_blocks,
-                                )
-                            }).collect();
+                            let new_vs = vs
+                                .iter()
+                                .map(|v| {
+                                    self.convert_if_needed(
+                                        *v,
+                                        &new_elem_type,
+                                        type_info,
+                                        &mut current_block_id,
+                                        &mut current_block,
+                                        &mut new_instructions,
+                                        function,
+                                        &mut new_blocks,
+                                    )
+                                })
+                                .collect();
                             let i = OpCode::MkSeq {
                                 result: r,
                                 elems: new_vs,
@@ -136,9 +147,24 @@ impl WitnessToRef {
                             new_instructions.push(i);
                         }
                         OpCode::Constrain { a, b, c } => {
-                            let a = self.ensure_witness_ref(a, type_info, &mut new_instructions, function);
-                            let b = self.ensure_witness_ref(b, type_info, &mut new_instructions, function);
-                            let c = self.ensure_witness_ref(c, type_info, &mut new_instructions, function);
+                            let a = self.ensure_witness_ref(
+                                a,
+                                type_info,
+                                &mut new_instructions,
+                                function,
+                            );
+                            let b = self.ensure_witness_ref(
+                                b,
+                                type_info,
+                                &mut new_instructions,
+                                function,
+                            );
+                            let c = self.ensure_witness_ref(
+                                c,
+                                type_info,
+                                &mut new_instructions,
+                                function,
+                            );
                             let new_val = function.fresh_value();
                             new_instructions.push(OpCode::NextDCoeff { result: new_val });
                             new_instructions.push(OpCode::BumpD {
@@ -217,7 +243,8 @@ impl WitnessToRef {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
                                         // Lower Sub(wit, wit) to Add(a, MulConst(-1, b))
-                                        let neg_one = function.push_field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_one =
+                                            function.push_field_const(ark_bn254::Fr::from(-1i64));
                                         let neg_b = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_b,
@@ -274,7 +301,8 @@ impl WitnessToRef {
                                         });
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
-                                        let neg_one = function.push_field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_one =
+                                            function.push_field_const(ark_bn254::Fr::from(-1i64));
                                         let neg_rhs = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_rhs,
@@ -298,11 +326,19 @@ impl WitnessToRef {
                             let ptr_type = type_info.get_value_type(ptr);
                             let new_ptr_type = self.witness_to_ref_in_type(&ptr_type);
                             let converted = self.convert_if_needed(
-                                value, &new_ptr_type, type_info,
-                                &mut current_block_id, &mut current_block,
-                                &mut new_instructions, function, &mut new_blocks,
+                                value,
+                                &new_ptr_type,
+                                type_info,
+                                &mut current_block_id,
+                                &mut current_block,
+                                &mut new_instructions,
+                                function,
+                                &mut new_blocks,
                             );
-                            new_instructions.push(OpCode::Store { ptr, value: converted });
+                            new_instructions.push(OpCode::Store {
+                                ptr,
+                                value: converted,
+                            });
                         }
                         OpCode::ArraySet {
                             result,
@@ -318,12 +354,20 @@ impl WitnessToRef {
                                 _ => panic!("ArraySet on non-array type"),
                             };
                             let converted = self.convert_if_needed(
-                                value, &expected_elem_type, type_info,
-                                &mut current_block_id, &mut current_block,
-                                &mut new_instructions, function, &mut new_blocks,
+                                value,
+                                &expected_elem_type,
+                                type_info,
+                                &mut current_block_id,
+                                &mut current_block,
+                                &mut new_instructions,
+                                function,
+                                &mut new_blocks,
                             );
                             new_instructions.push(OpCode::ArraySet {
-                                result, array, index, value: converted,
+                                result,
+                                array,
+                                index,
+                                value: converted,
                             });
                         }
                         OpCode::SlicePush {
@@ -338,15 +382,26 @@ impl WitnessToRef {
                                 TypeExpr::Slice(inner) => inner.as_ref().clone(),
                                 _ => panic!("SlicePush on non-slice type"),
                             };
-                            let new_values = values.iter().map(|v| {
-                                self.convert_if_needed(
-                                    *v, &expected_elem_type, type_info,
-                                    &mut current_block_id, &mut current_block,
-                                    &mut new_instructions, function, &mut new_blocks,
-                                )
-                            }).collect();
+                            let new_values = values
+                                .iter()
+                                .map(|v| {
+                                    self.convert_if_needed(
+                                        *v,
+                                        &expected_elem_type,
+                                        type_info,
+                                        &mut current_block_id,
+                                        &mut current_block,
+                                        &mut new_instructions,
+                                        function,
+                                        &mut new_blocks,
+                                    )
+                                })
+                                .collect();
                             new_instructions.push(OpCode::SlicePush {
-                                dir, result, slice, values: new_values,
+                                dir,
+                                result,
+                                slice,
+                                values: new_values,
                             });
                         }
                         OpCode::Select {
@@ -358,17 +413,30 @@ impl WitnessToRef {
                             let result_type = type_info.get_value_type(r);
                             let target_type = self.witness_to_ref_in_type(result_type);
                             let if_t = self.convert_if_needed(
-                                if_t, &target_type, type_info,
-                                &mut current_block_id, &mut current_block,
-                                &mut new_instructions, function, &mut new_blocks,
+                                if_t,
+                                &target_type,
+                                type_info,
+                                &mut current_block_id,
+                                &mut current_block,
+                                &mut new_instructions,
+                                function,
+                                &mut new_blocks,
                             );
                             let if_f = self.convert_if_needed(
-                                if_f, &target_type, type_info,
-                                &mut current_block_id, &mut current_block,
-                                &mut new_instructions, function, &mut new_blocks,
+                                if_f,
+                                &target_type,
+                                type_info,
+                                &mut current_block_id,
+                                &mut current_block,
+                                &mut new_instructions,
+                                function,
+                                &mut new_blocks,
                             );
                             new_instructions.push(OpCode::Select {
-                                result: r, cond, if_t, if_f,
+                                result: r,
+                                cond,
+                                if_t,
+                                if_f,
                             });
                         }
                         OpCode::Not { .. }
@@ -423,9 +491,14 @@ impl WitnessToRef {
                             let param_types = &block_param_types[target];
                             for (arg, expected_type) in args.iter_mut().zip(param_types.iter()) {
                                 *arg = self.convert_if_needed(
-                                    *arg, expected_type, type_info,
-                                    &mut current_block_id, &mut current_block,
-                                    &mut new_instructions, function, &mut new_blocks,
+                                    *arg,
+                                    expected_type,
+                                    type_info,
+                                    &mut current_block_id,
+                                    &mut current_block,
+                                    &mut new_instructions,
+                                    function,
+                                    &mut new_blocks,
                                 );
                             }
                         }
@@ -474,7 +547,10 @@ impl WitnessToRef {
                 refed
             }
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-                assert_eq!(src_size, tgt_size, "Array size mismatch in witness_to_ref conversion");
+                assert_eq!(
+                    src_size, tgt_size,
+                    "Array size mismatch in witness_to_ref conversion"
+                );
                 self.emit_array_conversion_loop(
                     value,
                     src_inner,
@@ -490,7 +566,11 @@ impl WitnessToRef {
                 )
             }
             (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-                assert_eq!(src_fields.len(), tgt_fields.len(), "Tuple field count mismatch in witness_to_ref conversion");
+                assert_eq!(
+                    src_fields.len(),
+                    tgt_fields.len(),
+                    "Tuple field count mismatch in witness_to_ref conversion"
+                );
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
                     let proj = function.fresh_value();
@@ -568,10 +648,7 @@ impl WitnessToRef {
         // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
         // source_array is accessed directly from the dominating block, not as a loop param.
         current_block.put_instructions(std::mem::take(new_instructions));
-        current_block.set_terminator(Terminator::Jmp(
-            loop_header_id,
-            vec![const_0, initial_dst],
-        ));
+        current_block.set_terminator(Terminator::Jmp(loop_header_id, vec![const_0, initial_dst]));
         let old_block = std::mem::replace(current_block, continuation);
         new_blocks.insert(*current_block_id, old_block);
         *current_block_id = continuation_id;
@@ -695,7 +772,11 @@ impl WitnessToRef {
             TypeExpr::Tuple(fields) => {
                 let mut dummy_elems = vec![];
                 for field_type in fields.iter() {
-                    dummy_elems.push(self.create_dummy_value(field_type, new_instructions, function));
+                    dummy_elems.push(self.create_dummy_value(
+                        field_type,
+                        new_instructions,
+                        function,
+                    ));
                 }
                 let result = function.fresh_value();
                 new_instructions.push(OpCode::MkTuple {
@@ -776,12 +857,12 @@ impl WitnessToRef {
             TypeExpr::Array(inner, size) => self
                 .witness_to_ref_in_type(inner)
                 .array_of(*size, tp.annotation.clone()),
-            TypeExpr::Slice(inner) => {
-                self.witness_to_ref_in_type(inner).slice_of(tp.annotation.clone())
-            }
-            TypeExpr::Ref(inner) => {
-                self.witness_to_ref_in_type(inner).ref_of(tp.annotation.clone())
-            }
+            TypeExpr::Slice(inner) => self
+                .witness_to_ref_in_type(inner)
+                .slice_of(tp.annotation.clone()),
+            TypeExpr::Ref(inner) => self
+                .witness_to_ref_in_type(inner)
+                .ref_of(tp.annotation.clone()),
             TypeExpr::WitnessRef => tp.clone(),
             TypeExpr::Function => tp.clone(),
             TypeExpr::Tuple(elements) => {

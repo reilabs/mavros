@@ -14,7 +14,25 @@ use crate::{
         monomorphization::Monomorphization,
         pass_manager::PassManager,
         passes::{
-            arithmetic_simplifier::ArithmeticSimplifier, defunctionalize::Defunctionalize, witness_to_ref::WitnessToRef, common_subexpression_elimination::CSE, condition_propagation::ConditionPropagation, dead_code_elimination::{self, DCE}, deduplicate_phis::DeduplicatePhis, explicit_witness::ExplicitWitness, fix_double_jumps::FixDoubleJumps, mem2reg::Mem2Reg, prepare_entry_point::PrepareEntryPoint, pull_into_assert::PullIntoAssert, rc_insertion::RCInsertion, remove_unreachable_blocks::RemoveUnreachableBlocks, remove_unreachable_functions::RemoveUnreachableFunctions, specializer::Specializer, struct_access_simplifier::MakeStructAccessStatic, witness_write_to_fresh::WitnessWriteToFresh, witness_write_to_void::WitnessWriteToVoid
+            arithmetic_simplifier::ArithmeticSimplifier,
+            common_subexpression_elimination::CSE,
+            condition_propagation::ConditionPropagation,
+            dead_code_elimination::{self, DCE},
+            deduplicate_phis::DeduplicatePhis,
+            defunctionalize::Defunctionalize,
+            explicit_witness::ExplicitWitness,
+            fix_double_jumps::FixDoubleJumps,
+            mem2reg::Mem2Reg,
+            prepare_entry_point::PrepareEntryPoint,
+            pull_into_assert::PullIntoAssert,
+            rc_insertion::RCInsertion,
+            remove_unreachable_blocks::RemoveUnreachableBlocks,
+            remove_unreachable_functions::RemoveUnreachableFunctions,
+            specializer::Specializer,
+            struct_access_simplifier::MakeStructAccessStatic,
+            witness_to_ref::WitnessToRef,
+            witness_write_to_fresh::WitnessWriteToFresh,
+            witness_write_to_void::WitnessWriteToVoid,
         },
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, SSA},
@@ -61,11 +79,7 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        let dir = self
-            .project
-            .get_only_crate()
-            .root_dir
-            .join("mavros_debug");
+        let dir = self.project.get_only_crate().root_dir.join("mavros_debug");
         dir
     }
 
@@ -375,8 +389,8 @@ impl Driver {
         wasm_config: Option<(std::path::PathBuf, &R1CS)>,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::llvm_codegen::LLVMCodeGen;
-        use inkwell::context::Context;
         use inkwell::OptimizationLevel;
+        use inkwell::context::Context;
 
         self.prepare_base_witgen_ssa();
         let ssa = self.base_witgen_ssa.as_ref().unwrap();
@@ -408,7 +422,11 @@ impl Driver {
     }
 
     /// Write WASM metadata JSON file
-    fn write_wasm_metadata(&self, wasm_path: &std::path::PathBuf, r1cs: &R1CS) -> Result<(), Error> {
+    fn write_wasm_metadata(
+        &self,
+        wasm_path: &std::path::PathBuf,
+        r1cs: &R1CS,
+    ) -> Result<(), Error> {
         let abi = self.abi.as_ref().unwrap();
 
         // Build parameter info
@@ -428,7 +446,11 @@ impl Driver {
         });
 
         let metadata_path = format!("{}.meta.json", wasm_path.display());
-        fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
 
         info!(message = %"WASM metadata generated", path = %metadata_path);
 

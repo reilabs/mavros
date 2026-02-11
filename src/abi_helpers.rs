@@ -32,25 +32,21 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
     match (value, abi_type) {
         (InputValue::Field(elem), _) => InputValueOrdered::Field(elem.into_repr()),
 
-        (InputValue::Vec(vec_elements), AbiType::Array { typ, .. }) => {
-            InputValueOrdered::Vec(
-                vec_elements
-                    .iter()
-                    .map(|elem| ordered_param(typ, elem))
-                    .collect(),
-            )
-        }
-        (InputValue::Struct(object), AbiType::Struct { fields, .. }) => {
-            InputValueOrdered::Struct(
-                fields
-                    .iter()
-                    .map(|(field_name, field_type)| {
-                        let field_value = object.get(field_name).expect("Field not found in struct");
-                        (field_name.clone(), ordered_param(field_type, field_value))
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        }
+        (InputValue::Vec(vec_elements), AbiType::Array { typ, .. }) => InputValueOrdered::Vec(
+            vec_elements
+                .iter()
+                .map(|elem| ordered_param(typ, elem))
+                .collect(),
+        ),
+        (InputValue::Struct(object), AbiType::Struct { fields, .. }) => InputValueOrdered::Struct(
+            fields
+                .iter()
+                .map(|(field_name, field_type)| {
+                    let field_value = object.get(field_name).expect("Field not found in struct");
+                    (field_name.clone(), ordered_param(field_type, field_value))
+                })
+                .collect::<Vec<_>>(),
+        ),
         (InputValue::String(_string), _) => {
             panic!("Strings are not supported in ordered params");
         }

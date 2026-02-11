@@ -1,4 +1,8 @@
-use std::{fmt::{Debug, Display}, fs, path::PathBuf};
+use std::{
+    fmt::{Debug, Display},
+    fs,
+    path::PathBuf,
+};
 
 use crate::compiler::{
     analysis::{
@@ -16,17 +20,11 @@ use crate::compiler::{
 /// This allows sharing the common pass manager logic while customizing
 /// constraint instrumentation support per type.
 pub trait PassManagerExt: CommutativeMonoid + Display + Eq + Clone + Debug {
-    fn initialize_constraint_instrumentation(
-        pm: &mut PassManager<Self>,
-        ssa: &mut SSA<Self>,
-    );
+    fn initialize_constraint_instrumentation(pm: &mut PassManager<Self>, ssa: &mut SSA<Self>);
 }
 
 impl PassManagerExt for ConstantTaint {
-    fn initialize_constraint_instrumentation(
-        pm: &mut PassManager<Self>,
-        ssa: &mut SSA<Self>,
-    ) {
+    fn initialize_constraint_instrumentation(pm: &mut PassManager<Self>, ssa: &mut SSA<Self>) {
         let cost_estimator = CostEstimator::new();
         let cost_analysis = cost_estimator.run(ssa, pm.type_info.as_ref().unwrap());
         pm.constraint_instrumentation = Some(cost_analysis.summarize());
@@ -34,10 +32,7 @@ impl PassManagerExt for ConstantTaint {
 }
 
 impl PassManagerExt for Empty {
-    fn initialize_constraint_instrumentation(
-        _pm: &mut PassManager<Self>,
-        _ssa: &mut SSA<Self>,
-    ) {
+    fn initialize_constraint_instrumentation(_pm: &mut PassManager<Self>, _ssa: &mut SSA<Self>) {
         panic!("Constraint instrumentation is not supported for Empty");
     }
 }
@@ -86,11 +81,7 @@ pub struct PassManager<V> {
 }
 
 impl<V: PassManagerExt> PassManager<V> {
-    pub fn new(
-        phase_label: String,
-        draw_cfg: bool,
-        passes: Vec<Box<dyn Pass<V>>>,
-    ) -> Self {
+    pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass<V>>>) -> Self {
         Self {
             passes,
             current_pass_info: None,
@@ -130,12 +121,7 @@ impl<V: PassManagerExt> PassManager<V> {
     }
 
     #[tracing::instrument(skip_all, fields(pass = %pass.pass_info().name))]
-    fn run_pass(
-        &mut self,
-        ssa: &mut SSA<V>,
-        pass: &dyn Pass<V>,
-        pass_index: usize,
-    ) {
+    fn run_pass(&mut self, ssa: &mut SSA<V>, pass: &dyn Pass<V>, pass_index: usize) {
         self.initialize_pass_data(ssa, &pass.pass_info());
         self.output_debug_info(ssa, pass_index, &pass.pass_info());
         self.current_pass_info = Some(pass.pass_info());
@@ -143,12 +129,7 @@ impl<V: PassManagerExt> PassManager<V> {
         self.tear_down_pass_data(pass);
     }
 
-    fn output_debug_info(
-        &mut self,
-        ssa: &SSA<V>,
-        pass_index: usize,
-        pass_info: &PassInfo,
-    ) {
+    fn output_debug_info(&mut self, ssa: &SSA<V>, pass_index: usize, pass_info: &PassInfo) {
         let Some(debug_output_dir) = &self.debug_output_dir else {
             return;
         };

@@ -5,7 +5,10 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Empty, Type, TypeExpr},
-    ssa::{BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator, TupleIdx},
+    ssa::{
+        BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator,
+        TupleIdx,
+    },
     taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType},
 };
 
@@ -26,7 +29,8 @@ impl UntaintControlFlow {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild::<ConstantTaint>();
 
         // Convert global types from Empty to ConstantTaint
-        let new_global_types: Vec<_> = old_global_types.into_iter()
+        let new_global_types: Vec<_> = old_global_types
+            .into_iter()
             .map(|t| self.pure_taint_for_type(t))
             .collect();
         result_ssa.set_global_types(new_global_types);
@@ -151,7 +155,10 @@ impl UntaintControlFlow {
                         function: CallTarget::Static(l),
                         args: h,
                     },
-                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
+                        ..
+                    } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
                     OpCode::AssertEq { lhs: r, rhs: l } => OpCode::AssertEq { lhs: r, rhs: l },
@@ -334,24 +341,16 @@ impl UntaintControlFlow {
                         keys,
                         results,
                     },
-                    OpCode::TupleProj {
-                        result,
-                        tuple,
-                        idx,
-                    } => {
-                        match &idx {
-                            TupleIdx::Static(sz) => {
-                                OpCode::TupleProj { 
-                                    result, 
-                                    tuple, 
-                                    idx: TupleIdx::Static(*sz),
-                                }
-                            }
-                            TupleIdx::Dynamic{..} => {
-                                panic!("Dynamic TupleProj should not appear here")
-                            }
+                    OpCode::TupleProj { result, tuple, idx } => match &idx {
+                        TupleIdx::Static(sz) => OpCode::TupleProj {
+                            result,
+                            tuple,
+                            idx: TupleIdx::Static(*sz),
+                        },
+                        TupleIdx::Dynamic { .. } => {
+                            panic!("Dynamic TupleProj should not appear here")
                         }
-                    } 
+                    },
                     OpCode::MkTuple {
                         result: r,
                         elems: l,
@@ -373,16 +372,18 @@ impl UntaintControlFlow {
                                 .collect(),
                         }
                     }
-                    OpCode::Todo { payload, results, result_types } => {
-                        OpCode::Todo {
-                            payload,
-                            results,
-                            result_types: result_types
-                                .iter()
-                                .map(|tp| self.pure_taint_for_type(tp.clone()))
-                                .collect(),
-                        }
-                    }
+                    OpCode::Todo {
+                        payload,
+                        results,
+                        result_types,
+                    } => OpCode::Todo {
+                        payload,
+                        results,
+                        result_types: result_types
+                            .iter()
+                            .map(|tp| self.pure_taint_for_type(tp.clone()))
+                            .collect(),
+                    },
                     OpCode::InitGlobal { global, value } => OpCode::InitGlobal { global, value },
                     OpCode::DropGlobal { global } => OpCode::DropGlobal { global },
                 };
@@ -443,7 +444,7 @@ impl UntaintControlFlow {
                         seq_type: _,
                         elem_type: _,
                     }
-                    | OpCode::MkTuple {..}
+                    | OpCode::MkTuple { .. }
                     | OpCode::Cast {
                         result: _,
                         value: _,
@@ -623,7 +624,10 @@ impl UntaintControlFlow {
                             args: args,
                         });
                     }
-                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
+                        ..
+                    } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
 
@@ -638,8 +642,8 @@ impl UntaintControlFlow {
                             result_types,
                         });
                     }
-                    
-                    OpCode::TupleProj {..} => {
+
+                    OpCode::TupleProj { .. } => {
                         new_instructions.push(instruction);
                     }
                     OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
@@ -824,7 +828,13 @@ impl UntaintControlFlow {
             },
             (TypeExpr::Tuple(child_types), TaintType::Tuple(top, child_taints)) => Type {
                 expr: TypeExpr::Tuple(
-                    child_types.iter().zip(child_taints.iter()).map(|(child_type, child_taint)| self.typify_taint(child_type.clone(), child_taint)).collect()
+                    child_types
+                        .iter()
+                        .zip(child_taints.iter())
+                        .map(|(child_type, child_taint)| {
+                            self.typify_taint(child_type.clone(), child_taint)
+                        })
+                        .collect(),
                 ),
                 annotation: top.expect_constant(),
             },
@@ -858,7 +868,9 @@ impl UntaintControlFlow {
                 expr: TypeExpr::WitnessRef,
                 annotation: ConstantTaint::Pure,
             },
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(_elements) => {
+                todo!("Tuples not supported yet")
+            }
             TypeExpr::Function => Type {
                 expr: TypeExpr::Function,
                 annotation: ConstantTaint::Pure,

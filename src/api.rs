@@ -5,12 +5,12 @@ use std::{
 
 use crate::{
     CompiledArtifacts, Project,
+    abi_helpers::ordered_params_from_btreemap,
+    api::interpreter::InputValueOrdered,
     compiled_artifacts::ArtifactError,
     compiler::{Field, r1cs_gen::R1CS},
     driver::{Driver, Error as DriverError},
     vm::interpreter,
-    api::interpreter::InputValueOrdered,
-    abi_helpers::ordered_params_from_btreemap,
 };
 use noirc_abi::input_parser::{Format, InputValue};
 
@@ -52,18 +52,10 @@ impl std::error::Error for ApiError {}
 pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), ApiError> {
     let project = Project::new(root).map_err(ApiError::Project)?;
     let mut driver = Driver::new(project, draw_graphs);
-    driver
-        .run_noir_compiler()
-        .unwrap();
-    driver
-        .make_struct_access_static()
-        .unwrap();
-    driver
-        .monomorphize()
-        .unwrap();
-    driver
-        .explictize_witness()
-        .unwrap();
+    driver.run_noir_compiler().unwrap();
+    driver.make_struct_access_static().unwrap();
+    driver.monomorphize().unwrap();
+    driver.explictize_witness().unwrap();
 
     let r1cs = driver.generate_r1cs().unwrap();
     Ok((driver, r1cs))
@@ -91,7 +83,10 @@ pub fn load_artifacts<P: AsRef<Path>>(path: P) -> Result<CompiledArtifacts, ApiE
     Ok(CompiledArtifacts::load_from_file(path)?)
 }
 
-pub fn read_prover_inputs(root: &Path, abi: &noirc_abi::Abi) -> Result<Vec<InputValueOrdered>, ApiError> {
+pub fn read_prover_inputs(
+    root: &Path,
+    abi: &noirc_abi::Abi,
+) -> Result<Vec<InputValueOrdered>, ApiError> {
     let file_path = root.join("Prover.toml");
     let ext = file_path
         .extension()
@@ -133,7 +128,12 @@ pub fn run_witgen_phase2(
     challenges: &[Field],
     r1cs: &R1CS,
 ) -> interpreter::WitgenResult {
-    interpreter::run_phase2(phase1, challenges, r1cs.witness_layout, r1cs.constraints_layout)
+    interpreter::run_phase2(
+        phase1,
+        challenges,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+    )
 }
 
 pub fn compile_witgen(driver: &mut Driver) -> Result<Vec<u64>, ApiError> {

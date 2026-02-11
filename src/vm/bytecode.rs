@@ -685,7 +685,8 @@ mod def {
         assert!(
             (index as usize) * stride < array.layout().array_size(),
             "array_get: index {} out of bounds for array of length {}",
-            index, array.layout().array_size() / stride
+            index,
+            array.layout().array_size() / stride
         );
         let src = array.array_idx(index as usize, stride);
         unsafe {
@@ -721,7 +722,8 @@ mod def {
         assert!(
             (index as usize) * stride < array.layout().array_size(),
             "array_set: index {} out of bounds for array of length {}",
-            index, array.layout().array_size() / stride
+            index,
+            array.layout().array_size() / stride
         );
         let new_array = array.copy_if_reused(vm);
         let target = new_array.array_idx(index as usize, stride);
@@ -748,11 +750,7 @@ mod def {
     }
 
     #[opcode]
-    fn slice_len(
-        #[out] res: *mut u64,
-        #[frame] array: BoxedValue,
-        stride: usize,
-    ) {
+    fn slice_len(#[out] res: *mut u64, #[frame] array: BoxedValue, stride: usize) {
         let len = array.layout().array_size() / stride;
         unsafe {
             *res = len as u64;
@@ -1062,7 +1060,13 @@ mod def {
     }
 
     #[opcode]
-    fn init_global(vm: &mut VM, frame: Frame, src: FramePosition, global_offset: usize, size: usize) {
+    fn init_global(
+        vm: &mut VM,
+        frame: Frame,
+        src: FramePosition,
+        global_offset: usize,
+        size: usize,
+    ) {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 frame.data.offset(src.0 as isize),
@@ -1075,11 +1079,7 @@ mod def {
     #[opcode]
     fn read_global(#[out] res: *mut u64, vm: &mut VM, global_offset: usize, size: usize) {
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                vm.globals.offset(global_offset as isize),
-                res,
-                size,
-            );
+            std::ptr::copy_nonoverlapping(vm.globals.offset(global_offset as isize), res, size);
         }
     }
 

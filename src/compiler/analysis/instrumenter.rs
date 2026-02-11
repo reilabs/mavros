@@ -67,7 +67,7 @@ impl ValueSignature {
                     format!("({})", elements)
                 } else {
                     format!("(...)")
-                }       
+                }
             }
         }
     }
@@ -506,7 +506,9 @@ impl Value {
             }
             TypeExpr::Slice(_) => panic!("Cannot witness slice type"),
             TypeExpr::Ref(_) => panic!("Cannot witness pointer type"),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(_elements) => {
+                todo!("Tuples not supported yet")
+            }
             TypeExpr::Function => panic!("Cannot witness function type"),
         }
     }
@@ -672,7 +674,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
-    fn mk_tuple (
+    fn mk_tuple(
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
         _elem_types: &[Type<ConstantTaint>],
@@ -741,11 +743,9 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
                 tp,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.tuple_get(
-                index,
-                tp,
-                instrumenter.get_specialized(),
-            ),
+            specialized: self
+                .specialized
+                .tuple_get(index, tp, instrumenter.get_specialized()),
         };
         res.blind_unspecialized_from(tp);
         res

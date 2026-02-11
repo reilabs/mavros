@@ -1,5 +1,5 @@
-use crate::compiler::taint_analysis::ConstantTaint;
 use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
+use crate::compiler::taint_analysis::ConstantTaint;
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
 
@@ -181,7 +181,6 @@ where
     pub fn get_globals_deinit_fn(&self) -> Option<FunctionId> {
         self.globals_deinit_fn
     }
-
 }
 
 impl<V: Display + Clone> SSA<V> {
@@ -203,10 +202,9 @@ pub enum Const {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum TupleIdx<V>
-{
-  Static(usize),
-  Dynamic(ValueId, Type<V>),
+pub enum TupleIdx<V> {
+    Static(usize),
+    Dynamic(ValueId, Type<V>),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -346,7 +344,11 @@ impl<V: Clone> Function<V> {
     }
 
     pub fn block_is_terminated(&self, block_id: BlockId) -> bool {
-        self.blocks.get(&block_id).unwrap().get_terminator().is_some()
+        self.blocks
+            .get(&block_id)
+            .unwrap()
+            .get_terminator()
+            .is_some()
     }
 
     pub fn next_virtual_block(&mut self) -> (BlockId, Block<V>) {
@@ -422,8 +424,13 @@ impl<V: Clone> Function<V> {
         self.push_const(Const::FnPtr(fn_id))
     }
 
-
-    pub fn push_cmp(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId, kind: CmpKind) -> ValueId {
+    pub fn push_cmp(
+        &mut self,
+        block_id: BlockId,
+        lhs: ValueId,
+        rhs: ValueId,
+        kind: CmpKind,
+    ) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
@@ -1457,8 +1464,8 @@ pub enum OpCode<V> {
         result_type: Type<V>,
     },
     TupleProj {
-        result: ValueId, 
-        tuple: ValueId, 
+        result: ValueId,
+        tuple: ValueId,
         idx: TupleIdx<V>,
     },
     MkTuple {
@@ -1586,12 +1593,7 @@ impl<V: Display + Clone> OpCode<V> {
                         )
                     }
                     CallTarget::Dynamic(fn_ptr) => {
-                        format!(
-                            "{} = call_indirect v{}({})",
-                            result_str,
-                            fn_ptr.0,
-                            args_str
-                        )
+                        format!("{} = call_indirect v{}({})", result_str, fn_ptr.0, args_str)
                     }
                 }
             }
@@ -1893,36 +1895,30 @@ impl<V: Display + Clone> OpCode<V> {
                     typ
                 )
             }
-            OpCode::TupleProj { 
-                result,
-                tuple,
-                idx,
-            } => {
-                match idx {
-                    TupleIdx::Dynamic(idx, _tp) => {
-                        format!(
-                            "v{}{} = v{}.v{}",
-                            result.0,
-                            annotate(value_annotator, *result),
-                            tuple.0,
-                            idx.0
-                        )
-                    }
-                    TupleIdx::Static(val) => {
-                        format!(
-                            "v{}{} = v{}.{}",
-                            result.0,
-                            annotate(value_annotator, *result),
-                            tuple.0,
-                            val
-                        )
-                    }
+            OpCode::TupleProj { result, tuple, idx } => match idx {
+                TupleIdx::Dynamic(idx, _tp) => {
+                    format!(
+                        "v{}{} = v{}.v{}",
+                        result.0,
+                        annotate(value_annotator, *result),
+                        tuple.0,
+                        idx.0
+                    )
+                }
+                TupleIdx::Static(val) => {
+                    format!(
+                        "v{}{} = v{}.{}",
+                        result.0,
+                        annotate(value_annotator, *result),
+                        tuple.0,
+                        val
+                    )
                 }
             },
-            OpCode::MkTuple { 
-                result, 
-                elems, 
-                element_types: _, 
+            OpCode::MkTuple {
+                result,
+                elems,
+                element_types: _,
             } => {
                 let elems_str = elems.iter().map(|v| format!("v{}", v.0)).join(", ");
                 format!(
@@ -1932,8 +1928,13 @@ impl<V: Display + Clone> OpCode<V> {
                     elems_str
                 )
             }
-            OpCode::Todo { payload, results, result_types } => {
-                let results_str = results.iter()
+            OpCode::Todo {
+                payload,
+                results,
+                result_types,
+            } => {
+                let results_str = results
+                    .iter()
                     .zip(result_types.iter())
                     .map(|(r, tp)| format!("v{}: {}", r.0, tp))
                     .join(", ");
@@ -2132,14 +2133,14 @@ impl<V> OpCode<V> {
                 offset: _,
                 result_type: _,
             } => vec![r].into_iter(),
-            Self::TupleProj { 
+            Self::TupleProj {
                 result: r,
                 tuple: t,
                 idx: _,
             } => vec![r, t].into_iter(),
-            OpCode::MkTuple { 
-                result: r, 
-                elems: e, 
+            OpCode::MkTuple {
+                result: r,
+                elems: e,
                 element_types: _,
             } => {
                 let mut ret_vec = vec![r];
@@ -2149,8 +2150,11 @@ impl<V> OpCode<V> {
             Self::Todo { results, .. } => {
                 let ret_vec: Vec<&mut ValueId> = results.iter_mut().collect();
                 ret_vec.into_iter()
-            },
-            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            }
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2340,7 +2344,10 @@ impl<V> OpCode<V> {
                 idx: _,
             } => vec![tuple].into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2522,15 +2529,9 @@ impl<V> OpCode<V> {
                 result: _,
                 tuple,
                 idx,
-            } => {
-                match idx {
-                    TupleIdx::Static(_size) => {
-                        vec![tuple].into_iter()
-                    }
-                    TupleIdx::Dynamic(idx, _tp) => {
-                        vec![tuple, idx].into_iter()
-                    }
-                }
+            } => match idx {
+                TupleIdx::Static(_size) => vec![tuple].into_iter(),
+                TupleIdx::Dynamic(idx, _tp) => vec![tuple, idx].into_iter(),
             },
             OpCode::MkTuple {
                 result: _,
@@ -2538,7 +2539,10 @@ impl<V> OpCode<V> {
                 element_types: _,
             } => e.iter().collect::<Vec<_>>().into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2625,17 +2629,15 @@ impl<V> OpCode<V> {
                 result: r,
                 value: _,
             }
-            |  Self::NextDCoeff { 
-                result: r 
-            } 
-            | Self::TupleProj { 
+            | Self::NextDCoeff { result: r }
+            | Self::TupleProj {
                 result: r,
                 tuple: _,
                 idx: _,
             }
-            | Self::MkTuple { 
-                result: r, 
-                elems: _, 
+            | Self::MkTuple {
+                result: r,
+                elems: _,
                 element_types: _,
             } => vec![r].into_iter(),
             Self::WriteWitness {
@@ -2691,8 +2693,11 @@ impl<V> OpCode<V> {
             Self::Todo { results, .. } => {
                 let ret_vec: Vec<&ValueId> = results.iter().collect();
                 ret_vec.into_iter()
-            },
-            Self::InitGlobal { global: _, value: _ } => vec![].into_iter(),
+            }
+            Self::InitGlobal {
+                global: _,
+                value: _,
+            } => vec![].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }

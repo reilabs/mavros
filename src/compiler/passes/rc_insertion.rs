@@ -169,20 +169,28 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
                     }
-                    OpCode::PureToWitnessRef { result: r, value: _, result_annotation: _ } => {
+                    OpCode::PureToWitnessRef {
+                        result: r,
+                        value: _,
+                        result_annotation: _,
+                    } => {
                         if !currently_live.contains(r) {
-                            panic!("ICE: Result of PureToWitnessRef is immediately dropped. This is a bug.")
+                            panic!(
+                                "ICE: Result of PureToWitnessRef is immediately dropped. This is a bug."
+                            )
                         }
                         new_instructions.push(instruction.clone());
                     }
-                    OpCode::TupleProj { 
-                        result, tuple, idx: _,
+                    OpCode::TupleProj {
+                        result,
+                        tuple,
+                        idx: _,
                     } => {
                         if !currently_live.contains(tuple) {
                             // The tuple dies here, so we drop it _after_ the read.
                             new_instructions.push(OpCode::MemOp {
                                 kind: MemOp::Drop,
-                                value: *tuple
+                                value: *tuple,
                             });
                         }
                         if self.needs_rc(type_info, result) {
@@ -191,7 +199,7 @@ impl RCInsertion {
                                 // it's now both accessed here and in the array.
                                 new_instructions.push(OpCode::MemOp {
                                     kind: MemOp::Bump(1),
-                                    value: *result
+                                    value: *result,
                                 });
                             } else {
                                 panic!(
@@ -209,17 +217,23 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*tuple);
                     }
-                    OpCode::Cast { result: r, value: v, target: CastTarget::Nop } => {
+                    OpCode::Cast {
+                        result: r,
+                        value: v,
+                        target: CastTarget::Nop,
+                    } => {
                         // Nop cast aliases result to input in codegen (same frame position).
                         if self.needs_rc(type_info, v) {
                             if !currently_live.contains(r) {
-                                panic!("ICE: Result of Cast::Nop is immediately dropped. This is a bug.");
+                                panic!(
+                                    "ICE: Result of Cast::Nop is immediately dropped. This is a bug."
+                                );
                             }
                             if currently_live.contains(v) {
                                 // Both input and output are live — two refs to the same boxed value.
                                 new_instructions.push(OpCode::MemOp {
                                     kind: MemOp::Bump(1),
-                                    value: *v
+                                    value: *v,
                                 });
                             }
                             // If only result is live (input dead), no RC op needed — single alias.
@@ -560,7 +574,10 @@ impl RCInsertion {
                         live_vals.extend(values.iter().copied());
                         currently_live.extend(live_vals);
                     }
-                    OpCode::InitGlobal { global: _, value: v } => {
+                    OpCode::InitGlobal {
+                        global: _,
+                        value: v,
+                    } => {
                         // InitGlobal stores value into a global slot.
                         // If the value needs RC, bump it since the global now holds a reference.
                         let v = *v;
@@ -577,7 +594,12 @@ impl RCInsertion {
                         // DropGlobal IS the RC drop itself, just pass through.
                         new_instructions.push(instruction);
                     }
-                    OpCode::Select { result: _, cond: _, if_t: v1, if_f: v2 } => {
+                    OpCode::Select {
+                        result: _,
+                        cond: _,
+                        if_t: v1,
+                        if_f: v2,
+                    } => {
                         if self.needs_rc(type_info, v1) || self.needs_rc(type_info, v2) {
                             panic!("Unsupported yet");
                         }
@@ -626,10 +648,10 @@ impl RCInsertion {
                     } => {
                         new_instructions.push(instruction);
                     }
-                    OpCode::MkTuple { 
-                        result, 
-                        elems, 
-                        element_types, 
+                    OpCode::MkTuple {
+                        result,
+                        elems,
+                        element_types,
                     } => {
                         new_instructions.push(instruction.clone());
                         for (input, group) in elems
@@ -642,7 +664,7 @@ impl RCInsertion {
                             let items: Vec<_> = group.collect();
                             let count = items.iter().count();
                             let (_, elem_type) = items[0];
-                            
+
                             if self.type_needs_rc(elem_type) {
                                 let mut count = count;
                                 if !currently_live.contains(input) {
@@ -651,12 +673,12 @@ impl RCInsertion {
                                 if count > 0 {
                                     new_instructions.push(OpCode::MemOp {
                                         kind: MemOp::Bump(count),
-                                        value: *input
+                                        value: *input,
                                     });
                                 }
                             }
                         }
-                            
+
                         if !currently_live.contains(result) {
                             panic!("ICE: Result of MkTuple is immediately dropped. This is a bug.")
                         }

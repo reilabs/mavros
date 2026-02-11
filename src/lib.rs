@@ -1,5 +1,5 @@
-pub mod compiled_artifacts;
 pub mod abi_helpers;
+pub mod compiled_artifacts;
 pub mod compiler;
 pub mod driver;
 pub mod error;

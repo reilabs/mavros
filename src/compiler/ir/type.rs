@@ -62,7 +62,9 @@ impl<V> TypeExpr<V> {
             TypeExpr::Array(inner, size) => TypeExpr::Array(Box::new(inner.as_pure()), *size),
             TypeExpr::Slice(inner) => TypeExpr::Slice(Box::new(inner.as_pure())),
             TypeExpr::Ref(inner) => TypeExpr::Ref(Box::new(inner.as_pure())),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(_elements) => {
+                todo!("Tuples not supported yet")
+            }
             TypeExpr::Function => TypeExpr::Function,
         }
     }
@@ -103,7 +105,14 @@ impl<V: Display> Display for Type<V> {
             }
             TypeExpr::WitnessRef => write!(f, "WitnessRef{}", format_annotation(&self.annotation)),
             TypeExpr::Tuple(elements) => write!(
-                f, "Tuple{}<{}>", format_annotation(&self.annotation), elements.iter().map(|e| format!("{}", e)).collect::<Vec<_>>().join(", ")
+                f,
+                "Tuple{}<{}>",
+                format_annotation(&self.annotation),
+                elements
+                    .iter()
+                    .map(|e| format!("{}", e))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             TypeExpr::Function => write!(f, "Function{}", format_annotation(&self.annotation)),
         }
@@ -249,7 +258,7 @@ impl<V> Type<V> {
             annotation,
         }
     }
-    
+
     pub fn tuple_of(types: Vec<Self>, annotation: V) -> Self {
         Type {
             expr: TypeExpr::Tuple(types),
@@ -290,7 +299,14 @@ impl<V> Type<V> {
     }
 
     pub fn is_heap_allocated(&self) -> bool {
-        matches!(self.expr, TypeExpr::WitnessRef | TypeExpr::Array(_, _) | TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_))
+        matches!(
+            self.expr,
+            TypeExpr::WitnessRef
+                | TypeExpr::Array(_, _)
+                | TypeExpr::Slice(_)
+                | TypeExpr::Ref(_)
+                | TypeExpr::Tuple(_)
+        )
     }
 
     pub fn is_function(&self) -> bool {
@@ -348,7 +364,9 @@ impl<V> Type<V> {
             }
             TypeExpr::Function => 1,
             TypeExpr::U(_) => 1,
-            _ => panic!("Cannot currently calculate size for types other than Field, U, Function, Array, and Tuple"),
+            _ => panic!(
+                "Cannot currently calculate size for types other than Field, U, Function, Array, and Tuple"
+            ),
         }
     }
 }

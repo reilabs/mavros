@@ -60,11 +60,7 @@ where
         seq_type: SeqType,
         elem_type: &Type<Taint>,
     ) -> Self;
-    fn mk_tuple(
-        elems: Vec<Self>,
-        ctx: &mut Context,
-        elem_types: &[Type<Taint>],
-    ) -> Self;
+    fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type<Taint>]) -> Self;
     fn alloc(ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
@@ -456,20 +452,16 @@ impl SymbolicExecutor {
                         offset,
                         result_type: _,
                     } => {
-                        let r = globals[*offset as usize].as_ref()
+                        let r = globals[*offset as usize]
+                            .as_ref()
                             .expect("ReadGlobal: global slot not initialized")
                             .clone();
                         scope[result.0 as usize] = Some(r);
                     }
-                    crate::compiler::ssa::OpCode::InitGlobal {
-                        global,
-                        value,
-                    } => {
+                    crate::compiler::ssa::OpCode::InitGlobal { global, value } => {
                         globals[*global] = Some(scope[value.0 as usize].as_ref().unwrap().clone());
                     }
-                    crate::compiler::ssa::OpCode::DropGlobal {
-                        global,
-                    } => {
+                    crate::compiler::ssa::OpCode::DropGlobal { global } => {
                         globals[*global] = None;
                     }
                     crate::compiler::ssa::OpCode::Lookup {
@@ -532,10 +524,10 @@ impl SymbolicExecutor {
                         } else {
                             panic!("Dynamic tuple indexing should not appear here");
                         }
-                    },
-                    crate::compiler::ssa::OpCode::MkTuple { 
-                        result, 
-                        elems, 
+                    }
+                    crate::compiler::ssa::OpCode::MkTuple {
+                        result,
+                        elems,
                         element_types,
                     } => {
                         let elems = elems

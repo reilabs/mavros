@@ -2,11 +2,11 @@ use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use mavros::api::{self, ApiError};
+use mavros::{Error, Project, abi_helpers, compiler::Field, driver::Driver, vm::interpreter};
+use noirc_abi::input_parser::Format;
 use tracing::{error, info, warn};
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
-use mavros::{Error, Project, abi_helpers, compiler::Field, driver::Driver, vm::interpreter};
-use noirc_abi::input_parser::Format;
 
 /// The default Noir project path for the CLI to extract from.
 const DEFAULT_NOIR_PROJECT_PATH: &str = "./";
@@ -154,7 +154,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
             writeln!(r1cs_file, "{}", r1c).unwrap();
         }
     }
-    
+
     if args.emit_llvm || args.emit_wasm {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
@@ -168,7 +168,9 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
             info!(message = %"Generating LLVM IR");
         }
 
-        driver.compile_llvm_targets(args.emit_llvm, wasm_config).unwrap();
+        driver
+            .compile_llvm_targets(args.emit_llvm, wasm_config)
+            .unwrap();
     }
 
     // Skip VM execution if requested

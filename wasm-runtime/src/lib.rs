@@ -27,8 +27,14 @@ unsafe fn write_field(ptr: *mut u64, fr: Fr) {
 #[no_mangle]
 pub unsafe extern "C" fn __field_mul(
     result_ptr: *mut u64,
-    a0: i64, a1: i64, a2: i64, a3: i64,
-    b0: i64, b1: i64, b2: i64, b3: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    b0: i64,
+    b1: i64,
+    b2: i64,
+    b3: i64,
 ) {
     let a = limbs_to_fr(a0, a1, a2, a3);
     let b = limbs_to_fr(b0, b1, b2, b3);
@@ -36,10 +42,7 @@ pub unsafe extern "C" fn __field_mul(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __write_witness(
-    vm_ptr: *mut u8,
-    v0: i64, v1: i64, v2: i64, v3: i64,
-) {
+pub unsafe extern "C" fn __write_witness(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v3: i64) {
     // VM struct: [witness_ptr, a_ptr, b_ptr, c_ptr] - 4 pointers
     // witness_ptr is at offset 0
     let witness_ptr_ptr = vm_ptr as *mut *mut u64;
@@ -50,10 +53,7 @@ pub unsafe extern "C" fn __write_witness(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __write_a(
-    vm_ptr: *mut u8,
-    v0: i64, v1: i64, v2: i64, v3: i64,
-) {
+pub unsafe extern "C" fn __write_a(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v3: i64) {
     // a_ptr is at offset 1 (8 bytes on 64-bit, 4 bytes on 32-bit wasm)
     let a_ptr_ptr = (vm_ptr as *mut *mut u64).add(1);
     let a_ptr = *a_ptr_ptr;
@@ -62,10 +62,7 @@ pub unsafe extern "C" fn __write_a(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __write_b(
-    vm_ptr: *mut u8,
-    v0: i64, v1: i64, v2: i64, v3: i64,
-) {
+pub unsafe extern "C" fn __write_b(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v3: i64) {
     // b_ptr is at offset 2
     let b_ptr_ptr = (vm_ptr as *mut *mut u64).add(2);
     let b_ptr = *b_ptr_ptr;
@@ -74,10 +71,7 @@ pub unsafe extern "C" fn __write_b(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __write_c(
-    vm_ptr: *mut u8,
-    v0: i64, v1: i64, v2: i64, v3: i64,
-) {
+pub unsafe extern "C" fn __write_c(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v3: i64) {
     // c_ptr is at offset 3
     let c_ptr_ptr = (vm_ptr as *mut *mut u64).add(3);
     let c_ptr = *c_ptr_ptr;

@@ -164,7 +164,10 @@ impl UnionFind {
             ),
             TaintType::Tuple(taint, child_taints) => TaintType::Tuple(
                 self.substitute_variables(taint),
-                child_taints.iter().map(|child_taint| self.substitute_taint_type(child_taint)).collect()
+                child_taints
+                    .iter()
+                    .map(|child_taint| self.substitute_taint_type(child_taint))
+                    .collect(),
             ),
         }
     }

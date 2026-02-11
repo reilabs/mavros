@@ -6,7 +6,8 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function, FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId
+            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function,
+            FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId,
         },
         taint_analysis::ConstantTaint,
     },
@@ -70,7 +71,7 @@ impl FrameLayouter {
             TypeExpr::Array(_, _) => 1, // Ptr
             TypeExpr::Slice(_) => 1,    // Ptr
             TypeExpr::WitnessRef => 1,  // Ptr
-            TypeExpr::Tuple(_) => 1, // Ptr
+            TypeExpr::Tuple(_) => 1,    // Ptr
             _ => todo!(),
         }
     }
@@ -145,7 +146,10 @@ impl GlobalFrameLayouter {
         use crate::compiler::ir::r#type::TypeExpr;
         match &typ.expr {
             TypeExpr::Field => bytecode::LIMBS,
-            TypeExpr::U(bits) => { assert!(*bits <= 64); 1 }
+            TypeExpr::U(bits) => {
+                assert!(*bits <= 64);
+                1
+            }
             // Heap-allocated types are pointers (1 word)
             _ => 1,
         }
@@ -645,9 +649,12 @@ impl CodeGen {
                             res,
                             tuple: layouter.get_value(*t),
                             index: *i as u64,
-                            child_sizes: type_info.get_value_type(*t).get_tuple_elements().iter().map(
-                                |elem_type| layouter.type_size(elem_type)    
-                            ).collect(),
+                            child_sizes: type_info
+                                .get_value_type(*t)
+                                .get_tuple_elements()
+                                .iter()
+                                .map(|elem_type| layouter.type_size(elem_type))
+                                .collect(),
                         });
                     } else {
                         panic!("Dynamic tuple indexing should not appear here");
@@ -714,7 +721,7 @@ impl CodeGen {
                 ssa::OpCode::MkTuple {
                     result,
                     elems,
-                    element_types
+                    element_types,
                 } => {
                     assert!(
                         element_types.len() <= 14,
@@ -726,24 +733,25 @@ impl CodeGen {
                         .iter()
                         .map(|a| layouter.get_value(*a))
                         .collect::<Vec<_>>();
-                    let field_sizes: Vec<usize> = element_types.iter().map(|elem_type| {
-                        let size = layouter.type_size(elem_type);
-                        assert!(
-                            size <= 8,
-                            "Struct field has {} bits, but maximum is 512",
-                            size * 64
-                        );
-                        size
-                    }).collect();
-                    let reference_counting = element_types.iter().map(
-                        |elem_type| elem_type.is_heap_allocated()
-                    ).collect();
+                    let field_sizes: Vec<usize> = element_types
+                        .iter()
+                        .map(|elem_type| {
+                            let size = layouter.type_size(elem_type);
+                            assert!(
+                                size <= 8,
+                                "Struct field has {} bits, but maximum is 512",
+                                size * 64
+                            );
+                            size
+                        })
+                        .collect();
+                    let reference_counting = element_types
+                        .iter()
+                        .map(|elem_type| elem_type.is_heap_allocated())
+                        .collect();
                     emitter.push_op(bytecode::OpCode::TupleAlloc {
                         res,
-                        meta: vm::array::BoxedLayout::new_struct(
-                            field_sizes,
-                            reference_counting,
-                        ),
+                        meta: vm::array::BoxedLayout::new_struct(field_sizes, reference_counting),
                         fields,
                     });
                 }
@@ -943,7 +951,11 @@ impl CodeGen {
                         global_offset: global_layouter.get_offset(*global),
                     });
                 }
-                ssa::OpCode::ReadGlobal { result: r, offset, result_type: _ } => {
+                ssa::OpCode::ReadGlobal {
+                    result: r,
+                    offset,
+                    result_type: _,
+                } => {
                     let global_idx = *offset as usize;
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     emitter.push_op(bytecode::OpCode::ReadGlobal {

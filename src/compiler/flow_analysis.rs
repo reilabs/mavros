@@ -676,11 +676,20 @@ impl FlowAnalysis {
                 }
                 for instruction in block.get_instructions() {
                     match instruction {
-                        OpCode::Call { results: _, function: CallTarget::Static(tgt_id), args: _ } => {
+                        OpCode::Call {
+                            results: _,
+                            function: CallTarget::Static(tgt_id),
+                            args: _,
+                        } => {
                             call_graph.add_call(*func_id, *tgt_id);
                         }
-                        OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
-                            panic!("Dynamic calls should be eliminated by defunctionalization before flow analysis");
+                        OpCode::Call {
+                            function: CallTarget::Dynamic(_),
+                            ..
+                        } => {
+                            panic!(
+                                "Dynamic calls should be eliminated by defunctionalization before flow analysis"
+                            );
                         }
                         _ => {}
                     }

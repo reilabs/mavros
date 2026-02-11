@@ -199,7 +199,7 @@ pub enum InputValueOrdered {
 }
 
 impl InputValueOrdered {
-    pub fn field_sizes (&self) -> Vec<usize> {
+    pub fn field_sizes(&self) -> Vec<usize> {
         match self {
             InputValueOrdered::Field(_) => vec![4],
             InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
@@ -217,8 +217,10 @@ impl InputValueOrdered {
     pub fn need_reference_counting(&self) -> Vec<bool> {
         match self {
             InputValueOrdered::Field(_) => vec![false],
-            InputValueOrdered::String(_) => panic!("Strings are not supported in need_reference_counting"),
-            InputValueOrdered::Vec(_) => vec![true], 
+            InputValueOrdered::String(_) => {
+                panic!("Strings are not supported in need_reference_counting")
+            }
+            InputValueOrdered::Vec(_) => vec![true],
             InputValueOrdered::Struct(fields) => {
                 let mut reference_counting = vec![];
                 for (_field_name, field_value) in fields {
@@ -290,7 +292,9 @@ pub fn run_phase1(
     );
 
     for (input_index, el) in flat_inputs.iter().enumerate() {
-        unsafe { *(frame.data.offset(2 + (4 * (input_index as isize))) as *mut Field) = el.clone(); }
+        unsafe {
+            *(frame.data.offset(2 + (4 * (input_index as isize))) as *mut Field) = el.clone();
+        }
     }
 
     let mut program = program.to_vec();
@@ -385,7 +389,8 @@ pub fn run_phase2(
             phase1.out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
         phase1.out_c[cnst_off] = Field::ONE;
         phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
-        phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] += phase1.out_a[cnst_off];
+        phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
+            phase1.out_a[cnst_off];
 
         current_lookup_off += 1;
     }
@@ -397,7 +402,8 @@ pub fn run_phase2(
         for i in 0..tbl.length {
             let multiplicity = phase1.out_c[tbl.elem_inverses_constraint_section_offset + i];
             if multiplicity != Field::ZERO {
-                let elem = phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] * multiplicity;
+                let elem =
+                    phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] * multiplicity;
                 phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
                 phase1.out_wit_post_comm[tbl.elem_inverses_witness_section_offset + i] = elem;
                 phase1.out_a[tbl.elem_inverses_constraint_section_offset + tbl.length] += elem;
@@ -497,7 +503,7 @@ fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
             for elem in vec_elements {
                 encoded_value.extend(flatten_params(elem));
             }
-        },
+        }
         InputValueOrdered::Struct(fields) => {
             for (_field_name, field_value) in fields {
                 encoded_value.extend(flatten_params(field_value));

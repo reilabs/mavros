@@ -1,5 +1,8 @@
 use core::panic;
-use std::{collections::HashMap, fmt::{Debug, Display}};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+};
 
 use tracing::{Level, instrument};
 
@@ -76,16 +79,24 @@ impl Types {
         for (value_id, const_) in function.iter_consts() {
             match const_ {
                 Const::U(size, _) => {
-                    function_info.values.insert(*value_id, Type::u(*size, V::empty()));
+                    function_info
+                        .values
+                        .insert(*value_id, Type::u(*size, V::empty()));
                 }
                 Const::Field(_) => {
-                    function_info.values.insert(*value_id, Type::field(V::empty()));
+                    function_info
+                        .values
+                        .insert(*value_id, Type::field(V::empty()));
                 }
                 Const::WitnessRef(_) => {
-                    function_info.values.insert(*value_id, Type::witness_ref(V::empty()));
+                    function_info
+                        .values
+                        .insert(*value_id, Type::witness_ref(V::empty()));
                 }
                 Const::FnPtr(_) => {
-                    function_info.values.insert(*value_id, Type::function(V::empty()));
+                    function_info
+                        .values
+                        .insert(*value_id, Type::function(V::empty()));
                 }
             }
         }
@@ -193,41 +204,45 @@ impl Types {
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function, args } => {
-                match function {
-                    CallTarget::Static(fn_id) => {
-                        let (param_types, return_types) = function_types
-                            .get(fn_id)
-                            .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
+            OpCode::Call {
+                results: result,
+                function,
+                args,
+            } => match function {
+                CallTarget::Static(fn_id) => {
+                    let (param_types, return_types) = function_types
+                        .get(fn_id)
+                        .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
 
-                        if args.len() != param_types.len() {
-                            return Err(format!(
-                                "Function {:?} expects {} arguments, got {}",
-                                fn_id,
-                                param_types.len(),
-                                args.len()
-                            ));
-                        }
-
-                        if result.len() != return_types.len() {
-                            return Err(format!(
-                                "Function {:?} expects {} return values, got {}",
-                                fn_id,
-                                return_types.len(),
-                                result.len()
-                            ));
-                        }
-
-                        for (ret, ret_type) in result.iter().zip(return_types.iter()) {
-                            function_info.values.insert(*ret, ret_type.clone());
-                        }
-                        Ok(())
+                    if args.len() != param_types.len() {
+                        return Err(format!(
+                            "Function {:?} expects {} arguments, got {}",
+                            fn_id,
+                            param_types.len(),
+                            args.len()
+                        ));
                     }
-                    CallTarget::Dynamic(_) => {
-                        panic!("Dynamic calls should be eliminated by defunctionalization before type analysis");
+
+                    if result.len() != return_types.len() {
+                        return Err(format!(
+                            "Function {:?} expects {} return values, got {}",
+                            fn_id,
+                            return_types.len(),
+                            result.len()
+                        ));
                     }
+
+                    for (ret, ret_type) in result.iter().zip(return_types.iter()) {
+                        function_info.values.insert(*ret, ret_type.clone());
+                    }
+                    Ok(())
                 }
-            }
+                CallTarget::Dynamic(_) => {
+                    panic!(
+                        "Dynamic calls should be eliminated by defunctionalization before type analysis"
+                    );
+                }
+            },
             OpCode::ArrayGet {
                 result,
                 array,
@@ -415,8 +430,16 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::DLookup { target: _, keys: _, results: _ } => Ok(()),
-            OpCode::PureToWitnessRef { result, value: _, result_annotation: annotation } => {
+            OpCode::DLookup {
+                target: _,
+                keys: _,
+                results: _,
+            } => Ok(()),
+            OpCode::PureToWitnessRef {
+                result,
+                value: _,
+                result_annotation: annotation,
+            } => {
                 function_info
                     .values
                     .insert(*result, Type::witness_ref(annotation.clone()));
@@ -458,12 +481,12 @@ impl Types {
                 function_info.values.insert(*r, tp.clone());
                 Ok(())
             }
-            OpCode::Lookup { target: _, keys: _, results: _ } => Ok(()),
-            OpCode::TupleProj { 
-                result,
-                tuple,
-                idx,
-            } => {
+            OpCode::Lookup {
+                target: _,
+                keys: _,
+                results: _,
+            } => Ok(()),
+            OpCode::TupleProj { result, tuple, idx } => {
                 if let TupleIdx::Static(sz) = idx {
                     let tuple_type = function_info.values.get(tuple).ok_or_else(|| {
                         format!("Tuple value {:?} not found in type assignments", tuple)
@@ -478,15 +501,21 @@ impl Types {
                     panic!("Dynamic TupleProj should not appear here")
                 }
             }
-            OpCode::MkTuple { 
+            OpCode::MkTuple {
                 result,
                 elems: _,
                 element_types,
             } => {
-                function_info.values.insert(*result, Type::tuple_of(element_types.clone(), V::empty()));
+                function_info
+                    .values
+                    .insert(*result, Type::tuple_of(element_types.clone(), V::empty()));
                 Ok(())
             }
-            OpCode::Todo { results, result_types, .. } => {
+            OpCode::Todo {
+                results,
+                result_types,
+                ..
+            } => {
                 if results.len() != result_types.len() {
                     return Err(format!(
                         "Todo opcode has {} results but {} result types",
@@ -499,7 +528,10 @@ impl Types {
                 }
                 Ok(())
             }
-            OpCode::InitGlobal { global: _, value: _ } => Ok(()),
+            OpCode::InitGlobal {
+                global: _,
+                value: _,
+            } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
         }
     }

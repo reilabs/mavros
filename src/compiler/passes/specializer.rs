@@ -275,9 +275,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
-                CastTarget::Nop => {
-                    self.clone()
-                }
+                CastTarget::Nop => self.clone(),
             },
             _ => todo!(),
         }
@@ -358,11 +356,9 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         elem_types: &[Type<ConstantTaint>],
     ) -> Self {
         let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.function.push_mk_tuple(
-            ctx.function.get_entry_id(),
-            a.clone(),
-            elem_types.to_vec(),
-        );
+        let val =
+            ctx.function
+                .push_mk_tuple(ctx.function.get_entry_id(), a.clone(), elem_types.to_vec());
         ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
@@ -510,10 +506,9 @@ impl<T> symbolic_executor::Context<Val, T> for SpecializationState {
             self.const_vals.insert(val, ConstVal::U(32, len));
             Val(val)
         } else {
-            let val = self.function.push_slice_len(
-                self.function.get_entry_id(),
-                slice.0,
-            );
+            let val = self
+                .function
+                .push_slice_len(self.function.get_entry_id(), slice.0);
             Val(val)
         }
     }

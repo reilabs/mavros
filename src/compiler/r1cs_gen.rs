@@ -143,8 +143,9 @@ impl Value {
     pub fn expect_u1(&self) -> bool {
         match self {
             Value::Const(c) => {
-                let v: u128 = c.into_bigint().to_string().parse()
-                    .unwrap_or_else(|e| panic!("expected u1, but field value is {}: {e}", c.into_bigint()));
+                let v: u128 = c.into_bigint().to_string().parse().unwrap_or_else(|e| {
+                    panic!("expected u1, but field value is {}: {e}", c.into_bigint())
+                });
                 assert!(v <= 1, "expected u1, but value is {v}");
                 v == 1
             }
@@ -156,7 +157,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u8, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u8, but field value is {s}: {e}"))
             }
             r => panic!("expected u8, got {:?}", r),
         }
@@ -166,7 +168,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u32, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u32, but field value is {s}: {e}"))
             }
             r => panic!("expected u32, got {:?}", r),
         }
@@ -176,7 +179,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u64, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u64, but field value is {s}: {e}"))
             }
             r => panic!("expected u64, got {:?}", r),
         }
@@ -186,7 +190,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u128, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u128, but field value is {s}: {e}"))
             }
             r => panic!("expected u128, got {:?}", r),
         }
@@ -266,9 +271,9 @@ impl Value {
     }
 
     pub fn mk_tuple(fields: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(RefCell::new(TupleData { 
+        Value::Tuple(Rc::new(RefCell::new(TupleData {
             table_id: None,
-            data: fields 
+            data: fields,
         })))
     }
 }
@@ -679,11 +684,7 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         Value::mk_array(a)
     }
 
-    fn mk_tuple(
-        elems: Vec<Self>,
-        _ctx: &mut R1CGen,
-        _elem_types: &[Type<V>],
-    ) -> Self {
+    fn mk_tuple(elems: Vec<Self>, _ctx: &mut R1CGen, _elem_types: &[Type<V>]) -> Self {
         Value::mk_tuple(elems)
     }
 

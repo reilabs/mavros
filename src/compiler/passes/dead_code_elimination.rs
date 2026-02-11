@@ -208,7 +208,7 @@ impl DCE {
                             offset: _,
                             result_type: _,
                         }
-                        | OpCode::MkTuple { .. } => {},
+                        | OpCode::MkTuple { .. } => {}
                         OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
