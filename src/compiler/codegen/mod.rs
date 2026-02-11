@@ -593,7 +593,7 @@ impl CodeGen {
                     });
                 }
                 ssa::OpCode::AssertR1C { .. } => {
-                    // TODO
+                    panic!("");
                 }
                 ssa::OpCode::Constrain { a, b, c } => {
                     let a_type = type_info.get_value_type(*a);
@@ -950,25 +950,13 @@ impl CodeGen {
                     let tp = type_info.get_value_type(*result);
                     let size = layouter.type_size(&tp);
                     let res = layouter.alloc_value(*result, &tp);
-                    match size {
-                        1 => {
-                            emitter.push_op(bytecode::OpCode::SelectU64 {
-                                res,
-                                cond: layouter.get_value(*cond),
-                                if_t: layouter.get_value(*if_t),
-                                if_f: layouter.get_value(*if_f),
-                            });
-                        }
-                        s if s == bytecode::LIMBS => {
-                            emitter.push_op(bytecode::OpCode::SelectField {
-                                res,
-                                cond: layouter.get_value(*cond),
-                                if_t: layouter.get_value(*if_t),
-                                if_f: layouter.get_value(*if_f),
-                            });
-                        }
-                        _ => panic!("Unsupported type size for select: {}", size),
-                    }
+                    emitter.push_op(bytecode::OpCode::Select {
+                        cond: layouter.get_value(*cond),
+                        res,
+                        if_t: layouter.get_value(*if_t),
+                        if_f: layouter.get_value(*if_f),
+                        size,
+                    });
                 }
                 other => panic!("Unsupported instruction: {:?}", other),
             }

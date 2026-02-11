@@ -278,15 +278,7 @@ impl SymbolicExecutor {
                         args: arguments,
                         is_unconstrained,
                     } => {
-                        if *is_unconstrained {
-                            // For unconstrained calls, create fresh witness values for returns
-                            // instead of executing the function symbolically.
-                            // The actual execution happens in Brillig VM.
-                            let return_types = ssa.get_function(*function_id).get_returns();
-                            for (val, ret_type) in returns.iter().zip(return_types.iter()) {
-                                scope[val.0 as usize] = Some(V::witness_of_type(ret_type, ctx));
-                            }
-                        } else {
+                        if !*is_unconstrained {                            
                             let params = arguments
                                 .iter()
                                 .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())

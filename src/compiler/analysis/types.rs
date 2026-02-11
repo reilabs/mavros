@@ -206,16 +206,7 @@ impl Types {
                         }
 
                         for (ret, ret_type) in result.iter().zip(return_types.iter()) {
-                            let ret_type = if *is_callee_unconstrained {
-                                if is_unconstrained {
-                                    ret_type.with_pure_annotation()
-                                } else {
-                                    ret_type.with_witness_annotation()
-                                }
-                            } else {
-                                ret_type.clone()
-                            };
-                            function_info.values.insert(*ret, ret_type);
+                            function_info.values.insert(*ret, ret_type.clone());
                         }
                         Ok(())
                     }

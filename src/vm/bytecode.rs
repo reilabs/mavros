@@ -488,16 +488,11 @@ mod def {
     fn nop() {}
 
     #[opcode]
-    fn select_u64(#[out] res: *mut u64, #[frame] cond: u64, #[frame] if_t: u64, #[frame] if_f: u64) {
-        unsafe {
-            *res = if cond != 0 { if_t } else { if_f };
-        }
-    }
-
-    #[opcode]
-    fn select_field(#[out] res: *mut Field, #[frame] cond: u64, #[frame] if_t: Field, #[frame] if_f: Field) {
-        unsafe {
-            *res = if cond != 0 { if_t } else { if_f };
+    fn select(frame: Frame, #[frame] cond: u64, res: FramePosition, if_t: FramePosition, if_f: FramePosition, size: usize) {
+        if cond != 0 {
+            frame.memcpy(res.0 as isize, if_t.0 as isize, size);
+        } else {
+            frame.memcpy(res.0 as isize, if_f.0 as isize, size);
         }
     }
 
