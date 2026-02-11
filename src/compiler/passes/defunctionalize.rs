@@ -158,6 +158,7 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
                         results,
                         function: CallTarget::Dynamic(fn_ptr_val),
                         args,
+                        is_unconstrained,
                     } => {
                         let dispatch_fn = *call_site_dispatch
                             .get(&(fid, fn_ptr_val))
@@ -173,6 +174,7 @@ fn run_defunctionalize(ssa: &mut SSA<Empty>) {
                             results,
                             function: CallTarget::Static(dispatch_fn),
                             args: new_args,
+                            is_unconstrained,
                         });
                     }
                     other => new_instructions.push(other),
@@ -340,7 +342,7 @@ fn compute_reaching_fn_ptrs(ssa: &SSA<Empty>) -> ReachingFns {
 
                 for instr in block.get_instructions() {
                     match instr {
-                        OpCode::Call { function, args, results } => {
+                        OpCode::Call { function, args, results, is_unconstrained: _ } => {
                             let target_fns: Vec<FunctionId> = match function {
                                 CallTarget::Static(callee_id) => vec![*callee_id],
                                 CallTarget::Dynamic(fn_ptr_val) => reaching
@@ -521,6 +523,7 @@ fn build_dispatch_function(
             variant_id,
             forwarded_params.clone(),
             return_types.len(),
+            func.is_unconstrained(),
         );
         func.terminate_block_with_jmp(entry_block, merge_block, call_results);
     } else {
@@ -537,6 +540,7 @@ fn build_dispatch_function(
                     variant_id,
                     forwarded_params.clone(),
                     return_types.len(),
+                    func.is_unconstrained(),
                 );
                 func.terminate_block_with_jmp(current_block, merge_block, call_results);
             } else {
@@ -558,6 +562,7 @@ fn build_dispatch_function(
                     variant_id,
                     forwarded_params.clone(),
                     return_types.len(),
+                    func.is_unconstrained(),
                 );
                 func.terminate_block_with_jmp(call_block, merge_block, call_results);
 

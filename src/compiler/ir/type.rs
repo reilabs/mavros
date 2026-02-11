@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display, Formatter};
 
 pub trait CommutativeMonoid {
     fn empty() -> Self;
+    fn witness() -> Self;
     fn op(&self, other: &Self) -> Self;
 }
 
@@ -10,6 +11,10 @@ pub struct Empty;
 
 impl CommutativeMonoid for Empty {
     fn empty() -> Self {
+        Empty
+    }
+
+    fn witness() -> Self {
         Empty
     }
 
@@ -62,7 +67,7 @@ impl<V> TypeExpr<V> {
             TypeExpr::Array(inner, size) => TypeExpr::Array(Box::new(inner.as_pure()), *size),
             TypeExpr::Slice(inner) => TypeExpr::Slice(Box::new(inner.as_pure())),
             TypeExpr::Ref(inner) => TypeExpr::Ref(Box::new(inner.as_pure())),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(elements) => TypeExpr::Tuple(elements.iter().map(|e| e.as_pure()).collect()),
             TypeExpr::Function => TypeExpr::Function,
         }
     }
@@ -150,6 +155,91 @@ impl<V: CommutativeMonoid + Display> Type<V> {
                 }
                 false
             }
+        }
+    }
+}
+
+impl<V: CommutativeMonoid + Clone> Type<V> {
+    /// Recursively applies witness to primitive types (Field, U) while keeping
+    /// container types (Array, Tuple) with empty/pure annotations.
+    /// Used for unconstrained function return values.
+    pub fn with_witness_annotation(&self) -> Self {
+        match &self.expr {
+            TypeExpr::Field => Type {
+                expr: TypeExpr::Field,
+                annotation: V::witness(),
+            },
+            TypeExpr::U(size) => Type {
+                expr: TypeExpr::U(*size),
+                annotation: V::witness(),
+            },
+            TypeExpr::Array(inner, size) => Type {
+                expr: TypeExpr::Array(Box::new(inner.with_witness_annotation()), *size),
+                annotation: V::empty(),
+            },
+            TypeExpr::Tuple(elements) => Type {
+                expr: TypeExpr::Tuple(
+                    elements.iter().map(|e| e.with_witness_annotation()).collect()
+                ),
+                annotation: V::empty(),
+            },
+            TypeExpr::Slice(inner) => Type {
+                expr: TypeExpr::Slice(Box::new(inner.with_witness_annotation())),
+                annotation: V::empty(),
+            },
+            TypeExpr::Ref(inner) => Type {
+                expr: TypeExpr::Ref(Box::new(inner.with_witness_annotation())),
+                annotation: V::witness(),
+            },
+            TypeExpr::WitnessRef => Type {
+                expr: TypeExpr::WitnessRef,
+                annotation: V::witness(),
+            },
+            TypeExpr::Function => Type {
+                expr: TypeExpr::Function,
+                annotation: V::witness(),
+            },
+        }
+    }
+
+    /// Recursively applies empty/pure annotations to all types.
+    /// Used when unconstrained code calls unconstrained functions.
+    pub fn with_pure_annotation(&self) -> Self {
+        match &self.expr {
+            TypeExpr::Field => Type {
+                expr: TypeExpr::Field,
+                annotation: V::empty(),
+            },
+            TypeExpr::U(size) => Type {
+                expr: TypeExpr::U(*size),
+                annotation: V::empty(),
+            },
+            TypeExpr::Array(inner, size) => Type {
+                expr: TypeExpr::Array(Box::new(inner.with_pure_annotation()), *size),
+                annotation: V::empty(),
+            },
+            TypeExpr::Tuple(elements) => Type {
+                expr: TypeExpr::Tuple(
+                    elements.iter().map(|e| e.with_pure_annotation()).collect()
+                ),
+                annotation: V::empty(),
+            },
+            TypeExpr::Slice(inner) => Type {
+                expr: TypeExpr::Slice(Box::new(inner.with_pure_annotation())),
+                annotation: V::empty(),
+            },
+            TypeExpr::Ref(inner) => Type {
+                expr: TypeExpr::Ref(Box::new(inner.with_pure_annotation())),
+                annotation: V::empty(),
+            },
+            TypeExpr::WitnessRef => Type {
+                expr: TypeExpr::WitnessRef,
+                annotation: V::empty(),
+            },
+            TypeExpr::Function => Type {
+                expr: TypeExpr::Function,
+                annotation: V::empty(),
+            },
         }
     }
 }

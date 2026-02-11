@@ -360,7 +360,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             }
 
-            OpCode::Call { results, function: CallTarget::Static(function), args } => {
+            OpCode::Call { results, function: CallTarget::Static(function), args, is_unconstrained: _ } => {
                 let callee = self.function_map[function];
                 let vm_ptr = self.vm_ptr.unwrap();
 

@@ -146,10 +146,12 @@ impl UntaintControlFlow {
                         results: r,
                         function: CallTarget::Static(l),
                         args: h,
+                        is_unconstrained,
                     } => OpCode::Call {
                         results: r,
                         function: CallTarget::Static(l),
                         args: h,
+                        is_unconstrained,
                     },
                     OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
@@ -607,17 +609,21 @@ impl UntaintControlFlow {
                         results: ret,
                         function: CallTarget::Static(tgt),
                         mut args,
+                        is_unconstrained,
                     } => {
-                        match block_taint {
-                            Some(arg) => {
-                                args.push(arg);
+                        if !is_unconstrained {
+                            match block_taint {
+                                Some(arg) => {
+                                    args.push(arg);
+                                }
+                                None => {}
                             }
-                            None => {}
                         }
                         new_instructions.push(OpCode::Call {
                             results: ret,
                             function: CallTarget::Static(tgt),
                             args: args,
+                            is_unconstrained,
                         });
                     }
                     OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
@@ -636,6 +642,9 @@ impl UntaintControlFlow {
                         new_instructions.push(instruction);
                     }
                     OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                        new_instructions.push(instruction);
+                    }
+                    OpCode::WriteWitness { .. } => {
                         new_instructions.push(instruction);
                     }
                     _ => {

@@ -426,6 +426,10 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         todo!()
     }
 
+    fn witness_of_type(_tp: &Type<ConstantTaint>, _ctx: &mut SpecializationState) -> Self {
+        todo!()
+    }
+
     fn mem_op(&self, kind: MemOp, ctx: &mut SpecializationState) {
         ctx.function
             .push_mem_op(ctx.function.get_entry_id(), self.0, kind);
@@ -724,6 +728,7 @@ impl Specializer {
             unspecialized_id,
             dispatcher_params,
             return_values.len(),
+            false,
         );
         dispatcher.terminate_block_with_jmp(
             unspecialized_caller,
@@ -736,6 +741,7 @@ impl Specializer {
             specialized_id,
             specialized_params,
             return_values.len(),
+            false,
         );
         dispatcher.terminate_block_with_jmp(specialized_caller, return_block, specialized_returns);
 

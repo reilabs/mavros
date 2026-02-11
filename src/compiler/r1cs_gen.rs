@@ -686,6 +686,10 @@ impl<V: Clone> symbolic_executor::Value<R1CGen, V> for Value {
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
 
+    fn witness_of_type(tp: &Type<V>, ctx: &mut R1CGen) -> Self {
+        todo!()
+    }
+
     fn mem_op(&self, _kind: MemOp, _ctx: &mut R1CGen) {}
 
     fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) {

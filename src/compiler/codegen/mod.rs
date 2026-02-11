@@ -595,6 +595,9 @@ impl CodeGen {
                         a: layouter.get_value(*v),
                     });
                 }
+                ssa::OpCode::AssertR1C { .. } => {
+                    panic!("");
+                }
                 ssa::OpCode::Constrain { a, b, c } => {
                     let a_type = type_info.get_value_type(*a);
                     let b_type = type_info.get_value_type(*b);
@@ -752,6 +755,7 @@ impl CodeGen {
                     results: r,
                     function: ssa::CallTarget::Static(fnid),
                     args: params,
+                    is_unconstrained: _,
                 } => {
                     let r = layouter.alloc_many_contiguous(
                         r.iter()
@@ -951,6 +955,18 @@ impl CodeGen {
                         res,
                         global_offset: global_layouter.get_offset(global_idx),
                         size: global_layouter.get_size(global_idx),
+                    });
+                }
+                ssa::OpCode::Select { result, cond, if_t, if_f } => {
+                    let tp = type_info.get_value_type(*result);
+                    let size = layouter.type_size(&tp);
+                    let res = layouter.alloc_value(*result, &tp);
+                    emitter.push_op(bytecode::OpCode::Select {
+                        cond: layouter.get_value(*cond),
+                        res,
+                        if_t: layouter.get_value(*if_t),
+                        if_f: layouter.get_value(*if_f),
+                        size,
                     });
                 }
                 other => panic!("Unsupported instruction: {:?}", other),

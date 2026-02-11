@@ -71,6 +71,7 @@ where
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type<Taint>, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type<Taint>>, ctx: &mut Context) -> Self;
     fn fresh_witness(ctx: &mut Context) -> Self;
+    fn witness_of_type(tp: &Type<Taint>, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
 }
@@ -275,6 +276,7 @@ impl SymbolicExecutor {
                         results: returns,
                         function: crate::compiler::ssa::CallTarget::Static(function_id),
                         args: arguments,
+                        is_unconstrained,
                     } => {
                         let params = arguments
                             .iter()

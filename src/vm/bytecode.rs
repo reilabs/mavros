@@ -488,6 +488,15 @@ mod def {
     fn nop() {}
 
     #[opcode]
+    fn select(frame: Frame, #[frame] cond: u64, res: FramePosition, if_t: FramePosition, if_f: FramePosition, size: usize) {
+        if cond != 0 {
+            frame.memcpy(res.0 as isize, if_t.0 as isize, size);
+        } else {
+            frame.memcpy(res.0 as isize, if_f.0 as isize, size);
+        }
+    }
+
+    #[opcode]
     fn mov_const(#[out] res: *mut u64, val: u64) {
         unsafe {
             *res = val;

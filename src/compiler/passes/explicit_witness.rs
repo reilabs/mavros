@@ -9,7 +9,7 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget, OpCode, Radix, SSA, SeqType, ValueId
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget, OpCode, Radix, SSA, SeqType, TupleIdx, ValueId
     },
     taint_analysis::ConstantTaint,
 };
@@ -63,7 +63,6 @@ impl ExplicitWitness {
                             new_instructions.push(instruction);
                         }
                         OpCode::Alloc { .. }
-                        | OpCode::Call { .. }
                         | OpCode::Constrain { .. }
                         | OpCode::WriteWitness { .. }
                         | OpCode::FreshWitness {
@@ -71,6 +70,19 @@ impl ExplicitWitness {
                             result_type: _,
                         } => {
                             new_instructions.push(instruction);
+                        }
+                        OpCode::Call {
+                            results,
+                            function: called_fn,
+                            args,
+                            is_unconstrained,
+                        } => {
+                            new_instructions.push(OpCode::Call {
+                                results,
+                                function: called_fn,
+                                args,
+                                is_unconstrained,
+                            });
                         }
                         OpCode::Cmp {
                             kind,
@@ -415,8 +427,14 @@ impl ExplicitWitness {
                                 lhs: res,
                                 rhs: neg_r,
                             });
+                            let cond_field = function.fresh_value();
+                            new_instructions.push(OpCode::Cast {
+                                result: cond_field,
+                                value: cond,
+                                target: CastTarget::Field,
+                            });
                             new_instructions.push(OpCode::Constrain {
-                                a: cond,
+                                a: cond_field,
                                 b: l_sub_r,
                                 c: res_sub_r,
                             });
@@ -681,4 +699,5 @@ impl ExplicitWitness {
             c: value,
         });
     }
+
 }

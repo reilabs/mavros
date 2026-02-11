@@ -6,3 +6,6 @@ settings.local.json
 dist
 node_modules
 .cargo
+mavros_debug_copy
+noir_examples/
+.vscode/

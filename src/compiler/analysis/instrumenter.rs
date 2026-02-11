@@ -397,6 +397,7 @@ impl Value {
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
             (Value::UWitness(_), CastTarget::Field) => Value::FWitness,
             (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
+            (Value::FWitness, CastTarget::Field) => Value::FWitness,
             (Value::Field(f), CastTarget::U(s)) => {
                 let bigint = f.into_bigint();
 
@@ -507,7 +508,7 @@ impl Value {
             }
             TypeExpr::Slice(_) => panic!("Cannot witness slice type"),
             TypeExpr::Ref(_) => panic!("Cannot witness pointer type"),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
+            TypeExpr::Tuple(_) => panic!("Cannot witness tuple type"),
             TypeExpr::Function => panic!("Cannot witness function type"),
         }
     }
@@ -932,6 +933,13 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         Self {
             unspecialized: Value::FWitness,
             specialized: Value::FWitness,
+        }
+    }
+
+    fn witness_of_type(tp: &Type<ConstantTaint>, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: Value::witness_of(tp),
+            specialized: Value::witness_of(tp),
         }
     }
 

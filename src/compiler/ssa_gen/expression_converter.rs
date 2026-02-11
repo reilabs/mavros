@@ -50,6 +50,8 @@ pub struct ExpressionConverter<'a> {
     in_unconstrained: bool,
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
+    /// Set of unconstrained function IDs
+    unconstrained_functions: &'a HashSet<AstFuncId>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -58,6 +60,7 @@ impl<'a> ExpressionConverter<'a> {
         entry_block: BlockId,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
+        unconstrained_functions: &'a HashSet<AstFuncId>,
     ) -> Self {
         Self {
             bindings: HashMap::new(),
@@ -68,6 +71,7 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
+            unconstrained_functions,
         }
     }
 
@@ -960,7 +964,7 @@ impl<'a> ExpressionConverter<'a> {
                         let return_type = &call.return_type;
                         let return_size = self.return_size(return_type);
 
-                        let results = function.push_call(self.current_block, *ssa_func_id, args, return_size);
+                        let results = function.push_call(self.current_block, *ssa_func_id, args, return_size, self.unconstrained_functions.contains(func_id));
 
                         if results.is_empty() {
                             None

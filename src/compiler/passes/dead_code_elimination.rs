@@ -102,8 +102,15 @@ impl DCE {
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
                     match instruction {
-                        // calls, stores, constraints and witness stores are critical side-effects
-                        OpCode::Call { .. } | OpCode::Store { .. } => {
+                        OpCode::Call { is_unconstrained, .. } => {
+                            // Unconstrained calls can be eliminated after witness shape is frozen
+                            // because their results are captured by FreshWitness instructions.
+                            // Before freezing, all calls are considered live side-effects.
+                            if !(*is_unconstrained && self.config.witness_shape_frozen) {
+                                worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                            }
+                        }                                                     
+                        OpCode::Store { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
                         // assert_eq is critical if it's not definitionally true

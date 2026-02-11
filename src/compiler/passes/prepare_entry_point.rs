@@ -30,6 +30,7 @@ impl PrepareEntryPoint {
         let original_main = ssa.get_main();
         let param_types = original_main.get_param_types();
         let return_types = original_main.get_returns().to_vec();
+        let is_main_unconstrained = original_main.is_unconstrained();
 
         let globals_init_fn = ssa.get_globals_init_fn();
         let globals_deinit_fn = ssa.get_globals_deinit_fn();
@@ -54,7 +55,7 @@ impl PrepareEntryPoint {
 
         // Call globals init function if present
         if let Some(init_fn) = globals_init_fn {
-            wrapper.push_call(entry_block, init_fn, vec![], 0);
+            wrapper.push_call(entry_block, init_fn, vec![], 0, false);
         }
 
         let results = wrapper.push_call(
@@ -62,6 +63,7 @@ impl PrepareEntryPoint {
             original_main_id,
             arg_values,
             return_types.len(),
+            is_main_unconstrained,
         );
         for ((result, public_input), return_type) in results.iter().zip(return_input_values.iter()).zip(return_types.iter()) {
             Self::assert_eq_deep(wrapper, entry_block, *result, *public_input, return_type);
@@ -69,7 +71,7 @@ impl PrepareEntryPoint {
 
         // Call globals deinit function if present
         if let Some(deinit_fn) = globals_deinit_fn {
-            wrapper.push_call(entry_block, deinit_fn, vec![], 0);
+            wrapper.push_call(entry_block, deinit_fn, vec![], 0, false);
         }
 
         wrapper.terminate_block_with_return(entry_block, vec![]);
@@ -233,4 +235,5 @@ impl PrepareEntryPoint {
 
         return (*value_id, new_parameters, new_instructions);
     }
+
 }

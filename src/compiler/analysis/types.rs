@@ -98,7 +98,7 @@ impl Types {
             }
 
             for instruction in block.get_instructions() {
-                self.run_opcode(instruction, &mut function_info, function_types)
+                self.run_opcode(instruction, &mut function_info, function_types, function.is_unconstrained())
                     .expect(&format!("Error running opcode {:?}", instruction));
             }
         }
@@ -111,6 +111,7 @@ impl Types {
         opcode: &OpCode<V>,
         function_info: &mut FunctionTypeInfo<V>,
         function_types: &HashMap<FunctionId, (Vec<Type<V>>, &[Type<V>])>,
+        is_unconstrained: bool,
     ) -> Result<(), String> {
         match opcode {
             OpCode::Cmp { kind: _kind, result, lhs, rhs } => {
@@ -179,7 +180,7 @@ impl Types {
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function, args } => {
+            OpCode::Call { results: result, function, args, is_unconstrained: is_callee_unconstrained } => {
                 match function {
                     CallTarget::Static(fn_id) => {
                         let (param_types, return_types) = function_types

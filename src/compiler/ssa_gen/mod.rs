@@ -6,7 +6,7 @@
 mod expression_converter;
 mod type_converter;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction,
@@ -47,6 +47,12 @@ impl SsaConverter {
     pub fn convert_program(&mut self, program: &Program) -> SSA<Empty> {
         let mut ssa = SSA::new();
 
+        let unconstrained_functions = program
+            .functions
+            .iter()
+            .filter(|f| f.unconstrained)
+            .map(|f| f.id)
+            .collect::<HashSet<_>>();
         // Phase 1: Register all functions to handle mutual recursion.
         // For each constrained function, also register an unconstrained variant
         // so that calls from unconstrained context propagate is_unconstrained=true.
@@ -59,6 +65,7 @@ impl SsaConverter {
             self.constrained_mapper.insert(func.id, ssa_id);
 
             if func.unconstrained {
+
                 // Natively unconstrained: same ID in both contexts
                 self.unconstrained_mapper.insert(func.id, ssa_id);
             } else {
@@ -78,17 +85,17 @@ impl SsaConverter {
             if ast_func.unconstrained {
                 // Natively unconstrained: convert once with is_unconstrained=true
                 let ssa_func_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(ast_func, &self.unconstrained_mapper, true);
+                let converted = self.convert_function(ast_func, &self.unconstrained_mapper, true, &unconstrained_functions);
                 *ssa.get_function_mut(ssa_func_id) = converted;
             } else {
                 // Constrained version
                 let constrained_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(ast_func, &self.constrained_mapper, false);
+                let converted = self.convert_function(ast_func, &self.constrained_mapper, false, &unconstrained_functions);
                 *ssa.get_function_mut(constrained_id) = converted;
 
                 // Unconstrained variant (for calls from unconstrained context)
                 let unconstrained_id = *self.unconstrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(ast_func, &self.unconstrained_mapper, true);
+                let converted = self.convert_function(ast_func, &self.unconstrained_mapper, true, &unconstrained_functions);
                 *ssa.get_function_mut(unconstrained_id) = converted;
             }
         }
@@ -170,6 +177,12 @@ impl SsaConverter {
 
     /// Convert globals: assign slot indices, build init/deinit functions.
     fn convert_globals(&mut self, program: &Program, ssa: &mut SSA<Empty>) {
+        let unconstrained_functions = program
+            .functions
+            .iter()
+            .filter(|f| f.unconstrained)
+            .map(|f| f.id)
+            .collect::<HashSet<_>>();
         // Assign slot indices
         let mut global_types = Vec::new();
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
@@ -228,6 +241,7 @@ impl SsaConverter {
                 entry,
                 false,
                 &self.global_slots,
+                &unconstrained_functions,
             );
 
             for gid in &ordered_ids {
@@ -264,6 +278,7 @@ impl SsaConverter {
         ast_func: &AstFunction,
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
+        unconstrained_functions: &HashSet<AstFuncId>,
     ) -> Function<Empty> {
         let name = if in_unconstrained && !ast_func.unconstrained {
             format!("{}_unconstrained", ast_func.name)
@@ -280,7 +295,7 @@ impl SsaConverter {
         }
 
         // Create expression converter
-        let mut expr_converter = ExpressionConverter::new_with_globals(function_mapper, entry_block, in_unconstrained, &self.global_slots);
+        let mut expr_converter = ExpressionConverter::new_with_globals(function_mapper, entry_block, in_unconstrained, &self.global_slots, unconstrained_functions);
 
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
@@ -302,6 +317,8 @@ impl SsaConverter {
         let current_block = expr_converter.current_block();
         let return_values = result.into_iter().collect();
         function.terminate_block_with_return(current_block, return_values);
+
+        function.set_unconstrained(in_unconstrained);
 
         function
     }

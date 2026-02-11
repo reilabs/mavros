@@ -17,3 +17,4 @@ pub mod witness_write_to_fresh;
 pub mod witness_write_to_void;
 pub mod struct_access_simplifier;
 pub mod prepare_entry_point;
+pub mod witness_unconstrained_returns;

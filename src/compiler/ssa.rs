@@ -225,6 +225,7 @@ pub struct Function<V> {
     next_value: u64,
     consts: HashMap<ValueId, Const>,
     consts_to_val: HashMap<Const, ValueId>,
+    is_unconstrained: bool,
 }
 
 impl<V: Display + Clone> Function<V> {
@@ -273,6 +274,7 @@ impl<V: Clone> Function<V> {
             next_value: 0,
             consts: HashMap::new(),
             consts_to_val: HashMap::new(),
+            is_unconstrained: false,
         }
     }
 
@@ -287,6 +289,7 @@ impl<V: Clone> Function<V> {
                 next_value: self.next_value,
                 consts: self.consts,
                 consts_to_val: self.consts_to_val,
+                is_unconstrained: self.is_unconstrained,
             },
             self.blocks,
             self.returns,
@@ -299,6 +302,14 @@ impl<V: Clone> Function<V> {
 
     pub fn set_name(&mut self, name: String) {
         self.name = name;
+    }
+
+    pub fn is_unconstrained(&self) -> bool {
+        self.is_unconstrained
+    }
+
+    pub fn set_unconstrained(&mut self, is_unconstrained: bool) {
+        self.is_unconstrained = is_unconstrained;
     }
 
     pub fn get_var_num_bound(&self) -> usize {
@@ -614,6 +625,7 @@ impl<V: Clone> Function<V> {
         fn_id: FunctionId,
         args: Vec<ValueId>,
         return_size: usize,
+        is_unconstrained: bool,
     ) -> Vec<ValueId> {
         let mut return_values = Vec::new();
         for _ in 0..return_size {
@@ -629,6 +641,7 @@ impl<V: Clone> Function<V> {
                 results: return_values.clone(),
                 function: CallTarget::Static(fn_id),
                 args: args,
+                is_unconstrained,
             });
         return_values
     }
@@ -654,6 +667,7 @@ impl<V: Clone> Function<V> {
                 results: return_values.clone(),
                 function: CallTarget::Dynamic(fn_ptr),
                 args,
+                is_unconstrained: false,
             });
         return_values
     }
@@ -1347,6 +1361,7 @@ pub enum OpCode<V> {
         results: Vec<ValueId>,
         function: CallTarget,
         args: Vec<ValueId>,
+        is_unconstrained: bool,
     },
     ArrayGet {
         result: ValueId,
@@ -1560,6 +1575,7 @@ impl<V: Display + Clone> OpCode<V> {
                 results: result,
                 function,
                 args,
+                is_unconstrained,
             } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
@@ -1569,8 +1585,9 @@ impl<V: Display + Clone> OpCode<V> {
                 match function {
                     CallTarget::Static(fn_id) => {
                         format!(
-                            "{} = call {}@{}({})",
+                            "{} = {} call {}@{}({})",
                             result_str,
+                            if *is_unconstrained { "unconstrained" } else { "" },
                             ssa.get_function(*fn_id).get_name(),
                             fn_id.0,
                             args_str
@@ -2042,6 +2059,7 @@ impl<V> OpCode<V> {
                 results: r,
                 function,
                 args: a,
+                is_unconstrained: _,
             } => {
                 let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -2241,6 +2259,7 @@ impl<V> OpCode<V> {
                 results: _,
                 function,
                 args: a,
+                is_unconstrained: _,
             } => {
                 let mut ret_vec = Vec::new();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -2430,6 +2449,7 @@ impl<V> OpCode<V> {
                 results: _,
                 function,
                 args: a,
+                is_unconstrained: _,
             } => {
                 let mut ret_vec = Vec::new();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -2644,6 +2664,7 @@ impl<V> OpCode<V> {
                 results: r,
                 function: _,
                 args: _,
+                is_unconstrained: _,
             } => r.iter().collect::<Vec<_>>().into_iter(),
             Self::Constrain { .. }
             | Self::BumpD {
