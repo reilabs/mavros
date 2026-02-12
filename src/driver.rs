@@ -19,6 +19,7 @@ use crate::{
         ssa::{DefaultSsaAnnotator, SSA},
         taint_analysis::TaintAnalysis,
         untaint_control_flow::UntaintControlFlow,
+        witness_type_inference::WitnessTypeInference,
     },
 };
 
@@ -137,14 +138,6 @@ impl Driver {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
         let flow_analysis = FlowAnalysis::run(&ssa);
         // let type_info = Types::new().run(ssa, &flow_analysis);
-        let call_loops = flow_analysis.get_call_graph().detect_loops();
-        if !call_loops.is_empty() {
-            todo!(
-                "Call loops detected: {:?}. We don't support recursion yet.",
-                call_loops
-            );
-        }
-
         if self.draw_cfg {
             flow_analysis.generate_images(
                 self.get_debug_output_dir().join("initial_state"),
@@ -155,6 +148,18 @@ impl Driver {
 
         let mut taint_analysis = TaintAnalysis::new();
         taint_analysis.run(&ssa, &flow_analysis).unwrap();
+
+        let mut witness_inference = WitnessTypeInference::new();
+        witness_inference.run(&ssa, &flow_analysis).unwrap();
+
+        fs::write(
+            self.get_debug_output_dir()
+                .join("witness_inference_ssa.txt"),
+            ssa.to_string(&witness_inference),
+        )
+        .unwrap();
+
+        witness_inference.compare_with_taint_analysis(&taint_analysis, &ssa);
 
         fs::write(
             self.get_debug_output_dir().join("taint_analysed_ssa.txt"),

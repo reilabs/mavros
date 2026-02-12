@@ -1,5 +1,6 @@
 use petgraph::Direction;
 use petgraph::algo::dominators::{self, Dominators};
+use petgraph::algo::tarjan_scc;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::{Bfs, DfsPostOrder, EdgeRef, Walker};
 use std::collections::{HashMap, HashSet};
@@ -566,6 +567,37 @@ impl CallGraph {
         DfsPostOrder::new(&self.call_graph, self.func_to_node[&main_fn_id])
             .iter(&self.call_graph)
             .filter_map(|node| self.node_to_func.get(&node).cloned())
+    }
+
+    /// Returns SCCs in reverse topological order (callees before callers).
+    /// Each SCC is a Vec<FunctionId>. Non-recursive functions appear as singleton SCCs.
+    pub fn get_sccs_reverse_topological(&self, main_fn_id: FunctionId) -> Vec<Vec<FunctionId>> {
+        // tarjan_scc returns SCCs in reverse topological order
+        // (i.e. if A calls B, the SCC containing B comes before the SCC containing A)
+        let main_node = self.func_to_node[&main_fn_id];
+        // First, find all reachable nodes from main via DFS
+        let reachable: HashSet<NodeIndex<u32>> = DfsPostOrder::new(&self.call_graph, main_node)
+            .iter(&self.call_graph)
+            .collect();
+
+        tarjan_scc(&self.call_graph)
+            .into_iter()
+            .map(|scc| {
+                scc.into_iter()
+                    .filter(|node| reachable.contains(node))
+                    .filter_map(|node| self.node_to_func.get(&node).cloned())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|scc| !scc.is_empty())
+            .collect()
+    }
+
+    /// Check if a function has a self-recursive call (calls itself directly).
+    pub fn is_self_recursive(&self, func_id: FunctionId) -> bool {
+        let node = self.func_to_node[&func_id];
+        self.call_graph
+            .edges_directed(node, Direction::Outgoing)
+            .any(|edge| edge.target() == node)
     }
 }
 

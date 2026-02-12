@@ -13,5 +13,9 @@ pub mod ssa;
 pub mod taint_analysis;
 pub mod union_find;
 pub mod untaint_control_flow;
+pub mod witness_constraint_solver;
+pub mod witness_info;
+pub mod witness_type_inference;
+pub mod witness_union_find;
 
 pub type Field = ark_bn254::Fr;
