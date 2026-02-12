@@ -138,6 +138,14 @@ impl Driver {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
         let flow_analysis = FlowAnalysis::run(&ssa);
         // let type_info = Types::new().run(ssa, &flow_analysis);
+        let call_loops = flow_analysis.get_call_graph().detect_loops();
+        if !call_loops.is_empty() {
+            todo!(
+                "Call loops detected: {:?}. We don't support recursion yet.",
+                call_loops
+            );
+        }
+
         if self.draw_cfg {
             flow_analysis.generate_images(
                 self.get_debug_output_dir().join("initial_state"),
