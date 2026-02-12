@@ -421,7 +421,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
-    fn fresh_witness(_ctx: &mut SpecializationState) -> Self {
+    fn fresh_witness(_result_type: &crate::compiler::ir::r#type::Type, _ctx: &mut SpecializationState) -> Self {
         todo!()
     }
 
@@ -589,7 +589,7 @@ impl Specializer {
                     info!("TODO: Aborting specialization on an array value");
                     return;
                 }
-                ValueSignature::Unknown | ValueSignature::WitnessOf(_) => {
+                ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
                     call_params.push(Val(state
                         .function
                         .add_parameter(state.function.get_entry_id(), param.clone())));
@@ -684,7 +684,7 @@ impl Specializer {
                 ValueSignature::Array(_) => {
                     todo!();
                 }
-                ValueSignature::Unknown | ValueSignature::WitnessOf(_) => {
+                ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
                     specialized_params.push(*pval);
                 }
                 ValueSignature::Field(v) => {

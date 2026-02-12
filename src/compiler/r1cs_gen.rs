@@ -681,7 +681,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
 
-    fn fresh_witness(ctx: &mut R1CGen) -> Self {
+    fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
