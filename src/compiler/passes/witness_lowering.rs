@@ -93,15 +93,8 @@ impl WitnessLowering {
                                 new_instructions.push(instruction);
                             }
                         }
-                        OpCode::FreshWitness {
-                            result: r,
-                            result_type: tp,
-                        } => {
-                            let i = OpCode::FreshWitness {
-                                result: r,
-                                result_type: Type::witness_of(tp.clone()),
-                            };
-                            new_instructions.push(i);
+                        OpCode::FreshWitness { .. } => {
+                            new_instructions.push(instruction);
                         }
                         OpCode::MkSeq {
                             result: r,

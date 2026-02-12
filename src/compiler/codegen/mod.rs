@@ -872,9 +872,8 @@ impl CodeGen {
                 }
                 ssa::OpCode::FreshWitness {
                     result: r,
-                    result_type: tp,
+                    result_type: _,
                 } => {
-                    assert!(matches!(tp.expr, TypeExpr::WitnessOf(_)));
                     emitter.push_op(bytecode::OpCode::FreshWitness {
                         res: layouter.alloc_ptr(*r),
                     });

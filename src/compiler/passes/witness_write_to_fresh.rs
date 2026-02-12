@@ -71,10 +71,13 @@ impl WitnessWriteToFresh {
             for (_, block) in function.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     let new_instruction = match instruction {
-                        OpCode::WriteWitness { result: r, value: _ } => {
+                        OpCode::WriteWitness { result: r, value: v } => {
                             let tp = type_info
                                 .get_function(*function_id)
-                                .get_value_type(r.unwrap());
+                                .get_value_type(*v);
+                            if tp.is_witness_of() {
+                                panic!("ICE: WriteWitness input has WitnessOf type: {:?}", tp);
+                            }
                             if !tp.is_numeric() {
                                 panic!("Expected numeric type, got {:?}", tp);
                             }
@@ -134,10 +137,10 @@ impl WitnessWriteToFresh {
     ) -> ValueId {
         let r = value_id.unwrap_or_else(|| main_function.fresh_value());
         match &tp.expr {
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessOf(_) => {
+            TypeExpr::WitnessOf(inner) => {
                 instruction_collector.push(OpCode::FreshWitness {
                     result: r,
-                    result_type: Type::witness_of(tp.strip_witness()),
+                    result_type: *inner.clone(),
                 })
             }
             TypeExpr::Array(inner_type, size) => {

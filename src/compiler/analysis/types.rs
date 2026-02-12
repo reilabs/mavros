@@ -279,7 +279,7 @@ impl Types {
                 Ok(())
             }
             OpCode::FreshWitness { result: r, result_type: tp } => {
-                function_info.values.insert(*r, tp.clone());
+                function_info.values.insert(*r, Type::witness_of(tp.clone()));
                 Ok(())
             }
             OpCode::Constrain { a: _, b: _, c: _ } => Ok(()),

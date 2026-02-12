@@ -85,17 +85,7 @@ impl WitnessCastInsertion {
                             elem_type: child_typ,
                         }
                     }
-                    OpCode::FreshWitness {
-                        result: r,
-                        result_type: tp,
-                    } => {
-                        let wt = function_wt.get_value_witness_type(r);
-                        let new_tp = self.apply_witness_type(tp, wt);
-                        OpCode::FreshWitness {
-                            result: r,
-                            result_type: new_tp,
-                        }
-                    }
+                    OpCode::FreshWitness { .. } => instruction,
                     OpCode::MkSeq {
                         result: r,
                         elems: l,
