@@ -6,12 +6,22 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator, TupleIdx},
-    witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo, WitnessType},
+    ssa::{BinaryArithOpKind, CallTarget, Function, FunctionId, OpCode, SSA, Terminator},
+    witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
 };
 
 pub struct UntaintControlFlow {}
+
+/// Look up the witness level for a value, defaulting to Pure for values
+/// not present in the witness type map (e.g., values created by WitnessCastInsertion).
+fn get_witness_or_pure(function_wt: &FunctionWitnessType, v: crate::compiler::ssa::ValueId) -> ConstantWitness {
+    function_wt
+        .value_witness_types
+        .get(&v)
+        .map(|wt| wt.toplevel_info().expect_constant())
+        .unwrap_or(ConstantWitness::Pure)
+}
 
 impl UntaintControlFlow {
     pub fn new() -> Self {
@@ -21,365 +31,36 @@ impl UntaintControlFlow {
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
     pub fn run(
         &mut self,
-        ssa: SSA,
+        mut ssa: SSA,
         witness_inference: &WitnessTypeInference,
         flow_analysis: &FlowAnalysis,
     ) -> SSA {
-        let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
-
-        // Convert global types from Empty to ConstantWitness
-        let new_global_types: Vec<_> = old_global_types.into_iter()
-            .map(|t| self.pure_taint_for_type(t))
-            .collect();
-        result_ssa.set_global_types(new_global_types);
-
-        for (function_id, function) in functions.into_iter() {
+        let function_ids: Vec<_> = ssa.get_function_ids().collect();
+        for function_id in function_ids {
             let function_wt = witness_inference.get_function_witness_type(function_id);
-            let new_function =
-                self.run_function(function_id, function, function_wt, flow_analysis);
-            result_ssa.put_function(function_id, new_function);
+            let mut function = ssa.take_function(function_id);
+            self.run_function(function_id, &mut function, function_wt, flow_analysis);
+            ssa.put_function(function_id, function);
         }
 
         // Post-process: wrapper_main's entry params should be plain Field/U types,
         // not WitnessOf. The VM writes concrete values to these positions.
         // Insert WriteWitness to bridge Field → WitnessOf(Field) before passing
         // to original_main.
-        Self::fix_main_entry_params(&mut result_ssa);
+        Self::fix_main_entry_params(&mut ssa);
 
-        result_ssa
+        ssa
     }
 
     #[instrument(skip_all, name = "UntaintControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
     fn run_function(
         &mut self,
         function_id: FunctionId,
-        function: Function,
+        function: &mut Function,
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
-    ) -> Function {
+    ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
-
-        let (mut function, blocks, returns) = function.prepare_rebuild();
-
-        for (block_id, mut block) in blocks.into_iter() {
-            let mut new_block = Block::empty();
-
-            let mut new_parameters = Vec::new();
-            for (value_id, typ) in block.take_parameters() {
-                let wt = function_wt.get_value_witness_type(value_id);
-                new_parameters.push((value_id, self.apply_witness_type(typ, wt)));
-            }
-            new_block.put_parameters(new_parameters);
-
-            let mut new_instructions = Vec::<OpCode>::new();
-            for instruction in block.take_instructions() {
-                let new = match instruction {
-                    OpCode::BinaryArithOp {
-                        kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    } => OpCode::BinaryArithOp {
-                        kind: kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    },
-                    OpCode::Cmp {
-                        kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    } => OpCode::Cmp {
-                        kind: kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    },
-                    OpCode::Store { ptr: r, value: l } => OpCode::Store { ptr: r, value: l },
-                    OpCode::Load { result: r, ptr: l } => OpCode::Load { result: r, ptr: l },
-                    OpCode::ArrayGet {
-                        result: r,
-                        array: l,
-                        index: h,
-                    } => OpCode::ArrayGet {
-                        result: r,
-                        array: l,
-                        index: h,
-                    },
-                    OpCode::ArraySet {
-                        result: r,
-                        array: l,
-                        index: h,
-                        value: j,
-                    } => OpCode::ArraySet {
-                        result: r,
-                        array: l,
-                        index: h,
-                        value: j,
-                    },
-                    OpCode::SlicePush {
-                        dir: d,
-                        result: r,
-                        slice: s,
-                        values: v,
-                    } => OpCode::SlicePush {
-                        dir: d,
-                        result: r,
-                        slice: s,
-                        values: v,
-                    },
-                    OpCode::SliceLen {
-                        result: r,
-                        slice: s,
-                    } => OpCode::SliceLen {
-                        result: r,
-                        slice: s,
-                    },
-                    OpCode::Alloc {
-                        result: r,
-                        elem_type: l,
-                    } => {
-                        let r_wt = function_wt.get_value_witness_type(r);
-                        let child = r_wt.child_witness_type().unwrap();
-                        let child_typ = self.apply_witness_type(l, &child);
-                        OpCode::Alloc {
-                            result: r,
-                            elem_type: child_typ,
-                        }
-                    }
-                    OpCode::Call {
-                        results: r,
-                        function: CallTarget::Static(l),
-                        args: h,
-                    } => OpCode::Call {
-                        results: r,
-                        function: CallTarget::Static(l),
-                        args: h,
-                    },
-                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
-                        panic!("Dynamic call targets are not supported in untaint_control_flow")
-                    }
-                    OpCode::AssertEq { lhs: r, rhs: l } => OpCode::AssertEq { lhs: r, rhs: l },
-                    OpCode::AssertR1C { a: r, b: l, c: h } => {
-                        OpCode::AssertR1C { a: r, b: l, c: h }
-                    }
-                    OpCode::Select {
-                        result: r,
-                        cond: l,
-                        if_t: h,
-                        if_f: j,
-                    } => OpCode::Select {
-                        result: r,
-                        cond: l,
-                        if_t: h,
-                        if_f: j,
-                    },
-                    OpCode::WriteWitness {
-                        result: r,
-                        value: l,
-                    } => OpCode::WriteWitness {
-                        result: r,
-                        value: l,
-                    },
-                    OpCode::FreshWitness {
-                        result: r,
-                        result_type: tp,
-                    } => {
-                        let wt = function_wt.get_value_witness_type(r);
-                        let new_tp = self.apply_witness_type(tp, wt);
-                        OpCode::FreshWitness {
-                            result: r,
-                            result_type: new_tp,
-                        }
-                    }
-                    OpCode::Constrain { a, b, c } => OpCode::Constrain { a: a, b: b, c: c },
-                    OpCode::NextDCoeff { result: a } => OpCode::NextDCoeff { result: a },
-                    OpCode::BumpD {
-                        matrix: a,
-                        variable: b,
-                        sensitivity: c,
-                    } => OpCode::BumpD {
-                        matrix: a,
-                        variable: b,
-                        sensitivity: c,
-                    },
-                    OpCode::MkSeq {
-                        result: r,
-                        elems: l,
-                        seq_type: stp,
-                        elem_type: tp,
-                    } => {
-                        let r_wt = function_wt
-                            .get_value_witness_type(r)
-                            .child_witness_type()
-                            .unwrap();
-                        OpCode::MkSeq {
-                            result: r,
-                            elems: l,
-                            seq_type: stp,
-                            elem_type: self.apply_witness_type(tp, &r_wt),
-                        }
-                    }
-                    OpCode::Cast {
-                        result: r,
-                        value: l,
-                        target: t,
-                    } => OpCode::Cast {
-                        result: r,
-                        value: l,
-                        target: t,
-                    },
-                    OpCode::Truncate {
-                        result: r,
-                        value: l,
-                        to_bits: out_bits,
-                        from_bits: in_bits,
-                    } => OpCode::Truncate {
-                        result: r,
-                        value: l,
-                        to_bits: out_bits,
-                        from_bits: in_bits,
-                    },
-                    OpCode::Not {
-                        result: r,
-                        value: l,
-                    } => OpCode::Not {
-                        result: r,
-                        value: l,
-                    },
-                    OpCode::ToBits {
-                        result: r,
-                        value: l,
-                        endianness: e,
-                        count: s,
-                    } => OpCode::ToBits {
-                        result: r,
-                        value: l,
-                        endianness: e,
-                        count: s,
-                    },
-                    OpCode::ToRadix {
-                        result: r,
-                        value: l,
-                        radix,
-                        endianness: e,
-                        count: s,
-                    } => OpCode::ToRadix {
-                        result: r,
-                        value: l,
-                        radix: radix,
-                        endianness: e,
-                        count: s,
-                    },
-                    OpCode::MemOp { kind, value } => OpCode::MemOp {
-                        kind: kind,
-                        value: value,
-                    },
-                    OpCode::MulConst {
-                        result: r,
-                        const_val: l,
-                        var: c,
-                    } => OpCode::MulConst {
-                        result: r,
-                        const_val: l,
-                        var: c,
-                    },
-                    OpCode::Rangecheck {
-                        value: val,
-                        max_bits,
-                    } => OpCode::Rangecheck {
-                        value: val,
-                        max_bits: max_bits,
-                    },
-                    OpCode::ReadGlobal {
-                        result: r,
-                        offset: l,
-                        result_type: tp,
-                    } => OpCode::ReadGlobal {
-                        result: r,
-                        offset: l,
-                        result_type: self.pure_taint_for_type(tp),
-                    },
-                    OpCode::Lookup {
-                        target,
-                        keys,
-                        results,
-                    } => OpCode::Lookup {
-                        target,
-                        keys,
-                        results,
-                    },
-                    OpCode::DLookup {
-                        target,
-                        keys,
-                        results,
-                    } => OpCode::DLookup {
-                        target,
-                        keys,
-                        results,
-                    },
-                    OpCode::TupleProj {
-                        result,
-                        tuple,
-                        idx,
-                    } => {
-                        match &idx {
-                            TupleIdx::Static(sz) => {
-                                OpCode::TupleProj {
-                                    result,
-                                    tuple,
-                                    idx: TupleIdx::Static(*sz),
-                                }
-                            }
-                            TupleIdx::Dynamic{..} => {
-                                panic!("Dynamic TupleProj should not appear here")
-                            }
-                        }
-                    }
-                    OpCode::MkTuple {
-                        result: r,
-                        elems: l,
-                        element_types: tps,
-                    } => {
-                        let r_wt = function_wt.get_value_witness_type(r);
-                        let child_wts = if let WitnessType::Tuple(_, children) = r_wt {
-                            children
-                        } else {
-                            panic!("MkTuple result should have Tuple witness type")
-                        };
-                        OpCode::MkTuple {
-                            result: r,
-                            elems: l,
-                            element_types: tps
-                                .iter()
-                                .zip(child_wts.iter())
-                                .map(|(tp, wt)| self.apply_witness_type(tp.clone(), wt))
-                                .collect(),
-                        }
-                    }
-                    OpCode::Todo { payload, results, result_types } => OpCode::Todo {
-                        payload,
-                        results,
-                        result_types: result_types.iter().map(|tp| self.pure_taint_for_type(tp.clone())).collect(),
-                    },
-                    OpCode::InitGlobal { global, value } => OpCode::InitGlobal { global, value },
-                    OpCode::DropGlobal { global } => OpCode::DropGlobal { global },
-                    OpCode::ValueOf { .. } => panic!("ICE: ValueOf should not appear at this stage"),
-                };
-                new_instructions.push(new);
-            }
-            new_block.put_instructions(new_instructions);
-
-            new_block.set_terminator(block.take_terminator().unwrap());
-
-            function.put_block(block_id, new_block);
-        }
-
-        for (ret, ret_wt) in returns.into_iter().zip(function_wt.returns_witness.iter()) {
-            let ret_typ = self.apply_witness_type(ret, ret_wt);
-            function.add_return_type(ret_typ);
-        }
 
         let cfg_witness_param = if matches!(
             function_wt.cfg_witness,
@@ -406,62 +87,29 @@ impl UntaintControlFlow {
 
             for instruction in old_instructions {
                 match instruction {
-                    OpCode::BinaryArithOp {
-                        kind: _,
-                        result: _,
-                        lhs: _,
-                        rhs: _,
-                    }
-                    | OpCode::Cmp {
-                        kind: _,
-                        result: _,
-                        lhs: _,
-                        rhs: _,
-                    }
-                    | OpCode::MkSeq {
-                        result: _,
-                        elems: _,
-                        seq_type: _,
-                        elem_type: _,
-                    }
-                    | OpCode::MkTuple {..}
-                    | OpCode::Cast {
-                        result: _,
-                        value: _,
-                        target: _,
-                    }
-                    | OpCode::Truncate {
-                        result: _,
-                        value: _,
-                        to_bits: _,
-                        from_bits: _,
-                    }
-                    | OpCode::Not {
-                        result: _,
-                        value: _,
-                    }
-                    | OpCode::Rangecheck {
-                        value: _,
-                        max_bits: _,
-                    }
-                    | OpCode::ToBits {
-                        result: _,
-                        value: _,
-                        endianness: _,
-                        count: _,
-                    }
-                    | OpCode::ToRadix {
-                        result: _,
-                        value: _,
-                        radix: _,
-                        endianness: _,
-                        count: _,
-                    }
-                    | OpCode::ReadGlobal {
-                        result: _,
-                        offset: _,
-                        result_type: _,
-                    } => {
+                    OpCode::BinaryArithOp { .. }
+                    | OpCode::Cmp { .. }
+                    | OpCode::MkSeq { .. }
+                    | OpCode::MkTuple { .. }
+                    | OpCode::Cast { .. }
+                    | OpCode::Truncate { .. }
+                    | OpCode::Not { .. }
+                    | OpCode::Rangecheck { .. }
+                    | OpCode::ToBits { .. }
+                    | OpCode::ToRadix { .. }
+                    | OpCode::ReadGlobal { .. }
+                    | OpCode::Select { .. }
+                    | OpCode::WriteWitness { .. }
+                    | OpCode::FreshWitness { .. }
+                    | OpCode::Constrain { .. }
+                    | OpCode::NextDCoeff { .. }
+                    | OpCode::BumpD { .. }
+                    | OpCode::MemOp { .. }
+                    | OpCode::MulConst { .. }
+                    | OpCode::Lookup { .. }
+                    | OpCode::DLookup { .. }
+                    | OpCode::TupleProj { .. }
+                    | OpCode::AssertR1C { .. } => {
                         new_instructions.push(instruction);
                     }
                     OpCode::AssertEq { lhs, rhs } => {
@@ -483,10 +131,7 @@ impl UntaintControlFlow {
                         }
                     }
                     OpCode::Store { ptr, value: v } => {
-                        let ptr_wt = function_wt
-                            .get_value_witness_type(ptr)
-                            .toplevel_info()
-                            .expect_constant();
+                        let ptr_wt = get_witness_or_pure(function_wt, ptr);
                         // writes to dynamic ptr not supported
                         assert_eq!(ptr_wt, ConstantWitness::Pure);
 
@@ -515,10 +160,7 @@ impl UntaintControlFlow {
                         }
                     }
                     OpCode::Load { result: _, ptr } => {
-                        let ptr_wt = function_wt
-                            .get_value_witness_type(ptr)
-                            .toplevel_info()
-                            .expect_constant();
+                        let ptr_wt = get_witness_or_pure(function_wt, ptr);
                         // reads from dynamic ptr not supported
                         assert_eq!(ptr_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
@@ -528,10 +170,7 @@ impl UntaintControlFlow {
                         array: arr,
                         index: _,
                     } => {
-                        let arr_wt = function_wt
-                            .get_value_witness_type(arr)
-                            .toplevel_info()
-                            .expect_constant();
+                        let arr_wt = get_witness_or_pure(function_wt, arr);
                         // dynamic array access not supported
                         assert_eq!(arr_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
@@ -542,14 +181,8 @@ impl UntaintControlFlow {
                         index: idx,
                         value: _,
                     } => {
-                        let arr_wt = function_wt
-                            .get_value_witness_type(arr)
-                            .toplevel_info()
-                            .expect_constant();
-                        let idx_wt = function_wt
-                            .get_value_witness_type(idx)
-                            .toplevel_info()
-                            .expect_constant();
+                        let arr_wt = get_witness_or_pure(function_wt, arr);
+                        let idx_wt = get_witness_or_pure(function_wt, idx);
                         // dynamic array access not supported
                         assert_eq!(arr_wt, ConstantWitness::Pure);
                         assert_eq!(idx_wt, ConstantWitness::Pure);
@@ -561,10 +194,7 @@ impl UntaintControlFlow {
                         slice: sl,
                         values: _,
                     } => {
-                        let slice_wt = function_wt
-                            .get_value_witness_type(sl)
-                            .toplevel_info()
-                            .expect_constant();
+                        let slice_wt = get_witness_or_pure(function_wt, sl);
                         // Slice must always be Pure witness
                         assert_eq!(slice_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
@@ -573,18 +203,12 @@ impl UntaintControlFlow {
                         result: _,
                         slice: sl,
                     } => {
-                        let slice_wt = function_wt
-                            .get_value_witness_type(sl)
-                            .toplevel_info()
-                            .expect_constant();
+                        let slice_wt = get_witness_or_pure(function_wt, sl);
                         // Slice must always be Pure witness
                         assert_eq!(slice_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
                     }
-                    OpCode::Alloc {
-                        result: _,
-                        elem_type: _,
-                    } => {
+                    OpCode::Alloc { .. } => {
                         new_instructions.push(instruction);
                     }
 
@@ -613,13 +237,10 @@ impl UntaintControlFlow {
                         new_instructions.push(OpCode::Todo {
                             payload,
                             results,
-                            result_types
+                            result_types,
                         });
                     }
 
-                    OpCode::TupleProj {..} => {
-                        new_instructions.push(instruction);
-                    }
                     OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                         new_instructions.push(instruction);
                     }
@@ -631,10 +252,7 @@ impl UntaintControlFlow {
 
             match block.get_terminator().cloned() {
                 Some(Terminator::JmpIf(cond, if_true, if_false)) => {
-                    let cond_wt = function_wt
-                        .get_value_witness_type(cond)
-                        .toplevel_info()
-                        .expect_constant();
+                    let cond_wt = get_witness_or_pure(function_wt, cond);
                     match cond_wt {
                         ConstantWitness::Pure => {}
                         ConstantWitness::Witness => {
@@ -771,8 +389,6 @@ impl UntaintControlFlow {
             block.put_instructions(new_instructions);
             function.put_block(block_id, block);
         }
-
-        function
     }
 
     /// Fix wrapper_main entry params: strip WitnessOf from param types
@@ -823,42 +439,5 @@ impl UntaintControlFlow {
         // Also fix the terminator (e.g., return args)
         replacements.replace_terminator(entry_block.get_terminator_mut());
         entry_block.put_instructions(new_instructions);
-    }
-
-    fn apply_witness_type(&self, typ: Type, wt: &WitnessType) -> Type {
-        match (typ.expr, wt) {
-            (TypeExpr::Field, WitnessType::Scalar(info)) => {
-                let base = Type::field();
-                if info.expect_constant().is_witness() { Type::witness_of(base) } else { base }
-            },
-            (TypeExpr::U(size), WitnessType::Scalar(info)) => {
-                let base = Type::u(size);
-                if info.expect_constant().is_witness() { Type::witness_of(base) } else { base }
-            },
-            (TypeExpr::Array(inner, size), WitnessType::Array(top, inner_wt)) => {
-                let base = self.apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
-                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
-            },
-            (TypeExpr::Slice(inner), WitnessType::Array(top, inner_wt)) => {
-                let base = self.apply_witness_type(*inner, inner_wt.as_ref()).slice_of();
-                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
-            },
-            (TypeExpr::Ref(inner), WitnessType::Ref(top, inner_wt)) => {
-                let base = self.apply_witness_type(*inner, inner_wt.as_ref()).ref_of();
-                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
-            },
-            (TypeExpr::Tuple(child_types), WitnessType::Tuple(top, child_wts)) => {
-                let base = Type::tuple_of(
-                    child_types.iter().zip(child_wts.iter()).map(|(child_type, child_wt)| self.apply_witness_type(child_type.clone(), child_wt)).collect()
-                );
-                if top.expect_constant().is_witness() { Type::witness_of(base) } else { base }
-            },
-            (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
-        }
-    }
-
-    fn pure_taint_for_type(&self, typ: Type) -> Type {
-        // Types no longer have annotations; a "pure" type is just the type itself
-        typ
     }
 }

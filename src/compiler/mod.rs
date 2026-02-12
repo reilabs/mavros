@@ -13,6 +13,7 @@ pub mod ssa;
 pub mod taint_analysis;
 pub mod union_find;
 pub mod untaint_control_flow;
+pub mod witness_cast_insertion;
 pub mod witness_constraint_solver;
 pub mod witness_info;
 pub mod witness_type_inference;

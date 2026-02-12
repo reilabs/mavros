@@ -18,6 +18,7 @@ use crate::{
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, SSA},
         untaint_control_flow::UntaintControlFlow,
+        witness_cast_insertion::WitnessCastInsertion,
         witness_type_inference::WitnessTypeInference,
     },
 };
@@ -168,6 +169,15 @@ impl Driver {
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
+            ssa.to_string(&witness_inference),
+        )
+        .unwrap();
+
+        let mut witness_cast = WitnessCastInsertion::new();
+        let ssa = witness_cast.run(ssa, &witness_inference);
+
+        fs::write(
+            self.get_debug_output_dir().join("witness_typed_ssa.txt"),
             ssa.to_string(&witness_inference),
         )
         .unwrap();
