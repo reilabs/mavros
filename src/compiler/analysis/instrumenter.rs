@@ -391,6 +391,11 @@ impl Value {
                 new_vals[*index as usize] = value.clone();
                 Value::Array(new_vals)
             }
+            // Dynamic index: any element could be replaced, so set all to value
+            (Value::Array(vals), _, value) => {
+                let new_vals = vals.iter().map(|_| value.clone()).collect();
+                Value::Array(new_vals)
+            }
             _ => panic!(
                 "Cannot set array element of {:?} with index {:?} to {:?}",
                 self, index, value
