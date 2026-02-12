@@ -64,7 +64,7 @@ where
         ctx: &mut Context,
         elem_types: &[Type],
     ) -> Self;
-    fn alloc(ctx: &mut Context) -> Self;
+    fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
@@ -248,9 +248,9 @@ impl SymbolicExecutor {
                     }
                     crate::compiler::ssa::OpCode::Alloc {
                         result: r,
-                        elem_type: _,
+                        elem_type,
                     } => {
-                        scope[r.0 as usize] = Some(V::alloc(ctx));
+                        scope[r.0 as usize] = Some(V::alloc(elem_type, ctx));
                     }
                     crate::compiler::ssa::OpCode::Store { ptr, value: val } => {
                         let ptr = scope[ptr.0 as usize].as_ref().unwrap();

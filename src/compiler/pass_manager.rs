@@ -185,7 +185,8 @@ impl PassManager {
         {
             let cost_estimator = CostEstimator::new();
             let cost_analysis = cost_estimator.run(ssa, self.type_info.as_ref().unwrap());
-            self.constraint_instrumentation = Some(cost_analysis.summarize());
+            let summary = cost_analysis.summarize();
+            self.constraint_instrumentation = Some(summary);
         }
         if pass_info.needs.contains(&DataPoint::ValueDefinitions) {
             self.value_definitions = Some(ValueDefinitions::from_ssa(ssa));

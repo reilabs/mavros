@@ -244,12 +244,33 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 
     fn truncate(
         &self,
-        _from: usize,
-        _to: usize,
+        from: usize,
+        to: usize,
         _out_type: &crate::compiler::ir::r#type::Type,
-        _ctx: &mut SpecializationState,
+        ctx: &mut SpecializationState,
     ) -> Self {
-        todo!()
+        let self_const = ctx.const_vals.get(&self.0);
+        match self_const {
+            Some(ConstVal::U(_, v)) => {
+                let res = v & ((1 << to) - 1);
+                let res_v = ctx.function.push_u_const(to, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
+                Self(res_v)
+            }
+            Some(ConstVal::Field(f)) => {
+                let v: u128 = (*f).into_bigint().as_ref()[0] as u128;
+                let res = v & ((1 << to) - 1);
+                let res_v = ctx.function.push_u_const(to, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
+                Self(res_v)
+            }
+            _ => {
+                let res = ctx
+                    .function
+                    .push_truncate(ctx.function.get_entry_id(), self.0, to, from);
+                Self(res)
+            }
+        }
     }
 
     fn cast(
@@ -277,7 +298,30 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     self.clone()
                 }
             },
-            _ => todo!(),
+            Some(ConstVal::Field(f)) => match cast_target {
+                CastTarget::U(s) => {
+                    let v: u128 = (*f).into_bigint().as_ref()[0] as u128;
+                    let res = v & ((1 << *s) - 1);
+                    let res_v = ctx.function.push_u_const(*s, res);
+                    ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
+                    Self(res_v)
+                }
+                CastTarget::Field | CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => {
+                    self.clone()
+                }
+            },
+            None => {
+                let res = ctx
+                    .function
+                    .push_cast(ctx.function.get_entry_id(), self.0, *cast_target);
+                Self(res)
+            }
+            _ => {
+                let res = ctx
+                    .function
+                    .push_cast(ctx.function.get_entry_id(), self.0, *cast_target);
+                Self(res)
+            }
         }
     }
 
@@ -365,20 +409,27 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         Self(val)
     }
 
-    fn alloc(_ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn alloc(elem_type: &Type, ctx: &mut SpecializationState) -> Self {
+        let val = ctx
+            .function
+            .push_alloc(ctx.function.get_entry_id(), elem_type.clone());
+        Self(val)
     }
 
-    fn ptr_write(&self, _val: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn ptr_write(&self, val: &Self, ctx: &mut SpecializationState) {
+        ctx.function
+            .push_store(ctx.function.get_entry_id(), self.0, val.0);
     }
 
     fn ptr_read(
         &self,
         _out_type: &crate::compiler::ir::r#type::Type,
-        _ctx: &mut SpecializationState,
+        ctx: &mut SpecializationState,
     ) -> Self {
-        todo!()
+        let val = ctx
+            .function
+            .push_load(ctx.function.get_entry_id(), self.0);
+        Self(val)
     }
 
     fn expect_constant_bool(&self, ctx: &mut SpecializationState) -> bool {

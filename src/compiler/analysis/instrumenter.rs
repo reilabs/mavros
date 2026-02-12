@@ -164,24 +164,45 @@ impl Value {
             Value::WitnessOf(inner) => (inner.as_ref(), true),
             other => (other, false),
         };
-        let both_wit = a_wit && b_wit;
+        let either_wit = a_wit || b_wit;
+        let a_unknown = matches!(a_inner, Value::Unknown(_));
+        let b_unknown = matches!(b_inner, Value::Unknown(_));
 
-        // If either inner is Unknown, result is Unknown + record costs
-        if matches!(a_inner, Value::Unknown(_)) || matches!(b_inner, Value::Unknown(_)) {
+        // Mul by zero → zero, always free. Return typed zero matching the operands.
+        if matches!(binary_arith_op_kind, BinaryArithOpKind::Mul) {
+            let a_zero = matches!(a_inner, Value::Field(f) if *f == Field::ZERO)
+                || matches!(a_inner, Value::U(_, 0));
+            let b_zero = matches!(b_inner, Value::Field(f) if *f == Field::ZERO)
+                || matches!(b_inner, Value::U(_, 0));
+            if a_zero || b_zero {
+                // Determine the correct type for the zero result
+                let zero = match (a_inner, b_inner) {
+                    (Value::U(s, _), _) | (_, Value::U(s, _)) => Value::U(*s, 0),
+                    (Value::Unknown(ScalarKind::U(s)), _)
+                    | (_, Value::Unknown(ScalarKind::U(s))) => Value::U(*s, 0),
+                    _ => Value::Field(Field::ZERO),
+                };
+                return zero;
+            }
+        }
+
+        // If either inner is Unknown, result is Unknown + record costs.
+        // In R1CS, Mul only needs a constraint when both operands are variables
+        // (Unknown). constant * variable is just a linear combination (free).
+        if a_unknown || b_unknown {
             let kind = match (a_inner, b_inner) {
                 (Value::Unknown(k), _) => *k,
                 (_, Value::Unknown(k)) => *k,
                 _ => unreachable!(),
             };
-            let either_wit = a_wit || b_wit;
             match binary_arith_op_kind {
                 BinaryArithOpKind::Mul => {
-                    if both_wit {
+                    if a_unknown && b_unknown && a_wit && b_wit {
                         instrumenter.record_constraints(1);
                     }
                 }
                 BinaryArithOpKind::Div => {
-                    if b_wit {
+                    if b_unknown && b_wit {
                         instrumenter.record_constraints(1);
                     }
                 }
@@ -193,15 +214,7 @@ impl Value {
             return Value::Unknown(kind);
         }
 
-        // Special case: mul by zero → concrete Field(0), no constraint
-        if matches!(binary_arith_op_kind, BinaryArithOpKind::Mul) {
-            if matches!(a_inner, Value::Field(f) if *f == Field::ZERO)
-                || matches!(b_inner, Value::Field(f) if *f == Field::ZERO)
-            {
-                return Value::Field(Field::ZERO);
-            }
-        }
-
+        // Both operands are concrete. Compute the result.
         let result = match (a_inner, b_inner) {
             (Value::U(s, a), Value::U(_, b)) => match binary_arith_op_kind {
                 BinaryArithOpKind::Add => Value::U(*s, a + b),
@@ -220,23 +233,9 @@ impl Value {
             (_, _) => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
         };
 
-        if both_wit {
-            match binary_arith_op_kind {
-                BinaryArithOpKind::Mul => {
-                    instrumenter.record_constraints(1);
-                }
-                _ => {}
-            }
-            Value::WitnessOf(Box::new(result))
-        } else if a_wit || b_wit {
-            match binary_arith_op_kind {
-                BinaryArithOpKind::Div => {
-                    if b_wit {
-                        instrumenter.record_constraints(1);
-                    }
-                }
-                _ => {}
-            }
+        // Both concrete → no Mul constraint (known product).
+        // Div by concrete witness is also free (multiply by inverse).
+        if either_wit {
             Value::WitnessOf(Box::new(result))
         } else {
             result
@@ -976,7 +975,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn alloc(_ctx: &mut CostAnalysis) -> Self {
+    fn alloc(_elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
             specialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
