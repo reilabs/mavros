@@ -1,9 +1,17 @@
 use itertools::Itertools;
 
-use crate::compiler::taint_analysis::TypeVariable;
-use crate::compiler::witness_union_find::WitnessUnionFind;
+use crate::compiler::union_find::UnionFind;
 use crate::compiler::ssa::{BlockId, FunctionId, SsaAnnotator, ValueId};
 use std::collections::{HashMap, HashSet};
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
+pub struct TypeVariable(pub usize);
+
+impl std::fmt::Display for TypeVariable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "V{}", self.0)
+    }
+}
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub enum ConstantWitness {
@@ -444,7 +452,7 @@ impl FunctionWitnessType {
         &self.judgements
     }
 
-    pub fn update_from_unification(&self, unification: &WitnessUnionFind) -> Self {
+    pub fn update_from_unification(&self, unification: &UnionFind) -> Self {
         let mut new_wt = self.clone();
 
         new_wt.judgements = Vec::new();

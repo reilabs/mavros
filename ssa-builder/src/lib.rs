@@ -166,8 +166,7 @@ pub fn ssa_snippet(input: TokenStream) -> TokenStream {
 
     let mut instructions = quote! {
         use crate::compiler::ssa::OpCode;
-        use crate::compiler::taint_analysis::ConstantTaint;
-        let mut __ssa_builder_result: Vec<OpCode<ConstantTaint>> = vec![];
+        let mut __ssa_builder_result: Vec<OpCode> = vec![];
         struct Result {
             #(#result_fields),*
         };
@@ -220,7 +219,6 @@ pub fn ssa_append(input: TokenStream) -> TokenStream {
 
     let mut instructions = quote! {
         use crate::compiler::ssa::OpCode;
-        use crate::compiler::taint_analysis::ConstantTaint;
         struct Result {
             #(#result_fields),*
         };

@@ -7,9 +7,9 @@ use crate::compiler::{
     ssa::{BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType, Terminator, TupleIdx, ValueId},
 };
 
-pub struct WitnessToRef {}
+pub struct WitnessLowering {}
 
-impl Pass for WitnessToRef {
+impl Pass for WitnessLowering {
     fn run(
         &self,
         ssa: &mut crate::compiler::ssa::SSA,
@@ -20,7 +20,7 @@ impl Pass for WitnessToRef {
 
     fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
         crate::compiler::pass_manager::PassInfo {
-            name: "witness_to_ref",
+            name: "witness_lowering",
             needs: vec![DataPoint::Types],
         }
     }
@@ -30,7 +30,7 @@ impl Pass for WitnessToRef {
     }
 }
 
-impl WitnessToRef {
+impl WitnessLowering {
     pub fn new() -> Self {
         Self {}
     }
@@ -43,7 +43,7 @@ impl WitnessToRef {
         for (function_id, function) in ssa.iter_functions_mut() {
             let type_info = type_info.get_function(*function_id);
             for rtp in function.iter_returns_mut() {
-                *rtp = self.witness_to_ref_in_type(rtp);
+                *rtp = self.witness_lowering_in_type(rtp);
             }
             // Collect converted block parameter types before taking blocks
             let block_param_types: HashMap<BlockId, Vec<Type>> = function
@@ -51,7 +51,7 @@ impl WitnessToRef {
                 .map(|(bid, block)| {
                     let types = block
                         .get_parameters()
-                        .map(|(_, tp)| self.witness_to_ref_in_type(tp))
+                        .map(|(_, tp)| self.witness_lowering_in_type(tp))
                         .collect();
                     (*bid, types)
                 })
@@ -63,7 +63,7 @@ impl WitnessToRef {
                 let old_params = block.take_parameters();
                 let new_params = old_params
                     .into_iter()
-                    .map(|(r, tp)| (r, self.witness_to_ref_in_type(&tp)))
+                    .map(|(r, tp)| (r, self.witness_lowering_in_type(&tp)))
                     .collect();
                 block.put_parameters(new_params);
 
@@ -109,7 +109,7 @@ impl WitnessToRef {
                             seq_type: s,
                             elem_type: tp,
                         } => {
-                            let new_elem_type = self.witness_to_ref_in_type(&tp);
+                            let new_elem_type = self.witness_lowering_in_type(&tp);
                             let new_vs = vs.iter().map(|v| {
                                 self.convert_if_needed(
                                     *v, &new_elem_type, type_info,
@@ -128,7 +128,7 @@ impl WitnessToRef {
                         OpCode::Alloc { result: r, elem_type: tp } => {
                             let i = OpCode::Alloc {
                                 result: r,
-                                elem_type: self.witness_to_ref_in_type(&tp),
+                                elem_type: self.witness_lowering_in_type(&tp),
                             };
                             new_instructions.push(i);
                         }
@@ -277,7 +277,7 @@ impl WitnessToRef {
                         }
                         OpCode::Store { ptr, value } => {
                             let ptr_type = type_info.get_value_type(ptr);
-                            let new_ptr_type = self.witness_to_ref_in_type(&ptr_type);
+                            let new_ptr_type = self.witness_lowering_in_type(&ptr_type);
                             let converted = self.convert_if_needed(
                                 value, &new_ptr_type, type_info,
                                 &mut current_block_id, &mut current_block,
@@ -292,7 +292,7 @@ impl WitnessToRef {
                             value,
                         } => {
                             let array_type = type_info.get_value_type(array);
-                            let new_array_type = self.witness_to_ref_in_type(&array_type);
+                            let new_array_type = self.witness_lowering_in_type(&array_type);
                             let expected_elem_type = match &new_array_type.expr {
                                 TypeExpr::Array(inner, _) => inner.as_ref().clone(),
                                 TypeExpr::Slice(inner) => inner.as_ref().clone(),
@@ -314,7 +314,7 @@ impl WitnessToRef {
                             values,
                         } => {
                             let slice_type = type_info.get_value_type(slice);
-                            let new_slice_type = self.witness_to_ref_in_type(&slice_type);
+                            let new_slice_type = self.witness_lowering_in_type(&slice_type);
                             let expected_elem_type = match &new_slice_type.expr {
                                 TypeExpr::Slice(inner) => inner.as_ref().clone(),
                                 _ => panic!("SlicePush on non-slice type"),
@@ -337,7 +337,7 @@ impl WitnessToRef {
                             if_f,
                         } => {
                             let result_type = type_info.get_value_type(r);
-                            let target_type = self.witness_to_ref_in_type(result_type);
+                            let target_type = self.witness_lowering_in_type(result_type);
                             let if_t = self.convert_if_needed(
                                 if_t, &target_type, type_info,
                                 &mut current_block_id, &mut current_block,
@@ -386,7 +386,7 @@ impl WitnessToRef {
                         } => {
                             let new_element_types = element_types
                                 .iter()
-                                .map(|tp| self.witness_to_ref_in_type(tp))
+                                .map(|tp| self.witness_lowering_in_type(tp))
                                 .collect();
                             new_instructions.push(OpCode::MkTuple {
                                 result,
@@ -440,7 +440,7 @@ impl WitnessToRef {
         function: &mut crate::compiler::ssa::Function,
         new_blocks: &mut HashMap<BlockId, Block>,
     ) -> ValueId {
-        let converted_source = self.witness_to_ref_in_type(source_type);
+        let converted_source = self.witness_lowering_in_type(source_type);
         if converted_source == *target_type {
             return value;
         }
@@ -452,7 +452,7 @@ impl WitnessToRef {
                 refed
             }
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-                assert_eq!(src_size, tgt_size, "Array size mismatch in witness_to_ref conversion");
+                assert_eq!(src_size, tgt_size, "Array size mismatch in witness_lowering conversion");
                 self.emit_array_conversion_loop(
                     value,
                     src_inner,
@@ -468,7 +468,7 @@ impl WitnessToRef {
                 )
             }
             (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-                assert_eq!(src_fields.len(), tgt_fields.len(), "Tuple field count mismatch in witness_to_ref conversion");
+                assert_eq!(src_fields.len(), tgt_fields.len(), "Tuple field count mismatch in witness_lowering conversion");
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
                     let proj = function.fresh_value();
@@ -504,7 +504,7 @@ impl WitnessToRef {
                 value
             }
             _ => panic!(
-                "witness_to_ref value conversion not supported: {:?} -> {:?}",
+                "witness_lowering value conversion not supported: {:?} -> {:?}",
                 source_type, target_type
             ),
         }
@@ -706,7 +706,7 @@ impl WitnessToRef {
         new_blocks: &mut HashMap<BlockId, Block>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
-        let converted_type = self.witness_to_ref_in_type(&value_type);
+        let converted_type = self.witness_lowering_in_type(&value_type);
         if converted_type == *target_type {
             value
         } else {
@@ -740,7 +740,7 @@ impl WitnessToRef {
         }
     }
 
-    fn witness_to_ref_in_type(&self, tp: &Type) -> Type {
+    fn witness_lowering_in_type(&self, tp: &Type) -> Type {
         match &tp.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
                 if tp.is_witness_of() {
@@ -750,20 +750,20 @@ impl WitnessToRef {
                 }
             }
             TypeExpr::Array(inner, size) => self
-                .witness_to_ref_in_type(inner)
+                .witness_lowering_in_type(inner)
                 .array_of(*size),
             TypeExpr::Slice(inner) => {
-                self.witness_to_ref_in_type(inner).slice_of()
+                self.witness_lowering_in_type(inner).slice_of()
             }
             TypeExpr::Ref(inner) => {
-                self.witness_to_ref_in_type(inner).ref_of()
+                self.witness_lowering_in_type(inner).ref_of()
             }
             TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),
             TypeExpr::Tuple(elements) => {
                 let boxed_elements = elements
                     .iter()
-                    .map(|elem| self.witness_to_ref_in_type(elem))
+                    .map(|elem| self.witness_lowering_in_type(elem))
                     .collect();
                 Type::tuple_of(boxed_elements)
             }

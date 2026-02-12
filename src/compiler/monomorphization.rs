@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::compiler::{witness_constraint_solver::WitnessConstraintSolver, ssa::{CallTarget, FunctionId, OpCode, SSA}, witness_info::{FunctionWitnessType, WitnessInfo, WitnessType}, witness_type_inference::WitnessTypeInference};
+use crate::compiler::{constraint_solver::ConstraintSolver, ssa::{CallTarget, FunctionId, OpCode, SSA}, witness_info::{FunctionWitnessType, WitnessInfo, WitnessType}, witness_type_inference::WitnessTypeInference};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct Signature {
@@ -47,7 +47,7 @@ impl Monomorphization {
 
             let function_wt = witness_inference.get_function_witness_type(function_id);
 
-            let mut constraint_solver = WitnessConstraintSolver::new(&function_wt);
+            let mut constraint_solver = ConstraintSolver::new(&function_wt);
             constraint_solver.add_assumption(
                 &WitnessType::Scalar(function_wt.cfg_witness.clone()),
                 &WitnessType::Scalar(signature.cfg_witness.clone()),

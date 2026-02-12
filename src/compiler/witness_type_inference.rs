@@ -1,15 +1,10 @@
-use crate::compiler::constraint_solver::ConstraintSolver;
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
     BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId,
 };
-use crate::compiler::taint_analysis::{
-    ConstantTaint, TaintAnalysis, TaintType, Taint, TypeVariable,
-};
-use crate::compiler::witness_constraint_solver::WitnessConstraintSolver;
 use crate::compiler::witness_info::{
-    FunctionWitnessType, WitnessInfo, WitnessJudgement, WitnessType,
+    FunctionWitnessType, TypeVariable, WitnessInfo, WitnessJudgement, WitnessType,
 };
 use std::collections::HashMap;
 
@@ -709,138 +704,6 @@ impl WitnessTypeInference {
         }
     }
 
-    /// Compare results of this analysis with the old TaintAnalysis.
-    /// Panics with a descriptive message on any mismatch.
-    pub fn compare_with_taint_analysis(&self, taint: &TaintAnalysis, ssa: &SSA) {
-        for (func_id, _) in ssa.iter_functions() {
-            let func_id = *func_id;
-
-            let taint_func = taint.get_function_taint(func_id);
-            let witness_func = self.get_function_witness_type(func_id);
-
-            // Solve both constraint systems
-            let mut taint_solver = ConstraintSolver::new(taint_func);
-            taint_solver.solve();
-            let resolved_taint = taint_func.update_from_unification(&taint_solver.unification);
-
-            let mut witness_solver = WitnessConstraintSolver::new(witness_func);
-            witness_solver.solve();
-            let resolved_witness =
-                witness_func.update_from_unification(&witness_solver.unification);
-
-            let func_name = ssa.get_function(func_id).get_name().to_string();
-
-            // Compare cfg_taint / cfg_witness
-            Self::compare_info(
-                &resolved_taint.cfg_taint,
-                &resolved_witness.cfg_witness,
-                &format!("fn {} (id={}) cfg", func_name, func_id.0),
-            );
-
-            // Compare block_cfg_taints / block_cfg_witness
-            for (block_id, taint_info) in &resolved_taint.block_cfg_taints {
-                let witness_info = resolved_witness
-                    .block_cfg_witness
-                    .get(block_id)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "fn {} (id={}): block {} missing from witness inference block_cfg_witness",
-                            func_name, func_id.0, block_id.0
-                        )
-                    });
-                Self::compare_info(
-                    taint_info,
-                    witness_info,
-                    &format!(
-                        "fn {} (id={}) block {} cfg",
-                        func_name, func_id.0, block_id.0
-                    ),
-                );
-            }
-
-            // Compare value_taints / value_witness_types
-            for (value_id, taint_type) in &resolved_taint.value_taints {
-                let witness_type = resolved_witness
-                    .value_witness_types
-                    .get(value_id)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "fn {} (id={}): value {} missing from witness inference",
-                            func_name, func_id.0, value_id.0
-                        )
-                    });
-                Self::compare_types(
-                    taint_type,
-                    witness_type,
-                    &format!(
-                        "fn {} (id={}) value {}",
-                        func_name, func_id.0, value_id.0
-                    ),
-                );
-            }
-        }
-    }
-
-    fn compare_info(taint: &Taint, witness: &WitnessInfo, context: &str) {
-        let taint_is_witness = match taint {
-            Taint::Constant(ConstantTaint::Witness) => true,
-            Taint::Constant(ConstantTaint::Pure) => false,
-            other => panic!(
-                "{}: taint not fully resolved: {:?}",
-                context, other
-            ),
-        };
-        let witness_is_witness = match witness {
-            WitnessInfo::Witness => true,
-            WitnessInfo::Pure => false,
-            other => panic!(
-                "{}: witness info not fully resolved: {:?}",
-                context, other
-            ),
-        };
-        if taint_is_witness != witness_is_witness {
-            panic!(
-                "MISMATCH at {}: taint={:?}, witness={:?}",
-                context, taint, witness
-            );
-        }
-    }
-
-    fn compare_types(taint_type: &TaintType, witness_type: &WitnessType, context: &str) {
-        match (taint_type, witness_type) {
-            (TaintType::Primitive(t), WitnessType::Scalar(w)) => {
-                Self::compare_info(t, w, context);
-            }
-            (TaintType::NestedImmutable(t, inner_t), WitnessType::Array(w, inner_w)) => {
-                Self::compare_info(t, w, &format!("{} (array toplevel)", context));
-                Self::compare_types(inner_t, inner_w, &format!("{} (array inner)", context));
-            }
-            (TaintType::NestedMutable(t, inner_t), WitnessType::Ref(w, inner_w)) => {
-                Self::compare_info(t, w, &format!("{} (ref toplevel)", context));
-                Self::compare_types(inner_t, inner_w, &format!("{} (ref inner)", context));
-            }
-            (TaintType::Tuple(t, children_t), WitnessType::Tuple(w, children_w)) => {
-                Self::compare_info(t, w, &format!("{} (tuple toplevel)", context));
-                if children_t.len() != children_w.len() {
-                    panic!(
-                        "MISMATCH at {} (tuple arity): taint has {} children, witness has {}",
-                        context,
-                        children_t.len(),
-                        children_w.len()
-                    );
-                }
-                for (i, (ct, cw)) in children_t.iter().zip(children_w.iter()).enumerate() {
-                    Self::compare_types(ct, cw, &format!("{} (tuple field {})", context, i));
-                }
-            }
-            _ => {
-                panic!(
-                    "MISMATCH at {}: structural mismatch taint={:?}, witness={:?}",
-                    context, taint_type, witness_type
-                );
-            }
-        }
-    }
 }
 
 impl SsaAnnotator for WitnessTypeInference {

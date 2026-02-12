@@ -1,13 +1,13 @@
-use crate::compiler::taint_analysis::{ConstantTaint, Judgement, Taint, TaintType, TypeVariable};
+use crate::compiler::witness_info::{ConstantWitness, TypeVariable, WitnessInfo, WitnessJudgement, WitnessType};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// Union-Find data structure for type variables with taint mapping
+/// Union-Find data structure for type variables with witness mapping
 #[derive(Debug, Clone)]
 pub struct UnionFind {
     parent: RefCell<HashMap<TypeVariable, TypeVariable>>,
     rank: RefCell<HashMap<TypeVariable, usize>>,
-    taint_mapping: RefCell<HashMap<TypeVariable, ConstantTaint>>,
+    witness_mapping: RefCell<HashMap<TypeVariable, ConstantWitness>>,
 }
 
 impl UnionFind {
@@ -15,7 +15,7 @@ impl UnionFind {
         UnionFind {
             parent: RefCell::new(HashMap::new()),
             rank: RefCell::new(HashMap::new()),
-            taint_mapping: RefCell::new(HashMap::new()),
+            witness_mapping: RefCell::new(HashMap::new()),
         }
     }
 
@@ -72,111 +72,107 @@ impl UnionFind {
             new_root = root_x;
         }
 
-        let taint_x = self.taint_mapping.borrow().get(&root_x).cloned();
-        let taint_y = self.taint_mapping.borrow().get(&root_y).cloned();
+        let witness_x = self.witness_mapping.borrow().get(&root_x).cloned();
+        let witness_y = self.witness_mapping.borrow().get(&root_y).cloned();
 
-        let mut mapping = self.taint_mapping.borrow_mut();
-        match (taint_x, taint_y) {
-            (Some(taint_x), Some(taint_y)) => {
-                if taint_x != taint_y {
-                    panic!("Taints are not the same: {:?} and {:?}", taint_x, taint_y);
+        let mut mapping = self.witness_mapping.borrow_mut();
+        match (witness_x, witness_y) {
+            (Some(wx), Some(wy)) => {
+                if wx != wy {
+                    panic!(
+                        "Witness values are not the same: {:?} and {:?}",
+                        wx, wy
+                    );
                 }
-                mapping.insert(new_root, taint_x);
+                mapping.insert(new_root, wx);
             }
-            (Some(taint_x), None) => {
-                mapping.insert(new_root, taint_x);
+            (Some(wx), None) => {
+                mapping.insert(new_root, wx);
             }
-            (None, Some(taint_y)) => {
-                mapping.insert(new_root, taint_y);
+            (None, Some(wy)) => {
+                mapping.insert(new_root, wy);
             }
-            (None, None) => {
-                // If neither had taint, no mapping is created
-            }
+            (None, None) => {}
         }
     }
 
-    pub fn same_class(&self, x: TypeVariable, y: TypeVariable) -> bool {
-        self.find(x) == self.find(y)
-    }
-
-    pub fn get_class(&self, x: TypeVariable) -> Vec<TypeVariable> {
-        let parent = self.parent.borrow();
-        let mut result = Vec::new();
-        for (var, _) in parent.iter() {
-            if parent[var] == parent[&x] {
-                result.push(*var);
-            }
+    pub fn set_witness(&mut self, representative: TypeVariable, witness: ConstantWitness) {
+        let mut mapping = self.witness_mapping.borrow_mut();
+        let old_witness = mapping.get(&representative).cloned();
+        if old_witness.is_some() && old_witness.unwrap() != witness {
+            panic!(
+                "Witness values are not the same: {:?} and {:?}",
+                old_witness, witness
+            );
         }
-        result
+        mapping.insert(representative, witness);
     }
 
-    pub fn set_taint(&mut self, representative: TypeVariable, taint: ConstantTaint) {
-        let mut mapping = self.taint_mapping.borrow_mut();
-        let old_taint = mapping.get(&representative).cloned();
-        if old_taint.is_some() && old_taint.unwrap() != taint {
-            panic!("Taints are not the same: {:?} and {:?}", old_taint, taint);
-        }
-        mapping.insert(representative, taint);
+    pub fn get_witness(&self, representative: TypeVariable) -> Option<WitnessInfo> {
+        let mapping = self.witness_mapping.borrow();
+        mapping
+            .get(&representative)
+            .cloned()
+            .map(WitnessInfo::from_constant)
     }
 
-    pub fn get_taint(&self, representative: TypeVariable) -> Option<Taint> {
-        let mapping = self.taint_mapping.borrow();
-        mapping.get(&representative).cloned().map(|t| Taint::Constant(t))
-    }
-
-    pub fn get_taint_for_variable(&self, variable: TypeVariable) -> Option<Taint> {
+    pub fn get_witness_for_variable(&self, variable: TypeVariable) -> Option<WitnessInfo> {
         let representative = self.find(variable);
-        self.get_taint(representative)
+        self.get_witness(representative)
     }
 
-    pub fn substitute_variables(&self, taint: &Taint) -> Taint {
-        match taint {
-            Taint::Constant(constant) => Taint::Constant(*constant),
-            Taint::Variable(var) => {
+    pub fn substitute_variables(&self, info: &WitnessInfo) -> WitnessInfo {
+        match info {
+            WitnessInfo::Pure => WitnessInfo::Pure,
+            WitnessInfo::Witness => WitnessInfo::Witness,
+            WitnessInfo::Variable(var) => {
                 let representative = self.find(*var);
-                if let Some(representative_taint) = self.get_taint(representative) {
-                    self.substitute_variables(&representative_taint)
+                if let Some(representative_info) = self.get_witness(representative) {
+                    self.substitute_variables(&representative_info)
                 } else {
-                    Taint::Variable(representative)
+                    WitnessInfo::Variable(representative)
                 }
             }
-            Taint::Union(left, right) => {
+            WitnessInfo::Join(left, right) => {
                 let left_substituted = self.substitute_variables(left);
                 let right_substituted = self.substitute_variables(right);
-                Taint::Union(Box::new(left_substituted), Box::new(right_substituted))
+                WitnessInfo::Join(Box::new(left_substituted), Box::new(right_substituted))
             }
         }
     }
 
-    pub fn substitute_taint_type(&self, taint_type: &TaintType) -> TaintType {
-        match taint_type {
-            TaintType::Primitive(taint) => TaintType::Primitive(self.substitute_variables(taint)),
-            TaintType::NestedImmutable(taint, inner) => TaintType::NestedImmutable(
-                self.substitute_variables(taint),
-                Box::new(self.substitute_taint_type(inner)),
+    pub fn substitute_witness_type(&self, wt: &WitnessType) -> WitnessType {
+        match wt {
+            WitnessType::Scalar(info) => WitnessType::Scalar(self.substitute_variables(info)),
+            WitnessType::Array(info, inner) => WitnessType::Array(
+                self.substitute_variables(info),
+                Box::new(self.substitute_witness_type(inner)),
             ),
-            TaintType::NestedMutable(taint, inner) => TaintType::NestedMutable(
-                self.substitute_variables(taint),
-                Box::new(self.substitute_taint_type(inner)),
+            WitnessType::Ref(info, inner) => WitnessType::Ref(
+                self.substitute_variables(info),
+                Box::new(self.substitute_witness_type(inner)),
             ),
-            TaintType::Tuple(taint, child_taints) => TaintType::Tuple(
-                self.substitute_variables(taint),
-                child_taints.iter().map(|child_taint| self.substitute_taint_type(child_taint)).collect()
+            WitnessType::Tuple(info, children) => WitnessType::Tuple(
+                self.substitute_variables(info),
+                children
+                    .iter()
+                    .map(|child| self.substitute_witness_type(child))
+                    .collect(),
             ),
         }
     }
 
-    pub fn substitute_judgement(&self, judgement: &Judgement) -> Judgement {
+    pub fn substitute_judgement(&self, judgement: &WitnessJudgement) -> WitnessJudgement {
         match judgement {
-            Judgement::Le(l, r) => {
+            WitnessJudgement::Le(l, r) => {
                 let l_substituted = self.substitute_variables(l);
                 let r_substituted = self.substitute_variables(r);
-                Judgement::Le(l_substituted, r_substituted)
+                WitnessJudgement::Le(l_substituted, r_substituted)
             }
-            Judgement::Eq(l, r) => {
+            WitnessJudgement::Eq(l, r) => {
                 let l_substituted = self.substitute_variables(l);
                 let r_substituted = self.substitute_variables(r);
-                Judgement::Eq(l_substituted, r_substituted)
+                WitnessJudgement::Eq(l_substituted, r_substituted)
             }
         }
     }
