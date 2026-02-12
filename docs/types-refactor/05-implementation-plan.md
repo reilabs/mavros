@@ -134,27 +134,85 @@ parallel solver in `witness_constraint_solver.rs`.
 
 ---
 
-## Phase 3: Monomorphization Update
+## Phase 3: Switch Monomorphization & UntaintControlFlow to WitnessTypeInference
 
-### Step 3.1: Switch Monomorphization to Type-based signatures
+Since `FunctionWitnessType` and `FunctionTaint` are structurally isomorphic, this phase
+is primarily a rename-level refactor: switch both Monomorphization and UntaintControlFlow
+from consuming `TaintAnalysis` to consuming `WitnessTypeInference`.
+
+Type application (baking WitnessOf into SSA types) stays in UntaintControlFlow for now
+via a renamed `apply_witness_type()` method. The separate WitnessCastInsertion pass is
+deferred to Phase 4.
+
+### Step 3.1: Switch Monomorphization to WitnessTypeInference
 
 **File:** `src/compiler/monomorphization.rs`
 
-- Change `Signature` to use `Vec<Type>` for params/returns (no `V` parameter)
-- Remove `cfg_taint` from Signature (CFG witness-ness is handled by UntaintControlFlow)
-- Update `monomorphize_main_signature` to produce WitnessOf types
-- Update `specialize_function` to use WitnessTypeInference results
-- Keep using current ConstraintSolver for resolving per-function constraints
-  (but fed with WitnessType data instead of TaintType)
+- Replace imports: `taint_analysis::{...}` → `witness_info::{...}` +
+  `witness_type_inference::WitnessTypeInference` + `witness_constraint_solver::WitnessConstraintSolver`
+- `Signature` struct: `cfg_witness: WitnessInfo`, `param_witnesses: Vec<WitnessType>`,
+  `return_witnesses: Vec<WitnessType>`
+- `run()`: accept `&mut WitnessTypeInference` instead of `&mut TaintAnalysis`
+- Use `WitnessConstraintSolver` instead of `ConstraintSolver`
+- `monomorphize_main_signature()`: operate on `FunctionWitnessType`
+- `monomorphize_main_taint()` → `monomorphize_main_witness()`: same logic with
+  `WitnessType::Scalar(WitnessInfo::Witness)` etc.
+- Call site signatures: read from `value_witness_types` and `block_cfg_witness`
 
-### Step 3.2: Create WitnessCastInsertion pass
+### Step 3.2: Switch UntaintControlFlow to WitnessTypeInference
+
+**File:** `src/compiler/untaint_control_flow.rs`
+
+- Replace imports: `taint_analysis::{...}` → `witness_info::{...}` +
+  `witness_type_inference::WitnessTypeInference`
+- `run()`: accept `&WitnessTypeInference` instead of `&TaintAnalysis`
+- `run_function()`: accept `&FunctionWitnessType` instead of `&FunctionTaint`
+- Rename `typify_taint()` → `apply_witness_type()`: use `WitnessType` instead of `TaintType`
+  - `TaintType::Primitive(taint)` → `WitnessType::Scalar(info)`
+  - `TaintType::NestedImmutable(top, inner)` → `WitnessType::Array(top, inner)`
+  - `TaintType::NestedMutable(top, inner)` → `WitnessType::Ref(top, inner)`
+  - `TaintType::Tuple(top, children)` → `WitnessType::Tuple(top, children)`
+  - `taint.expect_constant().is_witness()` → `info.expect_constant().is_witness()`
+- All taint field accesses:
+  - `function_taint.value_taints` → `function_wt.value_witness_types`
+  - `function_taint.block_cfg_taints` → `function_wt.block_cfg_witness`
+  - `function_taint.cfg_taint` → `function_wt.cfg_witness`
+  - `function_taint.returns_taint` → `function_wt.returns_witness`
+  - `Taint::Constant(ConstantTaint::Witness)` → `WitnessInfo::Witness`
+  - `ConstantTaint::Pure/Witness` → `ConstantWitness::Pure/Witness`
+- Control flow linearization logic (JmpIf→Select, guarded stores/asserts, CFG witness
+  parameters) is unchanged — just operating on the renamed types
+
+### Step 3.3: Update driver.rs
+
+**File:** `src/driver.rs`
+
+- Remove `TaintAnalysis` from active pipeline
+- Remove `compare_with_taint_analysis()` call
+- Feed `WitnessTypeInference` to `Monomorphization::run()`
+- Feed `WitnessTypeInference` to `UntaintControlFlow::run()`
+- Update debug output calls to use `witness_inference`
+
+**Test:** Full pipeline works. All 14 noir_tests pass.
+
+---
+
+## Phase 4: WitnessCastInsertion & UntaintControlFlow Separation
+
+### Step 4.1: Create WitnessCastInsertion pass
 
 **File:** `src/compiler/witness_cast_insertion.rs` (NEW)
 
-A separate pass that runs after monomorphization. Walks specialized functions and inserts
-explicit `Cast { target: WitnessOf }` where type mismatches exist.
+A separate pass that runs after monomorphization. Walks specialized functions,
+applies witness types to SSA (baking WitnessOf into TypeExpr), and inserts explicit
+`Cast { target: WitnessOf }` where type mismatches exist.
+
+This extracts the type-application logic (currently `apply_witness_type()` in
+UntaintControlFlow) into its own pass and adds explicit Cast instruction insertion.
 
 - `run(ssa, witness_analysis)` — entry point
+- `apply_witness_types(function, function_wt)` — bake WitnessOf into block params,
+  instruction types, return types
 - `insert_casts(function, type_map)` — per-function, walks instructions + terminators
 - `needs_witness_cast(actual, expected)` — recursive type comparison
 - `emit_scalar_cast(value)` → single Cast instruction
@@ -164,61 +222,17 @@ explicit `Cast { target: WitnessOf }` where type mismatches exist.
 
 Note: `WitnessOf(Array<...>)` as a cast target is not handled — panic with clear error.
 
-### Step 3.3: Switch driver to use new Monomorphization + CastInsertion
-
-**File:** `src/driver.rs`
-
-- Replace TaintAnalysis call with WitnessTypeInference
-- Feed new Monomorphization with WitnessType results
-- At this point, the SSA after monomorphization has WitnessOf types in TypeExpr
-
-**Test:** Pipeline produces correct SSA (may need to temporarily bridge to old
-UntaintControlFlow).
-
----
-
-## Phase 4: UntaintControlFlow Full Rework
-
-### Step 4.1: Rework UntaintControlFlow for WitnessOf types
+### Step 4.2: Simplify UntaintControlFlow
 
 **File:** `src/compiler/untaint_control_flow.rs`
 
-With `V` eliminated, there is no `SSA<Empty>` → `SSA<ConstantTaint>` conversion. UCF now
-operates directly on `SSA` with WitnessOf types baked into TypeExpr.
+With WitnessCastInsertion handling type application, UntaintControlFlow is simplified:
+- Remove `apply_witness_type()` — types are already baked into SSA
+- Remove the SSA `prepare_rebuild()` pattern for type conversion
+- Read WitnessOf types directly from SSA TypeExpr
+- Control flow linearization logic unchanged
 
-- **Input:** `SSA` with WitnessOf types (after monomorphization + cast insertion)
-- **Output:** `SSA` with WitnessOf types, witness branches linearized
-
-**Full witness branch handling (same transformations as current pass):**
-
-1. **Determine block CFG witness-ness** from the WitnessTypeInference results
-   (`block_cfg_witness` map). A block is witness-conditional if its `cfg_witness` resolved
-   to `Witness`.
-
-2. **Linearize witness JmpIf**: Replace `JmpIf(cond, then_block, else_block)` with
-   `Jmp(merge_block)`, insert `Select(cond, then_val, else_val)` for merge parameters.
-   Select result types contain `WitnessOf` (condition is WitnessOf → result is WitnessOf).
-
-3. **Guard stores** in witness-conditional blocks:
-   ```
-   // Original: store(ref, new_value)
-   // Becomes:
-   old = load(ref)
-   guarded = select(cfg_flag, new_value, old)
-   store(ref, guarded)
-   ```
-
-4. **Guard assert_eq** in witness-conditional blocks.
-
-5. **Add CFG witness parameters**: thread the "which branch was taken" flag as
-   `WitnessOf(U(1))` block parameters (replaces current `u(1, ConstantTaint::Witness)`).
-
-**Key differences from current:**
-- No type annotation conversion (no `V`, no `ConstantTaint`)
-- Checks `WitnessOf` in `TypeExpr` instead of `ConstantTaint` annotations
-- All existing linearization logic is preserved, just operating on different type representation
-
-### Step 4.2: Update downstream passes to check WitnessOf directly
+### Step 4.3: Update downstream passes to check WitnessOf directly
 
 Since `ConstantTaint` is eliminated, all downstream passes that currently check
 `annotation.is_witness()` must instead check `type.is_witness_of()`:
@@ -227,7 +241,7 @@ Since `ConstantTaint` is eliminated, all downstream passes that currently check
 - `WitnessLowering` (ex-WitnessToRef): check `WitnessOf` in TypeExpr
 - R1CGen, CodeGen: check `WitnessOf` in TypeExpr
 
-**Test:** Full pipeline works. All 20 tests pass.
+**Test:** Full pipeline works. All tests pass.
 
 ---
 

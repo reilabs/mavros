@@ -1,12 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::compiler::{constraint_solver::ConstraintSolver, ssa::{CallTarget, FunctionId, OpCode, SSA}, taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType}};
+use crate::compiler::{witness_constraint_solver::WitnessConstraintSolver, ssa::{CallTarget, FunctionId, OpCode, SSA}, witness_info::{FunctionWitnessType, WitnessInfo, WitnessType}, witness_type_inference::WitnessTypeInference};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct Signature {
-    cfg_taint: Taint,
-    param_taints: Vec<TaintType>,
-    return_taints: Vec<TaintType>,
+    cfg_witness: WitnessInfo,
+    param_witnesses: Vec<WitnessType>,
+    return_witnesses: Vec<WitnessType>,
 }
 
 #[derive(Debug)]
@@ -29,51 +29,49 @@ impl Monomorphization {
         }
     }
 
-    pub fn run(&mut self, ssa: &mut SSA, taint_analysis: &mut TaintAnalysis) -> Result<(), String> {
+    pub fn run(&mut self, ssa: &mut SSA, witness_inference: &mut WitnessTypeInference) -> Result<(), String> {
         let unspecialized_fns = ssa.get_function_ids().collect::<Vec<_>>();
         let entry_point = ssa.get_main_id();
-        let entry_point_taint = taint_analysis.get_function_taint(entry_point);
-        let entry_point_signature = self.monomorphize_main_signature(entry_point_taint);
+        let entry_point_wt = witness_inference.get_function_witness_type(entry_point);
+        let entry_point_signature = self.monomorphize_main_signature(entry_point_wt);
         let main_specialized_id =
             self.request_specialization(ssa, entry_point, entry_point_signature);
         ssa.set_entry_point(main_specialized_id);
 
         while let Some(work_item) = self.queue.pop_front() {
-            // println!("Processing work item: {:?}", work_item);
-
             let WorkItem {
                 function_id,
                 target_function_id,
                 signature,
             } = work_item;
 
-            let function_taint = taint_analysis.get_function_taint(function_id);
+            let function_wt = witness_inference.get_function_witness_type(function_id);
 
-            let mut constraint_solver = ConstraintSolver::new(&function_taint);
+            let mut constraint_solver = WitnessConstraintSolver::new(&function_wt);
             constraint_solver.add_assumption(
-                &TaintType::Primitive(function_taint.cfg_taint.clone()),
-                &TaintType::Primitive(signature.cfg_taint.clone()),
+                &WitnessType::Scalar(function_wt.cfg_witness.clone()),
+                &WitnessType::Scalar(signature.cfg_witness.clone()),
             );
-            for (original_param, specialized_param) in signature
-                .param_taints
+            for (specialized_param, original_param) in signature
+                .param_witnesses
                 .iter()
-                .zip(function_taint.parameters.iter())
+                .zip(function_wt.parameters.iter())
             {
-                constraint_solver.add_assumption(original_param, specialized_param);
+                constraint_solver.add_assumption(specialized_param, original_param);
             }
 
-            for (original_return, specialized_return) in signature
-                .return_taints
+            for (specialized_return, original_return) in signature
+                .return_witnesses
                 .iter()
-                .zip(function_taint.returns_taint.iter())
+                .zip(function_wt.returns_witness.iter())
             {
-                constraint_solver.add_assumption(original_return, specialized_return);
+                constraint_solver.add_assumption(specialized_return, original_return);
             }
 
             constraint_solver.solve();
-            let target_function_taint = function_taint.update_from_unification(&constraint_solver.unification);
-            taint_analysis.set_function_taint(target_function_id, target_function_taint);
-            let fn_taint = taint_analysis.get_function_taint(target_function_id);
+            let target_function_wt = function_wt.update_from_unification(&constraint_solver.unification);
+            witness_inference.set_function_witness_type(target_function_id, target_function_wt);
+            let fn_wt = witness_inference.get_function_witness_type(target_function_id);
 
             let mut func = ssa.take_function(target_function_id);
 
@@ -81,13 +79,13 @@ impl Monomorphization {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
                         OpCode::Call { results: returns, function: CallTarget::Static(func_id), args } => {
-                            let cfg_taint = fn_taint.block_cfg_taints.get(block_id).unwrap();
-                            let args_taints = args.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
-                            let ret_taints = returns.iter().map(|arg| fn_taint.value_taints.get(arg).unwrap().clone()).collect();
+                            let cfg_witness = fn_wt.block_cfg_witness.get(block_id).unwrap();
+                            let args_witnesses = args.iter().map(|arg| fn_wt.value_witness_types.get(arg).unwrap().clone()).collect();
+                            let ret_witnesses = returns.iter().map(|arg| fn_wt.value_witness_types.get(arg).unwrap().clone()).collect();
                             let signature = Signature {
-                                cfg_taint: cfg_taint.clone(),
-                                param_taints: args_taints,
-                                return_taints: ret_taints,
+                                cfg_witness: cfg_witness.clone(),
+                                param_witnesses: args_witnesses,
+                                return_witnesses: ret_witnesses,
                             };
 
                             let specialized_func_id = self.request_specialization(ssa, *func_id, signature);
@@ -106,7 +104,7 @@ impl Monomorphization {
 
         for fn_id in unspecialized_fns {
             ssa.take_function(fn_id);
-            taint_analysis.remove_function_taint(fn_id);
+            witness_inference.remove_function_witness_type(fn_id);
         }
 
         Ok(())
@@ -135,36 +133,36 @@ impl Monomorphization {
         specialized_id
     }
 
-    fn monomorphize_main_signature(&self, taint: &FunctionTaint) -> Signature {
+    fn monomorphize_main_signature(&self, wt: &FunctionWitnessType) -> Signature {
         Signature {
-            cfg_taint: taint.cfg_taint.clone(),
-            param_taints: taint
+            cfg_witness: wt.cfg_witness.clone(),
+            param_witnesses: wt
                 .parameters
                 .iter()
-                .map(|p| self.monomorphize_main_taint(p))
+                .map(|p| self.monomorphize_main_witness(p))
                 .collect(),
-            return_taints: taint
-                .returns_taint
+            return_witnesses: wt
+                .returns_witness
                 .iter()
-                .map(|p| self.monomorphize_main_taint(p))
+                .map(|p| self.monomorphize_main_witness(p))
                 .collect(),
         }
     }
 
-    fn monomorphize_main_taint(&self, taint: &TaintType) -> TaintType {
-        match taint {
-            TaintType::Primitive(_) => {
-                TaintType::Primitive(Taint::Constant(ConstantTaint::Witness))
+    fn monomorphize_main_witness(&self, wt: &WitnessType) -> WitnessType {
+        match wt {
+            WitnessType::Scalar(_) => {
+                WitnessType::Scalar(WitnessInfo::Witness)
             }
-            TaintType::NestedImmutable(_, inner) => TaintType::NestedImmutable(
-                Taint::Constant(ConstantTaint::Pure),
-                Box::new(self.monomorphize_main_taint(inner)),
+            WitnessType::Array(_, inner) => WitnessType::Array(
+                WitnessInfo::Pure,
+                Box::new(self.monomorphize_main_witness(inner)),
             ),
-            TaintType::Tuple(_, child_taints) => TaintType::Tuple(
-                Taint::Constant(ConstantTaint::Pure), 
-                child_taints.iter().map(|child_taint| self.monomorphize_main_taint(child_taint)).collect()
+            WitnessType::Tuple(_, child_wts) => WitnessType::Tuple(
+                WitnessInfo::Pure,
+                child_wts.iter().map(|child_wt| self.monomorphize_main_witness(child_wt)).collect()
             ),
-            _ => panic!("Pointer in main signature: {:?}", taint),
+            _ => panic!("Pointer in main signature: {:?}", wt),
         }
     }
 }

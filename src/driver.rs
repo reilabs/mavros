@@ -17,7 +17,6 @@ use crate::{
         },
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, SSA},
-        taint_analysis::TaintAnalysis,
         untaint_control_flow::UntaintControlFlow,
         witness_type_inference::WitnessTypeInference,
     },
@@ -154,9 +153,6 @@ impl Driver {
             );
         }
 
-        let mut taint_analysis = TaintAnalysis::new();
-        taint_analysis.run(&ssa, &flow_analysis).unwrap();
-
         let mut witness_inference = WitnessTypeInference::new();
         witness_inference.run(&ssa, &flow_analysis).unwrap();
 
@@ -167,20 +163,12 @@ impl Driver {
         )
         .unwrap();
 
-        witness_inference.compare_with_taint_analysis(&taint_analysis, &ssa);
-
-        fs::write(
-            self.get_debug_output_dir().join("taint_analysed_ssa.txt"),
-            ssa.to_string(&taint_analysis),
-        )
-        .unwrap();
-
         let mut monomorphization = Monomorphization::new();
-        monomorphization.run(&mut ssa, &mut taint_analysis).unwrap();
+        monomorphization.run(&mut ssa, &mut witness_inference).unwrap();
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
-            ssa.to_string(&taint_analysis),
+            ssa.to_string(&witness_inference),
         )
         .unwrap();
 
@@ -195,7 +183,7 @@ impl Driver {
         }
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &taint_analysis, &flow_analysis));
+        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis));
 
         fs::write(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
