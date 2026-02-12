@@ -5,7 +5,7 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ir::r#type::Type,
+    ir::r#type::{Type, TypeExpr},
     ssa::{CallTarget, CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
 };
 
@@ -343,6 +343,18 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
                 function_info.values.insert(*result, value_type.clone());
+                Ok(())
+            }
+            OpCode::ValueOf { result, value } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let inner = match &value_type.expr {
+                    TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
+                    _ => panic!("ICE: ValueOf applied to non-WitnessOf type: {}", value_type),
+                };
+                function_info.values.insert(*result, inner);
                 Ok(())
             }
             OpCode::ToBits { result, value: _, endianness: _, count: output_size } => {

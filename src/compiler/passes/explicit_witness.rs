@@ -104,11 +104,13 @@ impl ExplicitWitness {
                                             lr_diff := sub(l_field, r_field);
 
                                             div_hint := div(lr_diff, lr_diff);
-                                            div_hint_witness := write_witness(div_hint);
+                                            div_hint_plain := value_of(div_hint);
+                                            div_hint_witness := write_witness(div_hint_plain);
 
                                             out_hint := eq(lhs, rhs);
                                             out_hint_field := cast_to_field(out_hint);
-                                            out_hint_witness := write_witness(out_hint_field);
+                                            out_hint_plain := value_of(out_hint_field);
+                                            out_hint_witness := write_witness(out_hint_plain);
                                             #result := cast_to(u1, out_hint_witness);
 
                                             result_field := cast_to_field(result);
@@ -128,7 +130,8 @@ impl ExplicitWitness {
                                         let r = ssa_append!(function, new_instructions, {
                                             res_hint := lt(lhs, rhs);
                                             res_hint_field := cast_to_field(res_hint);
-                                            res_witness := write_witness(res_hint_field);
+                                            res_hint_plain := value_of(res_hint_field);
+                                            res_witness := write_witness(res_hint_plain);
                                             #result := cast_to(u1, res_witness);
 
                                             l_field := cast_to_field(lhs);
@@ -137,9 +140,10 @@ impl ExplicitWitness {
 
                                             two_res := mul(result, ! Field::from(2) : Field);
                                             adjustment := sub(! Field::ONE : Field, two_res);
-                                            
+
                                             adjusted_diff := mul(lr_diff, adjustment);
-                                            adjusted_diff_wit := write_witness(adjusted_diff);
+                                            adjusted_diff_plain := value_of(adjusted_diff);
+                                            adjusted_diff_wit := write_witness(adjusted_diff_plain);
                                             constrain(lr_diff, adjustment, adjusted_diff_wit);
                                         } -> adjusted_diff_wit);
                                         self.gen_witness_rangecheck(function, &mut new_instructions, r.adjusted_diff_wit, s);
@@ -171,9 +175,14 @@ impl ExplicitWitness {
                                 lhs: l,
                                 rhs: r,
                             });
+                            let mul_plain = function.fresh_value();
+                            new_instructions.push(OpCode::ValueOf {
+                                result: mul_plain,
+                                value: mul_witness,
+                            });
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
-                                value: mul_witness,
+                                value: mul_plain,
                             });
                             new_instructions.push(OpCode::Constrain { a: l, b: r, c: res });
                         }
@@ -208,7 +217,8 @@ impl ExplicitWitness {
                                         r_field := cast_to_field(r);
                                         res_hint := and(l, r);
                                         res_hint_field := cast_to_field(res_hint);
-                                        res_witness := write_witness(res_hint_field);
+                                        res_hint_plain := value_of(res_hint_field);
+                                        res_witness := write_witness(res_hint_plain);
                                         constrain(l_field, r_field, res_witness);
                                         #result := cast_to(u1, res_witness);
                                     } ->);
@@ -384,9 +394,14 @@ impl ExplicitWitness {
                                 if_t: l,
                                 if_f: r,
                             });
+                            let select_plain = function.fresh_value();
+                            new_instructions.push(OpCode::ValueOf {
+                                result: select_plain,
+                                value: select_witness,
+                            });
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
-                                value: select_witness,
+                                value: select_plain,
                             });
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
@@ -617,7 +632,8 @@ impl ExplicitWitness {
                                 panic!("Dynamic tuple indexing should not appear here");
                             }
                         },
-                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. }
+                        | OpCode::ValueOf { .. } => {
                             new_instructions.push(instruction);
                         }
                     }

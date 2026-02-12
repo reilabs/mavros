@@ -1392,6 +1392,10 @@ pub enum OpCode {
         kind: MemOp,
         value: ValueId,
     },
+    ValueOf {
+        result: ValueId,
+        value: ValueId,
+    },
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
@@ -1778,6 +1782,14 @@ impl OpCode {
                     value.0
                 )
             }
+            OpCode::ValueOf { result, value } => {
+                format!(
+                    "v{}{} = value_of v{}",
+                    result.0,
+                    annotate(value_annotator, *result),
+                    value.0
+                )
+            }
             OpCode::ToBits {
                 result,
                 value,
@@ -2049,6 +2061,10 @@ impl OpCode {
             Self::Not {
                 result: r,
                 value: v,
+            }
+            | Self::ValueOf {
+                result: r,
+                value: v,
             } => vec![r, v].into_iter(),
             Self::ToBits {
                 result: r,
@@ -2213,6 +2229,10 @@ impl OpCode {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -2386,6 +2406,10 @@ impl OpCode {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -2584,6 +2608,10 @@ impl OpCode {
             Self::Not {
                 result: r,
                 value: _,
+            }
+            | Self::ValueOf {
+                result: r,
+                value: _,
             } => vec![r].into_iter(),
             Self::ToBits {
                 result: r,
@@ -2758,6 +2786,10 @@ impl OpCode {
             lhs,
             rhs,
         }
+    }
+
+    pub fn mk_value_of(result: ValueId, value: ValueId) -> OpCode {
+        OpCode::ValueOf { result, value }
     }
 
     pub fn mk_lt(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {

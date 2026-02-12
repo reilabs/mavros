@@ -375,7 +375,8 @@ impl WitnessToRef {
                         | OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
                         | OpCode::TupleProj { .. }
-                        | OpCode::Todo { .. } => {
+                        | OpCode::Todo { .. }
+                        | OpCode::ValueOf { .. } => {
                             new_instructions.push(instruction);
                         }
                         OpCode::MkTuple {

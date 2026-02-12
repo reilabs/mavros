@@ -42,6 +42,9 @@ impl WitnessWriteToVoid {
                             }
                             *r = None;
                         }
+                        OpCode::ValueOf { result: r, value: v } => {
+                            replacements.insert(*r, *v);
+                        }
                         _ => {}
                     }
                 }
@@ -57,21 +60,29 @@ impl WitnessWriteToVoid {
             };
 
             for (block_id, block) in function.get_blocks_mut() {
-                // In the main function's entry block, remove only the voided WriteWitness
+                // Remove ValueOf instructions (identity in witgen pipeline) and,
+                // in the main function's entry block, remove only the voided WriteWitness
                 // that correspond to entry param Field→WitnessOf conversions. Their witness
                 // slots overlap with input positions filled by the interpreter. Other voided
                 // WriteWitness (e.g. byte decomposition from rangechecks) must be kept so
                 // their values are written to the witness tape at the correct positions.
-                if is_main && *block_id == entry_id {
-                    let old_instructions = block.take_instructions();
-                    let new_instructions = old_instructions
-                        .into_iter()
-                        .filter(|instr| {
-                            !matches!(instr, OpCode::WriteWitness { result: None, value } if entry_param_ids.contains(value))
-                        })
-                        .collect();
-                    block.put_instructions(new_instructions);
-                }
+                let is_entry = is_main && *block_id == entry_id;
+                let old_instructions = block.take_instructions();
+                let new_instructions = old_instructions
+                    .into_iter()
+                    .filter(|instr| {
+                        if matches!(instr, OpCode::ValueOf { .. }) {
+                            return false;
+                        }
+                        if is_entry {
+                            if matches!(instr, OpCode::WriteWitness { result: None, value } if entry_param_ids.contains(value)) {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .collect();
+                block.put_instructions(new_instructions);
 
                 for instruction in block.get_instructions_mut() {
                     replacements.replace_instruction(instruction);

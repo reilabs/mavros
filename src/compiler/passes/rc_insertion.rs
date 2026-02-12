@@ -512,10 +512,13 @@ impl RCInsertion {
                     OpCode::Rangecheck { value: _, max_bits: _ } => {
                         new_instructions.push(instruction);
                     }
-                    OpCode::MkTuple { 
-                        result, 
-                        elems, 
-                        element_types, 
+                    OpCode::ValueOf { .. } => {
+                        panic!("ICE: ValueOf should not appear at this stage");
+                    }
+                    OpCode::MkTuple {
+                        result,
+                        elems,
+                        element_types,
                     } => {
                         new_instructions.push(instruction.clone());
                         for (input, group) in elems

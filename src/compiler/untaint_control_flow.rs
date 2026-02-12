@@ -373,6 +373,7 @@ impl UntaintControlFlow {
                     },
                     OpCode::InitGlobal { global, value } => OpCode::InitGlobal { global, value },
                     OpCode::DropGlobal { global } => OpCode::DropGlobal { global },
+                    OpCode::ValueOf { .. } => panic!("ICE: ValueOf should not appear at this stage"),
                 };
                 new_instructions.push(new);
             }

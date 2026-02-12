@@ -435,7 +435,8 @@ impl CSE {
                     | OpCode::DLookup { target: _, keys: _, results: _ }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. } => {}
+                    | OpCode::DropGlobal { .. }
+                    | OpCode::ValueOf { .. } => {}
                      /* PureToWitnessRef removed - Cast already handled */
                     | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
                     OpCode::Not { result: r, value } => {

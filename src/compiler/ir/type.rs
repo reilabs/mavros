@@ -74,13 +74,15 @@ impl Type {
         Type { expr: TypeExpr::Tuple(types) }
     }
 
-    /// Construct a WitnessOf type, enforcing idempotency:
-    /// WitnessOf(WitnessOf(X)) = WitnessOf(X)
+    /// Construct a WitnessOf type. Double-wrapping is a bug.
     pub fn witness_of(inner: Type) -> Self {
-        match inner.expr {
-            TypeExpr::WitnessOf(_) => inner, // idempotent
-            _ => Type { expr: TypeExpr::WitnessOf(Box::new(inner)) },
-        }
+        assert!(
+            !matches!(inner.expr, TypeExpr::WitnessOf(_)),
+            "ICE: attempted to construct WitnessOf(WitnessOf(...)). \
+             Double witness wrapping indicates a logic error. Inner type: {:?}",
+            inner.expr
+        );
+        Type { expr: TypeExpr::WitnessOf(Box::new(inner)) }
     }
 
     // --- Predicates ---
@@ -353,7 +355,11 @@ impl Type {
 
     pub fn get_arithmetic_result_type(&self, other: &Self) -> Self {
         match (&self.expr, &other.expr) {
-            // If either is WitnessOf, unwrap, compute, then re-wrap
+            // Both WitnessOf: unwrap both, compute, re-wrap once
+            (TypeExpr::WitnessOf(a), TypeExpr::WitnessOf(b)) => {
+                Type::witness_of(a.get_arithmetic_result_type(b))
+            }
+            // One side WitnessOf: unwrap it, compute, re-wrap
             (TypeExpr::WitnessOf(inner), _) => {
                 Type::witness_of(inner.get_arithmetic_result_type(other))
             }
@@ -577,13 +583,13 @@ mod tests {
         assert_eq!(Type::join(&sf, &swf), swf);
     }
 
-    // --- idempotency ---
+    // --- double-witness rejection ---
 
     #[test]
-    fn witness_of_idempotent() {
+    #[should_panic(expected = "ICE: attempted to construct WitnessOf(WitnessOf(...))")]
+    fn witness_of_double_wrap_panics() {
         let wf = Type::witness_of(Type::field());
-        let wwf = Type::witness_of(wf.clone());
-        assert_eq!(wf, wwf);
+        let _wwf = Type::witness_of(wf);
     }
 
     // --- join properties ---

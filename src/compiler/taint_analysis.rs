@@ -907,6 +907,7 @@ impl TaintAnalysis {
                         results: _,
                     }
                     | OpCode::Todo { .. }
+                    | OpCode::ValueOf { .. }
                     => {
                         panic!("Should not be present at this stage {:?}", instruction);
                     }

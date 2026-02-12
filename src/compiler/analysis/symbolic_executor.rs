@@ -543,6 +543,9 @@ impl SymbolicExecutor {
                             scope[result_id.0 as usize] = Some(result_value.clone());
                         }
                     }
+                    crate::compiler::ssa::OpCode::ValueOf { .. } => {
+                        panic!("ICE: ValueOf should not appear at this stage");
+                    }
                 }
             }
 
