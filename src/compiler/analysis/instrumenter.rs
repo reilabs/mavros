@@ -210,7 +210,7 @@ impl Value {
         }
     }
 
-    fn blind_from(&mut self) {
+    fn blind(&mut self) {
         match self {
             Value::WitnessOf(inner) => {
                 inner.forget_concrete();
@@ -219,15 +219,15 @@ impl Value {
             Value::U(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in vals {
-                    val.blind_from();
+                    val.blind();
                 }
             }
             Value::Pointer(val) => {
-                val.borrow_mut().blind_from();
+                val.borrow_mut().blind();
             }
             Value::Tuple(vals) => {
                 for val in vals {
-                    val.blind_from();
+                    val.blind();
                 }
             }
         }
@@ -303,22 +303,22 @@ impl Value {
         _tp: &Type,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        // If the array itself is Unknown, result is Unknown
         if matches!(self, Value::Unknown(_)) {
             return Value::Unknown(ScalarKind::Field);
         }
 
-        // Extract array from WitnessOf wrapper if present
-        let arr = match self {
-            Value::WitnessOf(inner) => inner.as_ref(),
-            other => other,
-        };
+        let arr = self.unwrap_witness();
 
         match (arr, index) {
             (Value::Array(vals), Value::U(_, index)) => vals[*index as usize].clone(),
-            (Value::Array(vals), Value::Unknown(_))
-            | (Value::Array(vals), Value::WitnessOf(_)) => {
-                // Unknown or witness index — we don't know which element, return Unknown
+            (Value::Array(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
+                Value::U(_, index) => vals[*index as usize].clone(),
+                _ => {
+                    instrumenter.record_lookups(vals.len(), 1, 1);
+                    Value::Unknown(ScalarKind::Field)
+                }
+            },
+            (Value::Array(vals), Value::Unknown(_)) => {
                 instrumenter.record_lookups(vals.len(), 1, 1);
                 Value::Unknown(ScalarKind::Field)
             }
@@ -333,12 +333,12 @@ impl Value {
     fn tuple_get(
         &self,
         index: usize,
-        _tp: &Type,
-        _instrumenter: &mut dyn OpInstrumenter,
+        tp: &Type,
+        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::Unknown(_) => Value::Unknown(ScalarKind::Field),
-            Value::WitnessOf(inner) => inner.tuple_get(index, _tp, _instrumenter),
+            Value::WitnessOf(inner) => inner.tuple_get(index, tp, instrumenter),
             Value::Tuple(vals) => vals[index as usize].clone(),
             _ => panic!(
                 "Cannot get tuple element from {:?} with index {:?}",
@@ -359,7 +359,17 @@ impl Value {
                 new_vals[*index as usize] = value.clone();
                 Value::Array(new_vals)
             }
-            // Dynamic index: any element could be replaced, so set all to value
+            (Value::Array(vals), Value::WitnessOf(inner), value) => match inner.as_ref() {
+                Value::U(_, index) => {
+                    let mut new_vals = vals.clone();
+                    new_vals[*index as usize] = value.clone();
+                    Value::Array(new_vals)
+                }
+                _ => {
+                    let new_vals = vals.iter().map(|_| value.clone()).collect();
+                    Value::Array(new_vals)
+                }
+            },
             (Value::Array(vals), _, value) => {
                 let new_vals = vals.iter().map(|_| value.clone()).collect();
                 Value::Array(new_vals)
@@ -436,7 +446,6 @@ impl Value {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {
                 let result = inner.to_bits(endianness, size, instrumenter);
-                // Wrap each bit in WitnessOf
                 match result {
                     Value::Array(bits) => Value::Array(
                         bits.into_iter()
@@ -479,14 +488,24 @@ impl Value {
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
-            Value::Unknown(_) | Value::WitnessOf(_) => {
-                // Witness value decomposed to radix — result is unknown digits
+            Value::WitnessOf(inner) => {
+                let result = inner.to_radix(radix, _endianness, size, instrumenter);
+                match result {
+                    Value::Array(digits) => Value::Array(
+                        digits
+                            .into_iter()
+                            .map(|d| Value::WitnessOf(Box::new(d)))
+                            .collect(),
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            Value::Unknown(_) => {
                 instrumenter.record_rangechecks(8, size);
                 instrumenter.record_constraints(1);
                 Value::Array(vec![Value::Unknown(ScalarKind::U(8)); size])
             }
             Value::Field(f) => {
-                // Concrete field decomposed to radix
                 let radix_val = match radix {
                     Radix::Dyn(Value::U(_, r)) => *r as u128,
                     Radix::Bytes => 256,
@@ -556,24 +575,23 @@ impl Value {
             Value::U(_, 0) => if_true.clone(),
             Value::U(_, _) => if_false.clone(),
             Value::WitnessOf(inner) => {
-                // We know the concrete cond value, so we can select deterministically
                 match inner.as_ref() {
                     Value::U(_, 0) => if_true.clone(),
                     Value::U(_, _) => if_false.clone(),
                     _ => {
-                        // Non-U inner — treat as unknown
                         if if_true.is_witness() || if_false.is_witness() {
                             instrumenter.record_constraints(1);
                         }
-                        Value::Unknown(ScalarKind::Field)
+                        let mut result = if_true.clone();
+                        result.forget_concrete();
+                        result
                     }
                 }
             }
             Value::Unknown(_) => {
-                if if_true.is_witness() || if_false.is_witness() {
-                    instrumenter.record_constraints(1);
-                }
-                Value::Unknown(ScalarKind::Field)
+                let mut result = if_true.clone();
+                result.forget_concrete();
+                result
             }
             _ => panic!("Cannot select on {:?}", self),
         }
@@ -587,13 +605,13 @@ pub struct SpecSplitValue {
 }
 
 impl SpecSplitValue {
-    fn blind_unspecialized_from(&mut self) {
-        self.unspecialized.blind_from();
+    fn blind_unspecialized(&mut self) {
+        self.unspecialized.blind();
     }
 
-    fn blind_from(&mut self) {
-        self.unspecialized.blind_from();
-        self.specialized.blind_from();
+    fn blind(&mut self) {
+        self.unspecialized.blind();
+        self.specialized.blind();
     }
 }
 
@@ -696,7 +714,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             unspecialized: self.unspecialized.ptr_read(tp, ctx.get_unspecialized()),
             specialized: self.specialized.ptr_read(tp, ctx.get_specialized()),
         };
-        res.blind_unspecialized_from();
+        res.blind_unspecialized();
         res
     }
 
@@ -923,15 +941,22 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn expect_constant_bool(&self, _ctx: &mut CostAnalysis) -> bool {
-        // Use specialized side only — the unspecialized side may have Unknown
-        // loop conditions due to forget_concrete on non-witness params
-        match &self.specialized {
+        let specialized = match &self.specialized {
             Value::U(1, v) => *v != 0,
             _ => panic!(
                 "Expected constant bool, got specialized={:?}",
                 self.specialized
             ),
-        }
+        };
+        let unspecialized = match &self.unspecialized {
+            Value::U(1, v) => *v != 0,
+            _ => panic!(
+                "Expected constant bool, got unspecialized={:?}",
+                self.unspecialized
+            ),
+        };
+        assert_eq!(specialized, unspecialized);
+        specialized
     }
 
     fn of_u(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
@@ -956,7 +981,6 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut CostAnalysis) -> Self {
-        // Wrap value in WitnessOf
         Self {
             unspecialized: Value::WitnessOf(Box::new(self.unspecialized.clone())),
             specialized: Value::WitnessOf(Box::new(self.specialized.clone())),
@@ -1110,11 +1134,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         param_types: &[&Type],
     ) -> Option<Vec<SpecSplitValue>> {
         for (pval, _ptype) in params.iter_mut().zip(param_types.iter()) {
-            pval.blind_from();
-            // Additionally forget concrete values on the unspecialized side
-            // so that non-witness concrete parameters (like exponents) create
-            // divergence between specialized and unspecialized sides
-            pval.unspecialized.forget_concrete();
+            pval.blind();
         }
 
         // Build signature from the specialized side — this captures concrete
@@ -1153,8 +1173,8 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     }
 
     fn on_return(&mut self, returns: &mut [SpecSplitValue], return_types: &[Type]) {
-        for (rval, _rtype) in returns.iter_mut().zip(return_types.iter()) {
-            rval.blind_from();
+        for rval in returns.iter_mut() {
+            rval.blind();
         }
 
         let sig = self.exit_call();
@@ -1174,8 +1194,8 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         params: &mut [SpecSplitValue],
         param_types: &[&Type],
     ) {
-        for (pval, _ptype) in params.iter_mut().zip(param_types.iter()) {
-            pval.blind_unspecialized_from();
+        for pval in params.iter_mut() {
+            pval.blind_unspecialized();
         }
     }
 
