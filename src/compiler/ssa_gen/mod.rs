@@ -4,6 +4,7 @@
 //! bypassing the intermediate Noir SSA representation.
 
 mod expression_converter;
+pub mod llvm;
 mod type_converter;
 
 use std::collections::HashMap;
@@ -312,5 +313,15 @@ impl SSA<Empty> {
     pub fn from_program(program: &Program) -> SSA<Empty> {
         let mut converter = SsaConverter::new();
         converter.convert_program(program)
+    }
+
+    /// Create SSA by importing a constrained LLVM IR input.
+    pub fn from_llvm_ir_text(ir: &str) -> Result<SSA<Empty>, String> {
+        llvm::from_llvm_ir_text(ir)
+    }
+
+    /// Create SSA by importing a constrained LLVM IR file.
+    pub fn from_llvm_ir_file(path: &std::path::Path) -> Result<SSA<Empty>, String> {
+        llvm::from_llvm_ir_file(path)
     }
 }

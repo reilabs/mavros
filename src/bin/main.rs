@@ -32,6 +32,10 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    /// Import mavros SSA from a constrained LLVM IR file instead of compiling Noir.
+    #[arg(long, value_name = "PATH")]
+    pub llvm_ir: Option<PathBuf>,
 }
 
 /// The main function for the CLI utility, responsible for parsing program
@@ -58,11 +62,19 @@ fn main() -> ExitCode {
 ///
 /// - [`Error`] if the extraction process fails for any reason.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let project = Project::new(args.root.clone())?;
+    let mut driver = if args.llvm_ir.is_some() {
+        Driver::new_for_root(args.root.clone(), args.draw_graphs)
+    } else {
+        let project = Project::new(args.root.clone())?;
+        Driver::new(project, args.draw_graphs)
+    };
 
-    let mut driver = Driver::new(project, args.draw_graphs);
-
-    driver.run_noir_compiler().unwrap();
+    let imported_from_llvm = args.llvm_ir.is_some();
+    if let Some(llvm_ir_path) = &args.llvm_ir {
+        driver.run_llvm_importer(llvm_ir_path).unwrap();
+    } else {
+        driver.run_noir_compiler().unwrap();
+    }
     driver.make_struct_access_static().unwrap();
     driver.monomorphize().unwrap();
     driver.explictize_witness().unwrap();
@@ -96,6 +108,11 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     // Skip VM execution if requested
     if args.skip_vm {
         info!(message = %"Skipping VM execution as requested");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if imported_from_llvm {
+        info!(message = %"Skipping VM execution for LLVM-imported program (no Noir ABI).");
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -257,4 +274,3 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
     }
     Ok(path)
 }
-

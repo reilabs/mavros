@@ -24,7 +24,8 @@ use crate::{
 };
 
 pub struct Driver {
-    project: Project,
+    project: Option<Project>,
+    debug_output_dir: PathBuf,
     initial_ssa: Option<SSA<Empty>>,
     static_struct_access_ssa: Option<SSA<Empty>>,
     monomorphized_ssa: Option<SSA<ConstantTaint>>,
@@ -38,6 +39,7 @@ pub struct Driver {
 #[derive(Debug)]
 pub enum Error {
     NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
+    LlvmImportError(String),
 }
 
 impl Driver {
@@ -48,7 +50,28 @@ impl Driver {
         }
         fs::create_dir(&dir).unwrap();
         Self {
-            project,
+            project: Some(project),
+            debug_output_dir: dir,
+            initial_ssa: None,
+            static_struct_access_ssa: None,
+            monomorphized_ssa: None,
+            explicit_witness_ssa: None,
+            r1cs_ssa: None,
+            base_witgen_ssa: None,
+            abi: None,
+            draw_cfg,
+        }
+    }
+
+    pub fn new_for_root(root: PathBuf, draw_cfg: bool) -> Self {
+        let dir = root.join("mavros_debug");
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir(&dir).unwrap();
+        Self {
+            project: None,
+            debug_output_dir: dir,
             initial_ssa: None,
             static_struct_access_ssa: None,
             monomorphized_ssa: None,
@@ -61,20 +84,19 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        let dir = self
-            .project
-            .get_only_crate()
-            .root_dir
-            .join("mavros_debug");
-        dir
+        self.debug_output_dir.clone()
     }
 
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
+        let project = self
+            .project
+            .as_ref()
+            .expect("run_noir_compiler requires a Noir project");
         let (mut context, crate_id) = nargo::prepare_package(
-            self.project.file_manager(),
-            self.project.parsed_files(),
-            self.project.get_only_crate(),
+            project.file_manager(),
+            project.parsed_files(),
+            project.get_only_crate(),
         );
         noirc_driver::check_crate(
             &mut context,
@@ -96,6 +118,24 @@ impl Driver {
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
         self.initial_ssa = Some(SSA::from_program(&program));
+
+        fs::write(
+            self.get_debug_output_dir().join("initial_ssa.txt"),
+            self.initial_ssa
+                .as_ref()
+                .unwrap()
+                .to_string(&DefaultSsaAnnotator),
+        )
+        .unwrap();
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn run_llvm_importer(&mut self, llvm_ir_path: &std::path::Path) -> Result<(), Error> {
+        self.abi = None;
+        self.initial_ssa =
+            Some(SSA::from_llvm_ir_file(llvm_ir_path).map_err(Error::LlvmImportError)?);
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
@@ -396,7 +436,11 @@ impl Driver {
             codegen.write_ir(&wasm_path.with_extension("ll"));
             codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
             info!(message = %"WASM object generated", path = %wasm_path.display());
-            self.write_wasm_metadata(&wasm_path, r1cs)?;
+            if self.abi.is_some() {
+                self.write_wasm_metadata(&wasm_path, r1cs)?;
+            } else {
+                info!(message = %"Skipping WASM metadata generation: no ABI available for LLVM-imported program");
+            }
         }
 
         Ok(llvm_ir)
