@@ -28,6 +28,7 @@
               targets = [ "wasm32-unknown-unknown" ];
             })
             llvmPackages.llvm
+            llvmPackages.clang
             llvmPackages.libclang
             llvmPackages.lld
             pkg-config
