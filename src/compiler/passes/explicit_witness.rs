@@ -546,10 +546,15 @@ impl ExplicitWitness {
                                 new_instructions.push(instruction);
                             } else {
                                 assert!(endianness == Endianness::Little);
+                                let pure_value = function.fresh_value();
+                                new_instructions.push(OpCode::ValueOf {
+                                    result: pure_value,
+                                    value,
+                                });
                                 let hint = function.fresh_value();
                                 new_instructions.push(OpCode::ToRadix {
                                     result: hint,
-                                    value,
+                                    value: pure_value,
                                     radix,
                                     endianness: Endianness::Little,
                                     count,
@@ -688,10 +693,15 @@ impl ExplicitWitness {
         max_bits: usize,
     ) {
         assert!(max_bits % 8 == 0); // TODO
+        let pure_value = function.fresh_value();
+        new_instructions.push(OpCode::ValueOf {
+            result: pure_value,
+            value: value,
+        });
         let bytes_val = function.fresh_value();
         new_instructions.push(OpCode::ToRadix {
             result: bytes_val,
-            value: value,
+            value: pure_value,
             radix: Radix::Bytes,
             endianness: Endianness::Big,
             count: max_bits / 8,

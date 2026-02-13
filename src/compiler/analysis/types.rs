@@ -367,14 +367,28 @@ impl Types {
                 function_info.values.insert(*result, inner);
                 Ok(())
             }
-            OpCode::ToBits { result, value: _, endianness: _, count: output_size } => {
-                let bit_type = Type::u(1);
+            OpCode::ToBits { result, value, endianness: _, count: output_size } => {
+                let value_type = function_info.values.get(value).ok_or_else(|| {
+                    format!("Value {:?} not found in type assignments", value)
+                })?;
+                let bit_type = if value_type.is_witness_of() {
+                    Type::witness_of(Type::u(1))
+                } else {
+                    Type::u(1)
+                };
                 let result_type = bit_type.array_of(*output_size);
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::ToRadix { result, value: _, radix: _, endianness: _, count: output_size } => {
-                let digit_type = Type::u(8);
+            OpCode::ToRadix { result, value, radix: _, endianness: _, count: output_size } => {
+                let value_type = function_info.values.get(value).ok_or_else(|| {
+                    format!("Value {:?} not found in type assignments", value)
+                })?;
+                let digit_type = if value_type.is_witness_of() {
+                    Type::witness_of(Type::u(8))
+                } else {
+                    Type::u(8)
+                };
                 let result_type = digit_type.array_of(*output_size);
                 function_info.values.insert(*result, result_type);
                 Ok(())
