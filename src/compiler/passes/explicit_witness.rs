@@ -329,15 +329,25 @@ impl ExplicitWitness {
                                         TypeExpr::Function => panic!("Function type not expected in witnessed array reads"),
                                     };
 
-                                    let pure_idx = function.fresh_value();
-                                    new_instructions.push(OpCode::ValueOf {
-                                        result: pure_idx,
-                                        value: idx,
-                                    });
+                                    let r = ssa_append!(function, new_instructions, {
+                                        pure_idx := value_of(idx);
+                                        r_hint_val := array_get(arr, pure_idx);
+                                    } -> r_hint_val);
+                                    let mut r_pure_val = r.r_hint_val;
+
+                                    let elem_is_witness = function_type_info
+                                        .get_value_type(arr)
+                                        .get_array_element()
+                                        .is_witness_of();
+                                    if elem_is_witness {
+                                        r_pure_val = ssa_append!(function, new_instructions, {
+                                            v := value_of(r_pure_val);
+                                        } -> v).v;
+                                    }
+
                                     ssa_append!(function, new_instructions, {
                                         idx_field := cast_to_field(idx);
-                                        r_wit_val := array_get(arr, pure_idx);
-                                        r_wit_field := cast_to_field(r_wit_val);
+                                        r_wit_field := cast_to_field(r_pure_val);
                                         r_wit := write_witness(r_wit_field);
                                         #result := cast_to(back_cast_target, r_wit);
                                         lookup_arr(arr, idx_field, r_wit);
