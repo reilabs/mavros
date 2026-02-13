@@ -329,9 +329,14 @@ impl ExplicitWitness {
                                         TypeExpr::Function => panic!("Function type not expected in witnessed array reads"),
                                     };
 
+                                    let pure_idx = function.fresh_value();
+                                    new_instructions.push(OpCode::ValueOf {
+                                        result: pure_idx,
+                                        value: idx,
+                                    });
                                     ssa_append!(function, new_instructions, {
                                         idx_field := cast_to_field(idx);
-                                        r_wit_val := array_get(arr, idx);
+                                        r_wit_val := array_get(arr, pure_idx);
                                         r_wit_field := cast_to_field(r_wit_val);
                                         r_wit := write_witness(r_wit_field);
                                         #result := cast_to(back_cast_target, r_wit);

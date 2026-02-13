@@ -213,15 +213,23 @@ impl Types {
                     }
                 }
             }
-            OpCode::ArrayGet { result, array, index: _ } => {
+            OpCode::ArrayGet { result, array, index } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {
                     format!("Array value {:?} not found in type assignments", array)
                 })?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
 
                 let element_type = array_type.get_array_element();
+                let result_type = if index_type.is_witness_of() && !element_type.is_witness_of() {
+                    Type::witness_of(element_type)
+                } else {
+                    element_type
+                };
                 function_info.values.insert(
                     *result,
-                    element_type,
+                    result_type,
                 );
                 Ok(())
             }
