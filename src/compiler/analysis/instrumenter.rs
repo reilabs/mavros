@@ -28,8 +28,8 @@ impl ScalarKind {
         match &tp.strip_witness().expr {
             TypeExpr::Field => ScalarKind::Field,
             TypeExpr::U(s) => ScalarKind::U(*s),
-            TypeExpr::WitnessOf(inner) => ScalarKind::from_type(inner),
-            _ => ScalarKind::Field, // default fallback
+            TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
+            _ => panic!("Not a scalar type: {:?}", tp)
         }
     }
 }
@@ -101,51 +101,40 @@ pub enum Value {
 }
 
 impl Value {
+    fn unwrap_witness(&self) -> &Value {
+        match self {
+            Value::WitnessOf(inner) => inner.as_ref(),
+            other => other,
+        }
+    }
+
     fn cmp_op(
         &self,
         b: &Value,
         cmp_kind: &crate::compiler::ssa::CmpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        // Extract inner values from WitnessOf, track if either was witness
-        let (a_inner, a_wit) = match self {
-            Value::WitnessOf(inner) => (inner.as_ref(), true),
-            other => (other, false),
-        };
-        let (b_inner, b_wit) = match b {
-            Value::WitnessOf(inner) => (inner.as_ref(), true),
-            other => (other, false),
-        };
-        let either_wit = a_wit || b_wit;
-
-        // If either inner is Unknown, result is Unknown + record costs
-        if matches!(a_inner, Value::Unknown(_)) || matches!(b_inner, Value::Unknown(_)) {
-            if either_wit {
-                instrumenter.record_constraints(1);
-                return Value::WitnessOf(Box::new(Value::Unknown(ScalarKind::U(1))));
-            }
-            return Value::Unknown(ScalarKind::U(1));
-        }
-
-        let result = match (a_inner, b_inner) {
-            (Value::U(_, a), Value::U(_, b)) => match cmp_kind {
-                CmpKind::Eq => Value::U(1, if a == b { 1 } else { 0 }),
-                CmpKind::Lt => Value::U(1, if a < b { 1 } else { 0 }),
+        match cmp_kind {
+            CmpKind::Eq => match (self, b) {
+                (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a == b { 1 } else { 0 }),
+                (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    instrumenter.record_constraints(1);
+                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(b.unwrap_witness(), cmp_kind, instrumenter)))
+                }
+                (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+                _ => panic!("Cannot compare {:?} and {:?}", self, b),
             },
-            (Value::Field(a), Value::Field(b)) => match cmp_kind {
-                CmpKind::Eq => Value::U(1, if a == b { 1 } else { 0 }),
-                CmpKind::Lt => Value::U(1, if a < b { 1 } else { 0 }),
+            CmpKind::Lt => match (self, b) {
+                (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
+                (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    instrumenter.record_constraints(1);
+                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(b.unwrap_witness(), cmp_kind, instrumenter)))
+                }
+                (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+                _ => panic!("Cannot compare {:?} and {:?}", self, b),
             },
-            (_, _) => {
-                panic!("Cannot compare {:?} and {:?}", self, b);
-            }
-        };
-
-        if either_wit {
-            instrumenter.record_constraints(1);
-            Value::WitnessOf(Box::new(result))
-        } else {
-            result
         }
     }
 
@@ -155,90 +144,69 @@ impl Value {
         binary_arith_op_kind: &crate::compiler::ssa::BinaryArithOpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        // Extract inner values from WitnessOf, track if either was witness
-        let (a_inner, a_wit) = match self {
-            Value::WitnessOf(inner) => (inner.as_ref(), true),
-            other => (other, false),
-        };
-        let (b_inner, b_wit) = match b {
-            Value::WitnessOf(inner) => (inner.as_ref(), true),
-            other => (other, false),
-        };
-        let either_wit = a_wit || b_wit;
-        let a_unknown = matches!(a_inner, Value::Unknown(_));
-        let b_unknown = matches!(b_inner, Value::Unknown(_));
-
-        // Mul by zero → zero, always free. Return typed zero matching the operands.
-        if matches!(binary_arith_op_kind, BinaryArithOpKind::Mul) {
-            let a_zero = matches!(a_inner, Value::Field(f) if *f == Field::ZERO)
-                || matches!(a_inner, Value::U(_, 0));
-            let b_zero = matches!(b_inner, Value::Field(f) if *f == Field::ZERO)
-                || matches!(b_inner, Value::U(_, 0));
-            if a_zero || b_zero {
-                // Determine the correct type for the zero result
-                let zero = match (a_inner, b_inner) {
-                    (Value::U(s, _), _) | (_, Value::U(s, _)) => Value::U(*s, 0),
-                    (Value::Unknown(ScalarKind::U(s)), _)
-                    | (_, Value::Unknown(ScalarKind::U(s))) => Value::U(*s, 0),
-                    _ => Value::Field(Field::ZERO),
-                };
-                return zero;
-            }
-        }
-
-        // If either inner is Unknown, result is Unknown + record costs.
-        // In R1CS, Mul only needs a constraint when both operands are variables
-        // (Unknown). constant * variable is just a linear combination (free).
-        if a_unknown || b_unknown {
-            let kind = match (a_inner, b_inner) {
-                (Value::Unknown(k), _) => *k,
-                (_, Value::Unknown(k)) => *k,
-                _ => unreachable!(),
-            };
-            match binary_arith_op_kind {
-                BinaryArithOpKind::Mul => {
-                    if a_unknown && b_unknown && a_wit && b_wit {
-                        instrumenter.record_constraints(1);
-                    }
+        match binary_arith_op_kind {
+            BinaryArithOpKind::Add => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a + b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
                 }
-                BinaryArithOpKind::Div => {
-                    if b_unknown && b_wit {
-                        instrumenter.record_constraints(1);
-                    }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::Sub => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a - b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a - b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
                 }
-                _ => {}
-            }
-            if either_wit {
-                return Value::WitnessOf(Box::new(Value::Unknown(kind)));
-            }
-            return Value::Unknown(kind);
-        }
-
-        // Both operands are concrete. Compute the result.
-        let result = match (a_inner, b_inner) {
-            (Value::U(s, a), Value::U(_, b)) => match binary_arith_op_kind {
-                BinaryArithOpKind::Add => Value::U(*s, a + b),
-                BinaryArithOpKind::Sub => Value::U(*s, a - b),
-                BinaryArithOpKind::Mul => Value::U(*s, a * b),
-                BinaryArithOpKind::Div => Value::U(*s, a / b),
-                BinaryArithOpKind::And => Value::U(*s, a & b),
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            (Value::Field(a), Value::Field(b)) => match binary_arith_op_kind {
-                BinaryArithOpKind::Add => Value::Field(a + b),
-                BinaryArithOpKind::Sub => Value::Field(a - b),
-                BinaryArithOpKind::Mul => Value::Field(a * b),
-                BinaryArithOpKind::Div => Value::Field(a / b),
-                BinaryArithOpKind::And => todo!(),
+            BinaryArithOpKind::Mul => match (self, b) {
+                (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
+                (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
+                (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a * b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
+                (Value::WitnessOf(a), Value::WitnessOf(b)) => match (a.as_ref(), b.as_ref()) {
+                    (Value::Unknown(_), Value::Unknown(_)) => {
+                        instrumenter.record_constraints(1);
+                        Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter)))
+                    }
+                    _ => Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter))),
+                },
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            (_, _) => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-        };
-
-        // Both concrete → no Mul constraint (known product).
-        // Div by concrete witness is also free (multiply by inverse).
-        if either_wit {
-            Value::WitnessOf(Box::new(result))
-        } else {
-            result
+            BinaryArithOpKind::Div => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a / b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
+                (_, Value::WitnessOf(b)) => match b.as_ref() {
+                    Value::Unknown(_) => {
+                        instrumenter.record_constraints(1);
+                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b, binary_arith_op_kind, instrumenter)))
+                    }
+                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b, binary_arith_op_kind, instrumenter))),
+                },
+                (Value::WitnessOf(a), b) => {
+                    Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter)))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::And => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
+                (Value::Field(_), Value::Field(_)) => todo!(),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
         }
     }
 
