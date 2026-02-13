@@ -249,7 +249,10 @@ impl Types {
                 );
                 Ok(())
             }
-            OpCode::Select { result, cond: _cond, if_t: then, if_f: otherwise } => {
+            OpCode::Select { result, cond, if_t: then, if_f: otherwise } => {
+                let cond_type = function_info.values.get(cond).ok_or_else(|| {
+                    format!("Cond value {:?} not found in type assignments", cond)
+                })?;
                 let then_type = function_info.values.get(then).ok_or_else(|| {
                     format!("Then value {:?} not found in type assignments", then)
                 })?;
@@ -259,10 +262,17 @@ impl Types {
                         otherwise
                     )
                 })?;
-                function_info.values.insert(
-                    *result,
-                    then_type.get_arithmetic_result_type(otherwise_type),
-                );
+                // Alternatives must match (after potential WitnessCastInsertion).
+                // The matched alternative type comes from unifying the two branches.
+                let alt_type = then_type.get_arithmetic_result_type(otherwise_type);
+                // If cond is WitnessOf and alternatives are not already WitnessOf,
+                // the result is WitnessOf(alt_type). Otherwise result = alt_type.
+                let result_type = if cond_type.is_witness_of() && !alt_type.is_witness_of() {
+                    Type::witness_of(alt_type)
+                } else {
+                    alt_type
+                };
+                function_info.values.insert(*result, result_type);
                 Ok(())
             }
             OpCode::WriteWitness { result, value } => {

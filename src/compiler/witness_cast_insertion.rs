@@ -395,8 +395,12 @@ impl WitnessCastInsertion {
                         if_t,
                         if_f,
                     } => {
-                        let result_type = type_info.get_value_type(r);
-                        let target_type = result_type.clone();
+                        // Cast branches to match each other, NOT to the full result
+                        // type (which may include WitnessOf from the condition).
+                        // The target is the unified type of the two alternatives.
+                        let if_t_type = type_info.get_value_type(if_t);
+                        let if_f_type = type_info.get_value_type(if_f);
+                        let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
                         let if_t = self.convert_if_needed(
                             if_t,
                             &target_type,

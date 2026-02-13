@@ -380,13 +380,48 @@ impl ExplicitWitness {
                                 function_type_info.get_value_type(cond).is_witness_of();
                             let l_taint = function_type_info.get_value_type(l).is_witness_of();
                             let r_taint = function_type_info.get_value_type(r).is_witness_of();
-                            // The result is cond * l + (1 - cond) * r
-                            // If either cond or both l and r and pure, this becomes a linear combination
-                            // and as such doesn't need a witness
-                            if !cond_taint || (!l_taint && !r_taint) {
+                            // The result is cond * l + (1 - cond) * r = cond * (l - r) + r
+                            // If cond is pure, this is just a conditional move
+                            if !cond_taint {
                                 new_instructions.push(instruction);
                                 continue;
                             }
+                            // If both branches are pure, result is a linear combination
+                            // of cond and constants: cond * (l - r) + r. No constraint needed.
+                            if !l_taint && !r_taint {
+                                let neg_one = function.push_field_const(ark_ff::Fp::from(-1));
+                                let neg_r = function.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Mul,
+                                    result: neg_r,
+                                    lhs: r,
+                                    rhs: neg_one,
+                                });
+                                let l_sub_r = function.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Add,
+                                    result: l_sub_r,
+                                    lhs: l,
+                                    rhs: neg_r,
+                                });
+                                // cond * (l - r): l_sub_r is a constant, cond is witness
+                                let cond_times_diff = function.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Mul,
+                                    result: cond_times_diff,
+                                    lhs: l_sub_r,
+                                    rhs: cond,
+                                });
+                                // result = cond * (l - r) + r
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Add,
+                                    result: res,
+                                    lhs: cond_times_diff,
+                                    rhs: r,
+                                });
+                                continue;
+                            }
+                            // At least one branch is witness: full lowering with constraint
                             let select_witness = function.fresh_value();
                             new_instructions.push(OpCode::Select {
                                 result: select_witness,

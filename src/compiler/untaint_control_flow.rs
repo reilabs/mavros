@@ -6,7 +6,7 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, CallTarget, Function, FunctionId, OpCode, SSA, Terminator},
+    ssa::{BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SSA, Terminator, ValueId},
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
 };
@@ -72,6 +72,19 @@ impl UntaintControlFlow {
         } else {
             None
         };
+
+        // Build map of Cast { target: WitnessOf } results → pre-cast values.
+        // WitnessCastInsertion inserts these casts at Jmp boundaries to match
+        // merge block param types. We strip them from Select branches so that
+        // the Select typing rule derives WitnessOf from the condition instead.
+        let mut witness_cast_strip: HashMap<ValueId, ValueId> = HashMap::new();
+        for (_, block) in function.get_blocks() {
+            for instr in block.get_instructions() {
+                if let OpCode::Cast { result, value, target: CastTarget::WitnessOf } = instr {
+                    witness_cast_strip.insert(*result, *value);
+                }
+            }
+        }
 
         let mut block_taint_vars = HashMap::new();
         for (block_id, _) in function.get_blocks() {
@@ -369,6 +382,10 @@ impl UntaintControlFlow {
                                             .iter()
                                             .zip(args_passed_from_rhs.iter()),
                                     ) {
+                                        // Strip WitnessOf casts from branches — the Select
+                                        // typing rule derives WitnessOf from the condition.
+                                        let lhs = witness_cast_strip.get(lhs).unwrap_or(lhs);
+                                        let rhs = witness_cast_strip.get(rhs).unwrap_or(rhs);
                                         function.get_block_mut(merger_block).push_instruction(
                                             OpCode::Select {
                                                 result: *res,
