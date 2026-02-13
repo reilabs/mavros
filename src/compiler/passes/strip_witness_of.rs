@@ -1,6 +1,7 @@
 use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Pass, PassInfo, PassManager},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{CastTarget, Const, OpCode, SSA},
 };
 
@@ -8,7 +9,7 @@ use crate::compiler::{
 ///
 /// In the witgen pipeline, all computation is concrete — there's no need
 /// for the WitnessOf distinction. This pass converts all `WitnessOf(X)` types
-/// back to `X`, turns `CastTarget::WitnessOf` into `Nop`, and converts
+/// back to `X`, removes `Cast { target: WitnessOf }` instructions, and converts
 /// `Const::Witness` to `Const::Field`.
 pub struct StripWitnessOf {}
 
@@ -65,14 +66,34 @@ impl StripWitnessOf {
             }
 
             // Strip from block parameters and instructions
+            let mut replacements = ValueReplacements::new();
             for (_, block) in function.get_blocks_mut() {
                 for (_, tp) in block.get_parameters_mut() {
                     *tp = tp.strip_all_witness();
                 }
 
+                // Remove Cast { target: WitnessOf } by replacing result → value
+                let old_instructions = block.take_instructions();
+                let new_instructions: Vec<_> = old_instructions
+                    .into_iter()
+                    .filter_map(|mut instr| {
+                        if let OpCode::Cast { result, value, target: CastTarget::WitnessOf } = &instr {
+                            replacements.insert(*result, *value);
+                            return None;
+                        }
+                        Self::strip_instruction(&mut instr);
+                        Some(instr)
+                    })
+                    .collect();
+                block.put_instructions(new_instructions);
+            }
+
+            // Apply replacements for removed WitnessOf casts
+            for (_, block) in function.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
-                    Self::strip_instruction(instruction);
+                    replacements.replace_instruction(instruction);
                 }
+                replacements.replace_terminator(block.get_terminator_mut());
             }
         }
     }
@@ -88,10 +109,8 @@ impl StripWitnessOf {
             OpCode::Alloc { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
-            OpCode::Cast { target, .. } => {
-                if matches!(target, CastTarget::WitnessOf) {
-                    *target = CastTarget::Nop;
-                }
+            OpCode::Cast { .. } => {
+                // WitnessOf casts are removed above; other casts pass through
             }
             OpCode::MkTuple { element_types, .. } => {
                 for tp in element_types.iter_mut() {
