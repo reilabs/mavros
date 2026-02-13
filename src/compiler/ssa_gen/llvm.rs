@@ -262,14 +262,17 @@ fn convert_branch(
                 .ok_or_else(|| "malformed conditional branch: missing condition".to_string())?;
             let cond_id = resolve_value(function, value_map, cond)?;
 
-            let then_bb = inst
+            // For LLVM `br i1 <cond>, label <iftrue>, label <iffalse>`, inkwell's
+            // branch operands expose labels in reverse order for this instruction:
+            // operand 1 => false target, operand 2 => true target.
+            let else_bb = inst
                 .get_operand(1)
                 .and_then(|v| v.right())
-                .ok_or_else(|| "malformed conditional branch: missing then target".to_string())?;
-            let else_bb = inst
+                .ok_or_else(|| "malformed conditional branch: missing else target".to_string())?;
+            let then_bb = inst
                 .get_operand(2)
                 .and_then(|v| v.right())
-                .ok_or_else(|| "malformed conditional branch: missing else target".to_string())?;
+                .ok_or_else(|| "malformed conditional branch: missing then target".to_string())?;
 
             let then_target = block_map[&then_bb];
             let else_target = block_map[&else_bb];
