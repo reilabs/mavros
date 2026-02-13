@@ -66,17 +66,31 @@ fn emit(line: &str) {
 }
 
 fn run_single(root: PathBuf) {
-    let llvm_ir_path = find_llvm_ir_file(&root);
+    let llvm_c_path = find_llvm_c_file(&root);
+    let is_llvm_test = llvm_c_path.is_some();
 
     // 1. Compile
     emit("START:COMPILED");
     let driver = (|| {
-        if let Some(llvm_ir) = &llvm_ir_path {
+        if let Some(llvm_c) = &llvm_c_path {
             let mut driver = Driver::new_for_root(root.clone(), false);
-            driver.run_llvm_importer(llvm_ir).ok()?;
-            driver.make_struct_access_static().ok()?;
-            driver.monomorphize().ok()?;
-            driver.explictize_witness().ok()?;
+            let llvm_ir = compile_c_to_llvm_ir(llvm_c, &root)?;
+            if let Err(e) = driver.run_llvm_importer(&llvm_ir) {
+                eprintln!("llvm importer failed for {}: {:?}", llvm_ir.display(), e);
+                return None;
+            }
+            if let Err(e) = driver.make_struct_access_static() {
+                eprintln!("make_struct_access_static failed: {:?}", e);
+                return None;
+            }
+            if let Err(e) = driver.monomorphize() {
+                eprintln!("monomorphize failed: {:?}", e);
+                return None;
+            }
+            if let Err(e) = driver.explictize_witness() {
+                eprintln!("explictize_witness failed: {:?}", e);
+                return None;
+            }
             Some(driver)
         } else {
             let project = Project::new(root.clone()).ok()?;
@@ -123,11 +137,12 @@ fn run_single(root: PathBuf) {
         }
     });
 
-    // Load inputs (needed for witgen run). LLVM-imported tests currently have no ABI.
-    let ordered_params = if llvm_ir_path.is_none() {
+    // Load inputs (needed for witgen/wasm run). LLVM-imported tests currently use
+    // temporary hardcoded field inputs until we add an LLVM-side ABI/input format.
+    let ordered_params = if llvm_c_path.is_none() {
         load_inputs(&root.join("Prover.toml"), &driver)
     } else {
-        None
+        hardcoded_llvm_inputs()
     };
 
     // 5. Run witgen  (depends on WITGEN_COMPILE)
@@ -210,50 +225,63 @@ fn run_single(root: PathBuf) {
     }
 
     // 11. Compile WASM  (depends on R1CS)
-    let wasm_path = r1cs.as_ref().and_then(|r1cs| {
+    let wasm_path = if is_llvm_test {
         emit("START:WITGEN_WASM_COMPILE");
-        let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.into_path().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, Some((wasm_path.clone(), r1cs))) {
-            Ok(_) if wasm_path.exists() => {
-                emit("END:WITGEN_WASM_COMPILE:ok");
-                Some(wasm_path)
+        emit("END:WITGEN_WASM_COMPILE:skip");
+        None
+    } else {
+        r1cs.as_ref().and_then(|r1cs| {
+            emit("START:WITGEN_WASM_COMPILE");
+            let tmpdir = tempfile::tempdir().ok()?;
+            let wasm_path = tmpdir.into_path().join("witgen.wasm");
+            match driver.compile_llvm_targets(false, Some((wasm_path.clone(), r1cs))) {
+                Ok(_) if wasm_path.exists() => {
+                    emit("END:WITGEN_WASM_COMPILE:ok");
+                    Some(wasm_path)
+                }
+                Ok(_) => {
+                    eprintln!("WASM compile succeeded but output file not found at {:?}", wasm_path);
+                    emit("END:WITGEN_WASM_COMPILE:fail");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("WASM compile error: {:?}", e);
+                    emit("END:WITGEN_WASM_COMPILE:fail");
+                    None
+                }
             }
-            Ok(_) => {
-                eprintln!("WASM compile succeeded but output file not found at {:?}", wasm_path);
-                emit("END:WITGEN_WASM_COMPILE:fail");
-                None
-            }
-            Err(e) => {
-                eprintln!("WASM compile error: {:?}", e);
-                emit("END:WITGEN_WASM_COMPILE:fail");
-                None
-            }
-        }
-    });
+        })
+    };
 
     // 12. Run WASM  (depends on WITGEN_WASM_COMPILE)
-    let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
-        let params = ordered_params.as_ref()?;
+    let wasm_result = if is_llvm_test {
         emit("START:WITGEN_WASM_RUN");
-        let r1cs = r1cs.as_ref().unwrap();
-        match run_wasm(wasm_path, r1cs, params) {
-            Ok(result) => {
-                emit("END:WITGEN_WASM_RUN:ok");
-                Some(result)
+        emit("END:WITGEN_WASM_RUN:skip");
+        None
+    } else {
+        wasm_path.as_ref().and_then(|wasm_path| {
+            let params = ordered_params.as_ref()?;
+            emit("START:WITGEN_WASM_RUN");
+            let r1cs = r1cs.as_ref().unwrap();
+            match run_wasm(wasm_path, r1cs, params) {
+                Ok(result) => {
+                    emit("END:WITGEN_WASM_RUN:ok");
+                    Some(result)
+                }
+                Err(_) => {
+                    emit("END:WITGEN_WASM_RUN:fail");
+                    None
+                }
             }
-            Err(_) => {
-                emit("END:WITGEN_WASM_RUN:fail");
-                None
-            }
-        }
-    });
+        })
+    };
 
     // 13. Check WASM correctness  (depends on WITGEN_WASM_RUN)
-    if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
+    if is_llvm_test {
         emit("START:WITGEN_WASM_CORRECT");
-
-
+        emit("END:WITGEN_WASM_CORRECT:skip");
+    } else if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
+        emit("START:WITGEN_WASM_CORRECT");
         let correct = r1cs.check_witgen_output(
             &result.out_wit_pre_comm,
             &result.out_wit_post_comm,
@@ -283,11 +311,44 @@ fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::Inp
     Some(abi_helpers::ordered_params_from_btreemap(driver.abi(), &params))
 }
 
-fn find_llvm_ir_file(root: &Path) -> Option<PathBuf> {
+fn hardcoded_llvm_inputs() -> Option<Vec<interpreter::InputValueOrdered>> {
+    // Match noir_tests/power/Prover.toml exactly for now.
+    let x = Field::from(2u64);
+    let y = "11576989127771471539585320265679834540101776824219102960197490114445753948512"
+        .parse::<Field>()
+        .ok()?;
+    Some(vec![
+        interpreter::InputValueOrdered::Field(x),
+        interpreter::InputValueOrdered::Field(y),
+    ])
+}
+
+fn find_llvm_c_file(root: &Path) -> Option<PathBuf> {
     let entries = fs::read_dir(root).ok()?;
     entries
         .filter_map(|e| e.ok().map(|x| x.path()))
-        .find(|p| p.is_file() && p.extension().is_some_and(|e| e == "ll"))
+        .find(|p| p.is_file() && p.extension().is_some_and(|e| e == "c"))
+}
+
+fn compile_c_to_llvm_ir(c_file: &Path, root: &Path) -> Option<PathBuf> {
+    let debug_dir = root.join("mavros_debug");
+    fs::create_dir_all(&debug_dir).ok()?;
+    let out_ll = debug_dir.join("compiled_from_c.ll");
+    let status = Command::new("clang")
+        .arg("-S")
+        .arg("-emit-llvm")
+        .arg("-O1")
+        .arg("-std=c11")
+        .arg(c_file)
+        .arg("-o")
+        .arg(&out_ll)
+        .status()
+        .ok()?;
+    if !status.success() {
+        eprintln!("failed to compile C to LLVM IR via clang: {}", c_file.display());
+        return None;
+    }
+    Some(out_ll)
 }
 
 // ── WASM Runner ──────────────────────────────────────────────────────

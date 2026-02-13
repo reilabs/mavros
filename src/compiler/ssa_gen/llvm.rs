@@ -1,15 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use ark_ff::BigInt;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::values::{AnyValue, AsValueRef, BasicValue, BasicValueEnum, CallSiteValue, InstructionOpcode, InstructionValue, IntValue, PhiValue};
-use inkwell::{IntPredicate, types::BasicTypeEnum};
+use inkwell::{AddressSpace, IntPredicate, types::BasicTypeEnum};
 
 use crate::compiler::Field;
 use crate::compiler::ir::r#type::{Empty, Type};
-use crate::compiler::ssa::{BlockId, Function, SSA, ValueId};
+use crate::compiler::ssa::{BlockId, CastTarget, Function, SSA, ValueId};
 
 /// Convert a constrained subset of LLVM IR into mavros SSA.
 ///
@@ -18,12 +18,13 @@ use crate::compiler::ssa::{BlockId, Function, SSA, ValueId};
 /// - Integer add/sub/mul/div/and, integer `icmp` (eq, ult)
 /// - `phi` nodes (translated to block parameters)
 /// - `br`/`ret` terminators
-/// - Calls to `__field_mul` and `__assert_eq`
+/// - Calls to `__field_mul`, `__assert_eq`, and `__field_from_u64`
 ///
 /// Field values are expected to use one of:
 /// - `[4 x i64]`
 /// - `<4 x i64>`
 /// - a single-field struct wrapping one of the above.
+/// - `ptr addrspace(7)` (treated as an opaque Field handle for injected builtins).
 pub fn from_llvm_ir_file(path: &Path) -> Result<SSA<Empty>, String> {
     let ir = std::fs::read(path)
         .map_err(|e| format!("failed to read LLVM IR file {}: {e}", path.display()))?;
@@ -101,7 +102,9 @@ fn convert_function(main: inkwell::values::FunctionValue<'_>) -> Result<Function
         }
     }
 
-    for bb in &llvm_blocks {
+    let processing_order = reverse_postorder_from_entry(&llvm_blocks);
+
+    for bb in &processing_order {
         let block_id = block_map[bb];
 
         for inst in bb.get_instructions() {
@@ -188,6 +191,40 @@ fn convert_function(main: inkwell::values::FunctionValue<'_>) -> Result<Function
     Ok(function)
 }
 
+fn reverse_postorder_from_entry<'ctx>(
+    llvm_blocks: &[inkwell::basic_block::BasicBlock<'ctx>],
+) -> Vec<inkwell::basic_block::BasicBlock<'ctx>> {
+    if llvm_blocks.is_empty() {
+        return Vec::new();
+    }
+
+    fn visit<'ctx>(
+        bb: inkwell::basic_block::BasicBlock<'ctx>,
+        seen: &mut HashSet<inkwell::basic_block::BasicBlock<'ctx>>,
+        out_post: &mut Vec<inkwell::basic_block::BasicBlock<'ctx>>,
+    ) {
+        if !seen.insert(bb) {
+            return;
+        }
+        if let Some(term) = bb.get_terminator()
+            && term.get_opcode() == InstructionOpcode::Br
+        {
+            for i in 0..term.get_num_operands() {
+                if let Some(succ) = term.get_operand(i).and_then(|v| v.right()) {
+                    visit(succ, seen, out_post);
+                }
+            }
+        }
+        out_post.push(bb);
+    }
+
+    let mut seen = HashSet::new();
+    let mut post = Vec::new();
+    visit(llvm_blocks[0], &mut seen, &mut post);
+    post.reverse();
+    post
+}
+
 fn convert_branch(
     function: &mut Function<Empty>,
     block_id: BlockId,
@@ -234,16 +271,46 @@ fn convert_branch(
                 .and_then(|v| v.right())
                 .ok_or_else(|| "malformed conditional branch: missing else target".to_string())?;
 
-            function.terminate_block_with_jmp_if(
-                block_id,
-                cond_id,
-                block_map[&then_bb],
-                block_map[&else_bb],
-            );
+            let then_target = block_map[&then_bb];
+            let else_target = block_map[&else_bb];
+
+            let then_branch_target =
+                materialize_conditional_edge(function, block_id, then_target, value_map, edge_args)?;
+            let else_branch_target =
+                materialize_conditional_edge(function, block_id, else_target, value_map, edge_args)?;
+
+            function.terminate_block_with_jmp_if(block_id, cond_id, then_branch_target, else_branch_target);
             Ok(())
         }
         n => Err(format!("unsupported branch operand count: {n}")),
     }
+}
+
+fn materialize_conditional_edge(
+    function: &mut Function<Empty>,
+    pred_id: BlockId,
+    target_id: BlockId,
+    value_map: &HashMap<usize, ValueId>,
+    edge_args: &HashMap<(BlockId, BlockId), Vec<BasicValueEnum<'_>>>,
+) -> Result<BlockId, String> {
+    let args = edge_args
+        .get(&(pred_id, target_id))
+        .map(|values| {
+            values
+                .iter()
+                .map(|v| resolve_value(function, value_map, *v))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    if args.is_empty() {
+        return Ok(target_id);
+    }
+
+    let edge_block = function.add_block();
+    function.terminate_block_with_jmp(edge_block, target_id, args);
+    Ok(edge_block)
 }
 
 fn convert_call(
@@ -277,6 +344,9 @@ fn convert_call(
             }
             let result = function.push_mul(block_id, args[0], args[1]);
             value_map.insert(inst.as_value_ref() as usize, result);
+            if let Some(ret) = call.try_as_basic_value().left() {
+                value_map.insert(ret.as_value_ref() as usize, result);
+            }
             Ok(())
         }
         "__assert_eq" => {
@@ -286,8 +356,19 @@ fn convert_call(
             function.push_assert_eq(block_id, args[0], args[1]);
             Ok(())
         }
+        "__field_from_u64" => {
+            if args.len() != 1 {
+                return Err("__field_from_u64 expects exactly 1 argument".to_string());
+            }
+            let result = function.push_cast(block_id, args[0], CastTarget::Field);
+            value_map.insert(inst.as_value_ref() as usize, result);
+            if let Some(ret) = call.try_as_basic_value().left() {
+                value_map.insert(ret.as_value_ref() as usize, result);
+            }
+            Ok(())
+        }
         _ => Err(format!(
-            "unsupported call target `{callee_name}`; expected __field_mul or __assert_eq"
+            "unsupported call target `{callee_name}`; expected __field_mul, __assert_eq, or __field_from_u64"
         )),
     }
 }
@@ -415,6 +496,15 @@ fn convert_llvm_type(ty: BasicTypeEnum<'_>) -> Result<Type<Empty>, String> {
             }
             Err(format!("unsupported LLVM struct type for import: {s}"))
         }
+        BasicTypeEnum::PointerType(p) => {
+            if p.get_address_space() == AddressSpace::from(FIELD_ADDRSPACE) {
+                Ok(Type::field(Empty))
+            } else {
+                Err(format!(
+                    "unsupported LLVM pointer type for import: expected ptr addrspace({FIELD_ADDRSPACE}), got {p}"
+                ))
+            }
+        }
         _ => Err(format!("unsupported LLVM type for import: {ty}")),
     }
 }
@@ -427,7 +517,32 @@ mod tests {
 
     #[test]
     fn imports_power_style_llvm() {
-        let ir = include_str!("../../../llvm_tests/power/power.ll");
+        let ir = r#"
+declare ptr addrspace(7) @__field_mul(ptr addrspace(7), ptr addrspace(7))
+declare ptr addrspace(7) @__field_from_u64(i64)
+declare void @__assert_eq(ptr addrspace(7), ptr addrspace(7))
+
+define void @mavros_main(ptr addrspace(7) %x, ptr addrspace(7) %y) {
+entry:
+  %r0 = call ptr addrspace(7) @__field_from_u64(i64 1)
+  br label %loop
+
+loop:
+  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]
+  %r = phi ptr addrspace(7) [ %r0, %entry ], [ %r_next, %body ]
+  %cond = icmp ult i32 %i, 1000000
+  br i1 %cond, label %body, label %exit
+
+body:
+  %r_next = call ptr addrspace(7) @__field_mul(ptr addrspace(7) %r, ptr addrspace(7) %x)
+  %i_next = add i32 %i, 1
+  br label %loop
+
+exit:
+  call void @__assert_eq(ptr addrspace(7) %r, ptr addrspace(7) %y)
+  ret void
+}
+"#;
         let ssa = from_llvm_ir_text(ir).expect("llvm import should succeed");
         let main = ssa.get_main();
 
@@ -448,3 +563,4 @@ mod tests {
             .any(|(_, b)| matches!(b.get_terminator(), Some(Terminator::Jmp(_, _)))));
     }
 }
+const FIELD_ADDRSPACE: u16 = 7;
