@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod constraint_solver;
 pub mod flow_analysis;
 pub mod ir;
+#[cfg(feature = "wasm")]
 pub mod llvm_codegen;
 pub mod monomorphization;
 pub mod pass_manager;

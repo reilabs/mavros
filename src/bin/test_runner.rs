@@ -15,6 +15,7 @@ use mavros::{
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
+#[cfg(feature = "wasm")]
 use wasmtime::{Engine, Linker, Memory, Module, Store};
 
 fn main() {
@@ -229,6 +230,7 @@ fn run_single(root: PathBuf) {
     }
 
     // 11. Compile WASM  (depends on R1CS)
+    #[cfg(feature = "wasm")]
     let wasm_path = r1cs.as_ref().and_then(|r1cs| {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
@@ -255,6 +257,7 @@ fn run_single(root: PathBuf) {
     });
 
     // 12. Run WASM  (depends on WITGEN_WASM_COMPILE)
+    #[cfg(feature = "wasm")]
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
@@ -272,6 +275,7 @@ fn run_single(root: PathBuf) {
     });
 
     // 13. Check WASM correctness  (depends on WITGEN_WASM_RUN)
+    #[cfg(feature = "wasm")]
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
@@ -290,6 +294,7 @@ fn run_single(root: PathBuf) {
     }
 
     // 14. AD WASM Compile  (depends on R1CS, not yet implemented)
+    #[cfg(feature = "wasm")]
     let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|_r1cs| {
         emit("START:AD_WASM_COMPILE");
         panic!("AD WASM Compile is not yet implemented");
@@ -301,6 +306,7 @@ fn run_single(root: PathBuf) {
     });
 
     // 15. AD WASM Run  (depends on AD_WASM_COMPILE, not yet implemented)
+    #[cfg(feature = "wasm")]
     let ad_wasm_result: Option<()> = ad_wasm_path.as_ref().and_then(|_wasm_path| {
         emit("START:AD_WASM_RUN");
         panic!("AD WASM Run is not yet implemented");
@@ -312,6 +318,7 @@ fn run_single(root: PathBuf) {
     });
 
     // 16. AD WASM Correct  (depends on AD_WASM_RUN, not yet implemented)
+    #[cfg(feature = "wasm")]
     if let (Some(_result), Some(_r1cs)) = (&ad_wasm_result, &r1cs) {
         emit("START:AD_WASM_CORRECT");
         panic!("AD WASM Correct is not yet implemented");
@@ -333,9 +340,11 @@ fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::Inp
 
 // ── WASM Runner ──────────────────────────────────────────────────────
 
+#[cfg(feature = "wasm")]
 const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
 
 /// Output from running WASM witgen
+#[cfg(feature = "wasm")]
 struct WasmResult {
     out_wit_pre_comm: Vec<Field>,
     out_wit_post_comm: Vec<Field>,
@@ -345,6 +354,7 @@ struct WasmResult {
 }
 
 /// Read a field element from WASM memory
+#[cfg(feature = "wasm")]
 fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> Field {
     use ark_ff::BigInt;
     let data = memory.data(&store);
@@ -357,6 +367,7 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
 }
 
 /// Write a field element to WASM memory (writes Montgomery form)
+#[cfg(feature = "wasm")]
 fn write_field_to_memory(memory: &Memory, store: &mut Store<()>, ptr: u32, field: Field) {
     // Access the internal Montgomery representation directly
     // field.0 is the BigInt, field.0.0 is the [u64; 4] limbs in Montgomery form
@@ -370,6 +381,7 @@ fn write_field_to_memory(memory: &Memory, store: &mut Store<()>, ptr: u32, field
 }
 
 /// Flatten an InputValueOrdered into a list of Field elements
+#[cfg(feature = "wasm")]
 fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<Field> {
     let mut result = Vec::new();
     match value {
@@ -391,6 +403,7 @@ fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<Field> {
     result
 }
 
+#[cfg(feature = "wasm")]
 fn run_wasm(
     wasm_path: &Path,
     r1cs: &R1CS,

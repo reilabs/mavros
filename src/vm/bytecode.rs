@@ -12,6 +12,7 @@ use crate::{
 };
 
 use crate::vm::array::DataType;
+#[cfg(feature = "plotting")]
 use plotters::prelude::*;
 use std::fmt::Display;
 use std::path::Path;
@@ -62,7 +63,11 @@ impl AllocationInstrumenter {
         self.events.push(AlocationEvent::Free(ty, size));
     }
 
+    /// Returns the final memory usage in bytes. When the `plotting` feature is
+    /// enabled, also writes a PNG chart to `path`.
     pub fn plot(&self, path: &Path) -> usize {
+        let _ = path; // used only when "plotting" is enabled
+
         // Calculate memory usage over time
         let mut stack_usage = Vec::new();
         let mut heap_usage = Vec::new();
@@ -94,6 +99,14 @@ impl AllocationInstrumenter {
             return 0; // No events to plot
         }
 
+        #[cfg(feature = "plotting")]
+        self.draw_chart(path, &stack_usage, &heap_usage);
+
+        *stack_usage.last().unwrap() + *heap_usage.last().unwrap()
+    }
+
+    #[cfg(feature = "plotting")]
+    fn draw_chart(&self, path: &Path, stack_usage: &[usize], heap_usage: &[usize]) {
         // Calculate total memory usage
         let total_usage: Vec<usize> = stack_usage
             .iter()
@@ -118,7 +131,7 @@ impl AllocationInstrumenter {
         let common_max = max_total.max(max_stack).max(max_heap);
 
         // Determine the best unit and conversion factor
-        let (unit, divisor, y_label) = if common_max >= 2 * 1024 * 1024 {
+        let (_unit, divisor, y_label) = if common_max >= 2 * 1024 * 1024 {
             ("MB", 1024 * 1024, "Memory Size (MB)".to_string())
         } else if common_max >= 2 * 1024 {
             ("KB", 1024, "Memory Size (KB)".to_string())
@@ -253,8 +266,6 @@ impl AllocationInstrumenter {
             .unwrap();
 
         root.present().unwrap();
-
-        *stack_usage.last().unwrap() + *heap_usage.last().unwrap()
     }
 }
 
