@@ -10,7 +10,6 @@ use crate::{
         analysis::types::Types,
         codegen::CodeGen,
         flow_analysis::FlowAnalysis,
-        monomorphization::Monomorphization,
         pass_manager::PassManager,
         passes::{
             arithmetic_simplifier::ArithmeticSimplifier, defunctionalize::Defunctionalize, witness_lowering::WitnessLowering, common_subexpression_elimination::CSE, condition_propagation::ConditionPropagation, dead_code_elimination::{self, DCE}, deduplicate_phis::DeduplicatePhis, explicit_witness::ExplicitWitness, fix_double_jumps::FixDoubleJumps, mem2reg::Mem2Reg, prepare_entry_point::PrepareEntryPoint, pull_into_assert::PullIntoAssert, rc_insertion::RCInsertion, remove_unreachable_blocks::RemoveUnreachableBlocks, remove_unreachable_functions::RemoveUnreachableFunctions, specializer::Specializer, strip_witness_of::StripWitnessOf, struct_access_simplifier::MakeStructAccessStatic, witness_write_to_fresh::WitnessWriteToFresh, witness_write_to_void::WitnessWriteToVoid
@@ -155,17 +154,7 @@ impl Driver {
         }
 
         let mut witness_inference = WitnessTypeInference::new();
-        witness_inference.run(&ssa, &flow_analysis).unwrap();
-
-        fs::write(
-            self.get_debug_output_dir()
-                .join("witness_inference_ssa.txt"),
-            ssa.to_string(&witness_inference),
-        )
-        .unwrap();
-
-        let mut monomorphization = Monomorphization::new();
-        monomorphization.run(&mut ssa, &mut witness_inference).unwrap();
+        witness_inference.run(&mut ssa, &flow_analysis).unwrap();
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),

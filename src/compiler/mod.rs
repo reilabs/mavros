@@ -1,16 +1,13 @@
 pub mod analysis;
 pub mod ssa_gen;
 pub mod codegen;
-pub mod constraint_solver;
 pub mod flow_analysis;
 pub mod ir;
 pub mod llvm_codegen;
-pub mod monomorphization;
 pub mod pass_manager;
 pub mod passes;
 pub mod r1cs_gen;
 pub mod ssa;
-pub mod union_find;
 pub mod untaint_control_flow;
 pub mod witness_cast_insertion;
 pub mod witness_info;

@@ -166,7 +166,7 @@ impl WitnessCastInsertion {
         match (typ.expr, wt) {
             (TypeExpr::Field, WitnessType::Scalar(info)) => {
                 let base = Type::field();
-                if info.expect_constant().is_witness() {
+                if info.is_witness() {
                     Type::witness_of(base)
                 } else {
                     base
@@ -174,7 +174,7 @@ impl WitnessCastInsertion {
             }
             (TypeExpr::U(size), WitnessType::Scalar(info)) => {
                 let base = Type::u(size);
-                if info.expect_constant().is_witness() {
+                if info.is_witness() {
                     Type::witness_of(base)
                 } else {
                     base
@@ -184,7 +184,7 @@ impl WitnessCastInsertion {
                 let base = self
                     .apply_witness_type(*inner, inner_wt.as_ref())
                     .array_of(size);
-                if top.expect_constant().is_witness() {
+                if top.is_witness() {
                     Type::witness_of(base)
                 } else {
                     base
@@ -194,7 +194,7 @@ impl WitnessCastInsertion {
                 let base = self
                     .apply_witness_type(*inner, inner_wt.as_ref())
                     .slice_of();
-                if top.expect_constant().is_witness() {
+                if top.is_witness() {
                     Type::witness_of(base)
                 } else {
                     base
@@ -204,7 +204,7 @@ impl WitnessCastInsertion {
                 let base = self
                     .apply_witness_type(*inner, inner_wt.as_ref())
                     .ref_of();
-                if top.expect_constant().is_witness() {
+                if top.is_witness() {
                     Type::witness_of(base)
                 } else {
                     base
@@ -220,7 +220,7 @@ impl WitnessCastInsertion {
                         })
                         .collect(),
                 );
-                if top.expect_constant().is_witness() {
+                if top.is_witness() {
                     Type::witness_of(base)
                 } else {
                     base

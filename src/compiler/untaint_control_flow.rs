@@ -19,7 +19,7 @@ fn get_witness_or_pure(function_wt: &FunctionWitnessType, v: crate::compiler::ss
     function_wt
         .value_witness_types
         .get(&v)
-        .map(|wt| wt.toplevel_info().expect_constant())
+        .map(|wt| wt.toplevel_info())
         .unwrap_or(ConstantWitness::Pure)
 }
 
