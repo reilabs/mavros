@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use tracing::{Level, instrument};
+use tracing::{instrument, Level};
 
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SSA, Terminator, ValueId},
+    ssa::{BinaryArithOpKind, CallTarget, Function, FunctionId, OpCode, Terminator, SSA},
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
 };
@@ -14,8 +14,11 @@ use crate::compiler::{
 pub struct UntaintControlFlow {}
 
 /// Look up the witness level for a value, defaulting to Pure for values
-/// not present in the witness type map (e.g., values created by WitnessCastInsertion).
-fn get_witness_or_pure(function_wt: &FunctionWitnessType, v: crate::compiler::ssa::ValueId) -> ConstantWitness {
+/// not present in the witness type map (e.g., values created after witness inference).
+fn get_witness_or_pure(
+    function_wt: &FunctionWitnessType,
+    v: crate::compiler::ssa::ValueId,
+) -> ConstantWitness {
     function_wt
         .value_witness_types
         .get(&v)
@@ -62,29 +65,11 @@ impl UntaintControlFlow {
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
-        let cfg_witness_param = if matches!(
-            function_wt.cfg_witness,
-            WitnessInfo::Witness
-        ) {
-            Some(
-                function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))),
-            )
+        let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
+            Some(function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))))
         } else {
             None
         };
-
-        // Build map of Cast { target: WitnessOf } results → pre-cast values.
-        // WitnessCastInsertion inserts these casts at Jmp boundaries to match
-        // merge block param types. We strip them from Select branches so that
-        // the Select typing rule derives WitnessOf from the condition instead.
-        let mut witness_cast_strip: HashMap<ValueId, ValueId> = HashMap::new();
-        for (_, block) in function.get_blocks() {
-            for instr in block.get_instructions() {
-                if let OpCode::Cast { result, value, target: CastTarget::WitnessOf } = instr {
-                    witness_cast_strip.insert(*result, *value);
-                }
-            }
-        }
 
         let mut block_taint_vars = HashMap::new();
         for (block_id, _) in function.get_blocks() {
@@ -125,24 +110,22 @@ impl UntaintControlFlow {
                     | OpCode::AssertR1C { .. } => {
                         new_instructions.push(instruction);
                     }
-                    OpCode::AssertEq { lhs, rhs } => {
-                        match block_taint {
-                            Some(taint) => {
-                                let new_rhs = function.fresh_value();
-                                new_instructions.push(OpCode::Select {
-                                    result: new_rhs,
-                                    cond: taint,
-                                    if_t: rhs,
-                                    if_f: lhs,
-                                });
-                                new_instructions.push(OpCode::AssertEq {
-                                    lhs: lhs,
-                                    rhs: new_rhs,
-                                })
-                            }
-                            None => new_instructions.push(instruction),
+                    OpCode::AssertEq { lhs, rhs } => match block_taint {
+                        Some(taint) => {
+                            let new_rhs = function.fresh_value();
+                            new_instructions.push(OpCode::Select {
+                                result: new_rhs,
+                                cond: taint,
+                                if_t: rhs,
+                                if_f: lhs,
+                            });
+                            new_instructions.push(OpCode::AssertEq {
+                                lhs: lhs,
+                                rhs: new_rhs,
+                            })
                         }
-                    }
+                        None => new_instructions.push(instruction),
+                    },
                     OpCode::Store { ptr, value: v } => {
                         let ptr_wt = get_witness_or_pure(function_wt, ptr);
                         // writes to dynamic ptr not supported
@@ -242,11 +225,18 @@ impl UntaintControlFlow {
                             args: args,
                         });
                     }
-                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
+                        ..
+                    } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
 
-                    OpCode::Todo { payload, results, result_types } => {
+                    OpCode::Todo {
+                        payload,
+                        results,
+                        result_types,
+                    } => {
                         new_instructions.push(OpCode::Todo {
                             payload,
                             results,
@@ -382,10 +372,6 @@ impl UntaintControlFlow {
                                             .iter()
                                             .zip(args_passed_from_rhs.iter()),
                                     ) {
-                                        // Strip WitnessOf casts from branches — the Select
-                                        // typing rule derives WitnessOf from the condition.
-                                        let lhs = witness_cast_strip.get(lhs).unwrap_or(lhs);
-                                        let rhs = witness_cast_strip.get(rhs).unwrap_or(rhs);
                                         function.get_block_mut(merger_block).push_instruction(
                                             OpCode::Select {
                                                 result: *res,

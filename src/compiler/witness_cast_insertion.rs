@@ -1,44 +1,32 @@
 use std::collections::HashMap;
 
-use tracing::{Level, instrument};
+use tracing::{instrument, Level};
 
 use crate::compiler::{
     analysis::types::Types,
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Function, OpCode,
-        SSA, SeqType, Terminator, TupleIdx,
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Function, OpCode, SeqType,
+        Terminator, TupleIdx, SSA,
     },
     witness_info::{FunctionWitnessType, WitnessType},
     witness_type_inference::WitnessTypeInference,
 };
 
-pub struct WitnessCastInsertion {}
+pub struct WriteWitnessTypes {}
 
-impl WitnessCastInsertion {
+impl WriteWitnessTypes {
     pub fn new() -> Self {
         Self {}
     }
 
-    #[instrument(skip_all, name = "WitnessCastInsertion::run")]
+    #[instrument(skip_all, name = "WriteWitnessTypes::run")]
     pub fn run(&mut self, ssa: SSA, witness_inference: &WitnessTypeInference) -> SSA {
-        // Sub-pass 1: Bake WitnessOf into SSA types (prepare_rebuild pattern)
-        let ssa = self.apply_types(ssa, witness_inference);
-
-        // Compute type info for cast insertion
-        let flow_analysis = FlowAnalysis::run(&ssa);
-        let type_info = Types::new().run(&ssa, &flow_analysis);
-
-        // Sub-pass 2: Insert casts at typed-slot boundaries (take_blocks/put_blocks pattern)
-        self.insert_casts(ssa, &type_info)
+        self.write_types(ssa, witness_inference)
     }
 
-    // -----------------------------------------------------------------------
-    // Sub-pass 1: Type Application
-    // -----------------------------------------------------------------------
-
-    fn apply_types(&self, ssa: SSA, witness_inference: &WitnessTypeInference) -> SSA {
+    fn write_types(&self, ssa: SSA, witness_inference: &WitnessTypeInference) -> SSA {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
 
         // Global types: identity (pure types stay as-is)
@@ -46,14 +34,14 @@ impl WitnessCastInsertion {
 
         for (function_id, function) in functions.into_iter() {
             let function_wt = witness_inference.get_function_witness_type(function_id);
-            let new_function = self.apply_types_to_function(function, function_wt);
+            let new_function = self.write_types_to_function(function, function_wt);
             result_ssa.put_function(function_id, new_function);
         }
 
         result_ssa
     }
 
-    fn apply_types_to_function(
+    fn write_types_to_function(
         &self,
         function: Function,
         function_wt: &FunctionWitnessType,
@@ -66,7 +54,7 @@ impl WitnessCastInsertion {
             let mut new_parameters = Vec::new();
             for (value_id, typ) in block.take_parameters() {
                 let wt = function_wt.get_value_witness_type(value_id);
-                new_parameters.push((value_id, self.apply_witness_type(typ, wt)));
+                new_parameters.push((value_id, self.write_witness_type(typ, wt)));
             }
             new_block.put_parameters(new_parameters);
 
@@ -79,7 +67,7 @@ impl WitnessCastInsertion {
                     } => {
                         let r_wt = function_wt.get_value_witness_type(r);
                         let child = r_wt.child_witness_type().unwrap();
-                        let child_typ = self.apply_witness_type(l, &child);
+                        let child_typ = self.write_witness_type(l, &child);
                         OpCode::Alloc {
                             result: r,
                             elem_type: child_typ,
@@ -100,7 +88,7 @@ impl WitnessCastInsertion {
                             result: r,
                             elems: l,
                             seq_type: stp,
-                            elem_type: self.apply_witness_type(tp, &r_wt),
+                            elem_type: self.write_witness_type(tp, &r_wt),
                         }
                     }
                     OpCode::MkTuple {
@@ -120,7 +108,7 @@ impl WitnessCastInsertion {
                             element_types: tps
                                 .iter()
                                 .zip(child_wts.iter())
-                                .map(|(tp, wt)| self.apply_witness_type(tp.clone(), wt))
+                                .map(|(tp, wt)| self.write_witness_type(tp.clone(), wt))
                                 .collect(),
                         }
                     }
@@ -155,14 +143,14 @@ impl WitnessCastInsertion {
         }
 
         for (ret, ret_wt) in returns.into_iter().zip(function_wt.returns_witness.iter()) {
-            let ret_typ = self.apply_witness_type(ret, ret_wt);
+            let ret_typ = self.write_witness_type(ret, ret_wt);
             function.add_return_type(ret_typ);
         }
 
         function
     }
 
-    fn apply_witness_type(&self, typ: Type, wt: &WitnessType) -> Type {
+    fn write_witness_type(&self, typ: Type, wt: &WitnessType) -> Type {
         match (typ.expr, wt) {
             (TypeExpr::Field, WitnessType::Scalar(info)) => {
                 let base = Type::field();
@@ -182,7 +170,7 @@ impl WitnessCastInsertion {
             }
             (TypeExpr::Array(inner, size), WitnessType::Array(top, inner_wt)) => {
                 let base = self
-                    .apply_witness_type(*inner, inner_wt.as_ref())
+                    .write_witness_type(*inner, inner_wt.as_ref())
                     .array_of(size);
                 if top.is_witness() {
                     Type::witness_of(base)
@@ -192,7 +180,7 @@ impl WitnessCastInsertion {
             }
             (TypeExpr::Slice(inner), WitnessType::Array(top, inner_wt)) => {
                 let base = self
-                    .apply_witness_type(*inner, inner_wt.as_ref())
+                    .write_witness_type(*inner, inner_wt.as_ref())
                     .slice_of();
                 if top.is_witness() {
                     Type::witness_of(base)
@@ -201,9 +189,7 @@ impl WitnessCastInsertion {
                 }
             }
             (TypeExpr::Ref(inner), WitnessType::Ref(top, inner_wt)) => {
-                let base = self
-                    .apply_witness_type(*inner, inner_wt.as_ref())
-                    .ref_of();
+                let base = self.write_witness_type(*inner, inner_wt.as_ref()).ref_of();
                 if top.is_witness() {
                     Type::witness_of(base)
                 } else {
@@ -216,7 +202,7 @@ impl WitnessCastInsertion {
                         .iter()
                         .zip(child_wts.iter())
                         .map(|(child_type, child_wt)| {
-                            self.apply_witness_type(child_type.clone(), child_wt)
+                            self.write_witness_type(child_type.clone(), child_wt)
                         })
                         .collect(),
                 );
@@ -229,9 +215,24 @@ impl WitnessCastInsertion {
             (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
         }
     }
+}
+
+pub struct CastInsertion {}
+
+impl CastInsertion {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    #[instrument(skip_all, name = "CastInsertion::run")]
+    pub fn run(&mut self, ssa: SSA) -> SSA {
+        let flow_analysis = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow_analysis);
+        self.insert_casts(ssa, &type_info)
+    }
 
     // -----------------------------------------------------------------------
-    // Sub-pass 2: Cast Insertion
+    // Cast insertion
     // -----------------------------------------------------------------------
 
     fn insert_casts(
@@ -249,7 +250,7 @@ impl WitnessCastInsertion {
         ssa
     }
 
-    #[instrument(skip_all, name = "WitnessCastInsertion::insert_casts_in_function", level = Level::DEBUG, fields(function = function.get_name()))]
+    #[instrument(skip_all, name = "CastInsertion::insert_casts_in_function", level = Level::DEBUG, fields(function = function.get_name()))]
     fn insert_casts_in_function(
         &self,
         function: &mut Function,
@@ -259,10 +260,7 @@ impl WitnessCastInsertion {
         let block_param_types: HashMap<BlockId, Vec<Type>> = function
             .get_blocks()
             .map(|(bid, block)| {
-                let types = block
-                    .get_parameters()
-                    .map(|(_, tp)| tp.clone())
-                    .collect();
+                let types = block.get_parameters().map(|(_, tp)| tp.clone()).collect();
                 (*bid, types)
             })
             .collect();
@@ -511,8 +509,7 @@ impl WitnessCastInsertion {
                     }
                     Terminator::JmpIf(cond, if_true, if_false) => {
                         current_block.put_instructions(new_instructions);
-                        current_block
-                            .set_terminator(Terminator::JmpIf(cond, if_true, if_false));
+                        current_block.set_terminator(Terminator::JmpIf(cond, if_true, if_false));
                     }
                 }
             } else {
@@ -604,9 +601,7 @@ impl WitnessCastInsertion {
                     "Tuple field count mismatch in witness cast insertion"
                 );
                 let mut converted_elems = vec![];
-                for (i, (src_ft, tgt_ft)) in
-                    src_fields.iter().zip(tgt_fields.iter()).enumerate()
-                {
+                for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
                     let proj = function.fresh_value();
                     new_instructions.push(OpCode::TupleProj {
                         result: proj,
@@ -676,10 +671,7 @@ impl WitnessCastInsertion {
 
         // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
         current_block.put_instructions(std::mem::take(new_instructions));
-        current_block.set_terminator(Terminator::Jmp(
-            loop_header_id,
-            vec![const_0, initial_dst],
-        ));
+        current_block.set_terminator(Terminator::Jmp(loop_header_id, vec![const_0, initial_dst]));
         let old_block = std::mem::replace(current_block, continuation);
         new_blocks.insert(*current_block_id, old_block);
         *current_block_id = continuation_id;
@@ -798,8 +790,11 @@ impl WitnessCastInsertion {
             TypeExpr::Tuple(fields) => {
                 let mut dummy_elems = vec![];
                 for field_type in fields.iter() {
-                    dummy_elems
-                        .push(self.create_dummy_value(field_type, new_instructions, function));
+                    dummy_elems.push(self.create_dummy_value(
+                        field_type,
+                        new_instructions,
+                        function,
+                    ));
                 }
                 let result = function.fresh_value();
                 new_instructions.push(OpCode::MkTuple {
@@ -813,10 +808,7 @@ impl WitnessCastInsertion {
                 // Pure scalar types — use a zero constant
                 function.push_field_const(ark_bn254::Fr::from(0u64))
             }
-            _ => panic!(
-                "create_dummy_value: unsupported type {:?}",
-                target_type
-            ),
+            _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
     }
 }

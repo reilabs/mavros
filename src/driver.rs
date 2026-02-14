@@ -4,22 +4,41 @@ use ark_ff::AdditiveGroup as _;
 use tracing::info;
 
 use crate::{
-    Project,
     compiler::{
-        Field,
         analysis::types::Types,
         codegen::CodeGen,
         flow_analysis::FlowAnalysis,
         pass_manager::PassManager,
         passes::{
-            arithmetic_simplifier::ArithmeticSimplifier, defunctionalize::Defunctionalize, witness_lowering::WitnessLowering, common_subexpression_elimination::CSE, condition_propagation::ConditionPropagation, dead_code_elimination::{self, DCE}, deduplicate_phis::DeduplicatePhis, explicit_witness::ExplicitWitness, fix_double_jumps::FixDoubleJumps, mem2reg::Mem2Reg, prepare_entry_point::PrepareEntryPoint, pull_into_assert::PullIntoAssert, rc_insertion::RCInsertion, remove_unreachable_blocks::RemoveUnreachableBlocks, remove_unreachable_functions::RemoveUnreachableFunctions, specializer::Specializer, strip_witness_of::StripWitnessOf, struct_access_simplifier::MakeStructAccessStatic, witness_write_to_fresh::WitnessWriteToFresh, witness_write_to_void::WitnessWriteToVoid
+            arithmetic_simplifier::ArithmeticSimplifier,
+            common_subexpression_elimination::CSE,
+            condition_propagation::ConditionPropagation,
+            dead_code_elimination::{self, DCE},
+            deduplicate_phis::DeduplicatePhis,
+            defunctionalize::Defunctionalize,
+            explicit_witness::ExplicitWitness,
+            fix_double_jumps::FixDoubleJumps,
+            mem2reg::Mem2Reg,
+            prepare_entry_point::PrepareEntryPoint,
+            pull_into_assert::PullIntoAssert,
+            rc_insertion::RCInsertion,
+            remove_unreachable_blocks::RemoveUnreachableBlocks,
+            remove_unreachable_functions::RemoveUnreachableFunctions,
+            specializer::Specializer,
+            strip_witness_of::StripWitnessOf,
+            struct_access_simplifier::MakeStructAccessStatic,
+            witness_lowering::WitnessLowering,
+            witness_write_to_fresh::WitnessWriteToFresh,
+            witness_write_to_void::WitnessWriteToVoid,
         },
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, SSA},
         untaint_control_flow::UntaintControlFlow,
-        witness_cast_insertion::WitnessCastInsertion,
+        witness_cast_insertion::{CastInsertion, WriteWitnessTypes},
         witness_type_inference::WitnessTypeInference,
+        Field,
     },
+    Project,
 };
 
 pub struct Driver {
@@ -60,11 +79,7 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        let dir = self
-            .project
-            .get_only_crate()
-            .root_dir
-            .join("mavros_debug");
+        let dir = self.project.get_only_crate().root_dir.join("mavros_debug");
         dir
     }
 
@@ -91,7 +106,12 @@ impl Driver {
             noirc_frontend::monomorphization::monomorphize(main, &mut context.def_interner, false)
                 .unwrap();
 
-        self.abi = Some(noirc_driver::gen_abi(&context, &main, program.return_visibility(), BTreeMap::default()));
+        self.abi = Some(noirc_driver::gen_abi(
+            &context,
+            &main,
+            program.return_visibility(),
+            BTreeMap::default(),
+        ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
         self.initial_ssa = Some(SSA::from_program(&program));
@@ -154,8 +174,8 @@ impl Driver {
         )
         .unwrap();
 
-        let mut witness_cast = WitnessCastInsertion::new();
-        let ssa = witness_cast.run(ssa, &witness_inference);
+        let mut write_witness_types = WriteWitnessTypes::new();
+        let ssa = write_witness_types.run(ssa, &witness_inference);
 
         fs::write(
             self.get_debug_output_dir().join("witness_typed_ssa.txt"),
@@ -174,7 +194,10 @@ impl Driver {
         }
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis));
+        let ssa = untaint_cf.run(ssa, &witness_inference, &flow_analysis);
+
+        let mut cast_insertion = CastInsertion::new();
+        self.monomorphized_ssa = Some(cast_insertion.run(ssa));
 
         fs::write(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
@@ -395,7 +418,11 @@ impl Driver {
     }
 
     /// Write WASM metadata JSON file
-    fn write_wasm_metadata(&self, wasm_path: &std::path::PathBuf, r1cs: &R1CS) -> Result<(), Error> {
+    fn write_wasm_metadata(
+        &self,
+        wasm_path: &std::path::PathBuf,
+        r1cs: &R1CS,
+    ) -> Result<(), Error> {
         let abi = self.abi.as_ref().unwrap();
 
         // Build parameter info
@@ -415,7 +442,11 @@ impl Driver {
         });
 
         let metadata_path = format!("{}.meta.json", wasm_path.display());
-        fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
 
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
