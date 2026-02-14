@@ -754,25 +754,6 @@ impl WitnessTypeInference {
                                     );
                                     value_wt.insert(*result, result_wt);
                                 }
-                                WitnessType::Ref(ptr_info, inner) => {
-                                    // TupleProj on a Ref: implicit deref + field access
-                                    // Result is a Ref to the projected element
-                                    if let WitnessType::Tuple(inner_top, children) =
-                                        inner.as_ref()
-                                    {
-                                        let elem_wt = &children[*child_index];
-                                        let result_wt = WitnessType::Ref(
-                                            ptr_info.join(*inner_top),
-                                            Box::new(elem_wt.clone()),
-                                        );
-                                        value_wt.insert(*result, result_wt);
-                                    } else {
-                                        panic!(
-                                            "TupleProj on Ref with non-tuple inner type: {:?}",
-                                            inner
-                                        );
-                                    }
-                                }
                                 _ => {
                                     panic!(
                                         "TupleProj on non-tuple witness type: {:?}",
