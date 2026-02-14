@@ -361,7 +361,6 @@ impl WitnessLowering {
                         | OpCode::NextDCoeff { .. }
                         | OpCode::BumpD { .. }
                         | OpCode::DLookup { .. }
-                        /* PureToWitnessRef removed */
                         | OpCode::MulConst { .. }
                         | OpCode::Rangecheck { .. }
                         | OpCode::ReadGlobal { .. }

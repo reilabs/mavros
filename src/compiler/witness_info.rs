@@ -43,7 +43,6 @@ impl ConstantWitness {
     }
 }
 
-/// WitnessInfo is now simply ConstantWitness — no more type variables or joins.
 pub type WitnessInfo = ConstantWitness;
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
@@ -101,38 +100,6 @@ impl WitnessType {
                 "Cannot join different witness types: {:?} vs {:?}",
                 self, other
             ),
-        }
-    }
-
-    /// Join two witness types, handling shape mismatches gracefully.
-    /// When shapes don't match, keeps self's shape but joins in the other's toplevel
-    /// witness info. Use this for block params and return type joining where self's
-    /// shape is authoritative.
-    pub fn try_join(&self, other: &WitnessType) -> WitnessType {
-        if self.shape_compatible(other) {
-            self.join(other)
-        } else {
-            // Keep self's shape, join in other's toplevel witness info
-            self.with_toplevel_info(self.toplevel_info().join(other.toplevel_info()))
-        }
-    }
-
-
-    /// Check if two WitnessTypes have the same shape (variant and children count).
-    fn shape_compatible(&self, other: &WitnessType) -> bool {
-        match (self, other) {
-            (WitnessType::Scalar(_), WitnessType::Scalar(_)) => true,
-            (WitnessType::Array(_, inner1), WitnessType::Array(_, inner2)) => {
-                inner1.shape_compatible(inner2)
-            }
-            (WitnessType::Ref(_, inner1), WitnessType::Ref(_, inner2)) => {
-                inner1.shape_compatible(inner2)
-            }
-            (WitnessType::Tuple(_, c1), WitnessType::Tuple(_, c2)) => {
-                c1.len() == c2.len()
-                    && c1.iter().zip(c2.iter()).all(|(a, b)| a.shape_compatible(b))
-            }
-            _ => false,
         }
     }
 

@@ -109,9 +109,7 @@ impl StripWitnessOf {
             OpCode::Alloc { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
-            OpCode::Cast { .. } => {
-                // WitnessOf casts are removed above; other casts pass through
-            }
+            OpCode::Cast { .. } => {}
             OpCode::MkTuple { element_types, .. } => {
                 for tp in element_types.iter_mut() {
                     *tp = tp.strip_all_witness();
@@ -125,7 +123,36 @@ impl StripWitnessOf {
                     *tp = tp.strip_all_witness();
                 }
             }
-            _ => {}
+            OpCode::Cmp { .. }
+            | OpCode::BinaryArithOp { .. }
+            | OpCode::Cast { .. }
+            | OpCode::Truncate { .. }
+            | OpCode::Not { .. }
+            | OpCode::Store { .. }
+            | OpCode::Load { .. }
+            | OpCode::AssertEq { .. }
+            | OpCode::AssertR1C { .. }
+            | OpCode::Call { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
+            | OpCode::SlicePush { .. }
+            | OpCode::SliceLen { .. }
+            | OpCode::Select { .. }
+            | OpCode::ToBits { .. }
+            | OpCode::ToRadix { .. }
+            | OpCode::MemOp { .. }
+            | OpCode::ValueOf { .. }
+            | OpCode::WriteWitness { .. }
+            | OpCode::NextDCoeff { .. }
+            | OpCode::BumpD { .. }
+            | OpCode::Constrain { .. }
+            | OpCode::Lookup { .. }
+            | OpCode::DLookup { .. }
+            | OpCode::MulConst { .. }
+            | OpCode::Rangecheck { .. }
+            | OpCode::TupleProj { .. }
+            | OpCode::InitGlobal { .. }
+            | OpCode::DropGlobal { .. } => {}
         }
     }
 }

@@ -395,9 +395,6 @@ impl WitnessCastInsertion {
                         if_t,
                         if_f,
                     } => {
-                        // Cast branches to match each other, NOT to the full result
-                        // type (which may include WitnessOf from the condition).
-                        // The target is the unified type of the two alternatives.
                         let if_t_type = type_info.get_value_type(if_t);
                         let if_f_type = type_info.get_value_type(if_f);
                         let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
@@ -428,9 +425,38 @@ impl WitnessCastInsertion {
                             if_f,
                         });
                     }
-                    // All other opcodes pass through unchanged
-                    other => {
-                        new_instructions.push(other);
+                    op @ (OpCode::Cmp { .. }
+                    | OpCode::BinaryArithOp { .. }
+                    | OpCode::Cast { .. }
+                    | OpCode::Truncate { .. }
+                    | OpCode::Not { .. }
+                    | OpCode::Alloc { .. }
+                    | OpCode::Load { .. }
+                    | OpCode::AssertEq { .. }
+                    | OpCode::AssertR1C { .. }
+                    | OpCode::Call { .. }
+                    | OpCode::ArrayGet { .. }
+                    | OpCode::SliceLen { .. }
+                    | OpCode::ToBits { .. }
+                    | OpCode::ToRadix { .. }
+                    | OpCode::MemOp { .. }
+                    | OpCode::ValueOf { .. }
+                    | OpCode::WriteWitness { .. }
+                    | OpCode::FreshWitness { .. }
+                    | OpCode::NextDCoeff { .. }
+                    | OpCode::BumpD { .. }
+                    | OpCode::Constrain { .. }
+                    | OpCode::Lookup { .. }
+                    | OpCode::DLookup { .. }
+                    | OpCode::MulConst { .. }
+                    | OpCode::Rangecheck { .. }
+                    | OpCode::ReadGlobal { .. }
+                    | OpCode::TupleProj { .. }
+                    | OpCode::MkTuple { .. }
+                    | OpCode::Todo { .. }
+                    | OpCode::InitGlobal { .. }
+                    | OpCode::DropGlobal { .. }) => {
+                        new_instructions.push(op);
                     }
                 }
             }

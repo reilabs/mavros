@@ -136,9 +136,6 @@ impl Driver {
     pub fn monomorphize(&mut self) -> Result<(), Error> {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
         let flow_analysis = FlowAnalysis::run(&ssa);
-        // let type_info = Types::new().run(ssa, &flow_analysis);
-        // Mutual recursion (call graph cycles) is handled by the Mycroft-style
-        // fixed-point inference in WitnessTypeInference.
 
         if self.draw_cfg {
             flow_analysis.generate_images(

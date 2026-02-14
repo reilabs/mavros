@@ -132,7 +132,6 @@ impl RCInsertion {
                         }
                         currently_live.extend(rcd_inputs);
                     }
-                    // UnboxField removed
                     OpCode::MulConst { result: r, const_val: _, var: v } => {
                         if currently_live.contains(v) {
                             new_instructions.push(OpCode::MemOp {
@@ -146,7 +145,6 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
                     }
-                    // PureToWitnessRef removed - handled by Cast catch-all below
                     OpCode::TupleProj { 
                         result, tuple, idx: _,
                     } => {

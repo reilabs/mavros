@@ -189,7 +189,6 @@ impl DCE {
                         | OpCode::Cast { .. }
                         | OpCode::Truncate { .. }
                         | OpCode::Not { .. }
-                        /* PureToWitnessRef removed - Cast already handled above */
                         | OpCode::MulConst {
                             result: _,
                             const_val: _,

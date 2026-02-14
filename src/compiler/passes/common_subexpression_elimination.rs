@@ -437,7 +437,6 @@ impl CSE {
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
                     | OpCode::ValueOf { .. } => {}
-                     /* PureToWitnessRef removed - Cast already handled */
                     | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);

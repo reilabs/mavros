@@ -579,7 +579,7 @@ impl Value {
                     Value::U(_, 0) => if_true.clone(),
                     Value::U(_, _) => if_false.clone(),
                     _ => {
-                        if if_true.is_witness() || if_false.is_witness() {
+                        if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
                             instrumenter.record_constraints(1);
                         }
                         let mut result = if_true.clone();

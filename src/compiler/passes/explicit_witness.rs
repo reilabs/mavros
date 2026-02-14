@@ -624,7 +624,6 @@ impl ExplicitWitness {
                         OpCode::MemOp { kind: _, value: _ } => {
                             new_instructions.push(instruction);
                         }
-                        // PureToWitnessRef removed - Cast already handled
                         OpCode::MulConst {
                             result: _,
                             const_val: _,

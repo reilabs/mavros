@@ -552,18 +552,9 @@ impl CodeGen {
                 } => {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
-                    // WitnessOf cast: box a pure value into a witness reference
                     if matches!(tgt, ssa::CastTarget::WitnessOf) {
                         emitter.push_op(bytecode::OpCode::PureToWitnessRef {
                             res: layouter.alloc_ptr(*r),
-                            v: layouter.get_value(*v),
-                        });
-                        continue;
-                    }
-                    // Unbox: WitnessOf(X) → X (the reverse direction)
-                    if l_type.is_witness_of() && !r_type.is_witness_of() {
-                        emitter.push_op(bytecode::OpCode::UnboxField {
-                            res: layouter.alloc_field(*r),
                             v: layouter.get_value(*v),
                         });
                         continue;
@@ -878,7 +869,6 @@ impl CodeGen {
                         res: layouter.alloc_ptr(*r),
                     });
                 }
-                // PureToWitnessRef removed - now handled by general Cast handler above
                 ssa::OpCode::MulConst {
                     result: r,
                     const_val: c,

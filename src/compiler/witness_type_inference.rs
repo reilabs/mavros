@@ -407,7 +407,7 @@ impl WitnessTypeInference {
                     return_types = return_types
                         .iter()
                         .zip(ret_wts.iter())
-                        .map(|(a, b)| a.try_join(b))
+                        .map(|(a, b)| a.join(b))
                         .collect();
                 }
             }
@@ -499,7 +499,7 @@ impl WitnessTypeInference {
                         let then_wt = value_wt.get(if_t).unwrap();
                         let otherwise_wt = value_wt.get(if_f).unwrap();
                         // if_t and if_f should have matching shapes; cond is scalar
-                        let result_wt = then_wt.try_join(otherwise_wt).with_toplevel_info(
+                        let result_wt = then_wt.join(otherwise_wt).with_toplevel_info(
                             cond_wt
                                 .toplevel_info()
                                 .join(then_wt.toplevel_info())
@@ -529,9 +529,7 @@ impl WitnessTypeInference {
                                 val_wt.toplevel_info().join(block_cw),
                             );
                             // The alloc's elem_type may not match the actual stored value's
-                            // shape (e.g., after defunctionalization). Use try_join which
-                            // keeps the alloc's shape on mismatch, incorporating taint only.
-                            let new_inner = current_inner.try_join(&store_wt);
+                            let new_inner = current_inner.join(&store_wt);
                             alloc_inner.insert(origin_id, new_inner);
                         }
                     }
@@ -667,7 +665,7 @@ impl WitnessTypeInference {
                                     if let Some(origin_id) = origin {
                                         let current_inner =
                                             alloc_inner.get(&origin_id).unwrap().clone();
-                                        let new_inner = current_inner.try_join(inner_out);
+                                        let new_inner = current_inner.join(inner_out);
                                         alloc_inner.insert(origin_id, new_inner);
                                     }
                                 }
@@ -835,7 +833,7 @@ impl WitnessTypeInference {
                         {
                             let param_wt = value_wt.get(param).unwrap();
                             let existing = value_wt.get(target_value).unwrap();
-                            let joined = existing.try_join(param_wt);
+                            let joined = existing.join(param_wt);
                             value_wt.insert(*target_value, joined);
                         }
                     }
