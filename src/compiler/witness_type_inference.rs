@@ -4,7 +4,7 @@ use crate::compiler::ssa::{
     BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId,
 };
 use crate::compiler::witness_info::{
-    ConstantWitness, FunctionWitnessType, WitnessInfo, WitnessType,
+    ConstantWitness, FunctionWitnessType, WitnessType,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -44,8 +44,6 @@ struct CallSiteInfo {
     callee_func_id: FunctionId,
     arg_types: Vec<WitnessType>,
     cfg_witness: ConstantWitness,
-    result_value_ids: Vec<ValueId>,
-    arg_value_ids: Vec<ValueId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +111,7 @@ impl WitnessTypeInference {
 
         let mut specializations: HashMap<SpecKey, SpecValue> = HashMap::new();
         let mut worklist: VecDeque<SpecKey> = VecDeque::new();
+        let mut queued: HashSet<SpecKey> = HashSet::new();
         // Track which specializations call which (for re-queuing callers)
         let mut callers: HashMap<SpecKey, HashSet<SpecKey>> = HashMap::new();
 
@@ -125,9 +124,11 @@ impl WitnessTypeInference {
             },
         );
         worklist.push_back(main_key.clone());
+        queued.insert(main_key.clone());
 
         // 3. Global worklist loop
         while let Some(spec_key) = worklist.pop_front() {
+            queued.remove(&spec_key);
             let func = ssa.get_function(spec_key.original_func_id);
             let cfg = flow_analysis.get_function_cfg(spec_key.original_func_id);
 
@@ -191,6 +192,7 @@ impl WitnessTypeInference {
                             arg_types_out: callee_key.arg_types.clone(),
                         },
                     );
+                    queued.insert(callee_key.clone());
                     worklist.push_back(callee_key);
                 }
             }
@@ -199,7 +201,8 @@ impl WitnessTypeInference {
             if changed {
                 if let Some(caller_set) = callers.get(&spec_key) {
                     for caller_key in caller_set {
-                        if !worklist.contains(caller_key) {
+                        if !queued.contains(caller_key) {
+                            queued.insert(caller_key.clone());
                             worklist.push_back(caller_key.clone());
                         }
                     }
@@ -377,7 +380,7 @@ impl WitnessTypeInference {
 
             for instruction in block.get_instructions() {
                 if let OpCode::Call {
-                    results,
+                    results: _,
                     function: CallTarget::Static(callee_id),
                     args,
                 } = instruction
@@ -390,8 +393,6 @@ impl WitnessTypeInference {
                         callee_func_id: *callee_id,
                         arg_types: callee_arg_types,
                         cfg_witness: block_cw,
-                        result_value_ids: results.clone(),
-                        arg_value_ids: args.clone(),
                     });
                 }
             }
@@ -480,12 +481,9 @@ impl WitnessTypeInference {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_wt = value_wt.get(lhs).unwrap();
-                        let rhs_wt = value_wt.get(rhs).unwrap();
-                        // Operands should be scalars; use toplevel_info to flatten
-                        // any shape mismatches from defunctionalized values
-                        let result_wt = WitnessType::Scalar(
-                            lhs_wt.toplevel_info().join(rhs_wt.toplevel_info()),
+                        let result_wt = Self::infer_binop_cmp_result(
+                            value_wt.get(lhs).unwrap(),
+                            value_wt.get(rhs).unwrap(),
                         );
                         value_wt.insert(*r, result_wt);
                     }
@@ -495,15 +493,10 @@ impl WitnessTypeInference {
                         if_t,
                         if_f,
                     } => {
-                        let cond_wt = value_wt.get(cond).unwrap();
-                        let then_wt = value_wt.get(if_t).unwrap();
-                        let otherwise_wt = value_wt.get(if_f).unwrap();
-                        // if_t and if_f should have matching shapes; cond is scalar
-                        let result_wt = then_wt.join(otherwise_wt).with_toplevel_info(
-                            cond_wt
-                                .toplevel_info()
-                                .join(then_wt.toplevel_info())
-                                .join(otherwise_wt.toplevel_info()),
+                        let result_wt = Self::infer_select_result(
+                            value_wt.get(cond).unwrap(),
+                            value_wt.get(if_t).unwrap(),
+                            value_wt.get(if_f).unwrap(),
                         );
                         value_wt.insert(*r, result_wt);
                     }
@@ -883,6 +876,23 @@ impl WitnessTypeInference {
             block_cfg_witness: block_cfg.clone(),
             value_witness_types: value_wt.clone(),
         }
+    }
+
+    fn infer_binop_cmp_result(lhs_wt: &WitnessType, rhs_wt: &WitnessType) -> WitnessType {
+        WitnessType::Scalar(lhs_wt.toplevel_info().join(rhs_wt.toplevel_info()))
+    }
+
+    fn infer_select_result(
+        cond_wt: &WitnessType,
+        then_wt: &WitnessType,
+        otherwise_wt: &WitnessType,
+    ) -> WitnessType {
+        then_wt.join(otherwise_wt).with_toplevel_info(
+            cond_wt
+                .toplevel_info()
+                .join(then_wt.toplevel_info())
+                .join(otherwise_wt.toplevel_info()),
+        )
     }
 
     /// Compute witness type for a main function argument.
