@@ -395,16 +395,14 @@ impl CFG {
 }
 
 impl CFG {
-    pub fn generate_image<V>(
+    pub fn generate_image(
         &self,
         output_path: PathBuf,
-        ssa: &crate::compiler::ssa::SSA<V>,
-        function: &crate::compiler::ssa::Function<V>,
+        ssa: &crate::compiler::ssa::SSA,
+        function: &crate::compiler::ssa::Function,
         func_id: FunctionId,
         label: String,
     ) -> Result<(), Box<dyn std::error::Error>>
-    where
-        V: Clone + std::fmt::Display,
     {
         use std::fs;
         use std::process::Command;
@@ -569,16 +567,15 @@ impl CallGraph {
             .iter(&self.call_graph)
             .filter_map(|node| self.node_to_func.get(&node).cloned())
     }
+
 }
 
 impl CallGraph {
-    pub fn generate_image<V>(
+    pub fn generate_image(
         &self,
         output_path: PathBuf,
-        ssa: &SSA<V>,
+        ssa: &SSA,
     ) -> Result<(), Box<dyn std::error::Error>>
-    where
-        V: Clone,
     {
         use std::fs;
         use std::process::Command;
@@ -642,7 +639,7 @@ pub struct FlowAnalysis {
 }
 
 impl FlowAnalysis {
-    pub fn run<V: Clone>(ssa: &SSA<V>) -> Self {
+    pub fn run(ssa: &SSA) -> Self {
         let mut call_graph = CallGraph::new();
         let mut function_cfgs = HashMap::new();
 
@@ -703,10 +700,10 @@ impl FlowAnalysis {
         &self.function_cfgs[&function_id]
     }
 
-    pub fn generate_images<V: Clone + std::fmt::Display>(
+    pub fn generate_images(
         &self,
         debug_output_dir: PathBuf,
-        ssa: &SSA<V>,
+        ssa: &SSA,
         phase_label: String,
     ) {
         if !debug_output_dir.exists() {

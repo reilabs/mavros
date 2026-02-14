@@ -15,8 +15,24 @@ use crate::compiler::{
         BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, MemOp, Radix, SSA, SeqType,
         SliceOpDir,
     },
-    taint_analysis::ConstantTaint,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScalarKind {
+    Field,
+    U(usize),
+}
+
+impl ScalarKind {
+    pub fn from_type(tp: &Type) -> Self {
+        match &tp.strip_witness().expr {
+            TypeExpr::Field => ScalarKind::Field,
+            TypeExpr::U(s) => ScalarKind::U(*s),
+            TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
+            _ => panic!("Not a scalar type: {:?}", tp)
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
@@ -24,8 +40,8 @@ pub enum ValueSignature {
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
-    FWitness,
-    UWitness(usize),
+    Unknown(ScalarKind),
+    WitnessOf(Box<ValueSignature>),
     Tuple(Vec<ValueSignature>),
 }
 
@@ -38,8 +54,8 @@ impl ValueSignature {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
             }
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
-            ValueSignature::FWitness => Value::FWitness,
-            ValueSignature::UWitness(s) => Value::UWitness(*s),
+            ValueSignature::Unknown(kind) => Value::Unknown(*kind),
+            ValueSignature::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.to_value())),
             ValueSignature::Tuple(elements) => {
                 Value::Tuple(elements.iter().map(|e| e.to_value()).collect())
             }
@@ -59,15 +75,15 @@ impl ValueSignature {
                 }
             }
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
-            ValueSignature::FWitness => "W".to_string(),
-            ValueSignature::UWitness(_) => "W".to_string(),
+            ValueSignature::Unknown(_) => "?".to_string(),
+            ValueSignature::WitnessOf(inner) => format!("W({})", inner.pretty_print(full)),
             ValueSignature::Tuple(elements) => {
                 if full {
                     let elements = elements.iter().map(|e| e.pretty_print(full)).join(", ");
                     format!("({})", elements)
                 } else {
                     format!("(...)")
-                }       
+                }
             }
         }
     }
@@ -79,42 +95,46 @@ pub enum Value {
     Field(Field),
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
-    FWitness,
-    UWitness(usize),
+    Unknown(ScalarKind),
+    WitnessOf(Box<Value>),
     Tuple(Vec<Value>),
 }
 
 impl Value {
+    fn unwrap_witness(&self) -> &Value {
+        match self {
+            Value::WitnessOf(inner) => inner.as_ref(),
+            other => other,
+        }
+    }
+
     fn cmp_op(
         &self,
         b: &Value,
         cmp_kind: &crate::compiler::ssa::CmpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        match (self, b) {
-            (Value::U(_, a), Value::U(_, b)) => match cmp_kind {
-                CmpKind::Eq => Value::U(1, if a == b { 1 } else { 0 }),
-                CmpKind::Lt => Value::U(1, if a < b { 1 } else { 0 }),
-            },
-            (Value::Field(a), Value::Field(b)) => match cmp_kind {
-                CmpKind::Eq => Value::U(1, if a == b { 1 } else { 0 }),
-                CmpKind::Lt => Value::U(1, if a < b { 1 } else { 0 }),
-            },
-            (Value::UWitness(i), _) | (_, Value::UWitness(i)) => {
-                instrumenter.record_constraints(1);
-                instrumenter.record_rangechecks(*i as u8, 1);
-                Value::UWitness(1)
-            }
-            (Value::FWitness, _) | (_, Value::FWitness) => match cmp_kind {
-                CmpKind::Eq => {
+        match cmp_kind {
+            CmpKind::Eq => match (self, b) {
+                (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a == b { 1 } else { 0 }),
+                (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     instrumenter.record_constraints(1);
-                    Value::UWitness(1)
+                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(b.unwrap_witness(), cmp_kind, instrumenter)))
                 }
-                CmpKind::Lt => panic!("Cannot compare Field witnesses with Lt"),
+                (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+                _ => panic!("Cannot compare {:?} and {:?}", self, b),
             },
-            (_, _) => {
-                panic!("Cannot compare {:?} and {:?}", self, b);
-            }
+            CmpKind::Lt => match (self, b) {
+                (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
+                (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    instrumenter.record_constraints(1);
+                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(b.unwrap_witness(), cmp_kind, instrumenter)))
+                }
+                (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+                _ => panic!("Cannot compare {:?} and {:?}", self, b),
+            },
         }
     }
 
@@ -124,168 +144,135 @@ impl Value {
         binary_arith_op_kind: &crate::compiler::ssa::BinaryArithOpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        match (self, b) {
-            (Value::U(s, a), Value::U(_, b)) => match binary_arith_op_kind {
-                BinaryArithOpKind::Add => Value::U(*s, a + b),
-                BinaryArithOpKind::Sub => Value::U(*s, a - b),
-                BinaryArithOpKind::Mul => Value::U(*s, a * b),
-                BinaryArithOpKind::Div => Value::U(*s, a / b),
-                BinaryArithOpKind::And => Value::U(*s, a & b),
-            },
-            (Value::Field(a), Value::Field(b)) => match binary_arith_op_kind {
-                BinaryArithOpKind::Add => Value::Field(a + b),
-                BinaryArithOpKind::Sub => Value::Field(a - b),
-                BinaryArithOpKind::Mul => Value::Field(a * b),
-                BinaryArithOpKind::Div => Value::Field(a / b),
-                BinaryArithOpKind::And => todo!(),
-            },
-            (Value::FWitness, Value::FWitness) => match binary_arith_op_kind {
-                BinaryArithOpKind::Add => Value::FWitness,
-                BinaryArithOpKind::Sub => Value::FWitness,
-                BinaryArithOpKind::Mul => {
-                    instrumenter.record_constraints(1);
-                    Value::FWitness
+        match binary_arith_op_kind {
+            BinaryArithOpKind::Add => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a + b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
                 }
-                BinaryArithOpKind::Div => {
-                    instrumenter.record_constraints(1);
-                    Value::FWitness
-                }
-                BinaryArithOpKind::And => todo!(),
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            (Value::FWitness, Value::Field(a)) | (Value::Field(a), Value::FWitness) => {
-                match binary_arith_op_kind {
-                    BinaryArithOpKind::Mul => {
-                        if a == &Field::ZERO {
-                            Value::Field(Field::ZERO)
-                        } else {
-                            Value::FWitness
-                        }
+            BinaryArithOpKind::Sub => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a - b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a - b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::Mul => match (self, b) {
+                (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
+                (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
+                (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a * b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
+                (Value::WitnessOf(a), Value::WitnessOf(b)) => match (a.as_ref(), b.as_ref()) {
+                    (Value::Unknown(_), Value::Unknown(_)) => {
+                        instrumenter.record_constraints(1);
+                        Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter)))
                     }
-                    _ => Value::FWitness,
+                    _ => Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter))),
+                },
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
                 }
-            }
-            (Value::UWitness(1), _) | (_, Value::UWitness(1)) => match binary_arith_op_kind {
-                BinaryArithOpKind::And => {
-                    instrumenter.record_constraints(1);
-                    Value::UWitness(1)
-                }
-                _ => todo!("{:?}", binary_arith_op_kind),
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            (Value::UWitness(s), _) | (_, Value::UWitness(s)) => match binary_arith_op_kind {
-                BinaryArithOpKind::Mul => {
-                    instrumenter.record_constraints(2); // compute result && check the digital decomposition
-                    instrumenter.record_rangechecks(*s as u8, 2);
-                    Value::UWitness(*s)
+            BinaryArithOpKind::Div => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a / b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
+                (_, Value::WitnessOf(b)) => match b.as_ref() {
+                    Value::Unknown(_) => {
+                        instrumenter.record_constraints(1);
+                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b, binary_arith_op_kind, instrumenter)))
+                    }
+                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b, binary_arith_op_kind, instrumenter))),
+                },
+                (Value::WitnessOf(a), b) => {
+                    Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter)))
                 }
-                _ => todo!("{:?}", binary_arith_op_kind),
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            (_, _) => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            BinaryArithOpKind::And => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
+                (Value::Field(_), Value::Field(_)) => todo!(),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
         }
     }
 
-    fn blind_from(&mut self, tp: &Type<ConstantTaint>) {
-        match (&self, tp.get_annotation(), &tp.expr) {
-            (Value::UWitness(_), _, _) => {}
-            (Value::FWitness, _, _) => {}
-            (Value::U(s, _), ConstantTaint::Witness, _) => *self = Value::UWitness(*s),
-            (Value::U { .. }, _, _) => {}
-            (Value::Field { .. }, ConstantTaint::Witness, _) => *self = Value::FWitness,
-            (Value::Field { .. }, _, _) => {}
-            (Value::Array(_), ConstantTaint::Witness, _) => {
-                panic!("Witness arrays not supported yet")
+    fn blind(&mut self) {
+        match self {
+            Value::WitnessOf(inner) => {
+                inner.forget_concrete();
             }
-            (Value::Array(_), _, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Array(tp, _) => tp,
-                    TypeExpr::Slice(tp) => tp,
-                    _ => panic!("Unexpected array type: {:?}", tp),
-                };
-                match self {
-                    Value::Array(vals) => {
-                        for val in vals {
-                            val.blind_from(&item_tp);
-                        }
-                    }
-                    _ => panic!("Unexpected array type: {:?}", tp),
+            Value::Unknown(_) => {}
+            Value::U(_, _) | Value::Field(_) => {}
+            Value::Array(vals) => {
+                for val in vals {
+                    val.blind();
                 }
             }
-            (Value::Pointer(_), ConstantTaint::Witness, _) => {
-                panic!("Witness pointers not supported yet");
+            Value::Pointer(val) => {
+                val.borrow_mut().blind();
             }
-            (Value::Pointer(val), ConstantTaint::Pure, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Ref(tp) => tp,
-                    _ => panic!("Unexpected pointer type: {:?}", tp),
-                };
-                val.borrow_mut().blind_from(&item_tp);
-            }
-            (Value::Tuple(_), ConstantTaint::Witness, _) => {
-                panic!("Witness tuples not supported yet")
-            }
-            (Value::Tuple(_), _, tp) => {
-                let element_tps = match tp {
-                    TypeExpr::Tuple(elements) => elements,
-                    _ => panic!("Unexpected tuple type: {:?}", tp),
-                };
-                match self {
-                    Value::Tuple(vals) => {
-                        for (val, element_tp) in vals.iter_mut().zip(element_tps.iter()) {
-                            val.blind_from(element_tp);
-                        }
-                    }
-                    _ => panic!("Unexpected tuple type: {:?}", tp),
+            Value::Tuple(vals) => {
+                for val in vals {
+                    val.blind();
                 }
             }
         }
     }
 
-    fn make_unspecialized_sig(&self, tp: &Type<ConstantTaint>) -> ValueSignature {
-        match (self, tp.get_annotation(), &tp.expr) {
-            (Value::UWitness(s), _, _) => ValueSignature::UWitness(*s),
-            (Value::FWitness, _, _) => ValueSignature::FWitness,
-            (Value::U(s, v), ConstantTaint::Pure, _) => ValueSignature::U(*s, *v),
-            (Value::U(s, _), ConstantTaint::Witness, _) => ValueSignature::UWitness(*s),
-            (Value::Field(f), ConstantTaint::Pure, _) => ValueSignature::Field(f.clone()),
-            (Value::Field(_), ConstantTaint::Witness, _) => ValueSignature::FWitness,
-            (Value::Array(vals), ConstantTaint::Pure, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Array(tp, _) => tp,
-                    TypeExpr::Slice(tp) => tp,
-                    _ => panic!("Unexpected array type: {:?}", tp),
-                };
-                ValueSignature::Array(
-                    vals.iter()
-                        .map(|v| v.make_unspecialized_sig(&item_tp))
-                        .collect(),
-                )
+    fn forget_concrete(&mut self) {
+        match self {
+            Value::U(s, _) => *self = Value::Unknown(ScalarKind::U(*s)),
+            Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
+            Value::Unknown(_) => {}
+            Value::WitnessOf(inner) => {
+                inner.forget_concrete();
             }
-            (Value::Array(_), ConstantTaint::Witness, _) => {
-                panic!("Witness arrays not supported yet")
+            Value::Array(vals) => {
+                for val in vals {
+                    val.forget_concrete();
+                }
             }
-            (Value::Pointer(val), ConstantTaint::Pure, tp) => {
-                let item_tp = match tp {
-                    TypeExpr::Ref(tp) => tp,
-                    _ => panic!("Unexpected pointer type: {:?}", tp),
-                };
-                ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig(&item_tp)))
+            Value::Pointer(val) => {
+                val.borrow_mut().forget_concrete();
             }
-            (Value::Pointer(_), ConstantTaint::Witness, _) => {
-                panic!("Witness pointers not supported yet")
+            Value::Tuple(vals) => {
+                for val in vals {
+                    val.forget_concrete();
+                }
             }
-            (Value::Tuple(vals), ConstantTaint::Pure, tp) => {
-                let element_tps = match tp {
-                    TypeExpr::Tuple(elements) => elements,
-                    _ => panic!("Unexpected tuple type: {:?}", tp),
-                };
-                ValueSignature::Tuple(
-                    vals.iter()
-                        .zip(element_tps.iter())
-                        .map(|(v, element_tp)| v.make_unspecialized_sig(element_tp))
-                        .collect(),
-                )
+        }
+    }
+
+    fn make_unspecialized_sig(&self) -> ValueSignature {
+        match self {
+            Value::Unknown(kind) => ValueSignature::Unknown(*kind),
+            Value::WitnessOf(inner) => {
+                ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
-            (Value::Tuple(_), ConstantTaint::Witness, _) => {
-                panic!("Witness tuples not supported yet")
+            Value::U(s, v) => ValueSignature::U(*s, *v),
+            Value::Field(f) => ValueSignature::Field(f.clone()),
+            Value::Array(vals) => {
+                ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
+            }
+            Value::Pointer(val) => {
+                ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig()))
+            }
+            Value::Tuple(vals) => {
+                ValueSignature::Tuple(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
             }
         }
     }
@@ -304,8 +291,8 @@ impl Value {
 
     fn is_witness(&self) -> bool {
         match self {
-            Value::UWitness(_) => true,
-            Value::FWitness => true,
+            Value::Unknown(_) => false,
+            Value::WitnessOf(_) => true,
             _ => false,
         }
     }
@@ -313,16 +300,29 @@ impl Value {
     fn array_get(
         &self,
         index: &Value,
-        tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        match (self, index) {
+        if matches!(self, Value::Unknown(_)) {
+            return Value::Unknown(ScalarKind::Field);
+        }
+
+        let arr = self.unwrap_witness();
+
+        match (arr, index) {
             (Value::Array(vals), Value::U(_, index)) => vals[*index as usize].clone(),
-            (Value::Array(vals), Value::UWitness(_)) => {
-                // TODO: Measure type width
+            (Value::Array(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
+                Value::U(_, index) => vals[*index as usize].clone(),
+                _ => {
+                    instrumenter.record_lookups(vals.len(), 1, 1);
+                    Value::Unknown(ScalarKind::Field)
+                }
+            },
+            (Value::Array(vals), Value::Unknown(_)) => {
                 instrumenter.record_lookups(vals.len(), 1, 1);
-                Value::witness_of(tp)
+                Value::Unknown(ScalarKind::Field)
             }
+            (Value::Unknown(_), _) => Value::Unknown(ScalarKind::Field),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
@@ -333,13 +333,15 @@ impl Value {
     fn tuple_get(
         &self,
         index: usize,
-        _tp: &Type<ConstantTaint>,
-        _instrumenter: &mut dyn OpInstrumenter,
+        tp: &Type,
+        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
+            Value::Unknown(_) => Value::Unknown(ScalarKind::Field),
+            Value::WitnessOf(inner) => inner.tuple_get(index, tp, instrumenter),
             Value::Tuple(vals) => vals[index as usize].clone(),
             _ => panic!(
-                "Cannot get array element from {:?} with index {:?}",
+                "Cannot get tuple element from {:?} with index {:?}",
                 self, index
             ),
         }
@@ -357,6 +359,21 @@ impl Value {
                 new_vals[*index as usize] = value.clone();
                 Value::Array(new_vals)
             }
+            (Value::Array(vals), Value::WitnessOf(inner), value) => match inner.as_ref() {
+                Value::U(_, index) => {
+                    let mut new_vals = vals.clone();
+                    new_vals[*index as usize] = value.clone();
+                    Value::Array(new_vals)
+                }
+                _ => {
+                    let new_vals = vals.iter().map(|_| value.clone()).collect();
+                    Value::Array(new_vals)
+                }
+            },
+            (Value::Array(vals), _, value) => {
+                let new_vals = vals.iter().map(|_| value.clone()).collect();
+                Value::Array(new_vals)
+            }
             _ => panic!(
                 "Cannot set array element of {:?} with index {:?} to {:?}",
                 self, index, value
@@ -371,6 +388,10 @@ impl Value {
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
+            Value::Unknown(kind) => Value::Unknown(*kind),
+            Value::WitnessOf(inner) => {
+                Value::WitnessOf(Box::new(inner.truncate_op(_from, to, _instrumenter)))
+            }
             Value::U(_, v) => Value::U(to, v & ((1 << to) - 1)),
             Value::Field(f) => {
                 let bits = f
@@ -392,17 +413,18 @@ impl Value {
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match (self, cast_target) {
+            (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
+            (Value::Unknown(kind), _) => Value::Unknown(*kind),
+            (Value::WitnessOf(inner), target) => {
+                Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
+            }
             (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v),
-            (Value::UWitness(_), CastTarget::U(s2)) => Value::UWitness(*s2),
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
-            (Value::UWitness(_), CastTarget::Field) => Value::FWitness,
             (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
             (Value::Field(f), CastTarget::U(s)) => {
                 let bigint = f.into_bigint();
-
                 Value::U(*s, bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64))
             }
-            (Value::FWitness, CastTarget::U(s)) => Value::UWitness(*s),
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
             _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
         }
@@ -418,9 +440,21 @@ impl Value {
         &self,
         endianness: &crate::compiler::ssa::Endianness,
         size: usize,
-        _instrumenter: &mut dyn OpInstrumenter,
+        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
+            Value::Unknown(kind) => Value::Unknown(*kind),
+            Value::WitnessOf(inner) => {
+                let result = inner.to_bits(endianness, size, instrumenter);
+                match result {
+                    Value::Array(bits) => Value::Array(
+                        bits.into_iter()
+                            .map(|b| Value::WitnessOf(Box::new(b)))
+                            .collect(),
+                    ),
+                    _ => unreachable!(),
+                }
+            }
             Value::U(_, v) => {
                 let mut r = vec![];
                 for i in 0..size {
@@ -453,11 +487,47 @@ impl Value {
         size: usize,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        match (self, radix) {
-            (Value::FWitness, Radix::Dyn(Value::U(32, 256))) => {
+        match self {
+            Value::WitnessOf(inner) => {
+                let result = inner.to_radix(radix, _endianness, size, instrumenter);
+                match result {
+                    Value::Array(digits) => Value::Array(
+                        digits
+                            .into_iter()
+                            .map(|d| Value::WitnessOf(Box::new(d)))
+                            .collect(),
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            Value::Unknown(_) => {
                 instrumenter.record_rangechecks(8, size);
                 instrumenter.record_constraints(1);
-                Value::Array(vec![Value::UWitness(8); size])
+                Value::Array(vec![Value::Unknown(ScalarKind::U(8)); size])
+            }
+            Value::Field(f) => {
+                let radix_val = match radix {
+                    Radix::Dyn(Value::U(_, r)) => *r as u128,
+                    Radix::Bytes => 256,
+                    _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
+                };
+                let mut val = f.into_bigint();
+                let mut digits = vec![];
+                for _ in 0..size {
+                    let digit = {
+                        let limb = val.0[0] as u128;
+                        limb % radix_val
+                    };
+                    digits.push(Value::U(8, digit));
+                    // Divide val by radix_val
+                    let mut carry: u128 = 0;
+                    for i in (0..val.0.len()).rev() {
+                        let cur = (carry << 64) | (val.0[i] as u128);
+                        val.0[i] = (cur / radix_val) as u64;
+                        carry = cur % radix_val;
+                    }
+                }
+                Value::Array(digits)
             }
             _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
         }
@@ -465,13 +535,14 @@ impl Value {
 
     fn not_op(&self, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
+            Value::Unknown(kind) => Value::Unknown(*kind),
+            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.not_op(_instrumenter))),
             Value::U(s, v) => Value::U(*s, !v),
-            Value::UWitness(1) => Value::UWitness(1),
             _ => panic!("Cannot perform not operation on {:?}", self),
         }
     }
 
-    fn ptr_read(&self, _tp: &Type<ConstantTaint>, _instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn ptr_read(&self, _tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             Value::Pointer(val) => val.borrow().clone(),
             _ => panic!("Cannot read from {:?}", self),
@@ -493,40 +564,34 @@ impl Value {
         }
     }
 
-    fn witness_of(tp: &Type<ConstantTaint>) -> Value {
-        match &tp.expr {
-            TypeExpr::U(s) => Value::UWitness(*s),
-            TypeExpr::Field => Value::FWitness,
-            TypeExpr::WitnessRef => Value::FWitness,
-            TypeExpr::Array(tp, size) => {
-                let mut values = vec![];
-                for _ in 0..*size {
-                    values.push(Self::witness_of(tp));
-                }
-                Value::Array(values)
-            }
-            TypeExpr::Slice(_) => panic!("Cannot witness slice type"),
-            TypeExpr::Ref(_) => panic!("Cannot witness pointer type"),
-            TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
-            TypeExpr::Function => panic!("Cannot witness function type"),
-        }
-    }
-
     fn select(
         &self,
         if_true: &Value,
         if_false: &Value,
-        tp: &Type<ConstantTaint>,
-        get_specialized: &mut dyn OpInstrumenter,
+        _tp: &Type,
+        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::U(_, 0) => if_true.clone(),
             Value::U(_, _) => if_false.clone(),
-            Value::UWitness(_) => {
-                if if_true.is_witness() || if_false.is_witness() {
-                    get_specialized.record_constraints(1);
+            Value::WitnessOf(inner) => {
+                match inner.as_ref() {
+                    Value::U(_, 0) => if_true.clone(),
+                    Value::U(_, _) => if_false.clone(),
+                    _ => {
+                        if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
+                            instrumenter.record_constraints(1);
+                        }
+                        let mut result = if_true.clone();
+                        result.forget_concrete();
+                        result
+                    }
                 }
-                Self::witness_of(tp)
+            }
+            Value::Unknown(_) => {
+                let mut result = if_true.clone();
+                result.forget_concrete();
+                result
             }
             _ => panic!("Cannot select on {:?}", self),
         }
@@ -540,26 +605,22 @@ pub struct SpecSplitValue {
 }
 
 impl SpecSplitValue {
-    fn blind_unspecialized_from(&mut self, tp: &Type<ConstantTaint>) {
-        self.unspecialized.blind_from(tp);
+    fn blind_unspecialized(&mut self) {
+        self.unspecialized.blind();
     }
 
-    fn blind_from(&mut self, tp: &Type<ConstantTaint>) {
-        self.unspecialized.blind_from(tp);
-        self.specialized.blind_from(tp);
-    }
-
-    fn make_unspecialized_sig(&self, tp: &Type<ConstantTaint>) -> ValueSignature {
-        self.unspecialized.make_unspecialized_sig(tp)
+    fn blind(&mut self) {
+        self.unspecialized.blind();
+        self.specialized.blind();
     }
 }
 
-impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
+impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn cmp(
         &self,
         b: &SpecSplitValue,
         cmp_kind: CmpKind,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let unspecialized = self.unspecialized.cmp_op(
@@ -580,7 +641,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         b: &SpecSplitValue,
         binary_arith_op_kind: BinaryArithOpKind,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let unspecialized = self.unspecialized.binary_arith_op(
@@ -602,7 +663,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn cast(
         &self,
         cast_target: &crate::compiler::ssa::CastTarget,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -619,7 +680,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         from: usize,
         to: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -634,7 +695,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
-    fn not(&self, _tp: &Type<ConstantTaint>, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
+    fn not(&self, _tp: &Type, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
             unspecialized: self.unspecialized.not_op(instrumenter.get_unspecialized()),
             specialized: self.specialized.not_op(instrumenter.get_specialized()),
@@ -648,12 +709,12 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
             .ptr_write(&val.specialized, _instrumenter.get_specialized());
     }
 
-    fn ptr_read(&self, tp: &Type<ConstantTaint>, ctx: &mut CostAnalysis) -> SpecSplitValue {
+    fn ptr_read(&self, tp: &Type, ctx: &mut CostAnalysis) -> SpecSplitValue {
         let mut res = SpecSplitValue {
             unspecialized: self.unspecialized.ptr_read(tp, ctx.get_unspecialized()),
             specialized: self.specialized.ptr_read(tp, ctx.get_specialized()),
         };
-        res.blind_unspecialized_from(tp);
+        res.blind_unspecialized();
         res
     }
 
@@ -661,7 +722,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
         _seq_type: SeqType,
-        _elem_type: &Type<ConstantTaint>,
+        _elem_type: &Type,
     ) -> SpecSplitValue {
         let (uns, spec) = values
             .into_iter()
@@ -676,7 +737,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn mk_tuple (
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
-        _elem_types: &[Type<ConstantTaint>],
+        _elem_types: &[Type],
     ) -> SpecSplitValue {
         let (uns, spec) = values
             .into_iter()
@@ -711,10 +772,10 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     fn array_get(
         &self,
         i: &SpecSplitValue,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
-        let mut res = SpecSplitValue {
+        SpecSplitValue {
             unspecialized: self.unspecialized.array_get(
                 &i.unspecialized,
                 tp,
@@ -725,18 +786,16 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
                 tp,
                 instrumenter.get_specialized(),
             ),
-        };
-        res.blind_unspecialized_from(tp);
-        res
+        }
     }
 
     fn tuple_get(
         &self,
         index: usize,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
-        let mut res = SpecSplitValue {
+        SpecSplitValue {
             unspecialized: self.unspecialized.tuple_get(
                 index,
                 tp,
@@ -747,16 +806,14 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
                 tp,
                 instrumenter.get_specialized(),
             ),
-        };
-        res.blind_unspecialized_from(tp);
-        res
+        }
     }
 
     fn array_set(
         &self,
         i: &SpecSplitValue,
         v: &SpecSplitValue,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -777,7 +834,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         if_t: &SpecSplitValue,
         if_f: &SpecSplitValue,
-        tp: &Type<ConstantTaint>,
+        tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -834,7 +891,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         &self,
         endianness: Endianness,
         size: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
@@ -856,7 +913,7 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         radix: &Radix<SpecSplitValue>,
         endianness: Endianness,
         size: usize,
-        _tp: &Type<ConstantTaint>,
+        _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let spec_radix = match radix {
@@ -884,16 +941,22 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
     }
 
     fn expect_constant_bool(&self, _ctx: &mut CostAnalysis) -> bool {
-        match (&self.unspecialized, &self.specialized) {
-            (Value::U(1, v), Value::U(1, v2)) => {
-                assert_eq!(*v, *v2);
-                *v != 0
-            }
+        let specialized = match &self.specialized {
+            Value::U(1, v) => *v != 0,
             _ => panic!(
-                "Expected constant bool, got {:?} and {:?}",
-                self.unspecialized, self.specialized
+                "Expected constant bool, got specialized={:?}",
+                self.specialized
             ),
-        }
+        };
+        let unspecialized = match &self.unspecialized {
+            Value::U(1, v) => *v != 0,
+            _ => panic!(
+                "Expected constant bool, got unspecialized={:?}",
+                self.unspecialized
+            ),
+        };
+        assert_eq!(specialized, unspecialized);
+        specialized
     }
 
     fn of_u(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
@@ -910,28 +973,25 @@ impl symbolic_executor::Value<CostAnalysis, ConstantTaint> for SpecSplitValue {
         }
     }
 
-    fn alloc(_ctx: &mut CostAnalysis) -> Self {
+    fn alloc(_elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::FWitness))),
-            specialized: Value::Pointer(Rc::new(RefCell::new(Value::FWitness))),
+            unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
+            specialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
         }
     }
 
-    fn write_witness(&self, tp: Option<&Type<ConstantTaint>>, _ctx: &mut CostAnalysis) -> Self {
-        match tp {
-            Some(tp) => {
-                let mut res = self.clone();
-                res.blind_unspecialized_from(tp);
-                res
-            }
-            None => self.clone(),
+    fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: Value::WitnessOf(Box::new(self.unspecialized.clone())),
+            specialized: Value::WitnessOf(Box::new(self.specialized.clone())),
         }
     }
 
-    fn fresh_witness(_ctx: &mut CostAnalysis) -> Self {
+    fn fresh_witness(result_type: &Type, _ctx: &mut CostAnalysis) -> Self {
+        let kind = ScalarKind::from_type(result_type);
         Self {
-            unspecialized: Value::FWitness,
-            specialized: Value::FWitness,
+            unspecialized: Value::WitnessOf(Box::new(Value::Unknown(kind))),
+            specialized: Value::WitnessOf(Box::new(Value::Unknown(kind))),
         }
     }
 
@@ -945,7 +1005,7 @@ pub struct FunctionSignature {
 }
 
 impl FunctionSignature {
-    pub fn pretty_print(&self, ssa: &SSA<ConstantTaint>, all_params: bool) -> String {
+    pub fn pretty_print(&self, ssa: &SSA, all_params: bool) -> String {
         let fn_body = ssa.get_function(self.id);
         let name = fn_body.get_name();
         let params = self
@@ -1066,18 +1126,23 @@ pub struct CostAnalysis {
     stack: Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
 }
 
-impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis {
+impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     fn on_call(
         &mut self,
         func: FunctionId,
         params: &mut [SpecSplitValue],
-        param_types: &[&Type<ConstantTaint>],
+        param_types: &[&Type],
     ) -> Option<Vec<SpecSplitValue>> {
-        let mut inputs_sig = vec![];
-        for (pval, ptype) in params.iter_mut().zip(param_types.iter()) {
-            pval.blind_from(ptype);
-            inputs_sig.push(pval.make_unspecialized_sig(ptype));
+        for (pval, _ptype) in params.iter_mut().zip(param_types.iter()) {
+            pval.blind();
         }
+
+        // Build signature from the specialized side — this captures concrete
+        // non-witness values that the specializer can bake in
+        let inputs_sig: Vec<ValueSignature> = params
+            .iter()
+            .map(|pval| pval.specialized.make_unspecialized_sig())
+            .collect();
 
         let sig = FunctionSignature {
             id: func,
@@ -1107,17 +1172,17 @@ impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis 
         None
     }
 
-    fn on_return(&mut self, returns: &mut [SpecSplitValue], return_types: &[Type<ConstantTaint>]) {
-        for (rval, rtype) in returns.iter_mut().zip(return_types.iter()) {
-            rval.blind_from(rtype);
+    fn on_return(&mut self, returns: &mut [SpecSplitValue], return_types: &[Type]) {
+        for rval in returns.iter_mut() {
+            rval.blind();
         }
 
         let sig = self.exit_call();
 
         let mut caches = vec![];
 
-        for (rval, rtype) in returns.iter().zip(return_types.iter()) {
-            caches.push(rval.make_unspecialized_sig(rtype));
+        for rval in returns.iter() {
+            caches.push(rval.specialized.make_unspecialized_sig());
         }
 
         self.cache.insert(sig.clone(), caches);
@@ -1127,17 +1192,17 @@ impl symbolic_executor::Context<SpecSplitValue, ConstantTaint> for CostAnalysis 
         &mut self,
         _target: crate::compiler::ssa::BlockId,
         params: &mut [SpecSplitValue],
-        param_types: &[&Type<ConstantTaint>],
+        param_types: &[&Type],
     ) {
-        for (pval, ptype) in params.iter_mut().zip(param_types.iter()) {
-            pval.blind_unspecialized_from(ptype);
+        for pval in params.iter_mut() {
+            pval.blind_unspecialized();
         }
     }
 
     fn todo(
         &mut self,
         payload: &str,
-        _result_types: &[Type<ConstantTaint>],
+        _result_types: &[Type],
     ) -> Vec<SpecSplitValue> {
         panic!("Todo opcode encountered in CostAnalysis: {}", payload);
     }
@@ -1201,7 +1266,7 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn pretty_print(&self, ssa: &SSA<ConstantTaint>) -> String {
+    pub fn pretty_print(&self, ssa: &SSA) -> String {
         let mut r = String::new();
         r += &format!("Total constraints: {}\n", self.total_constraints);
         r += &format!(
@@ -1286,7 +1351,7 @@ impl CostAnalysis {
         self.functions
     }
 
-    pub fn pretty_print(&self, ssa: &SSA<ConstantTaint>) -> String {
+    pub fn pretty_print(&self, ssa: &SSA) -> String {
         let mut r = String::new();
         for (sig, cost) in self.functions.iter() {
             r += &format!("Function {}\n", sig.pretty_print(ssa, false));
@@ -1351,8 +1416,8 @@ impl CostEstimator {
     #[instrument(skip_all, name = "CostEstimator::run")]
     pub fn run(
         &self,
-        ssa: &SSA<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        ssa: &SSA,
+        type_info: &TypeInfo,
     ) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
@@ -1369,8 +1434,8 @@ impl CostEstimator {
 
     fn run_fn_from_signature(
         &self,
-        ssa: &SSA<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        ssa: &SSA,
+        type_info: &TypeInfo,
         sig: FunctionSignature,
         costs: &mut CostAnalysis,
     ) {
@@ -1386,31 +1451,41 @@ impl CostEstimator {
         SymbolicExecutor::new().run(ssa, type_info, sig.id, inputs, costs);
     }
 
-    fn make_main_sig(&self, ssa: &SSA<ConstantTaint>) -> FunctionSignature {
+    fn type_to_unknown_sig(&self, tp: &Type) -> ValueSignature {
+        match &tp.expr {
+            TypeExpr::Field => ValueSignature::Unknown(ScalarKind::Field),
+            TypeExpr::U(s) => ValueSignature::Unknown(ScalarKind::U(*s)),
+            TypeExpr::WitnessOf(inner) => {
+                ValueSignature::WitnessOf(Box::new(self.type_to_unknown_sig(inner)))
+            }
+            TypeExpr::Array(elem, len) => {
+                let elem_sig = self.type_to_unknown_sig(elem);
+                ValueSignature::Array(vec![elem_sig; *len])
+            }
+            TypeExpr::Slice(elem) => {
+                let elem_sig = self.type_to_unknown_sig(elem);
+                ValueSignature::Array(vec![elem_sig; 0])
+            }
+            TypeExpr::Tuple(elems) => {
+                ValueSignature::Tuple(
+                    elems.iter().map(|e| self.type_to_unknown_sig(e)).collect()
+                )
+            }
+            TypeExpr::Ref(inner) => {
+                ValueSignature::PointerTo(Box::new(self.type_to_unknown_sig(inner)))
+            }
+            _ => ValueSignature::Unknown(ScalarKind::Field),
+        }
+    }
+
+    fn make_main_sig(&self, ssa: &SSA) -> FunctionSignature {
         let id = ssa.get_main_id();
         let main_fn = ssa.get_function(id);
         let params = main_fn.get_param_types();
         let params = params
             .iter()
-            .map(|param| self.make_witness_sig(param))
+            .map(|param| self.type_to_unknown_sig(param))
             .collect();
         FunctionSignature { id, params }
-    }
-
-    fn make_witness_sig(&self, tp: &Type<ConstantTaint>) -> ValueSignature {
-        match &tp.expr {
-            TypeExpr::U(size) => ValueSignature::UWitness(*size),
-            TypeExpr::Field => ValueSignature::FWitness,
-            TypeExpr::Array(internal, size) => {
-                ValueSignature::Array(vec![self.make_witness_sig(internal); *size])
-            }
-            TypeExpr::WitnessRef => ValueSignature::FWitness,
-            TypeExpr::Slice(_) => panic!("slice not possible here"),
-            TypeExpr::Ref(_) => panic!("ref not possible here"),
-            TypeExpr::Tuple(elements) => {
-                ValueSignature::Tuple(elements.iter().map(|e| self.make_witness_sig(e)).collect())
-            }
-            TypeExpr::Function => panic!("function type not possible here"),
-        }
     }
 }

@@ -1,0 +1,8 @@
+x = "3"
+a = "5"
+b = "7"
+expected_fact = "360"
+expected_sum = "21"
+expected_ping = "36"
+expected_even = "9"
+expected_odd = "6"

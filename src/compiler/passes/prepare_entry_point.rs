@@ -1,12 +1,12 @@
-use crate::compiler::{ir::r#type::{Empty, Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, BlockId, CastTarget, Function, OpCode, SeqType, TupleIdx, ValueId, SSA}};
+use crate::compiler::{ir::r#type::{Type, TypeExpr}, pass_manager::{Pass, PassInfo}, ssa::{BinaryArithOpKind, BlockId, CastTarget, Function, OpCode, SeqType, TupleIdx, ValueId, SSA}};
 
 pub struct PrepareEntryPoint {}
 
-impl Pass<Empty> for PrepareEntryPoint {
+impl Pass for PrepareEntryPoint {
     fn run(
         &self,
-        ssa: &mut SSA<Empty>,
-        _pass_manager: &crate::compiler::pass_manager::PassManager<Empty>,
+        ssa: &mut SSA,
+        _pass_manager: &crate::compiler::pass_manager::PassManager,
     ) {
         Self::wrap_main(ssa);
         self.rebuild_main_params(ssa);
@@ -25,7 +25,7 @@ impl PrepareEntryPoint {
         Self {}
     }
 
-    fn wrap_main(ssa: &mut SSA<Empty>) {
+    fn wrap_main(ssa: &mut SSA) {
         let original_main_id = ssa.get_main_id();
         let original_main = ssa.get_main();
         let param_types = original_main.get_param_types();
@@ -78,11 +78,11 @@ impl PrepareEntryPoint {
     }
 
     fn assert_eq_deep(
-        wrapper: &mut Function<Empty>,
+        wrapper: &mut Function,
         block: BlockId,
         result: ValueId,
         public_input: ValueId,
-        typ: &Type<Empty>,
+        typ: &Type,
     ) {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
@@ -111,7 +111,7 @@ impl PrepareEntryPoint {
 
     fn rebuild_main_params(
         &self,
-        ssa: &mut SSA<Empty>,
+        ssa: &mut SSA,
     ) {
         let function = ssa.get_main_mut();
 
@@ -134,7 +134,7 @@ impl PrepareEntryPoint {
         entry_block.put_instructions(new_instructions);
     }
 
-    fn reconstruct_param (value_id: Option<&ValueId>, typ: &Type<Empty>, function: &mut Function<Empty>) -> (ValueId, Vec<(ValueId, Type<Empty>)>, Vec<OpCode<Empty>>) {
+    fn reconstruct_param (value_id: Option<&ValueId>, typ: &Type, function: &mut Function) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
         let mut new_instructions = Vec::new();
         let mut new_parameters = Vec::new();
 
@@ -150,7 +150,7 @@ impl PrepareEntryPoint {
             }
             TypeExpr::U(size) => {
                 let new_field_id = function.fresh_value();
-                new_parameters.push((new_field_id, Type{expr: TypeExpr::Field, annotation: Empty}));
+                new_parameters.push((new_field_id, Type::field()));
 
                 if *size == 1 {
                     // Boolean constraint: x * (x - 1) = 0

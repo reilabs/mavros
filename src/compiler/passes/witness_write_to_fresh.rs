@@ -3,16 +3,15 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{PassManager, PassInfo, DataPoint, Pass},
     ssa::{OpCode, SeqType, ValueId, Function, SSA},
-    taint_analysis::ConstantTaint,
 };
 
 pub struct WitnessWriteToFresh {}
 
-impl Pass<ConstantTaint> for WitnessWriteToFresh {
+impl Pass for WitnessWriteToFresh {
     fn run(
         &self,
-        ssa: &mut SSA<ConstantTaint>,
-        pass_manager: &PassManager<ConstantTaint>,
+        ssa: &mut SSA,
+        pass_manager: &PassManager,
     ) {
         self.do_run(ssa, pass_manager.get_type_info());
     }
@@ -37,24 +36,30 @@ impl WitnessWriteToFresh {
 
     pub fn do_run(
         &self,
-        ssa: &mut SSA<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        ssa: &mut SSA,
+        type_info: &TypeInfo,
     ) {
         let main_id = ssa.get_main_id();
         let main_function = ssa.get_function_mut(main_id);
         let main_block = main_function.get_block_mut(main_function.get_entry_id());
         let old_params = main_block.take_parameters();
         let old_instructions = main_block.take_instructions();
-        
+
         let mut new_instructions = vec![];
 
         for (r, tp) in old_params.iter() {
-            Self::generate_fresh_witness_for_parameter(
-                Some(*r),
-                tp.clone(),
-                main_function,
-                &mut new_instructions,
-            );
+            if tp.is_witness_of() {
+                // WitnessOf params get replaced by FreshWitness instructions
+                Self::generate_fresh_witness_for_parameter(
+                    Some(*r),
+                    tp.clone(),
+                    main_function,
+                    &mut new_instructions,
+                );
+            }
+            // Plain Field/U params are dropped — their WriteWitness instructions
+            // in the body will be replaced by FreshWitness to allocate witness entries.
+            // The value IDs become dead after WriteWitness replacement.
         }
 
         new_instructions.extend(old_instructions.into_iter());
@@ -66,10 +71,13 @@ impl WitnessWriteToFresh {
             for (_, block) in function.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     let new_instruction = match instruction {
-                        OpCode::WriteWitness { result: r, value: _, witness_annotation: _ } => {
+                        OpCode::WriteWitness { result: r, value: v } => {
                             let tp = type_info
                                 .get_function(*function_id)
-                                .get_value_type(r.unwrap());
+                                .get_value_type(*v);
+                            if tp.is_witness_of() {
+                                panic!("ICE: WriteWitness input has WitnessOf type: {:?}", tp);
+                            }
                             if !tp.is_numeric() {
                                 panic!("Expected numeric type, got {:?}", tp);
                             }
@@ -101,8 +109,6 @@ impl WitnessWriteToFresh {
                         | OpCode::FreshWitness { .. }
                         | OpCode::Constrain { .. }
                         | OpCode::NextDCoeff { .. }
-                        | OpCode::PureToWitnessRef { .. }
-                        | OpCode::UnboxField { .. }
                         | OpCode::MulConst { .. }
                         | OpCode::BumpD { .. }
                         | OpCode::Rangecheck { .. }
@@ -114,6 +120,7 @@ impl WitnessWriteToFresh {
                         | OpCode::Todo { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::MkTuple { .. }
+                        | OpCode::ValueOf { .. }
                         => instruction.clone(),
                     };
                     *instruction = new_instruction;
@@ -124,16 +131,16 @@ impl WitnessWriteToFresh {
 
     fn generate_fresh_witness_for_parameter(
         value_id: Option<ValueId>,
-        tp: Type<ConstantTaint>,
-        main_function: &mut Function<ConstantTaint>,
-        instruction_collector: &mut Vec<OpCode<ConstantTaint>>,
+        tp: Type,
+        main_function: &mut Function,
+        instruction_collector: &mut Vec<OpCode>,
     ) -> ValueId {
         let r = value_id.unwrap_or_else(|| main_function.fresh_value());
         match &tp.expr {
-            TypeExpr::Field => {
-                instruction_collector.push(OpCode::FreshWitness { 
+            TypeExpr::WitnessOf(inner) => {
+                instruction_collector.push(OpCode::FreshWitness {
                     result: r,
-                    result_type: Type::field(ConstantTaint::Witness),
+                    result_type: *inner.clone(),
                 })
             }
             TypeExpr::Array(inner_type, size) => {
@@ -171,7 +178,7 @@ impl WitnessWriteToFresh {
                     element_types: child_types.clone(),
                 });
             }    
-            _ => panic!("Unsupported parameter type for witness write to fresh. We only support fields and nested arrays of fields for now"), 
+            _ => panic!("Unsupported parameter type for witness write to fresh: {}. We only support fields and nested arrays of fields for now", tp),
         }
         r
     }

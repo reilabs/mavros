@@ -10,27 +10,26 @@ use crate::{
         analysis::types::Types,
         codegen::CodeGen,
         flow_analysis::FlowAnalysis,
-        ir::r#type::Empty,
-        monomorphization::Monomorphization,
         pass_manager::PassManager,
         passes::{
-            arithmetic_simplifier::ArithmeticSimplifier, defunctionalize::Defunctionalize, witness_to_ref::WitnessToRef, common_subexpression_elimination::CSE, condition_propagation::ConditionPropagation, dead_code_elimination::{self, DCE}, deduplicate_phis::DeduplicatePhis, explicit_witness::ExplicitWitness, fix_double_jumps::FixDoubleJumps, mem2reg::Mem2Reg, prepare_entry_point::PrepareEntryPoint, pull_into_assert::PullIntoAssert, rc_insertion::RCInsertion, remove_unreachable_blocks::RemoveUnreachableBlocks, remove_unreachable_functions::RemoveUnreachableFunctions, specializer::Specializer, struct_access_simplifier::MakeStructAccessStatic, witness_write_to_fresh::WitnessWriteToFresh, witness_write_to_void::WitnessWriteToVoid
+            arithmetic_simplifier::ArithmeticSimplifier, defunctionalize::Defunctionalize, witness_lowering::WitnessLowering, common_subexpression_elimination::CSE, condition_propagation::ConditionPropagation, dead_code_elimination::{self, DCE}, deduplicate_phis::DeduplicatePhis, explicit_witness::ExplicitWitness, fix_double_jumps::FixDoubleJumps, mem2reg::Mem2Reg, prepare_entry_point::PrepareEntryPoint, pull_into_assert::PullIntoAssert, rc_insertion::RCInsertion, remove_unreachable_blocks::RemoveUnreachableBlocks, remove_unreachable_functions::RemoveUnreachableFunctions, specializer::Specializer, strip_witness_of::StripWitnessOf, struct_access_simplifier::MakeStructAccessStatic, witness_write_to_fresh::WitnessWriteToFresh, witness_write_to_void::WitnessWriteToVoid
         },
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, SSA},
-        taint_analysis::{ConstantTaint, TaintAnalysis},
         untaint_control_flow::UntaintControlFlow,
+        witness_cast_insertion::WitnessCastInsertion,
+        witness_type_inference::WitnessTypeInference,
     },
 };
 
 pub struct Driver {
     project: Project,
-    initial_ssa: Option<SSA<Empty>>,
-    static_struct_access_ssa: Option<SSA<Empty>>,
-    monomorphized_ssa: Option<SSA<ConstantTaint>>,
-    explicit_witness_ssa: Option<SSA<ConstantTaint>>,
-    r1cs_ssa: Option<SSA<ConstantTaint>>,
-    base_witgen_ssa: Option<SSA<ConstantTaint>>,
+    initial_ssa: Option<SSA>,
+    static_struct_access_ssa: Option<SSA>,
+    monomorphized_ssa: Option<SSA>,
+    explicit_witness_ssa: Option<SSA>,
+    r1cs_ssa: Option<SSA>,
+    base_witgen_ssa: Option<SSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
 }
@@ -111,7 +110,7 @@ impl Driver {
 
     #[tracing::instrument(skip_all)]
     pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
-        let mut pass_manager = PassManager::<Empty>::new(
+        let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
             self.draw_cfg,
             vec![
@@ -137,14 +136,6 @@ impl Driver {
     pub fn monomorphize(&mut self) -> Result<(), Error> {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
         let flow_analysis = FlowAnalysis::run(&ssa);
-        // let type_info = Types::new().run(ssa, &flow_analysis);
-        let call_loops = flow_analysis.get_call_graph().detect_loops();
-        if !call_loops.is_empty() {
-            todo!(
-                "Call loops detected: {:?}. We don't support recursion yet.",
-                call_loops
-            );
-        }
 
         if self.draw_cfg {
             flow_analysis.generate_images(
@@ -154,21 +145,21 @@ impl Driver {
             );
         }
 
-        let mut taint_analysis = TaintAnalysis::new();
-        taint_analysis.run(&ssa, &flow_analysis).unwrap();
-
-        fs::write(
-            self.get_debug_output_dir().join("taint_analysed_ssa.txt"),
-            ssa.to_string(&taint_analysis),
-        )
-        .unwrap();
-
-        let mut monomorphization = Monomorphization::new();
-        monomorphization.run(&mut ssa, &mut taint_analysis).unwrap();
+        let mut witness_inference = WitnessTypeInference::new();
+        witness_inference.run(&mut ssa, &flow_analysis).unwrap();
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
-            ssa.to_string(&taint_analysis),
+            ssa.to_string(&witness_inference),
+        )
+        .unwrap();
+
+        let mut witness_cast = WitnessCastInsertion::new();
+        let ssa = witness_cast.run(ssa, &witness_inference);
+
+        fs::write(
+            self.get_debug_output_dir().join("witness_typed_ssa.txt"),
+            ssa.to_string(&witness_inference),
         )
         .unwrap();
 
@@ -183,7 +174,7 @@ impl Driver {
         }
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &taint_analysis, &flow_analysis));
+        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis));
 
         fs::write(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
@@ -199,7 +190,7 @@ impl Driver {
 
     #[tracing::instrument(skip_all)]
     pub fn explictize_witness(&mut self) -> Result<(), Error> {
-        let mut pass_manager = PassManager::<ConstantTaint>::new(
+        let mut pass_manager = PassManager::new(
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
@@ -232,7 +223,7 @@ impl Driver {
     pub fn generate_r1cs(&mut self) -> Result<R1CS, Error> {
         let mut r1cs_ssa = self.explicit_witness_ssa.clone().unwrap();
 
-        let mut r1cs_phase_1 = PassManager::<ConstantTaint>::new(
+        let mut r1cs_phase_1 = PassManager::new(
             "r1cs_phase_1".to_string(),
             self.draw_cfg,
             vec![
@@ -307,11 +298,11 @@ impl Driver {
 
     pub fn compile_ad(&self) -> Result<Vec<u64>, Error> {
         let mut ssa = self.r1cs_ssa.clone().unwrap();
-        let mut ad_pm = PassManager::<ConstantTaint>::new(
+        let mut ad_pm = PassManager::new(
             "ad".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(WitnessToRef::new()),
+                Box::new(WitnessLowering::new()),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
@@ -347,11 +338,12 @@ impl Driver {
 
         let mut ssa = self.explicit_witness_ssa.clone().unwrap();
 
-        let mut pass_manager = PassManager::<ConstantTaint>::new(
+        let mut pass_manager = PassManager::new(
             "base_witgen".to_string(),
             self.draw_cfg,
             vec![
                 Box::new(WitnessWriteToVoid::new()),
+                Box::new(StripWitnessOf::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),

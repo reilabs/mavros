@@ -1,4 +1,4 @@
-use std::{fmt::{Debug, Display}, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use crate::compiler::{
     analysis::{
@@ -7,40 +7,8 @@ use crate::compiler::{
         value_definitions::ValueDefinitions,
     },
     flow_analysis::FlowAnalysis,
-    ir::r#type::{CommutativeMonoid, Empty},
     ssa::{DefaultSsaAnnotator, SSA},
-    taint_analysis::ConstantTaint,
 };
-
-/// Trait for type-specific pass manager behavior.
-/// This allows sharing the common pass manager logic while customizing
-/// constraint instrumentation support per type.
-pub trait PassManagerExt: CommutativeMonoid + Display + Eq + Clone + Debug {
-    fn initialize_constraint_instrumentation(
-        pm: &mut PassManager<Self>,
-        ssa: &mut SSA<Self>,
-    );
-}
-
-impl PassManagerExt for ConstantTaint {
-    fn initialize_constraint_instrumentation(
-        pm: &mut PassManager<Self>,
-        ssa: &mut SSA<Self>,
-    ) {
-        let cost_estimator = CostEstimator::new();
-        let cost_analysis = cost_estimator.run(ssa, pm.type_info.as_ref().unwrap());
-        pm.constraint_instrumentation = Some(cost_analysis.summarize());
-    }
-}
-
-impl PassManagerExt for Empty {
-    fn initialize_constraint_instrumentation(
-        _pm: &mut PassManager<Self>,
-        _ssa: &mut SSA<Self>,
-    ) {
-        panic!("Constraint instrumentation is not supported for Empty");
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataPoint {
@@ -56,8 +24,8 @@ pub struct PassInfo {
     pub needs: Vec<DataPoint>,
 }
 
-pub trait Pass<V> {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &PassManager<V>);
+pub trait Pass {
+    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager);
     fn pass_info(&self) -> PassInfo;
     fn invalidates_cfg(&self) -> bool {
         true
@@ -73,23 +41,23 @@ pub trait Pass<V> {
     }
 }
 
-pub struct PassManager<V> {
-    passes: Vec<Box<dyn Pass<V>>>,
+pub struct PassManager {
+    passes: Vec<Box<dyn Pass>>,
     current_pass_info: Option<PassInfo>,
     cfg: Option<FlowAnalysis>,
     draw_cfg: bool,
-    type_info: Option<TypeInfo<V>>,
+    type_info: Option<TypeInfo>,
     constraint_instrumentation: Option<instrumenter::Summary>,
-    value_definitions: Option<ValueDefinitions<V>>,
+    value_definitions: Option<ValueDefinitions>,
     debug_output_dir: Option<PathBuf>,
     phase_label: String,
 }
 
-impl<V: PassManagerExt> PassManager<V> {
+impl PassManager {
     pub fn new(
         phase_label: String,
         draw_cfg: bool,
-        passes: Vec<Box<dyn Pass<V>>>,
+        passes: Vec<Box<dyn Pass>>,
     ) -> Self {
         Self {
             passes,
@@ -113,7 +81,7 @@ impl<V: PassManagerExt> PassManager<V> {
     }
 
     #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
-    pub fn run(&mut self, ssa: &mut SSA<V>) {
+    pub fn run(&mut self, ssa: &mut SSA) {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
                 fs::remove_dir_all(&debug_output_dir).unwrap();
@@ -132,8 +100,8 @@ impl<V: PassManagerExt> PassManager<V> {
     #[tracing::instrument(skip_all, fields(pass = %pass.pass_info().name))]
     fn run_pass(
         &mut self,
-        ssa: &mut SSA<V>,
-        pass: &dyn Pass<V>,
+        ssa: &mut SSA,
+        pass: &dyn Pass,
         pass_index: usize,
     ) {
         self.initialize_pass_data(ssa, &pass.pass_info());
@@ -145,7 +113,7 @@ impl<V: PassManagerExt> PassManager<V> {
 
     fn output_debug_info(
         &mut self,
-        ssa: &SSA<V>,
+        ssa: &SSA,
         pass_index: usize,
         pass_info: &PassInfo,
     ) {
@@ -170,7 +138,7 @@ impl<V: PassManagerExt> PassManager<V> {
         }
     }
 
-    fn output_final_debug_info(&mut self, ssa: &mut SSA<V>) {
+    fn output_final_debug_info(&mut self, ssa: &mut SSA) {
         if self.cfg.is_none() {
             self.cfg = Some(FlowAnalysis::run(ssa));
         }
@@ -193,7 +161,7 @@ impl<V: PassManagerExt> PassManager<V> {
         }
     }
 
-    fn initialize_pass_data(&mut self, ssa: &mut SSA<V>, pass_info: &PassInfo) {
+    fn initialize_pass_data(&mut self, ssa: &mut SSA, pass_info: &PassInfo) {
         if (pass_info.needs.contains(&DataPoint::CFG)
             || pass_info.needs.contains(&DataPoint::Types)
             || pass_info
@@ -215,14 +183,17 @@ impl<V: PassManagerExt> PassManager<V> {
             .needs
             .contains(&DataPoint::ConstraintInstrumentation)
         {
-            V::initialize_constraint_instrumentation(self, ssa);
+            let cost_estimator = CostEstimator::new();
+            let cost_analysis = cost_estimator.run(ssa, self.type_info.as_ref().unwrap());
+            let summary = cost_analysis.summarize();
+            self.constraint_instrumentation = Some(summary);
         }
         if pass_info.needs.contains(&DataPoint::ValueDefinitions) {
             self.value_definitions = Some(ValueDefinitions::from_ssa(ssa));
         }
     }
 
-    fn tear_down_pass_data(&mut self, pass: &dyn Pass<V>) {
+    fn tear_down_pass_data(&mut self, pass: &dyn Pass) {
         if pass.invalidates_cfg() {
             self.cfg = None;
         }
@@ -236,9 +207,7 @@ impl<V: PassManagerExt> PassManager<V> {
             self.value_definitions = None;
         }
     }
-}
 
-impl<V> PassManager<V> {
     pub fn get_cfg(&self) -> &FlowAnalysis {
         match &self.current_pass_info {
             Some(pass_info) => {
@@ -272,7 +241,7 @@ impl<V> PassManager<V> {
         self.constraint_instrumentation.as_ref().unwrap()
     }
 
-    pub fn get_type_info(&self) -> &TypeInfo<V> {
+    pub fn get_type_info(&self) -> &TypeInfo {
         match &self.current_pass_info {
             Some(pass_info) => {
                 if !pass_info.needs.contains(&DataPoint::Types) {
@@ -287,7 +256,7 @@ impl<V> PassManager<V> {
         self.type_info.as_ref().unwrap()
     }
 
-    pub fn get_value_definitions(&self) -> &ValueDefinitions<V> {
+    pub fn get_value_definitions(&self) -> &ValueDefinitions {
         match &self.current_pass_info {
             Some(pass_info) => {
                 if !pass_info.needs.contains(&DataPoint::ValueDefinitions) {

@@ -10,7 +10,6 @@ use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
 
 use crate::compiler::ir::r#type::{Type, TypeExpr};
-use crate::compiler::taint_analysis::ConstantTaint;
 
 /// Number of 64-bit limbs used to represent a BN254 field element
 pub const FIELD_LIMBS: u32 = 4;
@@ -26,7 +25,7 @@ impl<'ctx> TypeConverter<'ctx> {
     }
 
     /// Convert a Mavros type to an LLVM type
-    pub fn convert_type(&self, ty: &Type<ConstantTaint>) -> BasicTypeEnum<'ctx> {
+    pub fn convert_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
         match &ty.expr {
             TypeExpr::Field => {
                 // Field is represented as [4 x i64] - 256 bits in Montgomery form

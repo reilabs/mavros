@@ -39,7 +39,7 @@ impl LivenessAnalysis {
     }
 
     #[instrument(skip_all, name = "LivenessAnalysis::run")]
-    pub fn run<V: Clone>(&self, ssa: &SSA<V>, cfg: &FlowAnalysis) -> Liveness {
+    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis) -> Liveness {
         let mut result = Liveness {
             function_liveness: HashMap::new(),
         };
@@ -56,7 +56,7 @@ impl LivenessAnalysis {
     }
 
     #[instrument(skip_all, level = Level::TRACE, name = "LivenessAnalysis::run_function", fields(function = function.get_name()))]
-    fn run_function<V: Clone>(&self, function: &Function<V>, cfg: &CFG) -> FunctionLiveness {
+    fn run_function(&self, function: &Function, cfg: &CFG) -> FunctionLiveness {
         let mut gens = HashMap::<BlockId, HashSet<ValueId>>::new();
         let mut kills = HashMap::<BlockId, HashSet<ValueId>>::new();
 

@@ -1,0 +1,6 @@
+[package]
+name = "fibonacci"
+type = "bin"
+authors = [""]
+
+[dependencies]
