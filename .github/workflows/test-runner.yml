@@ -10,6 +10,14 @@ permissions:
   pull-requests: write
 
 jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check code formatting
+        run: nix develop --command cargo fmt --all --check
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -31,9 +39,6 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Check code formatting
-        run: nix develop --command cargo fmt --all --check
 
       - name: Build test-runner
         run: nix develop --command cargo build --release --bin test-runner
