@@ -452,8 +452,8 @@ impl Function {
             .push(OpCode::Cmp {
                 kind: CmpKind::Eq,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -467,8 +467,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -482,8 +482,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -498,8 +498,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Div,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -513,8 +513,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Sub,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -528,8 +528,8 @@ impl Function {
             .push(OpCode::Cmp {
                 kind: CmpKind::Lt,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -551,10 +551,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::Store {
-                ptr: ptr,
-                value: value,
-            });
+            .push(OpCode::Store { ptr, value });
     }
     pub fn push_load(&mut self, block_id: BlockId, ptr: ValueId) -> ValueId {
         let value_id = ValueId(self.next_value);
@@ -565,7 +562,7 @@ impl Function {
             .instructions
             .push(OpCode::Load {
                 result: value_id,
-                ptr: ptr,
+                ptr,
             });
         value_id
     }
@@ -574,7 +571,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::AssertEq { lhs: lhs, rhs: rhs });
+            .push(OpCode::AssertEq { lhs, rhs });
     }
 
     pub fn push_and(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
@@ -587,8 +584,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -608,7 +605,7 @@ impl Function {
             .instructions
             .push(OpCode::Select {
                 result: value_id,
-                cond: cond,
+                cond,
                 if_t: then,
                 if_f: otherwise,
             });
@@ -635,7 +632,7 @@ impl Function {
             .push(OpCode::Call {
                 results: return_values.clone(),
                 function: CallTarget::Static(fn_id),
-                args: args,
+                args,
             });
         return_values
     }
@@ -674,8 +671,8 @@ impl Function {
             .instructions
             .push(OpCode::ArrayGet {
                 result: value_id,
-                array: array,
-                index: index,
+                array,
+                index,
             });
         value_id
     }
@@ -694,7 +691,7 @@ impl Function {
             .instructions
             .push(OpCode::TupleProj {
                 result: value_id,
-                tuple: tuple,
+                tuple,
                 idx: index,
             });
         value_id
@@ -715,8 +712,8 @@ impl Function {
             .instructions
             .push(OpCode::ArraySet {
                 result: value_id,
-                array: array,
-                index: index,
+                array,
+                index,
                 value: element,
             });
         value_id
@@ -737,9 +734,9 @@ impl Function {
             .instructions
             .push(OpCode::SlicePush {
                 result: value_id,
-                slice: slice,
-                values: values,
-                dir: dir,
+                slice,
+                values,
+                dir,
             });
         value_id
     }
@@ -753,7 +750,7 @@ impl Function {
             .instructions
             .push(OpCode::SliceLen {
                 result: value_id,
-                slice: slice,
+                slice,
             });
         value_id
     }
@@ -809,8 +806,8 @@ impl Function {
             .instructions
             .push(OpCode::Cast {
                 result: value_id,
-                value: value,
-                target: target,
+                value,
+                target,
             });
         value_id
     }
@@ -830,7 +827,7 @@ impl Function {
             .instructions
             .push(OpCode::Truncate {
                 result: value_id,
-                value: value,
+                value,
                 to_bits: out_bit_size,
                 from_bits: in_bit_size,
             });
@@ -846,7 +843,7 @@ impl Function {
             .instructions
             .push(OpCode::Not {
                 result: value_id,
-                value: value,
+                value,
             });
         value_id
     }
@@ -866,8 +863,8 @@ impl Function {
             .instructions
             .push(OpCode::ToBits {
                 result: value_id,
-                value: value,
-                endianness: endianness,
+                value,
+                endianness,
                 count: output_size,
             });
         value_id
@@ -889,9 +886,9 @@ impl Function {
             .instructions
             .push(OpCode::ToRadix {
                 result: value_id,
-                value: value,
+                value,
                 radix,
-                endianness: endianness,
+                endianness,
                 count: output_size,
             });
         value_id
@@ -902,10 +899,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::Rangecheck {
-                value: value,
-                max_bits: max_bits,
-            });
+            .push(OpCode::Rangecheck { value, max_bits });
     }
 
     pub fn push_mem_op(&mut self, block_id: BlockId, value: ValueId, kind: MemOp) {
@@ -913,10 +907,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::MemOp {
-                kind: kind,
-                value: value,
-            });
+            .push(OpCode::MemOp { kind, value });
     }
 
     pub fn push_read_global(&mut self, block_id: BlockId, index: u64, typ: Type) -> ValueId {

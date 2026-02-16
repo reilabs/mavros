@@ -157,7 +157,7 @@ impl UntaintControlFlow {
                                 let old_value = function.fresh_value();
                                 new_instructions.push(OpCode::Load {
                                     result: old_value,
-                                    ptr: ptr,
+                                    ptr,
                                 });
 
                                 let new_value = function.fresh_value();
@@ -169,7 +169,7 @@ impl UntaintControlFlow {
                                 });
 
                                 new_instructions.push(OpCode::Store {
-                                    ptr: ptr,
+                                    ptr,
                                     value: new_value,
                                 });
                             }
@@ -243,7 +243,7 @@ impl UntaintControlFlow {
                         new_instructions.push(OpCode::Call {
                             results: ret,
                             function: CallTarget::Static(tgt),
-                            args: args,
+                            args,
                         });
                     }
                     OpCode::Call {
@@ -400,7 +400,7 @@ impl UntaintControlFlow {
                                         function.get_block_mut(merger_block).push_instruction(
                                             OpCode::Select {
                                                 result: *res,
-                                                cond: cond,
+                                                cond,
                                                 if_t: *lhs,
                                                 if_f: *rhs,
                                             },

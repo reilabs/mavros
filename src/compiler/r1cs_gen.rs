@@ -607,7 +607,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         let a = a.expect_linear_combination();
         let b = b.expect_linear_combination();
         let c = c.expect_linear_combination();
-        ctx.constraints.push(R1C { a: a, b: b, c: c });
+        ctx.constraints.push(R1C { a, b, c });
     }
 
     fn to_bits(

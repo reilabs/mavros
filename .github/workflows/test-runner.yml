@@ -10,6 +10,14 @@ permissions:
   pull-requests: write
 
 jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check code formatting
+        run: cargo fmt --all --check
+
   test:
     runs-on: ubuntu-latest
     steps:

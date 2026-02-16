@@ -300,7 +300,7 @@ impl ExplicitWitness {
                                 new_instructions.push(instruction);
                                 continue;
                             }
-                            new_instructions.push(OpCode::Constrain { a: a, b: b, c: c });
+                            new_instructions.push(OpCode::Constrain { a, b, c });
                         }
                         OpCode::NextDCoeff { result: _ } => {
                             panic!("ICE: should not be present at this stage");
@@ -459,7 +459,7 @@ impl ExplicitWitness {
                             let select_witness = function.fresh_value();
                             new_instructions.push(OpCode::Select {
                                 result: select_witness,
-                                cond: cond,
+                                cond,
                                 if_t: l,
                                 if_f: r,
                             });
@@ -541,7 +541,7 @@ impl ExplicitWitness {
                             let casted = function.fresh_value();
                             new_instructions.push(OpCode::Cast {
                                 result: casted,
-                                value: value,
+                                value,
                                 target: CastTarget::Field,
                             });
                             let subbed = function.fresh_value();
@@ -552,7 +552,7 @@ impl ExplicitWitness {
                                 rhs: casted,
                             });
                             new_instructions.push(OpCode::Cast {
-                                result: result,
+                                result,
                                 value: subbed,
                                 target: CastTarget::U(s),
                             });
@@ -632,7 +632,7 @@ impl ExplicitWitness {
                                 });
 
                                 new_instructions.push(OpCode::MkSeq {
-                                    result: result,
+                                    result,
                                     elems: witnesses,
                                     seq_type: SeqType::Array(count),
                                     elem_type: Type::witness_of(Type::field()),
@@ -726,7 +726,7 @@ impl ExplicitWitness {
         let pure_value = function.fresh_value();
         new_instructions.push(OpCode::ValueOf {
             result: pure_value,
-            value: value,
+            value,
         });
         let bytes_val = function.fresh_value();
         new_instructions.push(OpCode::ToRadix {

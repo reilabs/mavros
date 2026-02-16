@@ -101,7 +101,7 @@ impl Parse for Instruction {
             .collect::<Vec<_>>();
         Ok(Instruction {
             name: instruction_name,
-            operands: operands,
+            operands,
         })
     }
 }
@@ -151,7 +151,7 @@ impl Parse for AppendSnippet {
 
         Ok(AppendSnippet {
             func_expr: func,
-            result: result,
+            result,
             instructions: instructions.into_iter().collect::<Vec<_>>(),
             results: results.into_iter().collect::<Vec<_>>(),
         })
