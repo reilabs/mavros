@@ -166,7 +166,8 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 assert_eq!(l_val, r_val);
             }
             (None, _) | (_, None) => {
-                ctx.function.push_assert_eq(ctx.function.get_entry_id(), self.0, other.0);
+                ctx.function
+                    .push_assert_eq(ctx.function.get_entry_id(), self.0, other.0);
             }
             _ => panic!("Not yet implemented {:?}", (l_const, r_const)),
         }
@@ -294,9 +295,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
-                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => {
-                    self.clone()
-                }
+                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => self.clone(),
             },
             Some(ConstVal::Field(f)) => match cast_target {
                 CastTarget::U(s) => {
@@ -306,9 +305,10 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
                 }
-                CastTarget::Field | CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => {
-                    self.clone()
-                }
+                CastTarget::Field
+                | CastTarget::Nop
+                | CastTarget::ArrayToSlice
+                | CastTarget::WitnessOf => self.clone(),
             },
             None => {
                 let res = ctx
@@ -394,17 +394,11 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         Self(val)
     }
 
-    fn mk_tuple(
-        elems: Vec<Self>,
-        ctx: &mut SpecializationState,
-        elem_types: &[Type],
-    ) -> Self {
+    fn mk_tuple(elems: Vec<Self>, ctx: &mut SpecializationState, elem_types: &[Type]) -> Self {
         let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.function.push_mk_tuple(
-            ctx.function.get_entry_id(),
-            a.clone(),
-            elem_types.to_vec(),
-        );
+        let val =
+            ctx.function
+                .push_mk_tuple(ctx.function.get_entry_id(), a.clone(), elem_types.to_vec());
         ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
@@ -426,9 +420,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let val = ctx
-            .function
-            .push_load(ctx.function.get_entry_id(), self.0);
+        let val = ctx.function.push_load(ctx.function.get_entry_id(), self.0);
         Self(val)
     }
 
@@ -472,7 +464,10 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
-    fn fresh_witness(_result_type: &crate::compiler::ir::r#type::Type, _ctx: &mut SpecializationState) -> Self {
+    fn fresh_witness(
+        _result_type: &crate::compiler::ir::r#type::Type,
+        _ctx: &mut SpecializationState,
+    ) -> Self {
         todo!()
     }
 
@@ -559,21 +554,16 @@ impl symbolic_executor::Context<Val> for SpecializationState {
             self.const_vals.insert(val, ConstVal::U(32, len));
             Val(val)
         } else {
-            let val = self.function.push_slice_len(
-                self.function.get_entry_id(),
-                slice.0,
-            );
+            let val = self
+                .function
+                .push_slice_len(self.function.get_entry_id(), slice.0);
             Val(val)
         }
     }
 }
 
 impl Pass for Specializer {
-    fn run(
-        &self,
-        ssa: &mut SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         let summary = pass_manager.get_constraint_instrumentation();
         for (sig, summary) in summary.functions.iter() {
             if summary.specialization_total_savings > 0 {

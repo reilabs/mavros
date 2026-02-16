@@ -6,7 +6,10 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SSA, Terminator, ValueId},
+    ssa::{
+        BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SSA, Terminator,
+        ValueId,
+    },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
 };
@@ -15,7 +18,10 @@ pub struct UntaintControlFlow {}
 
 /// Look up the witness level for a value, defaulting to Pure for values
 /// not present in the witness type map (e.g., values created by WitnessCastInsertion).
-fn get_witness_or_pure(function_wt: &FunctionWitnessType, v: crate::compiler::ssa::ValueId) -> ConstantWitness {
+fn get_witness_or_pure(
+    function_wt: &FunctionWitnessType,
+    v: crate::compiler::ssa::ValueId,
+) -> ConstantWitness {
     function_wt
         .value_witness_types
         .get(&v)
@@ -62,13 +68,8 @@ impl UntaintControlFlow {
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
-        let cfg_witness_param = if matches!(
-            function_wt.cfg_witness,
-            WitnessInfo::Witness
-        ) {
-            Some(
-                function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))),
-            )
+        let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
+            Some(function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))))
         } else {
             None
         };
@@ -80,7 +81,12 @@ impl UntaintControlFlow {
         let mut witness_cast_strip: HashMap<ValueId, ValueId> = HashMap::new();
         for (_, block) in function.get_blocks() {
             for instr in block.get_instructions() {
-                if let OpCode::Cast { result, value, target: CastTarget::WitnessOf } = instr {
+                if let OpCode::Cast {
+                    result,
+                    value,
+                    target: CastTarget::WitnessOf,
+                } = instr
+                {
                     witness_cast_strip.insert(*result, *value);
                 }
             }
@@ -125,24 +131,19 @@ impl UntaintControlFlow {
                     | OpCode::AssertR1C { .. } => {
                         new_instructions.push(instruction);
                     }
-                    OpCode::AssertEq { lhs, rhs } => {
-                        match block_taint {
-                            Some(taint) => {
-                                let new_rhs = function.fresh_value();
-                                new_instructions.push(OpCode::Select {
-                                    result: new_rhs,
-                                    cond: taint,
-                                    if_t: rhs,
-                                    if_f: lhs,
-                                });
-                                new_instructions.push(OpCode::AssertEq {
-                                    lhs: lhs,
-                                    rhs: new_rhs,
-                                })
-                            }
-                            None => new_instructions.push(instruction),
+                    OpCode::AssertEq { lhs, rhs } => match block_taint {
+                        Some(taint) => {
+                            let new_rhs = function.fresh_value();
+                            new_instructions.push(OpCode::Select {
+                                result: new_rhs,
+                                cond: taint,
+                                if_t: rhs,
+                                if_f: lhs,
+                            });
+                            new_instructions.push(OpCode::AssertEq { lhs, rhs: new_rhs })
                         }
-                    }
+                        None => new_instructions.push(instruction),
+                    },
                     OpCode::Store { ptr, value: v } => {
                         let ptr_wt = get_witness_or_pure(function_wt, ptr);
                         // writes to dynamic ptr not supported
@@ -153,7 +154,7 @@ impl UntaintControlFlow {
                                 let old_value = function.fresh_value();
                                 new_instructions.push(OpCode::Load {
                                     result: old_value,
-                                    ptr: ptr,
+                                    ptr,
                                 });
 
                                 let new_value = function.fresh_value();
@@ -165,7 +166,7 @@ impl UntaintControlFlow {
                                 });
 
                                 new_instructions.push(OpCode::Store {
-                                    ptr: ptr,
+                                    ptr,
                                     value: new_value,
                                 });
                             }
@@ -239,14 +240,21 @@ impl UntaintControlFlow {
                         new_instructions.push(OpCode::Call {
                             results: ret,
                             function: CallTarget::Static(tgt),
-                            args: args,
+                            args,
                         });
                     }
-                    OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
+                        ..
+                    } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
 
-                    OpCode::Todo { payload, results, result_types } => {
+                    OpCode::Todo {
+                        payload,
+                        results,
+                        result_types,
+                    } => {
                         new_instructions.push(OpCode::Todo {
                             payload,
                             results,
@@ -389,7 +397,7 @@ impl UntaintControlFlow {
                                         function.get_block_mut(merger_block).push_instruction(
                                             OpCode::Select {
                                                 result: *res,
-                                                cond: cond,
+                                                cond,
                                                 if_t: *lhs,
                                                 if_f: *rhs,
                                             },

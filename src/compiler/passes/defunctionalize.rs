@@ -3,9 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Pass, PassInfo, PassManager},
-    ssa::{
-        BlockId, CallTarget, Const, FunctionId, OpCode, Terminator, TupleIdx, ValueId, SSA,
-    },
+    ssa::{BlockId, CallTarget, Const, FunctionId, OpCode, SSA, Terminator, TupleIdx, ValueId},
 };
 
 pub struct Defunctionalize {}
@@ -43,11 +41,15 @@ type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
 
 fn run_defunctionalize(ssa: &mut SSA) {
     // Check if there are any FnPtrs at all
-    let has_fn_ptrs = ssa.get_function_ids().collect::<Vec<_>>().iter().any(|fid| {
-        ssa.get_function(*fid)
-            .iter_consts()
-            .any(|(_, c)| matches!(c, Const::FnPtr(_)))
-    });
+    let has_fn_ptrs = ssa
+        .get_function_ids()
+        .collect::<Vec<_>>()
+        .iter()
+        .any(|fid| {
+            ssa.get_function(*fid)
+                .iter_consts()
+                .any(|(_, c)| matches!(c, Const::FnPtr(_)))
+        });
     if !has_fn_ptrs {
         return;
     }
@@ -85,17 +87,17 @@ fn run_defunctionalize(ssa: &mut SSA) {
         }
         let targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
-            .unwrap_or_else(|| {
-                panic!(
-                    "No reaching FnPtrs for v{} in {:?}",
-                    fn_ptr_val.0, fid
-                )
-            })
+            .unwrap_or_else(|| panic!("No reaching FnPtrs for v{} in {:?}", fn_ptr_val.0, fid))
             .iter()
             .copied()
             .collect();
 
-        assert!(!targets.is_empty(), "Empty target set for v{} in {:?}", fn_ptr_val.0, fid);
+        assert!(
+            !targets.is_empty(),
+            "Empty target set for v{} in {:?}",
+            fn_ptr_val.0,
+            fid
+        );
 
         // Get param/return types from the first target (all must match)
         let representative = ssa.get_function(targets[0]);
@@ -137,7 +139,13 @@ fn run_defunctionalize(ssa: &mut SSA) {
         let func = ssa.get_function(fid);
         let has_dynamic = func.get_blocks().any(|(_, block)| {
             block.get_instructions().any(|instr| {
-                matches!(instr, OpCode::Call { function: CallTarget::Dynamic(_), .. })
+                matches!(
+                    instr,
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
+                        ..
+                    }
+                )
             })
         });
         if !has_dynamic {
@@ -159,12 +167,9 @@ fn run_defunctionalize(ssa: &mut SSA) {
                         function: CallTarget::Dynamic(fn_ptr_val),
                         args,
                     } => {
-                        let dispatch_fn = *call_site_dispatch
-                            .get(&(fid, fn_ptr_val))
-                            .expect(&format!(
-                                "No dispatch function for v{} in {:?}",
-                                fn_ptr_val.0, fid
-                            ));
+                        let dispatch_fn = *call_site_dispatch.get(&(fid, fn_ptr_val)).expect(
+                            &format!("No dispatch function for v{} in {:?}", fn_ptr_val.0, fid),
+                        );
                         let mut new_args = Vec::with_capacity(args.len() + 1);
                         new_args.push(fn_ptr_val);
                         new_args.extend(args);
@@ -247,7 +252,10 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
         // Check Alloc instructions
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
-                if let OpCode::Alloc { result, elem_type, .. } = instr {
+                if let OpCode::Alloc {
+                    result, elem_type, ..
+                } = instr
+                {
                     if contains_function(elem_type) {
                         is_ref_with_fn.insert((fid, *result));
                     }
@@ -271,10 +279,7 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
         let func = ssa.get_function(fid);
         for (vid, c) in func.iter_consts() {
             if let Const::FnPtr(target) = c {
-                reaching
-                    .entry((fid, *vid))
-                    .or_default()
-                    .insert(*target);
+                reaching.entry((fid, *vid)).or_default().insert(*target);
             }
         }
     }
@@ -332,7 +337,8 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
                         if i < dest_params.len() {
                             changed |= propagate(&mut reaching, (fid, *arg), (fid, dest_params[i]));
                             if is_ref_with_fn.contains(&(fid, dest_params[i])) {
-                                changed |= propagate(&mut reaching, (fid, dest_params[i]), (fid, *arg));
+                                changed |=
+                                    propagate(&mut reaching, (fid, dest_params[i]), (fid, *arg));
                             }
                         }
                     }
@@ -340,7 +346,11 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
 
                 for instr in block.get_instructions() {
                     match instr {
-                        OpCode::Call { function, args, results } => {
+                        OpCode::Call {
+                            function,
+                            args,
+                            results,
+                        } => {
                             let target_fns: Vec<FunctionId> = match function {
                                 CallTarget::Static(callee_id) => vec![*callee_id],
                                 CallTarget::Dynamic(fn_ptr_val) => reaching
@@ -390,7 +400,8 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
                             for elem in elems {
                                 changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
                                 if is_ref_with_fn.contains(&(fid, *elem)) {
-                                    changed |= propagate(&mut reaching, (fid, *result), (fid, *elem));
+                                    changed |=
+                                        propagate(&mut reaching, (fid, *result), (fid, *elem));
                                 }
                             }
                         }
@@ -398,7 +409,8 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
                             for elem in elems {
                                 changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
                                 if is_ref_with_fn.contains(&(fid, *elem)) {
-                                    changed |= propagate(&mut reaching, (fid, *result), (fid, *elem));
+                                    changed |=
+                                        propagate(&mut reaching, (fid, *result), (fid, *elem));
                                 }
                             }
                         }
@@ -408,7 +420,12 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *array));
                             }
                         }
-                        OpCode::ArraySet { result, array, value, .. } => {
+                        OpCode::ArraySet {
+                            result,
+                            array,
+                            value,
+                            ..
+                        } => {
                             changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *value)) {
@@ -428,7 +445,12 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
                         OpCode::Store { ptr, value } => {
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *ptr));
                         }
-                        OpCode::SlicePush { result, slice, values, .. } => {
+                        OpCode::SlicePush {
+                            result,
+                            slice,
+                            values,
+                            ..
+                        } => {
                             changed |= propagate(&mut reaching, (fid, *slice), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *slice)) {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *slice));
@@ -440,7 +462,9 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
                                 }
                             }
                         }
-                        OpCode::Select { result, if_t, if_f, .. } => {
+                        OpCode::Select {
+                            result, if_t, if_f, ..
+                        } => {
                             changed |= propagate(&mut reaching, (fid, *if_t), (fid, *result));
                             changed |= propagate(&mut reaching, (fid, *if_f), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *if_t)) {

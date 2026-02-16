@@ -402,8 +402,7 @@ impl CFG {
         function: &crate::compiler::ssa::Function,
         func_id: FunctionId,
         label: String,
-    ) -> Result<(), Box<dyn std::error::Error>>
-    {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use std::fs;
         use std::process::Command;
 
@@ -567,7 +566,6 @@ impl CallGraph {
             .iter(&self.call_graph)
             .filter_map(|node| self.node_to_func.get(&node).cloned())
     }
-
 }
 
 impl CallGraph {
@@ -575,8 +573,7 @@ impl CallGraph {
         &self,
         output_path: PathBuf,
         ssa: &SSA,
-    ) -> Result<(), Box<dyn std::error::Error>>
-    {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use std::fs;
         use std::process::Command;
 
@@ -673,11 +670,20 @@ impl FlowAnalysis {
                 }
                 for instruction in block.get_instructions() {
                     match instruction {
-                        OpCode::Call { results: _, function: CallTarget::Static(tgt_id), args: _ } => {
+                        OpCode::Call {
+                            results: _,
+                            function: CallTarget::Static(tgt_id),
+                            args: _,
+                        } => {
                             call_graph.add_call(*func_id, *tgt_id);
                         }
-                        OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
-                            panic!("Dynamic calls should be eliminated by defunctionalization before flow analysis");
+                        OpCode::Call {
+                            function: CallTarget::Dynamic(_),
+                            ..
+                        } => {
+                            panic!(
+                                "Dynamic calls should be eliminated by defunctionalization before flow analysis"
+                            );
                         }
                         _ => {}
                     }
@@ -700,12 +706,7 @@ impl FlowAnalysis {
         &self.function_cfgs[&function_id]
     }
 
-    pub fn generate_images(
-        &self,
-        debug_output_dir: PathBuf,
-        ssa: &SSA,
-        phase_label: String,
-    ) {
+    pub fn generate_images(&self, debug_output_dir: PathBuf, ssa: &SSA, phase_label: String) {
         if !debug_output_dir.exists() {
             fs::create_dir(&debug_output_dir).unwrap();
         }

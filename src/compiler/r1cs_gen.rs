@@ -111,8 +111,9 @@ impl Value {
     pub fn expect_u1(&self) -> bool {
         match self {
             Value::Const(c) => {
-                let v: u128 = c.into_bigint().to_string().parse()
-                    .unwrap_or_else(|e| panic!("expected u1, but field value is {}: {e}", c.into_bigint()));
+                let v: u128 = c.into_bigint().to_string().parse().unwrap_or_else(|e| {
+                    panic!("expected u1, but field value is {}: {e}", c.into_bigint())
+                });
                 assert!(v <= 1, "expected u1, but value is {v}");
                 v == 1
             }
@@ -124,7 +125,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u8, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u8, but field value is {s}: {e}"))
             }
             r => panic!("expected u8, got {:?}", r),
         }
@@ -134,7 +136,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u32, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u32, but field value is {s}: {e}"))
             }
             r => panic!("expected u32, got {:?}", r),
         }
@@ -144,7 +147,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u64, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u64, but field value is {s}: {e}"))
             }
             r => panic!("expected u64, got {:?}", r),
         }
@@ -154,7 +158,8 @@ impl Value {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
-                s.parse().unwrap_or_else(|e| panic!("expected u128, but field value is {s}: {e}"))
+                s.parse()
+                    .unwrap_or_else(|e| panic!("expected u128, but field value is {s}: {e}"))
             }
             r => panic!("expected u128, got {:?}", r),
         }
@@ -234,9 +239,9 @@ impl Value {
     }
 
     pub fn mk_tuple(fields: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(RefCell::new(TupleData { 
+        Value::Tuple(Rc::new(RefCell::new(TupleData {
             table_id: None,
-            data: fields 
+            data: fields,
         })))
     }
 }
@@ -534,13 +539,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         value
     }
 
-    fn array_set(
-        &self,
-        index: &Self,
-        value: &Self,
-        _out_type: &Type,
-        _ctx: &mut R1CGen,
-    ) -> Self {
+    fn array_set(&self, index: &Self, value: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let array = self.expect_array();
         let index = index.expect_u32();
         let mut new_array = array.borrow().data.clone();
@@ -573,7 +572,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         let a = a.expect_linear_combination();
         let b = b.expect_linear_combination();
         let c = c.expect_linear_combination();
-        ctx.constraints.push(R1C { a: a, b: b, c: c });
+        ctx.constraints.push(R1C { a, b, c });
     }
 
     fn to_bits(
@@ -644,11 +643,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(a)
     }
 
-    fn mk_tuple(
-        elems: Vec<Self>,
-        _ctx: &mut R1CGen,
-        _elem_types: &[Type],
-    ) -> Self {
+    fn mk_tuple(elems: Vec<Self>, _ctx: &mut R1CGen, _elem_types: &[Type]) -> Self {
         Value::mk_tuple(elems)
     }
 
@@ -864,7 +859,10 @@ impl R1CGen {
     #[instrument(skip_all, name = "R1CGen::run")]
     pub fn run(&mut self, ssa: &SSA, type_info: &TypeInfo) {
         let entry_point = ssa.get_main_id();
-        assert!(ssa.get_function(entry_point).get_param_types().len() == 0, "Main should not have parameters as WitnessWriteToFresh pass should remove them");
+        assert!(
+            ssa.get_function(entry_point).get_param_types().len() == 0,
+            "Main should not have parameters as WitnessWriteToFresh pass should remove them"
+        );
         let main_params = vec![];
         let executor = SymbolicExecutor::new();
         executor.run(ssa, type_info, entry_point, main_params, self);
@@ -1053,7 +1051,10 @@ impl R1CGen {
                         b: lookup.elements[0].clone(),
                         c: vec![(x, -crate::compiler::Field::ONE)],
                     });
-                    let mut b = vec![(alpha, ark_bn254::Fr::ONE), (x, -crate::compiler::Field::ONE)];
+                    let mut b = vec![
+                        (alpha, ark_bn254::Fr::ONE),
+                        (x, -crate::compiler::Field::ONE),
+                    ];
                     for (w, coeff) in lookup.elements[0].iter() {
                         b.push((*w, -*coeff));
                     }

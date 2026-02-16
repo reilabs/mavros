@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use tracing::{debug, instrument, Level};
+use tracing::{Level, debug, instrument};
 
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::passes::fix_double_jumps::ValueReplacements;
@@ -35,7 +35,11 @@ impl Mem2Reg {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
             if self.escape_safe(function, function_type_info) {
-                self.run_function(function, cfg.get_function_cfg(*function_id), function_type_info);
+                self.run_function(
+                    function,
+                    cfg.get_function_cfg(*function_id),
+                    function_type_info,
+                );
             } else {
                 debug!(
                     "Skipping mem2reg for function: {:?} because it failed escape analysis",
@@ -87,11 +91,20 @@ impl Mem2Reg {
 
             for mut instruction in instructions {
                 match instruction {
-                    OpCode::Alloc { result: _, elem_type: _ } => {}
-                    OpCode::Store { ptr: lhs, value: rhs } => {
+                    OpCode::Alloc {
+                        result: _,
+                        elem_type: _,
+                    } => {}
+                    OpCode::Store {
+                        ptr: lhs,
+                        value: rhs,
+                    } => {
                         values.insert(lhs, rhs);
                     }
-                    OpCode::Load { result: lhs, ptr: rhs } => {
+                    OpCode::Load {
+                        result: lhs,
+                        ptr: rhs,
+                    } => {
                         let replacement = values.get(&rhs).expect("Uninitialized ptr value");
                         value_replacements.insert(lhs, *replacement);
                     }
@@ -175,10 +188,8 @@ impl Mem2Reg {
         let mut result: HashMap<BlockId, Vec<(ValueId, ValueId)>> = HashMap::new();
         for (value, blocks) in phi_blocks {
             for block in blocks {
-                let param = function.add_parameter(
-                    *block,
-                    type_info.get_value_type(*value).get_pointed(),
-                );
+                let param =
+                    function.add_parameter(*block, type_info.get_value_type(*value).get_pointed());
                 result.entry(*block).or_default().push((param, *value));
             }
         }
@@ -188,7 +199,10 @@ impl Mem2Reg {
     fn find_pointer_writes_and_defs(
         &self,
         function: &Function,
-    ) -> (HashMap<ValueId, HashSet<BlockId>>, HashMap<ValueId, BlockId>) {
+    ) -> (
+        HashMap<ValueId, HashSet<BlockId>>,
+        HashMap<ValueId, BlockId>,
+    ) {
         let mut writes: HashMap<ValueId, HashSet<BlockId>> = HashMap::new();
         let mut defs: HashMap<ValueId, BlockId> = HashMap::new();
         for (block_id, block) in function.get_blocks() {
@@ -197,7 +211,10 @@ impl Mem2Reg {
                     OpCode::Store { ptr: lhs, value: _ } => {
                         writes.entry(*lhs).or_default().insert(*block_id);
                     }
-                    OpCode::Alloc { result: lhs, elem_type: _ } => {
+                    OpCode::Alloc {
+                        result: lhs,
+                        elem_type: _,
+                    } => {
                         defs.insert(*lhs, *block_id);
                     }
                     _ => {}
@@ -256,13 +273,23 @@ impl Mem2Reg {
 
             for instruction in block.get_instructions() {
                 match instruction {
-                    OpCode::ArraySet { result: _, array: _, index: _, value: val } => {
+                    OpCode::ArraySet {
+                        result: _,
+                        array: _,
+                        index: _,
+                        value: val,
+                    } => {
                         let vtyp = type_info.get_value_type(*val);
                         if self.type_contains_ptr(vtyp) {
                             return false;
                         }
                     }
-                    OpCode::SlicePush { result: _, slice: _, values: vals, dir: _ } => {
+                    OpCode::SlicePush {
+                        result: _,
+                        slice: _,
+                        values: vals,
+                        dir: _,
+                    } => {
                         for val in vals {
                             let vtyp = type_info.get_value_type(*val);
                             if self.type_contains_ptr(vtyp) {
@@ -270,7 +297,11 @@ impl Mem2Reg {
                             }
                         }
                     }
-                    OpCode::ArrayGet { result: _, array: _, index: val } => {
+                    OpCode::ArrayGet {
+                        result: _,
+                        array: _,
+                        index: val,
+                    } => {
                         let vtyp = type_info.get_value_type(*val);
                         if self.type_contains_ptr(vtyp) {
                             return false;
@@ -282,7 +313,12 @@ impl Mem2Reg {
                             return false;
                         }
                     }
-                    OpCode::MkSeq { result: _, elems: _, seq_type: _, elem_type: typ } => {
+                    OpCode::MkSeq {
+                        result: _,
+                        elems: _,
+                        seq_type: _,
+                        elem_type: typ,
+                    } => {
                         if self.type_contains_ptr(typ) {
                             return false;
                         }
@@ -293,7 +329,11 @@ impl Mem2Reg {
                             return false;
                         }
                     }
-                    OpCode::Call { results: rets, function: _, args } => {
+                    OpCode::Call {
+                        results: rets,
+                        function: _,
+                        args,
+                    } => {
                         for v in rets.iter().chain(args.iter()) {
                             let vtyp = type_info.get_value_type(*v);
                             if self.type_contains_ptr(vtyp) {

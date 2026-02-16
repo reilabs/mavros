@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    flow_analysis::FlowAnalysis, pass_manager::{DataPoint, Pass, PassInfo, PassManager}, ssa::{BlockId, OpCode, Terminator, ValueId, SSA}
+    flow_analysis::FlowAnalysis,
+    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
+    ssa::{BlockId, OpCode, SSA, Terminator, ValueId},
 };
 
 pub struct ValueReplacements {

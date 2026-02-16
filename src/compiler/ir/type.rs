@@ -27,8 +27,13 @@ impl Display for Type {
             TypeExpr::Slice(inner) => write!(f, "Slice<{}>", inner),
             TypeExpr::Ref(inner) => write!(f, "Ref<{}>", inner),
             TypeExpr::Tuple(elements) => write!(
-                f, "Tuple<{}>",
-                elements.iter().map(|e| format!("{}", e)).collect::<Vec<_>>().join(", ")
+                f,
+                "Tuple<{}>",
+                elements
+                    .iter()
+                    .map(|e| format!("{}", e))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             TypeExpr::Function => write!(f, "Function"),
         }
@@ -39,11 +44,15 @@ impl Type {
     // --- Constructors ---
 
     pub fn field() -> Self {
-        Type { expr: TypeExpr::Field }
+        Type {
+            expr: TypeExpr::Field,
+        }
     }
 
     pub fn u(size: usize) -> Self {
-        Type { expr: TypeExpr::U(size) }
+        Type {
+            expr: TypeExpr::U(size),
+        }
     }
 
     pub fn bool() -> Self {
@@ -55,23 +64,33 @@ impl Type {
     }
 
     pub fn function() -> Self {
-        Type { expr: TypeExpr::Function }
+        Type {
+            expr: TypeExpr::Function,
+        }
     }
 
     pub fn array_of(self, size: usize) -> Self {
-        Type { expr: TypeExpr::Array(Box::new(self), size) }
+        Type {
+            expr: TypeExpr::Array(Box::new(self), size),
+        }
     }
 
     pub fn slice_of(self) -> Self {
-        Type { expr: TypeExpr::Slice(Box::new(self)) }
+        Type {
+            expr: TypeExpr::Slice(Box::new(self)),
+        }
     }
 
     pub fn ref_of(self) -> Self {
-        Type { expr: TypeExpr::Ref(Box::new(self)) }
+        Type {
+            expr: TypeExpr::Ref(Box::new(self)),
+        }
     }
 
     pub fn tuple_of(types: Vec<Self>) -> Self {
-        Type { expr: TypeExpr::Tuple(types) }
+        Type {
+            expr: TypeExpr::Tuple(types),
+        }
     }
 
     /// Construct a WitnessOf type. Double-wrapping is a bug.
@@ -82,7 +101,9 @@ impl Type {
              Double witness wrapping indicates a logic error. Inner type: {:?}",
             inner.expr
         );
-        Type { expr: TypeExpr::WitnessOf(Box::new(inner)) }
+        Type {
+            expr: TypeExpr::WitnessOf(Box::new(inner)),
+        }
     }
 
     // --- Predicates ---
@@ -185,9 +206,11 @@ impl Type {
     pub fn get_tuple_elements(&self) -> Vec<Self> {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements.clone(),
-            TypeExpr::WitnessOf(inner) => {
-                inner.get_tuple_elements().into_iter().map(Type::witness_of).collect()
-            }
+            TypeExpr::WitnessOf(inner) => inner
+                .get_tuple_elements()
+                .into_iter()
+                .map(Type::witness_of)
+                .collect(),
             _ => panic!("Type is not a tuple: {}", self),
         }
     }
@@ -238,18 +261,18 @@ impl Type {
     pub fn strip_all_witness(&self) -> Self {
         match &self.expr {
             TypeExpr::WitnessOf(inner) => inner.strip_all_witness(),
-            TypeExpr::Array(inner, size) => {
-                Type { expr: TypeExpr::Array(Box::new(inner.strip_all_witness()), *size) }
-            }
-            TypeExpr::Slice(inner) => {
-                Type { expr: TypeExpr::Slice(Box::new(inner.strip_all_witness())) }
-            }
-            TypeExpr::Ref(inner) => {
-                Type { expr: TypeExpr::Ref(Box::new(inner.strip_all_witness())) }
-            }
-            TypeExpr::Tuple(elements) => {
-                Type { expr: TypeExpr::Tuple(elements.iter().map(|e| e.strip_all_witness()).collect()) }
-            }
+            TypeExpr::Array(inner, size) => Type {
+                expr: TypeExpr::Array(Box::new(inner.strip_all_witness()), *size),
+            },
+            TypeExpr::Slice(inner) => Type {
+                expr: TypeExpr::Slice(Box::new(inner.strip_all_witness())),
+            },
+            TypeExpr::Ref(inner) => Type {
+                expr: TypeExpr::Ref(Box::new(inner.strip_all_witness())),
+            },
+            TypeExpr::Tuple(elements) => Type {
+                expr: TypeExpr::Tuple(elements.iter().map(|e| e.strip_all_witness()).collect()),
+            },
             _ => self.clone(),
         }
     }
@@ -280,8 +303,7 @@ impl Type {
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => n == m && x.is_subtype_of(y),
             (TypeExpr::Slice(x), TypeExpr::Slice(y)) => x.is_subtype_of(y),
             (TypeExpr::Tuple(xs), TypeExpr::Tuple(ys)) => {
-                xs.len() == ys.len()
-                    && xs.iter().zip(ys.iter()).all(|(x, y)| x.is_subtype_of(y))
+                xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| x.is_subtype_of(y))
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => x == y, // invariant
             (TypeExpr::Function, TypeExpr::Function) => true,
@@ -308,12 +330,8 @@ impl Type {
             (TypeExpr::WitnessOf(inner_a), TypeExpr::WitnessOf(inner_b)) => {
                 Type::witness_of(Type::join(inner_a, inner_b))
             }
-            (TypeExpr::WitnessOf(inner_a), _) => {
-                Type::witness_of(Type::join(inner_a, b))
-            }
-            (_, TypeExpr::WitnessOf(inner_b)) => {
-                Type::witness_of(Type::join(a, inner_b))
-            }
+            (TypeExpr::WitnessOf(inner_a), _) => Type::witness_of(Type::join(inner_a, b)),
+            (_, TypeExpr::WitnessOf(inner_b)) => Type::witness_of(Type::join(a, inner_b)),
             // Structural (neither is WitnessOf)
             (TypeExpr::Field, TypeExpr::Field) => Type::field(),
             (TypeExpr::U(n), TypeExpr::U(m)) => {
@@ -321,14 +339,20 @@ impl Type {
                 Type::u(*n)
             }
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => {
-                assert_eq!(n, m, "Cannot join arrays of different sizes: {} vs {}", n, m);
+                assert_eq!(
+                    n, m,
+                    "Cannot join arrays of different sizes: {} vs {}",
+                    n, m
+                );
                 Type::join(x, y).array_of(*n)
             }
-            (TypeExpr::Slice(x), TypeExpr::Slice(y)) => {
-                Type::join(x, y).slice_of()
-            }
+            (TypeExpr::Slice(x), TypeExpr::Slice(y)) => Type::join(x, y).slice_of(),
             (TypeExpr::Tuple(xs), TypeExpr::Tuple(ys)) => {
-                assert_eq!(xs.len(), ys.len(), "Cannot join tuples of different lengths");
+                assert_eq!(
+                    xs.len(),
+                    ys.len(),
+                    "Cannot join tuples of different lengths"
+                );
                 Type::tuple_of(
                     xs.iter()
                         .zip(ys.iter())
@@ -623,15 +647,26 @@ mod tests {
     fn subtype_iff_join_equals_supertype() {
         let pairs: Vec<(Type, Type)> = vec![
             (Type::field(), Type::witness_of(Type::field())),
-            (Type::field().array_of(3), Type::witness_of(Type::field()).array_of(3)),
-            (Type::field().array_of(3), Type::witness_of(Type::field().array_of(3))),
+            (
+                Type::field().array_of(3),
+                Type::witness_of(Type::field()).array_of(3),
+            ),
+            (
+                Type::field().array_of(3),
+                Type::witness_of(Type::field().array_of(3)),
+            ),
             (
                 Type::tuple_of(vec![Type::field(), Type::u(8)]),
                 Type::tuple_of(vec![Type::witness_of(Type::field()), Type::u(8)]),
             ),
         ];
         for (sub, sup) in &pairs {
-            assert!(sub.is_subtype_of(sup), "{} should be subtype of {}", sub, sup);
+            assert!(
+                sub.is_subtype_of(sup),
+                "{} should be subtype of {}",
+                sub,
+                sup
+            );
             assert_eq!(
                 Type::join(sub, sup),
                 *sup,

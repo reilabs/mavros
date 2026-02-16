@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    pass_manager::Pass, ssa::{BlockId, Terminator, ValueId, SSA}
+    pass_manager::Pass,
+    ssa::{BlockId, SSA, Terminator, ValueId},
 };
 
 pub struct DeduplicatePhis {}

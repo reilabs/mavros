@@ -67,10 +67,7 @@ impl WitnessType {
                 format!(
                     "({} of <{}>)",
                     info,
-                    children
-                        .iter()
-                        .map(|child| child.to_string())
-                        .join(", ")
+                    children.iter().map(|child| child.to_string()).join(", ")
                 )
             }
         }
@@ -79,9 +76,7 @@ impl WitnessType {
     /// Join two witness types (least upper bound). Eagerly computes concrete result.
     pub fn join(&self, other: &WitnessType) -> WitnessType {
         match (self, other) {
-            (WitnessType::Scalar(t1), WitnessType::Scalar(t2)) => {
-                WitnessType::Scalar(t1.join(*t2))
-            }
+            (WitnessType::Scalar(t1), WitnessType::Scalar(t2)) => WitnessType::Scalar(t1.join(*t2)),
             (WitnessType::Array(t1, inner1), WitnessType::Array(t2, inner2)) => {
                 WitnessType::Array(t1.join(*t2), Box::new(inner1.join(inner2)))
             }

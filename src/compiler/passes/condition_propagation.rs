@@ -1,5 +1,8 @@
 use crate::compiler::{
-    flow_analysis::FlowAnalysis, pass_manager::Pass, passes::fix_double_jumps::ValueReplacements, ssa::{BlockId, Terminator, ValueId, SSA}
+    flow_analysis::FlowAnalysis,
+    pass_manager::Pass,
+    passes::fix_double_jumps::ValueReplacements,
+    ssa::{BlockId, SSA, Terminator, ValueId},
 };
 
 pub struct ConditionPropagation {}
@@ -15,7 +18,7 @@ impl Pass for ConditionPropagation {
             needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
         }
     }
-    
+
     fn invalidates_cfg(&self) -> bool {
         false
     }

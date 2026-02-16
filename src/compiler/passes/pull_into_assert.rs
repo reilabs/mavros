@@ -13,11 +13,7 @@ pub struct PulledProduct {
 }
 
 impl Pass for PullIntoAssert {
-    fn run(
-        &self,
-        ssa: &mut SSA,
-        _pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
+    fn run(&self, ssa: &mut SSA, _pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa);
     }
 
@@ -83,7 +79,7 @@ impl PullIntoAssert {
                             new_instructions.push(OpCode::AssertR1C {
                                 a: pull.lhs,
                                 b: pull.rhs,
-                                c: other_op
+                                c: other_op,
                             });
                         }
                         _ => {
@@ -112,7 +108,12 @@ impl PullIntoAssert {
         match def {
             // TODO: we should also pull further, skipping pure multiplications and shoving
             // them into the constants or R1CS constraints
-            OpCode::BinaryArithOp { kind: BinaryArithOpKind::Mul, result: _, lhs, rhs } => Some(PulledProduct {
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Mul,
+                result: _,
+                lhs,
+                rhs,
+            } => Some(PulledProduct {
                 lhs: *lhs,
                 rhs: *rhs,
             }),

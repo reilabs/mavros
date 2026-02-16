@@ -8,7 +8,10 @@ use tracing::field;
 
 use crate::{
     compiler::Field,
-    vm::{bytecode::{AllocationType, VM}, interpreter::InputValueOrdered},
+    vm::{
+        bytecode::{AllocationType, VM},
+        interpreter::InputValueOrdered,
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -365,14 +368,15 @@ impl BoxedValue {
                             queue.push_back(elem);
                         }
                         item.free(vm);
-
                     }
                     DataType::Struct => {
                         let child_sizes = layout.child_sizes();
                         let refcounted_flags = layout.refcounted_flags();
                         for i in 0..layout.struct_field_count() {
                             if refcounted_flags[i] {
-                                let elem = unsafe { *(item.tuple_idx(i, &child_sizes) as *mut BoxedValue) };
+                                let elem = unsafe {
+                                    *(item.tuple_idx(i, &child_sizes) as *mut BoxedValue)
+                                };
                                 queue.push_back(elem);
                             }
                         }

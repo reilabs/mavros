@@ -177,7 +177,6 @@ impl SSA {
     pub fn get_globals_deinit_fn(&self) -> Option<FunctionId> {
         self.globals_deinit_fn
     }
-
 }
 
 impl SSA {
@@ -199,10 +198,9 @@ pub enum Const {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum TupleIdx
-{
-  Static(usize),
-  Dynamic(ValueId, Type),
+pub enum TupleIdx {
+    Static(usize),
+    Dynamic(ValueId, Type),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -342,7 +340,11 @@ impl Function {
     }
 
     pub fn block_is_terminated(&self, block_id: BlockId) -> bool {
-        self.blocks.get(&block_id).unwrap().get_terminator().is_some()
+        self.blocks
+            .get(&block_id)
+            .unwrap()
+            .get_terminator()
+            .is_some()
     }
 
     pub fn next_virtual_block(&mut self) -> (BlockId, Block) {
@@ -418,15 +420,25 @@ impl Function {
         self.push_const(Const::FnPtr(fn_id))
     }
 
-
-    pub fn push_cmp(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId, kind: CmpKind) -> ValueId {
+    pub fn push_cmp(
+        &mut self,
+        block_id: BlockId,
+        lhs: ValueId,
+        rhs: ValueId,
+        kind: CmpKind,
+    ) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::Cmp { kind, result: value_id, lhs, rhs });
+            .push(OpCode::Cmp {
+                kind,
+                result: value_id,
+                lhs,
+                rhs,
+            });
         value_id
     }
 
@@ -440,8 +452,8 @@ impl Function {
             .push(OpCode::Cmp {
                 kind: CmpKind::Eq,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -455,8 +467,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -470,8 +482,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -486,8 +498,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Div,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -501,8 +513,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Sub,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -516,8 +528,8 @@ impl Function {
             .push(OpCode::Cmp {
                 kind: CmpKind::Lt,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -539,10 +551,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::Store {
-                ptr: ptr,
-                value: value,
-            });
+            .push(OpCode::Store { ptr, value });
     }
     pub fn push_load(&mut self, block_id: BlockId, ptr: ValueId) -> ValueId {
         let value_id = ValueId(self.next_value);
@@ -553,7 +562,7 @@ impl Function {
             .instructions
             .push(OpCode::Load {
                 result: value_id,
-                ptr: ptr,
+                ptr,
             });
         value_id
     }
@@ -562,7 +571,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::AssertEq { lhs: lhs, rhs: rhs });
+            .push(OpCode::AssertEq { lhs, rhs });
     }
 
     pub fn push_and(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
@@ -575,8 +584,8 @@ impl Function {
             .push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And,
                 result: value_id,
-                lhs: lhs,
-                rhs: rhs,
+                lhs,
+                rhs,
             });
         value_id
     }
@@ -596,7 +605,7 @@ impl Function {
             .instructions
             .push(OpCode::Select {
                 result: value_id,
-                cond: cond,
+                cond,
                 if_t: then,
                 if_f: otherwise,
             });
@@ -623,7 +632,7 @@ impl Function {
             .push(OpCode::Call {
                 results: return_values.clone(),
                 function: CallTarget::Static(fn_id),
-                args: args,
+                args,
             });
         return_values
     }
@@ -662,8 +671,8 @@ impl Function {
             .instructions
             .push(OpCode::ArrayGet {
                 result: value_id,
-                array: array,
-                index: index,
+                array,
+                index,
             });
         value_id
     }
@@ -682,7 +691,7 @@ impl Function {
             .instructions
             .push(OpCode::TupleProj {
                 result: value_id,
-                tuple: tuple,
+                tuple,
                 idx: index,
             });
         value_id
@@ -703,8 +712,8 @@ impl Function {
             .instructions
             .push(OpCode::ArraySet {
                 result: value_id,
-                array: array,
-                index: index,
+                array,
+                index,
                 value: element,
             });
         value_id
@@ -725,18 +734,14 @@ impl Function {
             .instructions
             .push(OpCode::SlicePush {
                 result: value_id,
-                slice: slice,
-                values: values,
-                dir: dir,
+                slice,
+                values,
+                dir,
             });
         value_id
     }
 
-    pub fn push_slice_len(
-        &mut self,
-        block_id: BlockId,
-        slice: ValueId,
-    ) -> ValueId {
+    pub fn push_slice_len(&mut self, block_id: BlockId, slice: ValueId) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
@@ -745,7 +750,7 @@ impl Function {
             .instructions
             .push(OpCode::SliceLen {
                 result: value_id,
-                slice: slice,
+                slice,
             });
         value_id
     }
@@ -801,8 +806,8 @@ impl Function {
             .instructions
             .push(OpCode::Cast {
                 result: value_id,
-                value: value,
-                target: target,
+                value,
+                target,
             });
         value_id
     }
@@ -822,7 +827,7 @@ impl Function {
             .instructions
             .push(OpCode::Truncate {
                 result: value_id,
-                value: value,
+                value,
                 to_bits: out_bit_size,
                 from_bits: in_bit_size,
             });
@@ -838,7 +843,7 @@ impl Function {
             .instructions
             .push(OpCode::Not {
                 result: value_id,
-                value: value,
+                value,
             });
         value_id
     }
@@ -858,8 +863,8 @@ impl Function {
             .instructions
             .push(OpCode::ToBits {
                 result: value_id,
-                value: value,
-                endianness: endianness,
+                value,
+                endianness,
                 count: output_size,
             });
         value_id
@@ -881,9 +886,9 @@ impl Function {
             .instructions
             .push(OpCode::ToRadix {
                 result: value_id,
-                value: value,
+                value,
                 radix,
-                endianness: endianness,
+                endianness,
                 count: output_size,
             });
         value_id
@@ -894,10 +899,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::Rangecheck {
-                value: value,
-                max_bits: max_bits,
-            });
+            .push(OpCode::Rangecheck { value, max_bits });
     }
 
     pub fn push_mem_op(&mut self, block_id: BlockId, value: ValueId, kind: MemOp) {
@@ -905,10 +907,7 @@ impl Function {
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::MemOp {
-                kind: kind,
-                value: value,
-            });
+            .push(OpCode::MemOp { kind, value });
     }
 
     pub fn push_read_global(&mut self, block_id: BlockId, index: u64, typ: Type) -> ValueId {
@@ -925,12 +924,22 @@ impl Function {
         value
     }
 
-    pub fn push_todo(&mut self, block_id: BlockId, payload: String, results: Vec<ValueId>, result_types: Vec<Type>) {
+    pub fn push_todo(
+        &mut self,
+        block_id: BlockId,
+        payload: String,
+        results: Vec<ValueId>,
+        result_types: Vec<Type>,
+    ) {
         self.blocks
             .get_mut(&block_id)
             .unwrap()
             .instructions
-            .push(OpCode::Todo { payload, results, result_types });
+            .push(OpCode::Todo {
+                payload,
+                results,
+                result_types,
+            });
     }
 
     pub fn push_init_global(&mut self, block_id: BlockId, global: usize, value: ValueId) {
@@ -1442,8 +1451,8 @@ pub enum OpCode {
         result_type: Type,
     },
     TupleProj {
-        result: ValueId, 
-        tuple: ValueId, 
+        result: ValueId,
+        tuple: ValueId,
         idx: TupleIdx,
     },
     MkTuple {
@@ -1569,12 +1578,7 @@ impl OpCode {
                         )
                     }
                     CallTarget::Dynamic(fn_ptr) => {
-                        format!(
-                            "{} = call_indirect v{}({})",
-                            result_str,
-                            fn_ptr.0,
-                            args_str
-                        )
+                        format!("{} = call_indirect v{}({})", result_str, fn_ptr.0, args_str)
                     }
                 }
             }
@@ -1626,10 +1630,7 @@ impl OpCode {
                     values_str
                 )
             }
-            OpCode::SliceLen {
-                result,
-                slice,
-            } => {
+            OpCode::SliceLen { result, slice } => {
                 format!(
                     "v{}{} = slice_len(v{})",
                     result.0,
@@ -1652,10 +1653,7 @@ impl OpCode {
                     otherwise.0
                 )
             }
-            OpCode::WriteWitness {
-                result,
-                value,
-            } => {
+            OpCode::WriteWitness { result, value } => {
                 let r_str = if let Some(result) = result {
                     format!("v{}{} = ", result.0, annotate(value_annotator, *result))
                 } else {
@@ -1865,36 +1863,30 @@ impl OpCode {
                     typ
                 )
             }
-            OpCode::TupleProj { 
-                result,
-                tuple,
-                idx,
-            } => {
-                match idx {
-                    TupleIdx::Dynamic(idx, _tp) => {
-                        format!(
-                            "v{}{} = v{}.v{}",
-                            result.0,
-                            annotate(value_annotator, *result),
-                            tuple.0,
-                            idx.0
-                        )
-                    }
-                    TupleIdx::Static(val) => {
-                        format!(
-                            "v{}{} = v{}.{}",
-                            result.0,
-                            annotate(value_annotator, *result),
-                            tuple.0,
-                            val
-                        )
-                    }
+            OpCode::TupleProj { result, tuple, idx } => match idx {
+                TupleIdx::Dynamic(idx, _tp) => {
+                    format!(
+                        "v{}{} = v{}.v{}",
+                        result.0,
+                        annotate(value_annotator, *result),
+                        tuple.0,
+                        idx.0
+                    )
+                }
+                TupleIdx::Static(val) => {
+                    format!(
+                        "v{}{} = v{}.{}",
+                        result.0,
+                        annotate(value_annotator, *result),
+                        tuple.0,
+                        val
+                    )
                 }
             },
-            OpCode::MkTuple { 
-                result, 
-                elems, 
-                element_types: _, 
+            OpCode::MkTuple {
+                result,
+                elems,
+                element_types: _,
             } => {
                 let elems_str = elems.iter().map(|v| format!("v{}", v.0)).join(", ");
                 format!(
@@ -1904,8 +1896,13 @@ impl OpCode {
                     elems_str
                 )
             }
-            OpCode::Todo { payload, results, result_types } => {
-                let results_str = results.iter()
+            OpCode::Todo {
+                payload,
+                results,
+                result_types,
+            } => {
+                let results_str = results
+                    .iter()
                     .zip(result_types.iter())
                     .map(|(r, tp)| format!("v{}: {}", r.0, tp))
                     .join(", ");
@@ -2097,14 +2094,14 @@ impl OpCode {
                 offset: _,
                 result_type: _,
             } => vec![r].into_iter(),
-            Self::TupleProj { 
+            Self::TupleProj {
                 result: r,
                 tuple: t,
                 idx: _,
             } => vec![r, t].into_iter(),
-            OpCode::MkTuple { 
-                result: r, 
-                elems: e, 
+            OpCode::MkTuple {
+                result: r,
+                elems: e,
                 element_types: _,
             } => {
                 let mut ret_vec = vec![r];
@@ -2114,8 +2111,11 @@ impl OpCode {
             Self::Todo { results, .. } => {
                 let ret_vec: Vec<&mut ValueId> = results.iter_mut().collect();
                 ret_vec.into_iter()
-            },
-            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            }
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2298,7 +2298,10 @@ impl OpCode {
                 idx: _,
             } => vec![tuple].into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2473,15 +2476,9 @@ impl OpCode {
                 result: _,
                 tuple,
                 idx,
-            } => {
-                match idx {
-                    TupleIdx::Static(_size) => {
-                        vec![tuple].into_iter()
-                    }
-                    TupleIdx::Dynamic(idx, _tp) => {
-                        vec![tuple, idx].into_iter()
-                    }
-                }
+            } => match idx {
+                TupleIdx::Static(_size) => vec![tuple].into_iter(),
+                TupleIdx::Dynamic(idx, _tp) => vec![tuple, idx].into_iter(),
             },
             OpCode::MkTuple {
                 result: _,
@@ -2489,7 +2486,10 @@ impl OpCode {
                 element_types: _,
             } => e.iter().collect::<Vec<_>>().into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal { global: _, value: v } => vec![v].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2566,17 +2566,15 @@ impl OpCode {
                 const_val: _,
                 var: _,
             }
-            |  Self::NextDCoeff {
-                result: r
-            } 
-            | Self::TupleProj { 
+            | Self::NextDCoeff { result: r }
+            | Self::TupleProj {
                 result: r,
                 tuple: _,
                 idx: _,
             }
-            | Self::MkTuple { 
-                result: r, 
-                elems: _, 
+            | Self::MkTuple {
+                result: r,
+                elems: _,
                 element_types: _,
             } => vec![r].into_iter(),
             Self::WriteWitness {
@@ -2635,8 +2633,11 @@ impl OpCode {
             Self::Todo { results, .. } => {
                 let ret_vec: Vec<&ValueId> = results.iter().collect();
                 ret_vec.into_iter()
-            },
-            Self::InitGlobal { global: _, value: _ } => vec![].into_iter(),
+            }
+            Self::InitGlobal {
+                global: _,
+                value: _,
+            } => vec![].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
@@ -2701,7 +2702,6 @@ impl OpCode {
         }
     }
 
-
     pub fn mk_lookup_rngchk(target: LookupTarget<ValueId>, value: ValueId) -> OpCode {
         OpCode::Lookup {
             target,
@@ -2745,11 +2745,7 @@ impl OpCode {
     }
 
     pub fn mk_constrain(a: ValueId, b: ValueId, c: ValueId) -> OpCode {
-        OpCode::Constrain {
-            a,
-            b,
-            c,
-        }
+        OpCode::Constrain { a, b, c }
     }
 
     pub fn mk_sub(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {

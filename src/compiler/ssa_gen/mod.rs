@@ -9,11 +9,10 @@ mod type_converter;
 use std::collections::HashMap;
 
 use noirc_frontend::monomorphization::ast::{
-    Definition, Expression, FuncId as AstFuncId, Function as AstFunction,
-    GlobalId, Program,
+    Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::ssa::{FunctionId, Function, SSA};
+use crate::compiler::ssa::{Function, FunctionId, SSA};
 
 use expression_converter::ExpressionConverter;
 use type_converter::TypeConverter;
@@ -189,7 +188,11 @@ impl SsaConverter {
             if visited.contains(&gid) {
                 return;
             }
-            assert!(!in_stack.contains(&gid), "Cyclic global dependency on {:?}", gid);
+            assert!(
+                !in_stack.contains(&gid),
+                "Cyclic global dependency on {:?}",
+                gid
+            );
             in_stack.insert(gid);
             let (_name, _typ, init_expr) = &program.globals[&gid];
             let mut deps = Vec::new();
@@ -231,7 +234,9 @@ impl SsaConverter {
 
             for gid in &ordered_ids {
                 let (_name, _typ, init_expr) = &program.globals[gid];
-                let value = expr_converter.convert_expression(init_expr, init_fn).unwrap();
+                let value = expr_converter
+                    .convert_expression(init_expr, init_fn)
+                    .unwrap();
                 let idx = self.global_slots[gid];
                 init_fn.push_init_global(entry, idx, value);
             }
@@ -274,12 +279,20 @@ impl SsaConverter {
 
         // Add return types
         let return_type = self.type_converter.convert_type(&ast_func.return_type);
-        if !matches!(ast_func.return_type, noirc_frontend::monomorphization::ast::Type::Unit) {
+        if !matches!(
+            ast_func.return_type,
+            noirc_frontend::monomorphization::ast::Type::Unit
+        ) {
             function.add_return_type(return_type);
         }
 
         // Create expression converter
-        let mut expr_converter = ExpressionConverter::new_with_globals(function_mapper, entry_block, in_unconstrained, &self.global_slots);
+        let mut expr_converter = ExpressionConverter::new_with_globals(
+            function_mapper,
+            entry_block,
+            in_unconstrained,
+            &self.global_slots,
+        );
 
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {

@@ -54,11 +54,7 @@ pub struct PassManager {
 }
 
 impl PassManager {
-    pub fn new(
-        phase_label: String,
-        draw_cfg: bool,
-        passes: Vec<Box<dyn Pass>>,
-    ) -> Self {
+    pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass>>) -> Self {
         Self {
             passes,
             current_pass_info: None,
@@ -98,12 +94,7 @@ impl PassManager {
     }
 
     #[tracing::instrument(skip_all, fields(pass = %pass.pass_info().name))]
-    fn run_pass(
-        &mut self,
-        ssa: &mut SSA,
-        pass: &dyn Pass,
-        pass_index: usize,
-    ) {
+    fn run_pass(&mut self, ssa: &mut SSA, pass: &dyn Pass, pass_index: usize) {
         self.initialize_pass_data(ssa, &pass.pass_info());
         self.output_debug_info(ssa, pass_index, &pass.pass_info());
         self.current_pass_info = Some(pass.pass_info());
@@ -111,12 +102,7 @@ impl PassManager {
         self.tear_down_pass_data(pass);
     }
 
-    fn output_debug_info(
-        &mut self,
-        ssa: &SSA,
-        pass_index: usize,
-        pass_info: &PassInfo,
-    ) {
+    fn output_debug_info(&mut self, ssa: &SSA, pass_index: usize, pass_info: &PassInfo) {
         let Some(debug_output_dir) = &self.debug_output_dir else {
             return;
         };

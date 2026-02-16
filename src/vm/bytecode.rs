@@ -681,7 +681,8 @@ mod def {
         assert!(
             (index as usize) * stride < array.layout().array_size(),
             "array_get: index {} out of bounds for array of length {}",
-            index, array.layout().array_size() / stride
+            index,
+            array.layout().array_size() / stride
         );
         let src = array.array_idx(index as usize, stride);
         unsafe {
@@ -717,7 +718,8 @@ mod def {
         assert!(
             (index as usize) * stride < array.layout().array_size(),
             "array_set: index {} out of bounds for array of length {}",
-            index, array.layout().array_size() / stride
+            index,
+            array.layout().array_size() / stride
         );
         let new_array = array.copy_if_reused(vm);
         let target = new_array.array_idx(index as usize, stride);
@@ -744,11 +746,7 @@ mod def {
     }
 
     #[opcode]
-    fn slice_len(
-        #[out] res: *mut u64,
-        #[frame] array: BoxedValue,
-        stride: usize,
-    ) {
+    fn slice_len(#[out] res: *mut u64, #[frame] array: BoxedValue, stride: usize) {
         let len = array.layout().array_size() / stride;
         unsafe {
             *res = len as u64;
@@ -1014,13 +1012,16 @@ mod def {
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
 
-
         let inv_coeff = unsafe {
-            let r = *vm.data.as_ad.ad_coeffs.offset(vm.data.as_ad.current_cnst_lookups_off as isize);
+            let r = *vm
+                .data
+                .as_ad
+                .ad_coeffs
+                .offset(vm.data.as_ad.current_cnst_lookups_off as isize);
             vm.data.as_ad.current_cnst_lookups_off += 1;
             r
         };
-        
+
         let inv_sum_coeff = unsafe {
             *vm.data
                 .as_ad
@@ -1041,20 +1042,27 @@ mod def {
             // bumps for the inversion assert
             *vm.data.as_ad.out_da.offset(current_inv_wit_offset as isize) += inv_coeff;
 
-            *vm.data.as_ad.out_db.offset(vm.data.as_ad.logup_wit_challenge_off as isize) += inv_coeff;
+            *vm.data
+                .as_ad
+                .out_db
+                .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += inv_coeff;
             val.bump_db(-inv_coeff, vm);
 
             *vm.data.as_ad.out_dc += inv_coeff;
         }
-
-
 
         // unsafe {}
         // panic!("TODO: implement drngchk_8_field");
     }
 
     #[opcode]
-    fn init_global(vm: &mut VM, frame: Frame, src: FramePosition, global_offset: usize, size: usize) {
+    fn init_global(
+        vm: &mut VM,
+        frame: Frame,
+        src: FramePosition,
+        global_offset: usize,
+        size: usize,
+    ) {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 frame.data.offset(src.0 as isize),
@@ -1067,11 +1075,7 @@ mod def {
     #[opcode]
     fn read_global(#[out] res: *mut u64, vm: &mut VM, global_offset: usize, size: usize) {
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                vm.globals.offset(global_offset as isize),
-                res,
-                size,
-            );
+            std::ptr::copy_nonoverlapping(vm.globals.offset(global_offset as isize), res, size);
         }
     }
 

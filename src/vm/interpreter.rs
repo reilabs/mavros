@@ -184,7 +184,7 @@ pub enum InputValueOrdered {
 }
 
 impl InputValueOrdered {
-    pub fn field_sizes (&self) -> Vec<usize> {
+    pub fn field_sizes(&self) -> Vec<usize> {
         match self {
             InputValueOrdered::Field(_) => vec![4],
             InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
@@ -202,8 +202,10 @@ impl InputValueOrdered {
     pub fn need_reference_counting(&self) -> Vec<bool> {
         match self {
             InputValueOrdered::Field(_) => vec![false],
-            InputValueOrdered::String(_) => panic!("Strings are not supported in need_reference_counting"),
-            InputValueOrdered::Vec(_) => vec![true], 
+            InputValueOrdered::String(_) => {
+                panic!("Strings are not supported in need_reference_counting")
+            }
+            InputValueOrdered::Vec(_) => vec![true],
             InputValueOrdered::Struct(fields) => {
                 let mut reference_counting = vec![];
                 for (_field_name, field_value) in fields {
@@ -272,7 +274,9 @@ pub fn run(
     );
 
     for (input_index, el) in flat_inputs.iter().enumerate() {
-        unsafe { *(frame.data.offset(2 + (4 * (input_index as isize))) as *mut Field) = el.clone(); }
+        unsafe {
+            *(frame.data.offset(2 + (4 * (input_index as isize))) as *mut Field) = el.clone();
+        }
     }
 
     let mut program = program.to_vec();
@@ -337,7 +341,8 @@ pub fn run(
 
     while current_lookup_off < constraints_layout.lookups_data_size {
         let cnst_off = constraints_layout.lookups_data_start() + current_lookup_off;
-        let wit_off = witness_layout.lookups_data_start() - witness_layout.challenges_start() + current_lookup_off;
+        let wit_off = witness_layout.lookups_data_start() - witness_layout.challenges_start()
+            + current_lookup_off;
 
         let table_ix = out_a[cnst_off].0.0[0];
         let table = &vm.tables[table_ix as usize];
@@ -345,8 +350,10 @@ pub fn run(
             todo!("wide tables");
         }
         let ix_in_table = out_b[cnst_off].0.0[0];
-        out_a[cnst_off] = out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-        out_b[cnst_off] = out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+        out_a[cnst_off] =
+            out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+        out_b[cnst_off] =
+            out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
         out_c[cnst_off] = Field::ONE;
         out_wit_post_comm[wit_off] = out_a[cnst_off];
         out_c[table.elem_inverses_constraint_section_offset + table.length] += out_a[cnst_off];
@@ -368,10 +375,7 @@ pub fn run(
             }
         }
         out_b[tbl.elem_inverses_constraint_section_offset + tbl.length] = Field::ONE;
-
     }
-
-
 
     let result = WitgenResult {
         out_wit_pre_comm,

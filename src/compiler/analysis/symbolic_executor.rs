@@ -5,7 +5,8 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     ir::r#type::Type,
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId,
+        LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator,
     },
 };
 
@@ -25,13 +26,7 @@ where
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
-    fn array_set(
-        &self,
-        index: &Self,
-        value: &Self,
-        out_type: &Type,
-        ctx: &mut Context,
-    ) -> Self;
+    fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn truncate(&self, _from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
@@ -53,17 +48,8 @@ where
     fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_field(f: Field, ctx: &mut Context) -> Self;
-    fn mk_array(
-        a: Vec<Self>,
-        ctx: &mut Context,
-        seq_type: SeqType,
-        elem_type: &Type,
-    ) -> Self;
-    fn mk_tuple(
-        elems: Vec<Self>,
-        ctx: &mut Context,
-        elem_types: &[Type],
-    ) -> Self;
+    fn mk_array(a: Vec<Self>, ctx: &mut Context, seq_type: SeqType, elem_type: &Type) -> Self;
+    fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type]) -> Self;
     fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
@@ -316,9 +302,10 @@ impl SymbolicExecutor {
                         slice,
                         values,
                         dir,
-                    } => {                      
+                    } => {
                         let sl = scope[slice.0 as usize].as_ref().unwrap();
-                        let vals: Vec<_> = values.iter()
+                        let vals: Vec<_> = values
+                            .iter()
                             .map(|v| scope[v.0 as usize].as_ref().unwrap().clone())
                             .collect();
                         scope[result.0 as usize] = Some(ctx.slice_push(sl, &vals, *dir));
@@ -437,20 +424,16 @@ impl SymbolicExecutor {
                         offset,
                         result_type: _,
                     } => {
-                        let r = globals[*offset as usize].as_ref()
+                        let r = globals[*offset as usize]
+                            .as_ref()
                             .expect("ReadGlobal: global slot not initialized")
                             .clone();
                         scope[result.0 as usize] = Some(r);
                     }
-                    crate::compiler::ssa::OpCode::InitGlobal {
-                        global,
-                        value,
-                    } => {
+                    crate::compiler::ssa::OpCode::InitGlobal { global, value } => {
                         globals[*global] = Some(scope[value.0 as usize].as_ref().unwrap().clone());
                     }
-                    crate::compiler::ssa::OpCode::DropGlobal {
-                        global,
-                    } => {
+                    crate::compiler::ssa::OpCode::DropGlobal { global } => {
                         globals[*global] = None;
                     }
                     crate::compiler::ssa::OpCode::Lookup {
@@ -513,10 +496,10 @@ impl SymbolicExecutor {
                         } else {
                             panic!("Dynamic tuple indexing should not appear here");
                         }
-                    },
-                    crate::compiler::ssa::OpCode::MkTuple { 
-                        result, 
-                        elems, 
+                    }
+                    crate::compiler::ssa::OpCode::MkTuple {
+                        result,
+                        elems,
                         element_types,
                     } => {
                         let elems = elems
