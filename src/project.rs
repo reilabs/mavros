@@ -1,4 +1,4 @@
-use std::{fmt::Debug, path::PathBuf};
+use std::{fmt::Debug, path::Path, path::PathBuf};
 
 use fm::FileManager;
 use itertools::Itertools;
@@ -18,21 +18,45 @@ pub struct Project {
     nargo_parsed_files: ParsedFiles,
 }
 
-fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
+fn parse_workspace(
+    workspace: &Workspace,
+    replace_blackbox_with_noir: bool,
+) -> (FileManager, ParsedFiles) {
     let mut file_manager = workspace.new_file_manager();
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
+    if replace_blackbox_with_noir {
+        patch_stdlib_poseidon2(&mut file_manager);
+    }
     let parsed_files = nargo::parse_all(&file_manager);
     (file_manager, parsed_files)
 }
 
+fn patch_stdlib_poseidon2(file_manager: &mut FileManager) {
+    // Replace std/hash/mod.nr with our patched version
+    let hash_mod_id = file_manager
+        .find_by_path_suffix("std/hash/mod.nr")
+        .expect("find hash/mod.nr")
+        .expect("hash/mod.nr not found in stdlib");
+    let patched_hash_mod = include_str!("../noir_stdlib_patches/hash_mod_patched.nr");
+    file_manager.replace_file(hash_mod_id, patched_hash_mod.to_string());
+
+    // Add our pure Noir poseidon2 implementation as a new module
+    let impl_source = include_str!("../noir_stdlib_patches/poseidon2_impl.nr");
+    file_manager.add_file_with_source_canonical_path(
+        Path::new("std/hash/poseidon2_impl.nr"),
+        impl_source.to_string(),
+    );
+}
+
 impl Project {
-    pub fn new(project_root: PathBuf) -> Result<Self, Error> {
+    pub fn new(project_root: PathBuf, replace_blackbox_with_noir: bool) -> Result<Self, Error> {
         // Workspace loading was done based on https://github.com/noir-lang/noir/blob/c3a43abf9be80c6f89560405b65f5241ed67a6b2/tooling/nargo_cli/src/cli/mod.rs#L180
         let toml_path = nargo_toml::get_package_manifest(&project_root)?;
 
         let nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
 
-        let (nargo_file_manager, nargo_parsed_files) = parse_workspace(&nargo_workspace);
+        let (nargo_file_manager, nargo_parsed_files) =
+            parse_workspace(&nargo_workspace, replace_blackbox_with_noir);
 
         Ok(Self {
             project_root,
