@@ -32,6 +32,9 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub replace_blackbox_with_noir: bool,
 }
 
 /// The main function for the CLI utility, responsible for parsing program
@@ -58,7 +61,7 @@ fn main() -> ExitCode {
 ///
 /// - [`Error`] if the extraction process fails for any reason.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let project = Project::new(args.root.clone())?;
+    let project = Project::new(args.root.clone(), args.replace_blackbox_with_noir)?;
 
     let mut driver = Driver::new(project, args.draw_graphs);
 
