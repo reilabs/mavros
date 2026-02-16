@@ -1,7 +1,10 @@
 use std::hash::poseidon2_permutation;
+use poseidon2::bn254::perm;
 
-fn main(a: Field, b: Field, c: Field, d: Field) {
-    let state = [a, b, c, d];
-    let result = poseidon2_permutation(state, 4);
-    assert(result[0] != 0);
+fn main(x: [Field; 4]) {
+    let swapped = poseidon2_permutation(x, 4);
+    let library = perm::x5_4(x);
+    for i in 0..4 {
+        assert_eq(swapped[i], library[i]);
+    }
 }
