@@ -7,8 +7,8 @@ use crate::compiler::{
 
 pub struct ConditionPropagation {}
 
-impl<V: Clone> Pass<V> for ConditionPropagation {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &crate::compiler::pass_manager::PassManager<V>) {
+impl Pass for ConditionPropagation {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa, pass_manager.get_cfg());
     }
 
@@ -29,7 +29,7 @@ impl ConditionPropagation {
         Self {}
     }
 
-    pub fn do_run<V: Clone>(&self, ssa: &mut SSA<V>, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let mut replaces: Vec<(BlockId, ValueId, bool)> = vec![];
 

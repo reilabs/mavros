@@ -5,16 +5,15 @@ use crate::compiler::{
     ir::r#type::TypeExpr,
     pass_manager::{DataPoint, Pass},
     ssa::{CastTarget, CmpKind, OpCode},
-    taint_analysis::ConstantTaint,
 };
 
 pub struct ArithmeticSimplifier {}
 
-impl Pass<ConstantTaint> for ArithmeticSimplifier {
+impl Pass for ArithmeticSimplifier {
     fn run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA<ConstantTaint>,
-        pass_manager: &crate::compiler::pass_manager::PassManager<ConstantTaint>,
+        ssa: &mut crate::compiler::ssa::SSA,
+        pass_manager: &crate::compiler::pass_manager::PassManager,
     ) {
         self.do_run(
             ssa,
@@ -42,11 +41,9 @@ impl ArithmeticSimplifier {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA<ConstantTaint>,
-        type_info: &crate::compiler::analysis::types::TypeInfo<ConstantTaint>,
-        value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions<
-            ConstantTaint,
-        >,
+        ssa: &mut crate::compiler::ssa::SSA,
+        type_info: &crate::compiler::analysis::types::TypeInfo,
+        value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let type_info = type_info.get_function(*function_id);
@@ -72,7 +69,7 @@ impl ArithmeticSimplifier {
                                     },
                                 ) => {
                                     let v_type = type_info.get_value_type(*v);
-                                    if !matches!(v_type.annotation, ConstantTaint::Pure) {
+                                    if v_type.is_witness_of() {
                                         panic!("Rangecheck on impure value");
                                     }
                                     match &v_type.expr {

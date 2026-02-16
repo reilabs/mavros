@@ -5,32 +5,32 @@ use crate::compiler::{
     ssa::{BlockId, Const, Function, FunctionId, OpCode, SSA, ValueId},
 };
 
-pub enum ValueDefinition<V> {
+pub enum ValueDefinition {
     Const(Const),
-    Param(BlockId, usize, Type<V>),
-    Instruction(BlockId, usize, OpCode<V>),
+    Param(BlockId, usize, Type),
+    Instruction(BlockId, usize, OpCode),
 }
 
-pub struct FunctionValueDefinitions<V> {
-    definitions: HashMap<ValueId, ValueDefinition<V>>,
+pub struct FunctionValueDefinitions {
+    definitions: HashMap<ValueId, ValueDefinition>,
 }
 
-impl<V: Clone> FunctionValueDefinitions<V> {
+impl FunctionValueDefinitions {
     pub fn new() -> Self {
         Self {
             definitions: HashMap::new(),
         }
     }
 
-    pub fn get_definition(&self, value_id: ValueId) -> &ValueDefinition<V> {
+    pub fn get_definition(&self, value_id: ValueId) -> &ValueDefinition {
         self.definitions.get(&value_id).unwrap()
     }
 
-    pub fn insert(&mut self, value_id: ValueId, definition: ValueDefinition<V>) {
+    pub fn insert(&mut self, value_id: ValueId, definition: ValueDefinition) {
         self.definitions.insert(value_id, definition);
     }
 
-    pub fn from_ssa(ssa: &Function<V>) -> Self {
+    pub fn from_ssa(ssa: &Function) -> Self {
         let mut definitions = Self::new();
 
         for (value_id, definition) in ssa.iter_consts() {
@@ -56,18 +56,18 @@ impl<V: Clone> FunctionValueDefinitions<V> {
     }
 }
 
-pub struct ValueDefinitions<V> {
-    functions: HashMap<FunctionId, FunctionValueDefinitions<V>>,
+pub struct ValueDefinitions {
+    functions: HashMap<FunctionId, FunctionValueDefinitions>,
 }
 
-impl<V: Clone> ValueDefinitions<V> {
+impl ValueDefinitions {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
         }
     }
 
-    pub fn from_ssa(ssa: &SSA<V>) -> Self {
+    pub fn from_ssa(ssa: &SSA) -> Self {
         let mut definitions = Self::new();
 
         for (function_id, function) in ssa.iter_functions() {
@@ -79,7 +79,7 @@ impl<V: Clone> ValueDefinitions<V> {
         definitions
     }
 
-    pub fn get_function(&self, function_id: FunctionId) -> &FunctionValueDefinitions<V> {
+    pub fn get_function(&self, function_id: FunctionId) -> &FunctionValueDefinitions {
         self.functions.get(&function_id).unwrap()
     }
 }

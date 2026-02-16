@@ -1,5 +1,4 @@
-use crate::compiler::ir::r#type::{CommutativeMonoid, Empty, Type, TypeExpr};
-use crate::compiler::taint_analysis::ConstantTaint;
+use crate::compiler::ir::r#type::Type;
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
 
@@ -45,10 +44,10 @@ impl<'a> LocalFunctionAnnotator<'a> {
 }
 
 #[derive(Clone)]
-pub struct SSA<V> {
-    functions: HashMap<FunctionId, Function<V>>,
+pub struct SSA {
+    functions: HashMap<FunctionId, Function>,
     /// Type of each global slot (indexed by slot number)
-    global_types: Vec<Type<V>>,
+    global_types: Vec<Type>,
     /// Function that initializes all globals (emits InitGlobal opcodes)
     globals_init_fn: Option<FunctionId>,
     /// Function that drops all globals (emits DropGlobal opcodes)
@@ -57,10 +56,7 @@ pub struct SSA<V> {
     next_function_id: u64,
 }
 
-impl<V> SSA<V>
-where
-    V: Clone,
-{
+impl SSA {
     pub fn new() -> Self {
         let main_function = Function::empty("main".to_string());
         let main_id = FunctionId(0_u64);
@@ -76,7 +72,7 @@ where
         }
     }
 
-    pub fn prepare_rebuild<V2>(self) -> (SSA<V2>, HashMap<FunctionId, Function<V>>, Vec<Type<V>>) {
+    pub fn prepare_rebuild(self) -> (SSA, HashMap<FunctionId, Function>, Vec<Type>) {
         (
             SSA {
                 functions: HashMap::new(),
@@ -91,7 +87,7 @@ where
         )
     }
 
-    pub fn insert_function(&mut self, function: Function<V>) -> FunctionId {
+    pub fn insert_function(&mut self, function: Function) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
         self.functions.insert(new_id, function);
@@ -106,31 +102,31 @@ where
         self.main_id
     }
 
-    pub fn get_main_mut(&mut self) -> &mut Function<V> {
+    pub fn get_main_mut(&mut self) -> &mut Function {
         self.functions
             .get_mut(&self.main_id)
             .expect("Main function should exist")
     }
 
-    pub fn get_main(&self) -> &Function<V> {
+    pub fn get_main(&self) -> &Function {
         self.functions
             .get(&self.main_id)
             .expect("Main function should exist")
     }
 
-    pub fn get_function(&self, id: FunctionId) -> &Function<V> {
+    pub fn get_function(&self, id: FunctionId) -> &Function {
         self.functions.get(&id).expect("Function should exist")
     }
 
-    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function<V> {
+    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function {
         self.functions.get_mut(&id).expect("Function should exist")
     }
 
-    pub fn take_function(&mut self, id: FunctionId) -> Function<V> {
+    pub fn take_function(&mut self, id: FunctionId) -> Function {
         self.functions.remove(&id).expect("Function should exist")
     }
 
-    pub fn put_function(&mut self, id: FunctionId, function: Function<V>) {
+    pub fn put_function(&mut self, id: FunctionId, function: Function) {
         self.functions.insert(id, function);
     }
 
@@ -142,11 +138,11 @@ where
         new_id
     }
 
-    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function<V>)> {
+    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function)> {
         self.functions.iter()
     }
 
-    pub fn iter_functions_mut(&mut self) -> impl Iterator<Item = (&FunctionId, &mut Function<V>)> {
+    pub fn iter_functions_mut(&mut self) -> impl Iterator<Item = (&FunctionId, &mut Function)> {
         self.functions.iter_mut()
     }
 
@@ -154,11 +150,11 @@ where
         self.functions.keys().copied()
     }
 
-    pub fn set_global_types(&mut self, types: Vec<Type<V>>) {
+    pub fn set_global_types(&mut self, types: Vec<Type>) {
         self.global_types = types;
     }
 
-    pub fn get_global_types(&self) -> &[Type<V>] {
+    pub fn get_global_types(&self) -> &[Type] {
         &self.global_types
     }
 
@@ -183,7 +179,7 @@ where
     }
 }
 
-impl<V: Display + Clone> SSA<V> {
+impl SSA {
     pub fn to_string(&self, value_annotator: &dyn SsaAnnotator) -> String {
         self.functions
             .iter()
@@ -197,14 +193,14 @@ impl<V: Display + Clone> SSA<V> {
 pub enum Const {
     U(usize, u128),
     Field(ark_bn254::Fr),
-    WitnessRef(ark_bn254::Fr),
+    Witness(ark_bn254::Fr),
     FnPtr(FunctionId),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum TupleIdx<V> {
+pub enum TupleIdx {
     Static(usize),
-    Dynamic(ValueId, Type<V>),
+    Dynamic(ValueId, Type),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -214,21 +210,21 @@ pub enum CallTarget {
 }
 
 #[derive(Clone)]
-pub struct Function<V> {
+pub struct Function {
     entry_block: BlockId,
-    blocks: HashMap<BlockId, Block<V>>,
+    blocks: HashMap<BlockId, Block>,
     name: String,
-    returns: Vec<Type<V>>,
+    returns: Vec<Type>,
     next_block: u64,
     next_value: u64,
     consts: HashMap<ValueId, Const>,
     consts_to_val: HashMap<Const, ValueId>,
 }
 
-impl<V: Display + Clone> Function<V> {
+impl Function {
     pub fn to_string(
         &self,
-        ssa: &SSA<V>,
+        ssa: &SSA,
         id: FunctionId,
         value_annotator: &dyn SsaAnnotator,
     ) -> String {
@@ -256,7 +252,7 @@ impl<V: Display + Clone> Function<V> {
     }
 }
 
-impl<V: Clone> Function<V> {
+impl Function {
     pub fn empty(name: String) -> Self {
         let entry = Block::empty();
         let entry_id = BlockId(0);
@@ -274,7 +270,7 @@ impl<V: Clone> Function<V> {
         }
     }
 
-    pub fn prepare_rebuild<V2>(self) -> (Function<V2>, HashMap<BlockId, Block<V>>, Vec<Type<V>>) {
+    pub fn prepare_rebuild(self) -> (Function, HashMap<BlockId, Block>, Vec<Type>) {
         (
             Function {
                 entry_block: self.entry_block,
@@ -303,13 +299,13 @@ impl<V: Clone> Function<V> {
         return self.next_value as usize;
     }
 
-    pub fn get_entry_mut(&mut self) -> &mut Block<V> {
+    pub fn get_entry_mut(&mut self) -> &mut Block {
         self.blocks
             .get_mut(&self.entry_block)
             .expect("Entry block should exist")
     }
 
-    pub fn get_entry(&self) -> &Block<V> {
+    pub fn get_entry(&self) -> &Block {
         self.blocks
             .get(&self.entry_block)
             .expect("Entry block should exist")
@@ -319,19 +315,19 @@ impl<V: Clone> Function<V> {
         self.entry_block
     }
 
-    pub fn get_block(&self, id: BlockId) -> &Block<V> {
+    pub fn get_block(&self, id: BlockId) -> &Block {
         self.blocks.get(&id).expect("Block should exist")
     }
 
-    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block<V> {
+    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block {
         self.blocks.get_mut(&id).expect("Block should exist")
     }
 
-    pub fn take_block(&mut self, id: BlockId) -> Block<V> {
+    pub fn take_block(&mut self, id: BlockId) -> Block {
         self.blocks.remove(&id).expect("Block should exist")
     }
 
-    pub fn put_block(&mut self, id: BlockId, block: Block<V>) {
+    pub fn put_block(&mut self, id: BlockId, block: Block) {
         self.blocks.insert(id, block);
     }
 
@@ -351,18 +347,18 @@ impl<V: Clone> Function<V> {
             .is_some()
     }
 
-    pub fn next_virtual_block(&mut self) -> (BlockId, Block<V>) {
+    pub fn next_virtual_block(&mut self) -> (BlockId, Block) {
         let new_id = BlockId(self.next_block);
         self.next_block += 1;
         let block = Block::empty();
         (new_id, block)
     }
 
-    pub fn add_return_type(&mut self, typ: Type<V>) {
+    pub fn add_return_type(&mut self, typ: Type) {
         self.returns.push(typ);
     }
 
-    pub fn get_param_types(&self) -> Vec<Type<V>> {
+    pub fn get_param_types(&self) -> Vec<Type> {
         self.get_entry()
             .parameters
             .iter()
@@ -378,19 +374,19 @@ impl<V: Clone> Function<V> {
         self.consts.iter_mut()
     }
 
-    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Type<V>> {
+    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Type> {
         self.returns.iter_mut()
     }
 
-    pub fn get_returns(&self) -> &[Type<V>] {
+    pub fn get_returns(&self) -> &[Type] {
         &self.returns
     }
 
-    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block<V>)> {
+    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block)> {
         self.blocks.iter()
     }
 
-    pub fn add_parameter(&mut self, block_id: BlockId, typ: Type<V>) -> ValueId {
+    pub fn add_parameter(&mut self, block_id: BlockId, typ: Type) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
@@ -537,7 +533,7 @@ impl<V: Clone> Function<V> {
             });
         value_id
     }
-    pub fn push_alloc(&mut self, block_id: BlockId, typ: Type<V>, annotation: V) -> ValueId {
+    pub fn push_alloc(&mut self, block_id: BlockId, typ: Type) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
@@ -547,7 +543,6 @@ impl<V: Clone> Function<V> {
             .push(OpCode::Alloc {
                 result: value_id,
                 elem_type: typ,
-                result_annotation: annotation,
             });
         value_id
     }
@@ -689,7 +684,7 @@ impl<V: Clone> Function<V> {
         &mut self,
         block_id: BlockId,
         tuple: ValueId,
-        index: TupleIdx<V>,
+        index: TupleIdx,
     ) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
@@ -768,7 +763,7 @@ impl<V: Clone> Function<V> {
         block_id: BlockId,
         elements: Vec<ValueId>,
         stp: SeqType,
-        typ: Type<V>,
+        typ: Type,
     ) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
@@ -789,7 +784,7 @@ impl<V: Clone> Function<V> {
         &mut self,
         block_id: BlockId,
         elements: Vec<ValueId>,
-        types: Vec<Type<V>>,
+        types: Vec<Type>,
     ) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
@@ -924,7 +919,7 @@ impl<V: Clone> Function<V> {
             });
     }
 
-    pub fn push_read_global(&mut self, block_id: BlockId, index: u64, typ: Type<V>) -> ValueId {
+    pub fn push_read_global(&mut self, block_id: BlockId, index: u64, typ: Type) -> ValueId {
         let value = self.fresh_value();
         self.blocks
             .get_mut(&block_id)
@@ -943,7 +938,7 @@ impl<V: Clone> Function<V> {
         block_id: BlockId,
         payload: String,
         results: Vec<ValueId>,
-        result_types: Vec<Type<V>>,
+        result_types: Vec<Type>,
     ) {
         self.blocks
             .get_mut(&block_id)
@@ -1027,15 +1022,15 @@ impl<V: Clone> Function<V> {
             .set_terminator(Terminator::Jmp(destination, arguments));
     }
 
-    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block<V>)> {
+    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block)> {
         self.blocks.iter_mut()
     }
 
-    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block<V>> {
+    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block> {
         std::mem::take(&mut self.blocks)
     }
 
-    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block<V>>) {
+    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block>) {
         self.blocks = blocks;
     }
 
@@ -1058,7 +1053,7 @@ impl<V: Clone> Function<V> {
         self.consts_to_val.insert(new_const, value_id);
     }
 
-    pub fn take_returns(&mut self) -> Vec<Type<V>> {
+    pub fn take_returns(&mut self) -> Vec<Type> {
         std::mem::take(&mut self.returns)
     }
 
@@ -1076,16 +1071,16 @@ impl<V: Clone> Function<V> {
 }
 
 #[derive(Clone)]
-pub struct Block<V> {
-    parameters: Vec<(ValueId, Type<V>)>,
-    instructions: Vec<OpCode<V>>,
+pub struct Block {
+    parameters: Vec<(ValueId, Type)>,
+    instructions: Vec<OpCode>,
     terminator: Option<Terminator>,
 }
 
-impl<V: Display + Clone> Block<V> {
+impl Block {
     pub fn to_string(
         &self,
-        ssa: &SSA<V>,
+        ssa: &SSA,
         func_id: FunctionId,
         id: BlockId,
         value_annotator: &dyn SsaAnnotator,
@@ -1126,7 +1121,7 @@ impl<V: Display + Clone> Block<V> {
     }
 }
 
-impl<V> Block<V> {
+impl Block {
     pub fn empty() -> Self {
         Block {
             parameters: Vec::new(),
@@ -1135,15 +1130,15 @@ impl<V> Block<V> {
         }
     }
 
-    pub fn take_instructions(&mut self) -> Vec<OpCode<V>> {
+    pub fn take_instructions(&mut self) -> Vec<OpCode> {
         std::mem::take(&mut self.instructions)
     }
 
-    pub fn put_instructions(&mut self, instructions: Vec<OpCode<V>>) {
+    pub fn put_instructions(&mut self, instructions: Vec<OpCode>) {
         self.instructions = instructions;
     }
 
-    pub fn push_instruction(&mut self, instruction: OpCode<V>) {
+    pub fn push_instruction(&mut self, instruction: OpCode) {
         self.instructions.push(instruction);
     }
 
@@ -1151,15 +1146,19 @@ impl<V> Block<V> {
         self.terminator = Some(terminator);
     }
 
-    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Type<V>)> {
+    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Type)> {
         self.parameters.iter()
     }
 
-    pub fn take_parameters(&mut self) -> Vec<(ValueId, Type<V>)> {
+    pub fn get_parameters_mut(&mut self) -> impl Iterator<Item = &mut (ValueId, Type)> {
+        self.parameters.iter_mut()
+    }
+
+    pub fn take_parameters(&mut self) -> Vec<(ValueId, Type)> {
         std::mem::take(&mut self.parameters)
     }
 
-    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Type<V>)>) {
+    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Type)>) {
         self.parameters = parameters;
     }
 
@@ -1167,15 +1166,15 @@ impl<V> Block<V> {
         self.parameters.iter().map(|(id, _)| id)
     }
 
-    pub fn get_instruction(&self, i: usize) -> &OpCode<V> {
+    pub fn get_instruction(&self, i: usize) -> &OpCode {
         &self.instructions[i]
     }
 
-    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &OpCode<V>> {
+    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &OpCode> {
         self.instructions.iter()
     }
 
-    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut OpCode<V>> {
+    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut OpCode> {
         self.instructions.iter_mut()
     }
 
@@ -1222,6 +1221,7 @@ pub enum SeqType {
 pub enum CastTarget {
     Field,
     U(usize),
+    WitnessOf,
     Nop,
     ArrayToSlice,
 }
@@ -1243,6 +1243,7 @@ impl Display for CastTarget {
         match self {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::U(size) => write!(f, "u{}", size),
+            CastTarget::WitnessOf => write!(f, "WitnessOf"),
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
         }
@@ -1269,10 +1270,10 @@ impl Display for SeqType {
 }
 
 impl SeqType {
-    pub fn of<V: CommutativeMonoid>(&self, t: Type<V>) -> Type<V> {
+    pub fn of(&self, t: Type) -> Type {
         match self {
-            SeqType::Array(len) => Type::array_of(t, *len, V::empty()),
-            SeqType::Slice => Type::slice_of(t, V::empty()),
+            SeqType::Array(len) => t.array_of(*len),
+            SeqType::Slice => t.slice_of(),
             SeqType::Tuple => panic!("Tuple type requires multiple element types"),
         }
     }
@@ -1305,7 +1306,7 @@ pub enum Radix<V> {
 }
 
 #[derive(Debug, Clone)]
-pub enum OpCode<V> {
+pub enum OpCode {
     Cmp {
         kind: CmpKind,
         result: ValueId,
@@ -1337,12 +1338,11 @@ pub enum OpCode<V> {
         result: ValueId,
         elems: Vec<ValueId>,
         seq_type: SeqType,
-        elem_type: Type<V>,
+        elem_type: Type,
     },
     Alloc {
         result: ValueId,
-        elem_type: Type<V>,
-        result_annotation: V,
+        elem_type: Type,
     },
     Store {
         ptr: ValueId,
@@ -1410,14 +1410,17 @@ pub enum OpCode<V> {
         kind: MemOp,
         value: ValueId,
     },
+    ValueOf {
+        result: ValueId,
+        value: ValueId,
+    },
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
-        witness_annotation: V,
-    }, // TODO: split into two variants, the current structure is weird.
+    },
     FreshWitness {
         result: ValueId,
-        result_type: Type<V>,
+        result_type: Type,
     },
     NextDCoeff {
         result: ValueId,
@@ -1442,15 +1445,6 @@ pub enum OpCode<V> {
         keys: Vec<ValueId>,
         results: Vec<ValueId>,
     },
-    PureToWitnessRef {
-        result: ValueId,
-        value: ValueId,
-        result_annotation: V,
-    },
-    UnboxField {
-        result: ValueId,
-        value: ValueId,
-    },
     MulConst {
         result: ValueId,
         const_val: ValueId,
@@ -1463,22 +1457,22 @@ pub enum OpCode<V> {
     ReadGlobal {
         result: ValueId,
         offset: u64,
-        result_type: Type<V>,
+        result_type: Type,
     },
     TupleProj {
         result: ValueId,
         tuple: ValueId,
-        idx: TupleIdx<V>,
+        idx: TupleIdx,
     },
     MkTuple {
         result: ValueId,
         elems: Vec<ValueId>,
-        element_types: Vec<Type<V>>,
+        element_types: Vec<Type>,
     },
     Todo {
         payload: String,
         results: Vec<ValueId>,
-        result_types: Vec<Type<V>>,
+        result_types: Vec<Type>,
     },
     InitGlobal {
         global: usize,
@@ -1489,8 +1483,8 @@ pub enum OpCode<V> {
     },
 }
 
-impl<V: Display + Clone> OpCode<V> {
-    fn to_string(&self, ssa: &SSA<V>, value_annotator: &LocalFunctionAnnotator) -> String {
+impl OpCode {
+    fn to_string(&self, ssa: &SSA, value_annotator: &LocalFunctionAnnotator) -> String {
         fn annotate(value_annotator: &LocalFunctionAnnotator, value: ValueId) -> String {
             let annotation = value_annotator.annotate_value(value);
             if annotation.is_empty() {
@@ -1544,13 +1538,11 @@ impl<V: Display + Clone> OpCode<V> {
             OpCode::Alloc {
                 result,
                 elem_type: typ,
-                result_annotation: annotation,
             } => format!(
-                "v{}{} = alloc({} as {})",
+                "v{}{} = alloc({})",
                 result.0,
                 annotate(value_annotator, *result),
-                typ,
-                annotation
+                typ
             ),
             OpCode::Store { ptr, value } => format!(
                 "*v{}{} = v{}",
@@ -1670,11 +1662,7 @@ impl<V: Display + Clone> OpCode<V> {
                     otherwise.0
                 )
             }
-            OpCode::WriteWitness {
-                result,
-                value,
-                witness_annotation: _annotation,
-            } => {
+            OpCode::WriteWitness { result, value } => {
                 let r_str = if let Some(result) = result {
                     format!("v{}{} = ", result.0, annotate(value_annotator, *result))
                 } else {
@@ -1801,6 +1789,14 @@ impl<V: Display + Clone> OpCode<V> {
                     value.0
                 )
             }
+            OpCode::ValueOf { result, value } => {
+                format!(
+                    "v{}{} = value_of v{}",
+                    result.0,
+                    annotate(value_annotator, *result),
+                    value.0
+                )
+            }
             OpCode::ToBits {
                 result,
                 value,
@@ -1843,27 +1839,6 @@ impl<V: Display + Clone> OpCode<V> {
                     MemOp::Drop => "drop".to_string(),
                 };
                 format!("{}(v{})", name, value.0)
-            }
-            OpCode::PureToWitnessRef {
-                result,
-                value,
-                result_annotation: annotation,
-            } => {
-                format!(
-                    "v{}{} = box_field(v{}) as {}",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    value.0,
-                    annotation
-                )
-            }
-            OpCode::UnboxField { result, value } => {
-                format!(
-                    "v{}{} = unbox_field(v{})",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    value.0
-                )
             }
             OpCode::MulConst {
                 result,
@@ -1952,13 +1927,12 @@ impl<V: Display + Clone> OpCode<V> {
     }
 }
 
-impl<V> OpCode<V> {
+impl OpCode {
     pub fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             Self::Alloc {
                 result: r,
                 elem_type: _,
-                result_annotation: _,
             }
             | Self::MemOp { kind: _, value: r }
             | Self::FreshWitness {
@@ -1992,15 +1966,6 @@ impl<V> OpCode<V> {
                 result: a,
                 value: b,
                 target: _,
-            }
-            | Self::PureToWitnessRef {
-                result: a,
-                value: b,
-                result_annotation: _,
-            }
-            | Self::UnboxField {
-                result: a,
-                value: b,
             } => vec![a, b].into_iter(),
             Self::Truncate {
                 result: a,
@@ -2041,7 +2006,6 @@ impl<V> OpCode<V> {
             Self::WriteWitness {
                 result: a,
                 value: b,
-                witness_annotation: _,
             } => {
                 let mut ret_vec = a.iter_mut().collect::<Vec<_>>();
                 ret_vec.push(b);
@@ -2101,6 +2065,10 @@ impl<V> OpCode<V> {
                 if_f: d,
             } => vec![a, b, c, d].into_iter(),
             Self::Not {
+                result: r,
+                value: v,
+            }
+            | Self::ValueOf {
                 result: r,
                 value: v,
             } => vec![r, v].into_iter(),
@@ -2166,7 +2134,6 @@ impl<V> OpCode<V> {
             Self::Alloc {
                 result: _,
                 elem_type: _,
-                result_annotation: _,
             }
             | Self::FreshWitness {
                 result: _,
@@ -2227,21 +2194,11 @@ impl<V> OpCode<V> {
             | Self::WriteWitness {
                 result: _,
                 value: c,
-                witness_annotation: _,
             }
             | Self::Cast {
                 result: _,
                 value: c,
                 target: _,
-            }
-            | Self::PureToWitnessRef {
-                result: _,
-                value: c,
-                result_annotation: _,
-            }
-            | Self::UnboxField {
-                result: _,
-                value: c,
             }
             | Self::Truncate {
                 result: _,
@@ -2281,6 +2238,10 @@ impl<V> OpCode<V> {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -2359,7 +2320,6 @@ impl<V> OpCode<V> {
             Self::Alloc {
                 result: _,
                 elem_type: _,
-                result_annotation: _,
             }
             | Self::FreshWitness {
                 result: _,
@@ -2419,21 +2379,11 @@ impl<V> OpCode<V> {
             | Self::WriteWitness {
                 result: _,
                 value: c,
-                witness_annotation: _,
             }
             | Self::Cast {
                 result: _,
                 value: c,
                 target: _,
-            }
-            | Self::PureToWitnessRef {
-                result: _,
-                value: c,
-                result_annotation: _,
-            }
-            | Self::UnboxField {
-                result: _,
-                value: c,
             }
             | Self::Truncate {
                 result: _,
@@ -2468,6 +2418,10 @@ impl<V> OpCode<V> {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -2554,7 +2508,6 @@ impl<V> OpCode<V> {
             Self::Alloc {
                 result: r,
                 elem_type: _,
-                result_annotation: _,
             }
             | Self::FreshWitness {
                 result: r,
@@ -2622,15 +2575,6 @@ impl<V> OpCode<V> {
                 const_val: _,
                 var: _,
             }
-            | Self::PureToWitnessRef {
-                result: r,
-                value: _,
-                result_annotation: _,
-            }
-            | Self::UnboxField {
-                result: r,
-                value: _,
-            }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj {
                 result: r,
@@ -2645,7 +2589,6 @@ impl<V> OpCode<V> {
             Self::WriteWitness {
                 result: r,
                 value: _,
-                witness_annotation: _,
             } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
                 ret_vec.into_iter()
@@ -2670,6 +2613,10 @@ impl<V> OpCode<V> {
                 max_bits: _,
             } => vec![].into_iter(),
             Self::Not {
+                result: r,
+                value: _,
+            }
+            | Self::ValueOf {
                 result: r,
                 value: _,
             } => vec![r].into_iter(),
@@ -2732,8 +2679,8 @@ impl Terminator {
     }
 }
 
-impl OpCode<ConstantTaint> {
-    pub fn mk_array_get(result: ValueId, array: ValueId, index: ValueId) -> OpCode<ConstantTaint> {
+impl OpCode {
+    pub fn mk_array_get(result: ValueId, array: ValueId, index: ValueId) -> OpCode {
         OpCode::ArrayGet {
             result,
             array,
@@ -2741,7 +2688,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_cast_to_field(result: ValueId, value: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_cast_to_field(result: ValueId, value: ValueId) -> OpCode {
         OpCode::Cast {
             result,
             value,
@@ -2749,15 +2696,14 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_write_witness(result: ValueId, value_id: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_write_witness(result: ValueId, value_id: ValueId) -> OpCode {
         OpCode::WriteWitness {
             result: Some(result),
             value: value_id,
-            witness_annotation: ConstantTaint::Witness,
         }
     }
 
-    pub fn mk_lookup_rngchk_8(value: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_lookup_rngchk_8(value: ValueId) -> OpCode {
         OpCode::Lookup {
             target: LookupTarget::Rangecheck(8),
             keys: vec![value],
@@ -2765,10 +2711,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_lookup_rngchk(
-        target: LookupTarget<ValueId>,
-        value: ValueId,
-    ) -> OpCode<ConstantTaint> {
+    pub fn mk_lookup_rngchk(target: LookupTarget<ValueId>, value: ValueId) -> OpCode {
         OpCode::Lookup {
             target,
             keys: vec![value],
@@ -2776,7 +2719,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_mul(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_mul(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Mul,
             result,
@@ -2785,7 +2728,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_add(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_add(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Add,
             result,
@@ -2794,7 +2737,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_lookup_arr(array: ValueId, index: ValueId, result: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_lookup_arr(array: ValueId, index: ValueId, result: ValueId) -> OpCode {
         OpCode::Lookup {
             target: LookupTarget::Array(array),
             keys: vec![index],
@@ -2802,11 +2745,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_cast_to(
-        result: ValueId,
-        target: CastTarget,
-        value: ValueId,
-    ) -> OpCode<ConstantTaint> {
+    pub fn mk_cast_to(result: ValueId, target: CastTarget, value: ValueId) -> OpCode {
         OpCode::Cast {
             result,
             value,
@@ -2814,11 +2753,11 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_constrain(a: ValueId, b: ValueId, c: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_constrain(a: ValueId, b: ValueId, c: ValueId) -> OpCode {
         OpCode::Constrain { a, b, c }
     }
 
-    pub fn mk_sub(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_sub(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Sub,
             result,
@@ -2827,7 +2766,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_div(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_div(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Div,
             result,
@@ -2836,7 +2775,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_eq(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_eq(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::Cmp {
             kind: CmpKind::Eq,
             result,
@@ -2845,7 +2784,7 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_and(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_and(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::And,
             result,
@@ -2854,7 +2793,11 @@ impl OpCode<ConstantTaint> {
         }
     }
 
-    pub fn mk_lt(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode<ConstantTaint> {
+    pub fn mk_value_of(result: ValueId, value: ValueId) -> OpCode {
+        OpCode::ValueOf { result, value }
+    }
+
+    pub fn mk_lt(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
         OpCode::Cmp {
             kind: CmpKind::Lt,
             result,

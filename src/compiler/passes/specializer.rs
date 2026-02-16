@@ -16,7 +16,6 @@ use crate::compiler::{
         BinaryArithOpKind, CastTarget, Endianness, Function, FunctionId, MemOp, Radix, SSA,
         SeqType, ValueId,
     },
-    taint_analysis::ConstantTaint,
 };
 
 pub struct Specializer {
@@ -36,16 +35,16 @@ enum ConstVal {
 struct Val(ValueId);
 
 struct SpecializationState {
-    function: Function<ConstantTaint>,
+    function: Function,
     const_vals: HashMap<ValueId, ConstVal>,
 }
 
-impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
+impl symbolic_executor::Value<SpecializationState> for Val {
     fn cmp(
         &self,
         b: &Self,
         cmp_kind: crate::compiler::ssa::CmpKind,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let l_const = ctx.const_vals.get(&self.0);
@@ -79,7 +78,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         &self,
         b: &Self,
         binary_arith_op_kind: crate::compiler::ssa::BinaryArithOpKind,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let a_const = ctx.const_vals.get(&self.0);
@@ -181,7 +180,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
     fn array_get(
         &self,
         index: &Self,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let a_const = ctx.const_vals.get(&self.0);
@@ -221,7 +220,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
     fn tuple_get(
         &self,
         index: usize,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let a_const = ctx.const_vals.get(&self.0);
@@ -238,7 +237,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         &self,
         _index: &Self,
         _value: &Self,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         _ctx: &mut SpecializationState,
     ) -> Self {
         todo!()
@@ -246,18 +245,39 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
 
     fn truncate(
         &self,
-        _from: usize,
-        _to: usize,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
-        _ctx: &mut SpecializationState,
+        from: usize,
+        to: usize,
+        _out_type: &crate::compiler::ir::r#type::Type,
+        ctx: &mut SpecializationState,
     ) -> Self {
-        todo!()
+        let self_const = ctx.const_vals.get(&self.0);
+        match self_const {
+            Some(ConstVal::U(_, v)) => {
+                let res = v & ((1 << to) - 1);
+                let res_v = ctx.function.push_u_const(to, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
+                Self(res_v)
+            }
+            Some(ConstVal::Field(f)) => {
+                let v: u128 = (*f).into_bigint().as_ref()[0] as u128;
+                let res = v & ((1 << to) - 1);
+                let res_v = ctx.function.push_u_const(to, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
+                Self(res_v)
+            }
+            _ => {
+                let res = ctx
+                    .function
+                    .push_truncate(ctx.function.get_entry_id(), self.0, to, from);
+                Self(res)
+            }
+        }
     }
 
     fn cast(
         &self,
         cast_target: &crate::compiler::ssa::CastTarget,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let self_const = ctx.const_vals.get(&self.0);
@@ -275,9 +295,33 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
-                CastTarget::Nop | CastTarget::ArrayToSlice => self.clone(),
+                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => self.clone(),
             },
-            _ => todo!(),
+            Some(ConstVal::Field(f)) => match cast_target {
+                CastTarget::U(s) => {
+                    let v: u128 = (*f).into_bigint().as_ref()[0] as u128;
+                    let res = v & ((1 << *s) - 1);
+                    let res_v = ctx.function.push_u_const(*s, res);
+                    ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
+                    Self(res_v)
+                }
+                CastTarget::Field
+                | CastTarget::Nop
+                | CastTarget::ArrayToSlice
+                | CastTarget::WitnessOf => self.clone(),
+            },
+            None => {
+                let res = ctx
+                    .function
+                    .push_cast(ctx.function.get_entry_id(), self.0, *cast_target);
+                Self(res)
+            }
+            _ => {
+                let res = ctx
+                    .function
+                    .push_cast(ctx.function.get_entry_id(), self.0, *cast_target);
+                Self(res)
+            }
         }
     }
 
@@ -289,7 +333,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         &self,
         endianness: Endianness,
         size: usize,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let val = ctx
@@ -302,7 +346,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
 
     fn not(
         &self,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let const_val = ctx.const_vals.get(&self.0);
@@ -337,7 +381,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         a: Vec<Self>,
         ctx: &mut SpecializationState,
         seq_type: SeqType,
-        elem_type: &Type<ConstantTaint>,
+        elem_type: &Type,
     ) -> Self {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
         let val = ctx.function.push_mk_array(
@@ -350,11 +394,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         Self(val)
     }
 
-    fn mk_tuple(
-        elems: Vec<Self>,
-        ctx: &mut SpecializationState,
-        elem_types: &[Type<ConstantTaint>],
-    ) -> Self {
+    fn mk_tuple(elems: Vec<Self>, ctx: &mut SpecializationState, elem_types: &[Type]) -> Self {
         let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
         let val =
             ctx.function
@@ -363,20 +403,25 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         Self(val)
     }
 
-    fn alloc(_ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn alloc(elem_type: &Type, ctx: &mut SpecializationState) -> Self {
+        let val = ctx
+            .function
+            .push_alloc(ctx.function.get_entry_id(), elem_type.clone());
+        Self(val)
     }
 
-    fn ptr_write(&self, _val: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn ptr_write(&self, val: &Self, ctx: &mut SpecializationState) {
+        ctx.function
+            .push_store(ctx.function.get_entry_id(), self.0, val.0);
     }
 
     fn ptr_read(
         &self,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
-        _ctx: &mut SpecializationState,
+        _out_type: &crate::compiler::ir::r#type::Type,
+        ctx: &mut SpecializationState,
     ) -> Self {
-        todo!()
+        let val = ctx.function.push_load(ctx.function.get_entry_id(), self.0);
+        Self(val)
     }
 
     fn expect_constant_bool(&self, ctx: &mut SpecializationState) -> bool {
@@ -391,7 +436,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         &self,
         if_t: &Self,
         if_f: &Self,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let self_const = ctx.const_vals.get(&self.0);
@@ -413,13 +458,16 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
 
     fn write_witness(
         &self,
-        _tp: Option<&crate::compiler::ir::r#type::Type<ConstantTaint>>,
+        _tp: Option<&crate::compiler::ir::r#type::Type>,
         _ctx: &mut SpecializationState,
     ) -> Self {
         todo!()
     }
 
-    fn fresh_witness(_ctx: &mut SpecializationState) -> Self {
+    fn fresh_witness(
+        _result_type: &crate::compiler::ir::r#type::Type,
+        _ctx: &mut SpecializationState,
+    ) -> Self {
         todo!()
     }
 
@@ -438,7 +486,7 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
         radix: &Radix<Self>,
         endianness: Endianness,
         size: usize,
-        _out_type: &crate::compiler::ir::r#type::Type<ConstantTaint>,
+        _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let cst_val = ctx.const_vals.get(&self.0);
@@ -462,12 +510,12 @@ impl symbolic_executor::Value<SpecializationState, ConstantTaint> for Val {
     }
 }
 
-impl<T> symbolic_executor::Context<Val, T> for SpecializationState {
+impl symbolic_executor::Context<Val> for SpecializationState {
     fn on_call(
         &mut self,
         _func: crate::compiler::ssa::FunctionId,
         _params: &mut [Val],
-        _param_types: &[&crate::compiler::ir::r#type::Type<T>],
+        _param_types: &[&crate::compiler::ir::r#type::Type],
     ) -> Option<Vec<Val>> {
         None
     }
@@ -475,7 +523,7 @@ impl<T> symbolic_executor::Context<Val, T> for SpecializationState {
     fn on_return(
         &mut self,
         returns: &mut [Val],
-        _return_types: &[crate::compiler::ir::r#type::Type<T>],
+        _return_types: &[crate::compiler::ir::r#type::Type],
     ) {
         self.function.terminate_block_with_return(
             self.function.get_entry_id(),
@@ -487,14 +535,14 @@ impl<T> symbolic_executor::Context<Val, T> for SpecializationState {
         &mut self,
         _target: crate::compiler::ssa::BlockId,
         _params: &mut [Val],
-        _param_types: &[&crate::compiler::ir::r#type::Type<T>],
+        _param_types: &[&crate::compiler::ir::r#type::Type],
     ) {
     }
 
     fn todo(
         &mut self,
         payload: &str,
-        _result_types: &[crate::compiler::ir::r#type::Type<T>],
+        _result_types: &[crate::compiler::ir::r#type::Type],
     ) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
     }
@@ -514,12 +562,8 @@ impl<T> symbolic_executor::Context<Val, T> for SpecializationState {
     }
 }
 
-impl Pass<ConstantTaint> for Specializer {
-    fn run(
-        &self,
-        ssa: &mut SSA<ConstantTaint>,
-        pass_manager: &crate::compiler::pass_manager::PassManager<ConstantTaint>,
-    ) {
+impl Pass for Specializer {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         let summary = pass_manager.get_constraint_instrumentation();
         for (sig, summary) in summary.functions.iter() {
             if summary.specialization_total_savings > 0 {
@@ -546,8 +590,8 @@ impl Specializer {
     #[instrument(skip_all, name = "Specializer::try_spec", fields(function = %signature.pretty_print(ssa, true), expected_savings = summary.specialization_total_savings))]
     fn try_spec(
         &self,
-        ssa: &mut SSA<ConstantTaint>,
-        type_info: &TypeInfo<ConstantTaint>,
+        ssa: &mut SSA,
+        type_info: &TypeInfo,
         summary: &SpecializationSummary,
         signature: FunctionSignature,
     ) {
@@ -566,7 +610,7 @@ impl Specializer {
         let original_fn = ssa.get_function(signature.get_fun_id());
 
         let mut state = SpecializationState {
-            function: Function::<ConstantTaint>::empty(name),
+            function: Function::empty(name),
             const_vals: HashMap::new(),
         };
 
@@ -586,12 +630,7 @@ impl Specializer {
                     info!("TODO: Aborting specialization on an array value");
                     return;
                 }
-                ValueSignature::UWitness(_) => {
-                    call_params.push(Val(state
-                        .function
-                        .add_parameter(state.function.get_entry_id(), param.clone())));
-                }
-                ValueSignature::FWitness => {
+                ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
                     call_params.push(Val(state
                         .function
                         .add_parameter(state.function.get_entry_id(), param.clone())));
@@ -656,14 +695,14 @@ impl Specializer {
 
     fn build_dispatcher_for(
         &self,
-        params: Vec<Type<ConstantTaint>>,
-        returns: Vec<Type<ConstantTaint>>,
+        params: Vec<Type>,
+        returns: Vec<Type>,
         signature: &FunctionSignature,
         fn_name: String,
         specialized_id: FunctionId,
         unspecialized_id: FunctionId,
-    ) -> Function<ConstantTaint> {
-        let mut dispatcher = Function::<ConstantTaint>::empty(fn_name);
+    ) -> Function {
+        let mut dispatcher = Function::empty(fn_name);
         let mut dispatcher_params = vec![];
         for param in params {
             dispatcher_params.push(dispatcher.add_parameter(dispatcher.get_entry_id(), param));
@@ -686,7 +725,7 @@ impl Specializer {
                 ValueSignature::Array(_) => {
                     todo!();
                 }
-                ValueSignature::UWitness(_) | ValueSignature::FWitness => {
+                ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
                     specialized_params.push(*pval);
                 }
                 ValueSignature::Field(v) => {

@@ -15,8 +15,8 @@ impl RemoveUnreachableFunctions {
     }
 }
 
-impl<V: Clone> Pass<V> for RemoveUnreachableFunctions {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &PassManager<V>) {
+impl Pass for RemoveUnreachableFunctions {
+    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
         let cfg = pass_manager.get_cfg();
         let call_graph = cfg.get_call_graph();
 

@@ -12,7 +12,6 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::ir::r#type::Empty;
 use crate::compiler::ssa::{Function, FunctionId, SSA};
 
 use expression_converter::ExpressionConverter;
@@ -43,7 +42,7 @@ impl SsaConverter {
     }
 
     /// Convert an entire program to SSA.
-    pub fn convert_program(&mut self, program: &Program) -> SSA<Empty> {
+    pub fn convert_program(&mut self, program: &Program) -> SSA {
         let mut ssa = SSA::new();
 
         // Phase 1: Register all functions to handle mutual recursion.
@@ -168,7 +167,7 @@ impl SsaConverter {
     }
 
     /// Convert globals: assign slot indices, build init/deinit functions.
-    fn convert_globals(&mut self, program: &Program, ssa: &mut SSA<Empty>) {
+    fn convert_globals(&mut self, program: &Program, ssa: &mut SSA) {
         // Assign slot indices
         let mut global_types = Vec::new();
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
@@ -269,7 +268,7 @@ impl SsaConverter {
         ast_func: &AstFunction,
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
-    ) -> Function<Empty> {
+    ) -> Function {
         let name = if in_unconstrained && !ast_func.unconstrained {
             format!("{}_unconstrained", ast_func.name)
         } else {
@@ -320,9 +319,9 @@ impl SsaConverter {
     }
 }
 
-impl SSA<Empty> {
+impl SSA {
     /// Create SSA directly from a monomorphized program.
-    pub fn from_program(program: &Program) -> SSA<Empty> {
+    pub fn from_program(program: &Program) -> SSA {
         let mut converter = SsaConverter::new();
         converter.convert_program(program)
     }

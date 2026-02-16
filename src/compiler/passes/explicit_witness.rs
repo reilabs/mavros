@@ -12,17 +12,12 @@ use crate::compiler::{
         BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget,
         OpCode, Radix, SSA, SeqType, ValueId,
     },
-    taint_analysis::ConstantTaint,
 };
 
 pub struct ExplicitWitness {}
 
-impl Pass<ConstantTaint> for ExplicitWitness {
-    fn run(
-        &self,
-        ssa: &mut SSA<ConstantTaint>,
-        pass_manager: &crate::compiler::pass_manager::PassManager<ConstantTaint>,
-    ) {
+impl Pass for ExplicitWitness {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa, pass_manager.get_type_info());
     }
 
@@ -43,10 +38,10 @@ impl ExplicitWitness {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA<ConstantTaint>, type_info: &TypeInfo<ConstantTaint>) {
+    pub fn do_run(&self, ssa: &mut SSA, type_info: &TypeInfo) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
-            let mut new_blocks = HashMap::<BlockId, Block<ConstantTaint>>::new();
+            let mut new_blocks = HashMap::<BlockId, Block>::new();
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
@@ -79,29 +74,31 @@ impl ExplicitWitness {
                             lhs,
                             rhs,
                         } => {
-                            let l_taint = function_type_info.get_value_type(lhs).get_annotation();
-                            let r_taint = function_type_info.get_value_type(rhs).get_annotation();
-                            if !(l_taint.is_pure() && r_taint.is_pure()) {
+                            let l_taint = function_type_info.get_value_type(lhs).is_witness_of();
+                            let r_taint = function_type_info.get_value_type(rhs).is_witness_of();
+                            if !(!l_taint && !r_taint) {
                                 assert!(function_type_info.get_value_type(rhs).is_numeric());
                                 assert!(function_type_info.get_value_type(lhs).is_numeric());
                                 match kind {
                                     CmpKind::Eq => {
                                         let u1 = CastTarget::U(1);
                                         // Conditionally cast operands to Field (skip if already Field)
-                                        let l_field = if matches!(
-                                            function_type_info.get_value_type(lhs).expr,
-                                            TypeExpr::Field
-                                        ) {
+                                        let l_field = if function_type_info
+                                            .get_value_type(lhs)
+                                            .strip_witness()
+                                            .is_field()
+                                        {
                                             lhs
                                         } else {
                                             let v = function.fresh_value();
                                             new_instructions.push(OpCode::mk_cast_to_field(v, lhs));
                                             v
                                         };
-                                        let r_field = if matches!(
-                                            function_type_info.get_value_type(rhs).expr,
-                                            TypeExpr::Field
-                                        ) {
+                                        let r_field = if function_type_info
+                                            .get_value_type(rhs)
+                                            .strip_witness()
+                                            .is_field()
+                                        {
                                             rhs
                                         } else {
                                             let v = function.fresh_value();
@@ -112,11 +109,13 @@ impl ExplicitWitness {
                                             lr_diff := sub(l_field, r_field);
 
                                             div_hint := div(lr_diff, lr_diff);
-                                            div_hint_witness := write_witness(div_hint);
+                                            div_hint_plain := value_of(div_hint);
+                                            div_hint_witness := write_witness(div_hint_plain);
 
                                             out_hint := eq(lhs, rhs);
                                             out_hint_field := cast_to_field(out_hint);
-                                            out_hint_witness := write_witness(out_hint_field);
+                                            out_hint_plain := value_of(out_hint_field);
+                                            out_hint_witness := write_witness(out_hint_plain);
                                             #result := cast_to(u1, out_hint_witness);
 
                                             result_field := cast_to_field(result);
@@ -129,8 +128,10 @@ impl ExplicitWitness {
                                         } ->);
                                     }
                                     CmpKind::Lt => {
-                                        let TypeExpr::U(s) =
-                                            function_type_info.get_value_type(rhs).expr
+                                        let TypeExpr::U(s) = function_type_info
+                                            .get_value_type(rhs)
+                                            .strip_witness()
+                                            .expr
                                         else {
                                             panic!("ICE: rhs is not a U type");
                                         };
@@ -138,7 +139,8 @@ impl ExplicitWitness {
                                         let r = ssa_append!(function, new_instructions, {
                                             res_hint := lt(lhs, rhs);
                                             res_hint_field := cast_to_field(res_hint);
-                                            res_witness := write_witness(res_hint_field);
+                                            res_hint_plain := value_of(res_hint_field);
+                                            res_witness := write_witness(res_hint_plain);
                                             #result := cast_to(u1, res_witness);
 
                                             l_field := cast_to_field(lhs);
@@ -149,7 +151,8 @@ impl ExplicitWitness {
                                             adjustment := sub(! Field::ONE : Field, two_res);
 
                                             adjusted_diff := mul(lr_diff, adjustment);
-                                            adjusted_diff_wit := write_witness(adjusted_diff);
+                                            adjusted_diff_plain := value_of(adjusted_diff);
+                                            adjusted_diff_wit := write_witness(adjusted_diff_plain);
                                             constrain(lr_diff, adjustment, adjusted_diff_wit);
                                         } -> adjusted_diff_wit);
                                         self.gen_witness_rangecheck(
@@ -170,10 +173,10 @@ impl ExplicitWitness {
                             lhs: l,
                             rhs: r,
                         } => {
-                            let l_taint = function_type_info.get_value_type(l).get_annotation();
-                            let r_taint = function_type_info.get_value_type(r).get_annotation();
+                            let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                            let r_taint = function_type_info.get_value_type(r).is_witness_of();
 
-                            if l_taint.is_pure() || r_taint.is_pure() {
+                            if !l_taint || !r_taint {
                                 new_instructions.push(instruction);
                                 continue;
                             }
@@ -186,10 +189,14 @@ impl ExplicitWitness {
                                 lhs: l,
                                 rhs: r,
                             });
+                            let mul_plain = function.fresh_value();
+                            new_instructions.push(OpCode::ValueOf {
+                                result: mul_plain,
+                                value: mul_witness,
+                            });
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
-                                value: mul_witness,
-                                witness_annotation: ConstantTaint::Witness,
+                                value: mul_plain,
                             });
                             new_instructions.push(OpCode::Constrain { a: l, b: r, c: res });
                         }
@@ -199,10 +206,10 @@ impl ExplicitWitness {
                             lhs: l,
                             rhs: r,
                         } => {
-                            let l_taint = function_type_info.get_value_type(l).get_annotation();
-                            let r_taint = function_type_info.get_value_type(r).get_annotation();
-                            assert!(l_taint.is_pure());
-                            assert!(r_taint.is_pure());
+                            let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                            let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                            assert!(!l_taint);
+                            assert!(!r_taint);
                             new_instructions.push(instruction);
                         }
                         OpCode::BinaryArithOp {
@@ -211,20 +218,21 @@ impl ExplicitWitness {
                             lhs: l,
                             rhs: r,
                         } => {
-                            let l_taint = function_type_info.get_value_type(l).get_annotation();
-                            let r_taint = function_type_info.get_value_type(r).get_annotation();
+                            let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                            let r_taint = function_type_info.get_value_type(r).is_witness_of();
                             match (l_taint, r_taint) {
-                                (ConstantTaint::Pure, ConstantTaint::Pure) => {
+                                (false, false) => {
                                     new_instructions.push(instruction);
                                 }
-                                (ConstantTaint::Witness, ConstantTaint::Witness) => {
+                                (true, true) => {
                                     let u1 = CastTarget::U(1);
                                     ssa_append!(function, new_instructions, {
                                         l_field := cast_to_field(l);
                                         r_field := cast_to_field(r);
                                         res_hint := and(l, r);
                                         res_hint_field := cast_to_field(res_hint);
-                                        res_witness := write_witness(res_hint_field);
+                                        res_hint_plain := value_of(res_hint_field);
+                                        res_witness := write_witness(res_hint_plain);
                                         constrain(l_field, r_field, res_witness);
                                         #result := cast_to(u1, res_witness);
                                     } ->);
@@ -241,26 +249,26 @@ impl ExplicitWitness {
                             }
                         }
                         OpCode::Store { ptr, value: _ } => {
-                            let ptr_taint = function_type_info.get_value_type(ptr).get_annotation();
-                            assert!(ptr_taint.is_pure());
+                            let ptr_taint = function_type_info.get_value_type(ptr).is_witness_of();
+                            assert!(!ptr_taint);
                             new_instructions.push(instruction);
                         }
                         OpCode::Load { result: _, ptr } => {
-                            let ptr_taint = function_type_info.get_value_type(ptr).get_annotation();
-                            assert!(ptr_taint.is_pure());
+                            let ptr_taint = function_type_info.get_value_type(ptr).is_witness_of();
+                            assert!(!ptr_taint);
                             new_instructions.push(instruction);
                         }
                         OpCode::AssertEq { lhs: l, rhs: r } => {
                             let l_type = function_type_info.get_value_type(l);
                             let r_type = function_type_info.get_value_type(r);
-                            let l_taint = l_type.get_annotation();
-                            let r_taint = r_type.get_annotation();
-                            if l_taint.is_pure() && r_taint.is_pure() {
+                            let l_taint = l_type.is_witness_of();
+                            let r_taint = r_type.is_witness_of();
+                            if !l_taint && !r_taint {
                                 new_instructions.push(instruction);
                                 continue;
                             }
                             let one = function.push_field_const(ark_ff::Fp::from(1));
-                            let l = if l_type.is_field() {
+                            let l = if l_type.strip_witness().is_field() {
                                 l
                             } else {
                                 let casted = function.fresh_value();
@@ -271,7 +279,7 @@ impl ExplicitWitness {
                                 });
                                 casted
                             };
-                            let r = if r_type.is_field() {
+                            let r = if r_type.strip_witness().is_field() {
                                 r
                             } else {
                                 let casted = function.fresh_value();
@@ -285,10 +293,10 @@ impl ExplicitWitness {
                             new_instructions.push(OpCode::Constrain { a: l, b: one, c: r });
                         }
                         OpCode::AssertR1C { a, b, c } => {
-                            let a_taint = function_type_info.get_value_type(a).get_annotation();
-                            let b_taint = function_type_info.get_value_type(b).get_annotation();
-                            let c_taint = function_type_info.get_value_type(c).get_annotation();
-                            if a_taint.is_pure() && b_taint.is_pure() && c_taint.is_pure() {
+                            let a_taint = function_type_info.get_value_type(a).is_witness_of();
+                            let b_taint = function_type_info.get_value_type(b).is_witness_of();
+                            let c_taint = function_type_info.get_value_type(c).is_witness_of();
+                            if !a_taint && !b_taint && !c_taint {
                                 new_instructions.push(instruction);
                                 continue;
                             }
@@ -309,19 +317,19 @@ impl ExplicitWitness {
                             array: arr,
                             index: idx,
                         } => {
-                            let arr_taint = function_type_info.get_value_type(arr).get_annotation();
+                            let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
                             let idx_type = function_type_info.get_value_type(idx);
-                            let idx_taint = idx_type.get_annotation();
-                            assert!(arr_taint.is_pure());
+                            let idx_taint = idx_type.is_witness_of();
+                            assert!(!arr_taint);
                             match idx_taint {
-                                ConstantTaint::Pure => {
+                                false => {
                                     new_instructions.push(instruction);
                                 }
-                                ConstantTaint::Witness => {
+                                true => {
                                     let back_cast_target = match &idx_type.expr {
                                         TypeExpr::U(s) => CastTarget::U(*s),
                                         TypeExpr::Field => CastTarget::Field,
-                                        TypeExpr::WitnessRef => CastTarget::Field,
+                                        TypeExpr::WitnessOf(_) => CastTarget::Field,
                                         TypeExpr::Array(_, _) => {
                                             todo!("array types in witnessed array reads")
                                         }
@@ -339,10 +347,26 @@ impl ExplicitWitness {
                                         ),
                                     };
 
+                                    let r = ssa_append!(function, new_instructions, {
+                                        pure_idx := value_of(idx);
+                                        r_hint_val := array_get(arr, pure_idx);
+                                    } -> r_hint_val);
+                                    let mut r_pure_val = r.r_hint_val;
+
+                                    let elem_is_witness = function_type_info
+                                        .get_value_type(arr)
+                                        .get_array_element()
+                                        .is_witness_of();
+                                    if elem_is_witness {
+                                        r_pure_val = ssa_append!(function, new_instructions, {
+                                            v := value_of(r_pure_val);
+                                        } -> v)
+                                        .v;
+                                    }
+
                                     ssa_append!(function, new_instructions, {
                                         idx_field := cast_to_field(idx);
-                                        r_wit_val := array_get(arr, idx);
-                                        r_wit_field := cast_to_field(r_wit_val);
+                                        r_wit_field := cast_to_field(r_pure_val);
                                         r_wit := write_witness(r_wit_field);
                                         #result := cast_to(back_cast_target, r_wit);
                                         lookup_arr(arr, idx_field, r_wit);
@@ -356,10 +380,10 @@ impl ExplicitWitness {
                             index: idx,
                             value: _,
                         } => {
-                            let arr_taint = function_type_info.get_value_type(arr).get_annotation();
-                            let idx_taint = function_type_info.get_value_type(idx).get_annotation();
-                            assert!(arr_taint.is_pure());
-                            assert!(idx_taint.is_pure());
+                            let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
+                            let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
+                            assert!(!arr_taint);
+                            assert!(!idx_taint);
                             new_instructions.push(instruction);
                         }
                         OpCode::SlicePush {
@@ -368,18 +392,16 @@ impl ExplicitWitness {
                             slice: sl,
                             values: _,
                         } => {
-                            let slice_taint =
-                                function_type_info.get_value_type(sl).get_annotation();
-                            assert!(slice_taint.is_pure());
+                            let slice_taint = function_type_info.get_value_type(sl).is_witness_of();
+                            assert!(!slice_taint);
                             new_instructions.push(instruction);
                         }
                         OpCode::SliceLen {
                             result: _,
                             slice: sl,
                         } => {
-                            let slice_taint =
-                                function_type_info.get_value_type(sl).get_annotation();
-                            assert!(slice_taint.is_pure());
+                            let slice_taint = function_type_info.get_value_type(sl).is_witness_of();
+                            assert!(!slice_taint);
                             new_instructions.push(instruction);
                         }
                         OpCode::Select {
@@ -389,16 +411,51 @@ impl ExplicitWitness {
                             if_f: r,
                         } => {
                             let cond_taint =
-                                function_type_info.get_value_type(cond).get_annotation();
-                            let l_taint = function_type_info.get_value_type(l).get_annotation();
-                            let r_taint = function_type_info.get_value_type(r).get_annotation();
-                            // The result is cond * l + (1 - cond) * r
-                            // If either cond or both l and r and pure, this becomes a linear combination
-                            // and as such doesn't need a witness
-                            if cond_taint.is_pure() || (l_taint.is_pure() && r_taint.is_pure()) {
+                                function_type_info.get_value_type(cond).is_witness_of();
+                            let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                            let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                            // The result is cond * l + (1 - cond) * r = cond * (l - r) + r
+                            // If cond is pure, this is just a conditional move
+                            if !cond_taint {
                                 new_instructions.push(instruction);
                                 continue;
                             }
+                            // If both branches are pure, result is a linear combination
+                            // of cond and constants: cond * (l - r) + r. No constraint needed.
+                            if !l_taint && !r_taint {
+                                let neg_one = function.push_field_const(ark_ff::Fp::from(-1));
+                                let neg_r = function.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Mul,
+                                    result: neg_r,
+                                    lhs: r,
+                                    rhs: neg_one,
+                                });
+                                let l_sub_r = function.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Add,
+                                    result: l_sub_r,
+                                    lhs: l,
+                                    rhs: neg_r,
+                                });
+                                // cond * (l - r): l_sub_r is a constant, cond is witness
+                                let cond_times_diff = function.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Mul,
+                                    result: cond_times_diff,
+                                    lhs: l_sub_r,
+                                    rhs: cond,
+                                });
+                                // result = cond * (l - r) + r
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::Add,
+                                    result: res,
+                                    lhs: cond_times_diff,
+                                    rhs: r,
+                                });
+                                continue;
+                            }
+                            // At least one branch is witness: full lowering with constraint
                             let select_witness = function.fresh_value();
                             new_instructions.push(OpCode::Select {
                                 result: select_witness,
@@ -406,10 +463,14 @@ impl ExplicitWitness {
                                 if_t: l,
                                 if_f: r,
                             });
+                            let select_plain = function.fresh_value();
+                            new_instructions.push(OpCode::ValueOf {
+                                result: select_plain,
+                                value: select_witness,
+                            });
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
-                                value: select_witness,
-                                witness_annotation: ConstantTaint::Witness,
+                                value: select_plain,
                             });
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
@@ -466,36 +527,35 @@ impl ExplicitWitness {
                             to_bits: _,
                             from_bits: _,
                         } => {
-                            let i_taint = function_type_info.get_value_type(i).get_annotation();
-                            assert!(i_taint.is_pure()); // TODO: witness versions
+                            let i_taint = function_type_info.get_value_type(i).is_witness_of();
+                            assert!(!i_taint); // TODO: witness versions
                             new_instructions.push(instruction);
                         }
                         OpCode::Not { result, value } => {
-                            match &function_type_info.get_value_type(value).expr {
-                                TypeExpr::U(s) => {
-                                    let ones =
-                                        function.push_field_const(Field::from((1u128 << *s) - 1));
-                                    let casted = function.fresh_value();
-                                    new_instructions.push(OpCode::Cast {
-                                        result: casted,
-                                        value: value,
-                                        target: CastTarget::Field,
-                                    });
-                                    let subbed = function.fresh_value();
-                                    new_instructions.push(OpCode::BinaryArithOp {
-                                        kind: BinaryArithOpKind::Sub,
-                                        result: subbed,
-                                        lhs: ones,
-                                        rhs: casted,
-                                    });
-                                    new_instructions.push(OpCode::Cast {
-                                        result: result,
-                                        value: subbed,
-                                        target: CastTarget::U(*s),
-                                    });
-                                }
+                            let value_type = function_type_info.get_value_type(value);
+                            let s = match &value_type.strip_witness().expr {
+                                TypeExpr::U(s) => *s,
                                 e => todo!("Unsupported type for negation: {:?}", e),
-                            }
+                            };
+                            let ones = function.push_field_const(Field::from((1u128 << s) - 1));
+                            let casted = function.fresh_value();
+                            new_instructions.push(OpCode::Cast {
+                                result: casted,
+                                value: value,
+                                target: CastTarget::Field,
+                            });
+                            let subbed = function.fresh_value();
+                            new_instructions.push(OpCode::BinaryArithOp {
+                                kind: BinaryArithOpKind::Sub,
+                                result: subbed,
+                                lhs: ones,
+                                rhs: casted,
+                            });
+                            new_instructions.push(OpCode::Cast {
+                                result: result,
+                                value: subbed,
+                                target: CastTarget::U(s),
+                            });
                         }
                         OpCode::ToBits {
                             result: _,
@@ -503,8 +563,8 @@ impl ExplicitWitness {
                             endianness: _,
                             count: _,
                         } => {
-                            let i_taint = function_type_info.get_value_type(i).get_annotation();
-                            assert!(i_taint.is_pure()); // Only handle pure input case for now
+                            let i_taint = function_type_info.get_value_type(i).is_witness_of();
+                            assert!(!i_taint); // Only handle pure input case for now
                             new_instructions.push(instruction);
                         }
                         OpCode::ToRadix {
@@ -515,15 +575,20 @@ impl ExplicitWitness {
                             count,
                         } => {
                             let value_taint =
-                                function_type_info.get_value_type(value).get_annotation();
-                            if value_taint.is_pure() {
+                                function_type_info.get_value_type(value).is_witness_of();
+                            if !value_taint {
                                 new_instructions.push(instruction);
                             } else {
                                 assert!(endianness == Endianness::Little);
+                                let pure_value = function.fresh_value();
+                                new_instructions.push(OpCode::ValueOf {
+                                    result: pure_value,
+                                    value,
+                                });
                                 let hint = function.fresh_value();
                                 new_instructions.push(OpCode::ToRadix {
                                     result: hint,
-                                    value,
+                                    value: pure_value,
                                     radix,
                                     endianness: Endianness::Little,
                                     count,
@@ -570,25 +635,12 @@ impl ExplicitWitness {
                                     result: result,
                                     elems: witnesses,
                                     seq_type: SeqType::Array(count),
-                                    elem_type: Type::field(ConstantTaint::Witness),
+                                    elem_type: Type::witness_of(Type::field()),
                                 });
                             }
                         }
 
                         OpCode::MemOp { kind: _, value: _ } => {
-                            new_instructions.push(instruction);
-                        }
-                        OpCode::PureToWitnessRef {
-                            result: _,
-                            value: _,
-                            result_annotation: _,
-                        } => {
-                            new_instructions.push(instruction);
-                        }
-                        OpCode::UnboxField {
-                            result: _,
-                            value: _,
-                        } => {
                             new_instructions.push(instruction);
                         }
                         OpCode::MulConst {
@@ -599,8 +651,8 @@ impl ExplicitWitness {
                             new_instructions.push(instruction);
                         }
                         OpCode::Rangecheck { value, max_bits } => {
-                            let v_taint = function_type_info.get_value_type(value).get_annotation();
-                            if v_taint.is_pure() {
+                            let v_taint = function_type_info.get_value_type(value).is_witness_of();
+                            if !v_taint {
                                 new_instructions.push(instruction);
                             } else {
                                 self.gen_witness_rangecheck(
@@ -638,8 +690,8 @@ impl ExplicitWitness {
                         OpCode::TupleProj { result, tuple, idx } => {
                             if let crate::compiler::ssa::TupleIdx::Static(index) = idx {
                                 let tuple_taint =
-                                    function_type_info.get_value_type(tuple).get_annotation();
-                                assert!(tuple_taint.is_pure());
+                                    function_type_info.get_value_type(tuple).is_witness_of();
+                                assert!(!tuple_taint);
                                 new_instructions.push(OpCode::TupleProj {
                                     result,
                                     tuple,
@@ -649,7 +701,9 @@ impl ExplicitWitness {
                                 panic!("Dynamic tuple indexing should not appear here");
                             }
                         }
-                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                        OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. }
+                        | OpCode::ValueOf { .. } => {
                             new_instructions.push(instruction);
                         }
                     }
@@ -663,16 +717,21 @@ impl ExplicitWitness {
 
     fn gen_witness_rangecheck(
         &self,
-        function: &mut Function<ConstantTaint>,
-        new_instructions: &mut Vec<OpCode<ConstantTaint>>,
+        function: &mut Function,
+        new_instructions: &mut Vec<OpCode>,
         value: ValueId,
         max_bits: usize,
     ) {
         assert!(max_bits % 8 == 0); // TODO
+        let pure_value = function.fresh_value();
+        new_instructions.push(OpCode::ValueOf {
+            result: pure_value,
+            value: value,
+        });
         let bytes_val = function.fresh_value();
         new_instructions.push(OpCode::ToRadix {
             result: bytes_val,
-            value: value,
+            value: pure_value,
             radix: Radix::Bytes,
             endianness: Endianness::Big,
             count: max_bits / 8,

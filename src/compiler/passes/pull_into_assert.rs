@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::compiler::{
     pass_manager::Pass,
     ssa::{BinaryArithOpKind, OpCode, SSA, ValueId},
-    taint_analysis::ConstantTaint,
 };
 
 pub struct PullIntoAssert {}
@@ -13,12 +12,8 @@ pub struct PulledProduct {
     rhs: ValueId,
 }
 
-impl Pass<ConstantTaint> for PullIntoAssert {
-    fn run(
-        &self,
-        ssa: &mut SSA<ConstantTaint>,
-        _pass_manager: &crate::compiler::pass_manager::PassManager<ConstantTaint>,
-    ) {
+impl Pass for PullIntoAssert {
+    fn run(&self, ssa: &mut SSA, _pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa);
     }
 
@@ -43,10 +38,10 @@ impl PullIntoAssert {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA<ConstantTaint>) {
+    pub fn do_run(&self, ssa: &mut SSA) {
         for (_, function) in ssa.iter_functions_mut() {
             let mut uses: HashMap<ValueId, usize> = HashMap::new();
-            let mut defs: HashMap<ValueId, OpCode<ConstantTaint>> = HashMap::new();
+            let mut defs: HashMap<ValueId, OpCode> = HashMap::new();
 
             for (_, block) in function.get_blocks() {
                 for instruction in block.get_instructions() {
@@ -104,7 +99,7 @@ impl PullIntoAssert {
         &self,
         value: ValueId,
         uses: &HashMap<ValueId, usize>,
-        defs: &HashMap<ValueId, OpCode<ConstantTaint>>,
+        defs: &HashMap<ValueId, OpCode>,
     ) -> Option<PulledProduct> {
         if *uses.get(&value).unwrap_or(&0) > 1 {
             return None;

@@ -3,18 +3,17 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     analysis::value_definitions::ValueDefinition,
-    ir::r#type::Empty,
     pass_manager::{DataPoint, Pass},
     ssa::{BinaryArithOpKind, Const, OpCode, TupleIdx},
 };
 
 pub struct MakeStructAccessStatic {}
 
-impl Pass<Empty> for MakeStructAccessStatic {
+impl Pass for MakeStructAccessStatic {
     fn run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA<Empty>,
-        pass_manager: &crate::compiler::pass_manager::PassManager<Empty>,
+        ssa: &mut crate::compiler::ssa::SSA,
+        pass_manager: &crate::compiler::pass_manager::PassManager,
     ) {
         self.do_run(ssa, pass_manager.get_value_definitions());
     }
@@ -38,8 +37,8 @@ impl MakeStructAccessStatic {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA<Empty>,
-        value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions<Empty>,
+        ssa: &mut crate::compiler::ssa::SSA,
+        value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let value_definitions = value_definitions.get_function(*function_id);

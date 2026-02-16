@@ -23,13 +23,13 @@ impl ValueReplacements {
             .insert(replaced, *replacements_replacement);
     }
 
-    pub fn replace_instruction<V>(&self, instruction: &mut OpCode<V>) {
+    pub fn replace_instruction(&self, instruction: &mut OpCode) {
         for operand in instruction.get_operands_mut() {
             *operand = self.get_replacement(*operand);
         }
     }
 
-    pub fn replace_inputs<V>(&self, instruction: &mut OpCode<V>) {
+    pub fn replace_inputs(&self, instruction: &mut OpCode) {
         for input in instruction.get_inputs_mut() {
             *input = self.get_replacement(*input);
         }
@@ -61,8 +61,8 @@ impl ValueReplacements {
 
 pub struct FixDoubleJumps {}
 
-impl<V: Clone> Pass<V> for FixDoubleJumps {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &PassManager<V>) {
+impl Pass for FixDoubleJumps {
+    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
         let flow_analysis = pass_manager.get_cfg();
         self.do_run(ssa, flow_analysis);
     }
@@ -80,7 +80,7 @@ impl FixDoubleJumps {
         Self {}
     }
 
-    pub fn do_run<V: Clone>(&self, ssa: &mut SSA<V>, flow_analysis: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut SSA, flow_analysis: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = flow_analysis.get_function_cfg(*function_id);
             let jumps = cfg.find_redundant_jumps();

@@ -4,15 +4,30 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    ir::r#type::{Empty, Type, TypeExpr},
+    ir::r#type::{Type, TypeExpr},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, Block, CallTarget, Function, FunctionId, OpCode, SSA, Terminator,
-        TupleIdx,
+        BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SSA, Terminator,
+        ValueId,
     },
-    taint_analysis::{ConstantTaint, FunctionTaint, Taint, TaintAnalysis, TaintType},
+    witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
+    witness_type_inference::WitnessTypeInference,
 };
 
 pub struct UntaintControlFlow {}
+
+/// Look up the witness level for a value, defaulting to Pure for values
+/// not present in the witness type map (e.g., values created by WitnessCastInsertion).
+fn get_witness_or_pure(
+    function_wt: &FunctionWitnessType,
+    v: crate::compiler::ssa::ValueId,
+) -> ConstantWitness {
+    function_wt
+        .value_witness_types
+        .get(&v)
+        .map(|wt| wt.toplevel_info())
+        .unwrap_or(ConstantWitness::Pure)
+}
 
 impl UntaintControlFlow {
     pub fn new() -> Self {
@@ -22,399 +37,64 @@ impl UntaintControlFlow {
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
     pub fn run(
         &mut self,
-        ssa: SSA<Empty>,
-        taint_analysis: &TaintAnalysis,
+        mut ssa: SSA,
+        witness_inference: &WitnessTypeInference,
         flow_analysis: &FlowAnalysis,
-    ) -> SSA<ConstantTaint> {
-        let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild::<ConstantTaint>();
-
-        // Convert global types from Empty to ConstantTaint
-        let new_global_types: Vec<_> = old_global_types
-            .into_iter()
-            .map(|t| self.pure_taint_for_type(t))
-            .collect();
-        result_ssa.set_global_types(new_global_types);
-
-        for (function_id, function) in functions.into_iter() {
-            let function_taint = taint_analysis.get_function_taint(function_id);
-            let new_function =
-                self.run_function(function_id, function, function_taint, flow_analysis);
-            result_ssa.put_function(function_id, new_function);
+    ) -> SSA {
+        let function_ids: Vec<_> = ssa.get_function_ids().collect();
+        for function_id in function_ids {
+            let function_wt = witness_inference.get_function_witness_type(function_id);
+            let mut function = ssa.take_function(function_id);
+            self.run_function(function_id, &mut function, function_wt, flow_analysis);
+            ssa.put_function(function_id, function);
         }
-        result_ssa
+
+        // Post-process: wrapper_main's entry params should be plain Field/U types,
+        // not WitnessOf. The VM writes concrete values to these positions.
+        // Insert WriteWitness to bridge Field → WitnessOf(Field) before passing
+        // to original_main.
+        Self::fix_main_entry_params(&mut ssa);
+
+        ssa
     }
 
     #[instrument(skip_all, name = "UntaintControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
     fn run_function(
         &mut self,
         function_id: FunctionId,
-        function: Function<Empty>,
-        function_taint: &FunctionTaint,
+        function: &mut Function,
+        function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
-    ) -> Function<ConstantTaint> {
+    ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
-        let (mut function, blocks, returns) = function.prepare_rebuild::<ConstantTaint>();
-
-        for (block_id, mut block) in blocks.into_iter() {
-            let mut new_block = Block::empty();
-
-            let mut new_parameters = Vec::new();
-            for (value_id, typ) in block.take_parameters() {
-                let taint = function_taint.get_value_taint(value_id);
-                new_parameters.push((value_id, self.typify_taint(typ, taint)));
-            }
-            new_block.put_parameters(new_parameters);
-
-            let mut new_instructions = Vec::<OpCode<ConstantTaint>>::new();
-            for instruction in block.take_instructions() {
-                let new = match instruction {
-                    OpCode::BinaryArithOp {
-                        kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    } => OpCode::BinaryArithOp {
-                        kind: kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    },
-                    OpCode::Cmp {
-                        kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    } => OpCode::Cmp {
-                        kind: kind,
-                        result: r,
-                        lhs: l,
-                        rhs: h,
-                    },
-                    OpCode::Store { ptr: r, value: l } => OpCode::Store { ptr: r, value: l },
-                    OpCode::Load { result: r, ptr: l } => OpCode::Load { result: r, ptr: l },
-                    OpCode::ArrayGet {
-                        result: r,
-                        array: l,
-                        index: h,
-                    } => OpCode::ArrayGet {
-                        result: r,
-                        array: l,
-                        index: h,
-                    },
-                    OpCode::ArraySet {
-                        result: r,
-                        array: l,
-                        index: h,
-                        value: j,
-                    } => OpCode::ArraySet {
-                        result: r,
-                        array: l,
-                        index: h,
-                        value: j,
-                    },
-                    OpCode::SlicePush {
-                        dir: d,
-                        result: r,
-                        slice: s,
-                        values: v,
-                    } => OpCode::SlicePush {
-                        dir: d,
-                        result: r,
-                        slice: s,
-                        values: v,
-                    },
-                    OpCode::SliceLen {
-                        result: r,
-                        slice: s,
-                    } => OpCode::SliceLen {
-                        result: r,
-                        slice: s,
-                    },
-                    OpCode::Alloc {
-                        result: r,
-                        elem_type: l,
-                        result_annotation: _,
-                    } => {
-                        let r_taint = function_taint.get_value_taint(r);
-                        let child = r_taint.child_taint_type().unwrap();
-                        let child_typ = self.typify_taint(l, &child);
-                        let self_taint = r_taint.toplevel_taint().expect_constant();
-                        OpCode::Alloc {
-                            result: r,
-                            elem_type: child_typ,
-                            result_annotation: self_taint,
-                        }
-                    }
-                    OpCode::Call {
-                        results: r,
-                        function: CallTarget::Static(l),
-                        args: h,
-                    } => OpCode::Call {
-                        results: r,
-                        function: CallTarget::Static(l),
-                        args: h,
-                    },
-                    OpCode::Call {
-                        function: CallTarget::Dynamic(_),
-                        ..
-                    } => {
-                        panic!("Dynamic call targets are not supported in untaint_control_flow")
-                    }
-                    OpCode::AssertEq { lhs: r, rhs: l } => OpCode::AssertEq { lhs: r, rhs: l },
-                    OpCode::AssertR1C { a: r, b: l, c: h } => {
-                        OpCode::AssertR1C { a: r, b: l, c: h }
-                    }
-                    OpCode::Select {
-                        result: r,
-                        cond: l,
-                        if_t: h,
-                        if_f: j,
-                    } => OpCode::Select {
-                        result: r,
-                        cond: l,
-                        if_t: h,
-                        if_f: j,
-                    },
-                    OpCode::WriteWitness {
-                        result: r,
-                        value: l,
-                        witness_annotation: _,
-                    } => OpCode::WriteWitness {
-                        result: r,
-                        value: l,
-                        witness_annotation: ConstantTaint::Witness,
-                    },
-                    OpCode::FreshWitness {
-                        result: r,
-                        result_type: tp,
-                    } => {
-                        let taint = function_taint.get_value_taint(r);
-                        let new_tp = self.typify_taint(tp, taint);
-                        OpCode::FreshWitness {
-                            result: r,
-                            result_type: new_tp,
-                        }
-                    }
-                    OpCode::Constrain { a, b, c } => OpCode::Constrain { a: a, b: b, c: c },
-                    OpCode::NextDCoeff { result: a } => OpCode::NextDCoeff { result: a },
-                    OpCode::BumpD {
-                        matrix: a,
-                        variable: b,
-                        sensitivity: c,
-                    } => OpCode::BumpD {
-                        matrix: a,
-                        variable: b,
-                        sensitivity: c,
-                    },
-                    OpCode::MkSeq {
-                        result: r,
-                        elems: l,
-                        seq_type: stp,
-                        elem_type: tp,
-                    } => {
-                        let r_taint = function_taint
-                            .get_value_taint(r)
-                            .child_taint_type()
-                            .unwrap();
-                        OpCode::MkSeq {
-                            result: r,
-                            elems: l,
-                            seq_type: stp,
-                            elem_type: self.typify_taint(tp, &r_taint),
-                        }
-                    }
-                    OpCode::Cast {
-                        result: r,
-                        value: l,
-                        target: t,
-                    } => OpCode::Cast {
-                        result: r,
-                        value: l,
-                        target: t,
-                    },
-                    OpCode::Truncate {
-                        result: r,
-                        value: l,
-                        to_bits: out_bits,
-                        from_bits: in_bits,
-                    } => OpCode::Truncate {
-                        result: r,
-                        value: l,
-                        to_bits: out_bits,
-                        from_bits: in_bits,
-                    },
-                    OpCode::Not {
-                        result: r,
-                        value: l,
-                    } => OpCode::Not {
-                        result: r,
-                        value: l,
-                    },
-                    OpCode::ToBits {
-                        result: r,
-                        value: l,
-                        endianness: e,
-                        count: s,
-                    } => OpCode::ToBits {
-                        result: r,
-                        value: l,
-                        endianness: e,
-                        count: s,
-                    },
-                    OpCode::ToRadix {
-                        result: r,
-                        value: l,
-                        radix,
-                        endianness: e,
-                        count: s,
-                    } => OpCode::ToRadix {
-                        result: r,
-                        value: l,
-                        radix: radix,
-                        endianness: e,
-                        count: s,
-                    },
-                    OpCode::MemOp { kind, value } => OpCode::MemOp {
-                        kind: kind,
-                        value: value,
-                    },
-                    OpCode::PureToWitnessRef {
-                        result: r,
-                        value: l,
-                        result_annotation: _c,
-                    } => OpCode::PureToWitnessRef {
-                        result: r,
-                        value: l,
-                        result_annotation: function_taint
-                            .get_value_taint(r)
-                            .toplevel_taint()
-                            .expect_constant(),
-                    },
-                    OpCode::UnboxField {
-                        result: r,
-                        value: l,
-                    } => OpCode::UnboxField {
-                        result: r,
-                        value: l,
-                    },
-                    OpCode::MulConst {
-                        result: r,
-                        const_val: l,
-                        var: c,
-                    } => OpCode::MulConst {
-                        result: r,
-                        const_val: l,
-                        var: c,
-                    },
-                    OpCode::Rangecheck {
-                        value: val,
-                        max_bits,
-                    } => OpCode::Rangecheck {
-                        value: val,
-                        max_bits: max_bits,
-                    },
-                    OpCode::ReadGlobal {
-                        result: r,
-                        offset: l,
-                        result_type: tp,
-                    } => OpCode::ReadGlobal {
-                        result: r,
-                        offset: l,
-                        result_type: self.pure_taint_for_type(tp),
-                    },
-                    OpCode::Lookup {
-                        target,
-                        keys,
-                        results,
-                    } => OpCode::Lookup {
-                        target,
-                        keys,
-                        results,
-                    },
-                    OpCode::DLookup {
-                        target,
-                        keys,
-                        results,
-                    } => OpCode::DLookup {
-                        target,
-                        keys,
-                        results,
-                    },
-                    OpCode::TupleProj { result, tuple, idx } => match &idx {
-                        TupleIdx::Static(sz) => OpCode::TupleProj {
-                            result,
-                            tuple,
-                            idx: TupleIdx::Static(*sz),
-                        },
-                        TupleIdx::Dynamic { .. } => {
-                            panic!("Dynamic TupleProj should not appear here")
-                        }
-                    },
-                    OpCode::MkTuple {
-                        result: r,
-                        elems: l,
-                        element_types: tps,
-                    } => {
-                        let r_taint = function_taint.get_value_taint(r);
-                        let child_taints = if let TaintType::Tuple(_, children) = r_taint {
-                            children
-                        } else {
-                            panic!("MkTuple result should have Tuple taint type")
-                        };
-                        OpCode::MkTuple {
-                            result: r,
-                            elems: l,
-                            element_types: tps
-                                .iter()
-                                .zip(child_taints.iter())
-                                .map(|(tp, taint)| self.typify_taint(tp.clone(), taint))
-                                .collect(),
-                        }
-                    }
-                    OpCode::Todo {
-                        payload,
-                        results,
-                        result_types,
-                    } => OpCode::Todo {
-                        payload,
-                        results,
-                        result_types: result_types
-                            .iter()
-                            .map(|tp| self.pure_taint_for_type(tp.clone()))
-                            .collect(),
-                    },
-                    OpCode::InitGlobal { global, value } => OpCode::InitGlobal { global, value },
-                    OpCode::DropGlobal { global } => OpCode::DropGlobal { global },
-                };
-                new_instructions.push(new);
-            }
-            new_block.put_instructions(new_instructions);
-
-            new_block.set_terminator(block.take_terminator().unwrap());
-
-            function.put_block(block_id, new_block);
-        }
-
-        for (ret, ret_taint) in returns.into_iter().zip(function_taint.returns_taint.iter()) {
-            let ret_typ = self.typify_taint(ret, ret_taint);
-            function.add_return_type(ret_typ);
-        }
-
-        let cfg_taint_param = if matches!(
-            function_taint.cfg_taint,
-            Taint::Constant(ConstantTaint::Witness)
-        ) {
-            Some(
-                function.add_parameter(function.get_entry_id(), Type::u(1, ConstantTaint::Witness)),
-            )
+        let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
+            Some(function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))))
         } else {
             None
         };
 
+        // Build map of Cast { target: WitnessOf } results → pre-cast values.
+        // WitnessCastInsertion inserts these casts at Jmp boundaries to match
+        // merge block param types. We strip them from Select branches so that
+        // the Select typing rule derives WitnessOf from the condition instead.
+        let mut witness_cast_strip: HashMap<ValueId, ValueId> = HashMap::new();
+        for (_, block) in function.get_blocks() {
+            for instr in block.get_instructions() {
+                if let OpCode::Cast {
+                    result,
+                    value,
+                    target: CastTarget::WitnessOf,
+                } = instr
+                {
+                    witness_cast_strip.insert(*result, *value);
+                }
+            }
+        }
+
         let mut block_taint_vars = HashMap::new();
         for (block_id, _) in function.get_blocks() {
-            block_taint_vars.insert(*block_id, cfg_taint_param.clone());
+            block_taint_vars.insert(*block_id, cfg_witness_param.clone());
         }
 
         for block_id in cfg.get_blocks_bfs() {
@@ -426,62 +106,29 @@ impl UntaintControlFlow {
 
             for instruction in old_instructions {
                 match instruction {
-                    OpCode::BinaryArithOp {
-                        kind: _,
-                        result: _,
-                        lhs: _,
-                        rhs: _,
-                    }
-                    | OpCode::Cmp {
-                        kind: _,
-                        result: _,
-                        lhs: _,
-                        rhs: _,
-                    }
-                    | OpCode::MkSeq {
-                        result: _,
-                        elems: _,
-                        seq_type: _,
-                        elem_type: _,
-                    }
+                    OpCode::BinaryArithOp { .. }
+                    | OpCode::Cmp { .. }
+                    | OpCode::MkSeq { .. }
                     | OpCode::MkTuple { .. }
-                    | OpCode::Cast {
-                        result: _,
-                        value: _,
-                        target: _,
-                    }
-                    | OpCode::Truncate {
-                        result: _,
-                        value: _,
-                        to_bits: _,
-                        from_bits: _,
-                    }
-                    | OpCode::Not {
-                        result: _,
-                        value: _,
-                    }
-                    | OpCode::Rangecheck {
-                        value: _,
-                        max_bits: _,
-                    }
-                    | OpCode::ToBits {
-                        result: _,
-                        value: _,
-                        endianness: _,
-                        count: _,
-                    }
-                    | OpCode::ToRadix {
-                        result: _,
-                        value: _,
-                        radix: _,
-                        endianness: _,
-                        count: _,
-                    }
-                    | OpCode::ReadGlobal {
-                        result: _,
-                        offset: _,
-                        result_type: _,
-                    } => {
+                    | OpCode::Cast { .. }
+                    | OpCode::Truncate { .. }
+                    | OpCode::Not { .. }
+                    | OpCode::Rangecheck { .. }
+                    | OpCode::ToBits { .. }
+                    | OpCode::ToRadix { .. }
+                    | OpCode::ReadGlobal { .. }
+                    | OpCode::Select { .. }
+                    | OpCode::WriteWitness { .. }
+                    | OpCode::FreshWitness { .. }
+                    | OpCode::Constrain { .. }
+                    | OpCode::NextDCoeff { .. }
+                    | OpCode::BumpD { .. }
+                    | OpCode::MemOp { .. }
+                    | OpCode::MulConst { .. }
+                    | OpCode::Lookup { .. }
+                    | OpCode::DLookup { .. }
+                    | OpCode::TupleProj { .. }
+                    | OpCode::AssertR1C { .. } => {
                         new_instructions.push(instruction);
                     }
                     OpCode::AssertEq { lhs, rhs } => match block_taint {
@@ -501,12 +148,9 @@ impl UntaintControlFlow {
                         None => new_instructions.push(instruction),
                     },
                     OpCode::Store { ptr, value: v } => {
-                        let ptr_taint = function_taint
-                            .get_value_taint(ptr)
-                            .toplevel_taint()
-                            .expect_constant();
+                        let ptr_wt = get_witness_or_pure(function_wt, ptr);
                         // writes to dynamic ptr not supported
-                        assert_eq!(ptr_taint, ConstantTaint::Pure);
+                        assert_eq!(ptr_wt, ConstantWitness::Pure);
 
                         match block_taint {
                             Some(taint) => {
@@ -533,12 +177,9 @@ impl UntaintControlFlow {
                         }
                     }
                     OpCode::Load { result: _, ptr } => {
-                        let ptr_taint = function_taint
-                            .get_value_taint(ptr)
-                            .toplevel_taint()
-                            .expect_constant();
+                        let ptr_wt = get_witness_or_pure(function_wt, ptr);
                         // reads from dynamic ptr not supported
-                        assert_eq!(ptr_taint, ConstantTaint::Pure);
+                        assert_eq!(ptr_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
                     }
                     OpCode::ArrayGet {
@@ -546,12 +187,9 @@ impl UntaintControlFlow {
                         array: arr,
                         index: _,
                     } => {
-                        let arr_taint = function_taint
-                            .get_value_taint(arr)
-                            .toplevel_taint()
-                            .expect_constant();
+                        let arr_wt = get_witness_or_pure(function_wt, arr);
                         // dynamic array access not supported
-                        assert_eq!(arr_taint, ConstantTaint::Pure);
+                        assert_eq!(arr_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
                     }
                     OpCode::ArraySet {
@@ -560,17 +198,11 @@ impl UntaintControlFlow {
                         index: idx,
                         value: _,
                     } => {
-                        let arr_taint = function_taint
-                            .get_value_taint(arr)
-                            .toplevel_taint()
-                            .expect_constant();
-                        let idx_taint = function_taint
-                            .get_value_taint(idx)
-                            .toplevel_taint()
-                            .expect_constant();
+                        let arr_wt = get_witness_or_pure(function_wt, arr);
+                        let idx_wt = get_witness_or_pure(function_wt, idx);
                         // dynamic array access not supported
-                        assert_eq!(arr_taint, ConstantTaint::Pure);
-                        assert_eq!(idx_taint, ConstantTaint::Pure);
+                        assert_eq!(arr_wt, ConstantWitness::Pure);
+                        assert_eq!(idx_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
                     }
                     OpCode::SlicePush {
@@ -579,31 +211,21 @@ impl UntaintControlFlow {
                         slice: sl,
                         values: _,
                     } => {
-                        let slice_taint = function_taint
-                            .get_value_taint(sl)
-                            .toplevel_taint()
-                            .expect_constant();
-                        // Slice must always be Pure taint
-                        assert_eq!(slice_taint, ConstantTaint::Pure);
+                        let slice_wt = get_witness_or_pure(function_wt, sl);
+                        // Slice must always be Pure witness
+                        assert_eq!(slice_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
                     }
                     OpCode::SliceLen {
                         result: _,
                         slice: sl,
                     } => {
-                        let slice_taint = function_taint
-                            .get_value_taint(sl)
-                            .toplevel_taint()
-                            .expect_constant();
-                        // Slice must always be Pure taint
-                        assert_eq!(slice_taint, ConstantTaint::Pure);
+                        let slice_wt = get_witness_or_pure(function_wt, sl);
+                        // Slice must always be Pure witness
+                        assert_eq!(slice_wt, ConstantWitness::Pure);
                         new_instructions.push(instruction);
                     }
-                    OpCode::Alloc {
-                        result: _,
-                        elem_type: _,
-                        result_annotation: _,
-                    } => {
+                    OpCode::Alloc { .. } => {
                         new_instructions.push(instruction);
                     }
 
@@ -643,9 +265,6 @@ impl UntaintControlFlow {
                         });
                     }
 
-                    OpCode::TupleProj { .. } => {
-                        new_instructions.push(instruction);
-                    }
                     OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                         new_instructions.push(instruction);
                     }
@@ -657,13 +276,10 @@ impl UntaintControlFlow {
 
             match block.get_terminator().cloned() {
                 Some(Terminator::JmpIf(cond, if_true, if_false)) => {
-                    let cond_taint = function_taint
-                        .get_value_taint(cond)
-                        .toplevel_taint()
-                        .expect_constant();
-                    match cond_taint {
-                        ConstantTaint::Pure => {}
-                        ConstantTaint::Witness => {
+                    let cond_wt = get_witness_or_pure(function_wt, cond);
+                    match cond_wt {
+                        ConstantWitness::Pure => {}
+                        ConstantWitness::Witness => {
                             let child_block_taint = match block_taint {
                                 Some(tnt) => {
                                     let result_val = function.fresh_value();
@@ -777,6 +393,10 @@ impl UntaintControlFlow {
                                             .iter()
                                             .zip(args_passed_from_rhs.iter()),
                                     ) {
+                                        // Strip WitnessOf casts from branches — the Select
+                                        // typing rule derives WitnessOf from the condition.
+                                        let lhs = witness_cast_strip.get(lhs).unwrap_or(lhs);
+                                        let rhs = witness_cast_strip.get(rhs).unwrap_or(rhs);
                                         function.get_block_mut(merger_block).push_instruction(
                                             OpCode::Select {
                                                 result: *res,
@@ -797,84 +417,55 @@ impl UntaintControlFlow {
             block.put_instructions(new_instructions);
             function.put_block(block_id, block);
         }
-
-        function
     }
 
-    fn typify_taint(&self, typ: Type<Empty>, taint: &TaintType) -> Type<ConstantTaint> {
-        match (typ.expr, taint) {
-            (TypeExpr::Field, TaintType::Primitive(taint)) => Type {
-                expr: TypeExpr::Field,
-                annotation: taint.expect_constant(),
-            },
-            (TypeExpr::U(size), TaintType::Primitive(taint)) => Type {
-                expr: TypeExpr::U(size),
-                annotation: taint.expect_constant(),
-            },
-            (TypeExpr::Array(inner, size), TaintType::NestedImmutable(top, inner_taint)) => Type {
-                expr: TypeExpr::Array(
-                    Box::new(self.typify_taint(*inner, inner_taint.as_ref())),
-                    size,
-                ),
-                annotation: top.expect_constant(),
-            },
-            (TypeExpr::Slice(inner), TaintType::NestedImmutable(top, inner_taint)) => Type {
-                expr: TypeExpr::Slice(Box::new(self.typify_taint(*inner, inner_taint.as_ref()))),
-                annotation: top.expect_constant(),
-            },
-            (TypeExpr::Ref(inner), TaintType::NestedMutable(top, inner_taint)) => Type {
-                expr: TypeExpr::Ref(Box::new(self.typify_taint(*inner, inner_taint.as_ref()))),
-                annotation: top.expect_constant(),
-            },
-            (TypeExpr::Tuple(child_types), TaintType::Tuple(top, child_taints)) => Type {
-                expr: TypeExpr::Tuple(
-                    child_types
-                        .iter()
-                        .zip(child_taints.iter())
-                        .map(|(child_type, child_taint)| {
-                            self.typify_taint(child_type.clone(), child_taint)
-                        })
-                        .collect(),
-                ),
-                annotation: top.expect_constant(),
-            },
-            (tp, taint) => panic!("Unexpected type {:?} with taint {:?}", tp, taint),
-        }
-    }
+    /// Fix wrapper_main entry params: strip WitnessOf from param types
+    /// and insert WriteWitness instructions to convert Field → WitnessOf(Field).
+    /// This is needed because the VM writes concrete Field values (4 limbs) to
+    /// entry params, but WitnessOf(Field) is pointer-sized (1 slot).
+    fn fix_main_entry_params(ssa: &mut SSA) {
+        let main_id = ssa.get_main_id();
+        let main_fn = ssa.get_function_mut(main_id);
+        let entry_id = main_fn.get_entry_id();
+        let entry_block = main_fn.get_block_mut(entry_id);
 
-    fn pure_taint_for_type(&self, typ: Type<Empty>) -> Type<ConstantTaint> {
-        match typ.expr {
-            TypeExpr::Field => Type {
-                expr: TypeExpr::Field,
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::U(size) => Type {
-                expr: TypeExpr::U(size),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Array(inner, size) => Type {
-                expr: TypeExpr::Array(Box::new(self.pure_taint_for_type(*inner)), size),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Slice(inner) => Type {
-                expr: TypeExpr::Slice(Box::new(self.pure_taint_for_type(*inner))),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Ref(inner) => Type {
-                expr: TypeExpr::Ref(Box::new(self.pure_taint_for_type(*inner))),
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::WitnessRef => Type {
-                expr: TypeExpr::WitnessRef,
-                annotation: ConstantTaint::Pure,
-            },
-            TypeExpr::Tuple(_elements) => {
-                todo!("Tuples not supported yet")
+        let old_params = entry_block.take_parameters();
+        let old_instructions = entry_block.take_instructions();
+
+        let mut new_params = Vec::new();
+        let mut write_witness_instructions = Vec::new();
+        let mut replacements = ValueReplacements::new();
+
+        for (value_id, typ) in &old_params {
+            if typ.is_witness_of() {
+                // Strip WitnessOf from param type — entry params are concrete values
+                let inner_type = typ.strip_witness();
+                new_params.push((*value_id, inner_type));
+
+                // Create WriteWitness to bridge Field → WitnessOf(Field)
+                let witness_val = main_fn.fresh_value();
+                write_witness_instructions.push(OpCode::WriteWitness {
+                    result: Some(witness_val),
+                    value: *value_id,
+                });
+                replacements.insert(*value_id, witness_val);
+            } else {
+                new_params.push((*value_id, typ.clone()));
             }
-            TypeExpr::Function => Type {
-                expr: TypeExpr::Function,
-                annotation: ConstantTaint::Pure,
-            },
         }
+
+        // Rebuild entry block: params + WriteWitness instructions + original instructions
+        let entry_block = main_fn.get_block_mut(entry_id);
+
+        let mut new_instructions = write_witness_instructions;
+        for mut instruction in old_instructions {
+            replacements.replace_instruction(&mut instruction);
+            new_instructions.push(instruction);
+        }
+
+        entry_block.put_parameters(new_params);
+        // Also fix the terminator (e.g., return args)
+        replacements.replace_terminator(entry_block.get_terminator_mut());
+        entry_block.put_instructions(new_instructions);
     }
 }

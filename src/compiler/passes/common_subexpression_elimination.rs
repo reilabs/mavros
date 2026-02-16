@@ -172,8 +172,8 @@ impl Debug for Expr {
 
 pub struct CSE {}
 
-impl<V: Clone> Pass<V> for CSE {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &crate::compiler::pass_manager::PassManager<V>) {
+impl Pass for CSE {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa, pass_manager.get_cfg());
     }
 
@@ -194,7 +194,7 @@ impl CSE {
         Self {}
     }
 
-    pub fn do_run<V: Clone>(&self, ssa: &mut SSA<V>, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let exprs = self.gather_expressions(function, cfg);
@@ -271,9 +271,9 @@ impl CSE {
         false
     }
 
-    fn gather_expressions<V: Clone>(
+    fn gather_expressions(
         &self,
-        ssa: &Function<V>,
+        ssa: &Function,
         cfg: &CFG,
     ) -> HashMap<Expr, Vec<(BlockId, usize, ValueId)>> {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
@@ -283,7 +283,7 @@ impl CSE {
             match const_ {
                 Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
                 Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
-                Const::WitnessRef(_) => todo!(),
+                Const::Witness(_) => todo!(),
                 Const::FnPtr(_) => None,
             };
         }
@@ -435,9 +435,8 @@ impl CSE {
                     | OpCode::DLookup { target: _, keys: _, results: _ }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. } => {}
-                     OpCode::PureToWitnessRef { result: _, value: _, result_annotation: _ }
-                    | OpCode::UnboxField { result: _, value: _ }
+                    | OpCode::DropGlobal { .. }
+                    | OpCode::ValueOf { .. } => {}
                     | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);

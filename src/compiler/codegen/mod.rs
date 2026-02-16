@@ -9,7 +9,6 @@ use crate::{
             self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function,
             FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId,
         },
-        taint_analysis::ConstantTaint,
     },
     vm::{self, bytecode},
 };
@@ -31,7 +30,7 @@ impl FrameLayouter {
         bytecode::FramePosition(self.variables[&value])
     }
 
-    fn alloc_value(&mut self, value: ValueId, tp: &Type<ConstantTaint>) -> bytecode::FramePosition {
+    fn alloc_value(&mut self, value: ValueId, tp: &Type) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
@@ -61,26 +60,23 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
-    fn type_size(&self, tp: &Type<ConstantTaint>) -> usize {
+    fn type_size(&self, tp: &Type) -> usize {
         match tp.expr {
             TypeExpr::Field => bytecode::LIMBS,
             TypeExpr::U(bits) => {
                 assert!(bits <= 64);
                 1
             }
-            TypeExpr::Array(_, _) => 1, // Ptr
-            TypeExpr::Slice(_) => 1,    // Ptr
-            TypeExpr::WitnessRef => 1,  // Ptr
-            TypeExpr::Tuple(_) => 1,    // Ptr
+            TypeExpr::Array(_, _) => 1,  // Ptr
+            TypeExpr::Slice(_) => 1,     // Ptr
+            TypeExpr::WitnessOf(_) => 1, // Ptr
+            TypeExpr::Tuple(_) => 1,     // Ptr
             _ => todo!(),
         }
     }
 
     // This method needs to ensure contiguous storage!
-    fn alloc_many_contiguous(
-        &mut self,
-        values: Vec<(ValueId, &Type<ConstantTaint>)>,
-    ) -> bytecode::FramePosition {
+    fn alloc_many_contiguous(&mut self, values: Vec<(ValueId, &Type)>) -> bytecode::FramePosition {
         let r = self.next_free;
         for (value, tp) in values {
             self.alloc_value(value, tp);
@@ -124,7 +120,7 @@ struct GlobalFrameLayouter {
 }
 
 impl GlobalFrameLayouter {
-    fn new(ssa: &SSA<ConstantTaint>) -> Self {
+    fn new(ssa: &SSA) -> Self {
         let global_types = ssa.get_global_types();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
@@ -142,7 +138,7 @@ impl GlobalFrameLayouter {
         }
     }
 
-    fn type_frame_size(typ: &Type<ConstantTaint>) -> usize {
+    fn type_frame_size(typ: &Type) -> usize {
         use crate::compiler::ir::r#type::TypeExpr;
         match &typ.expr {
             TypeExpr::Field => bytecode::LIMBS,
@@ -171,12 +167,7 @@ impl CodeGen {
         Self {}
     }
 
-    pub fn run(
-        &self,
-        ssa: &SSA<ConstantTaint>,
-        cfg: &FlowAnalysis,
-        type_info: &TypeInfo<ConstantTaint>,
-    ) -> bytecode::Program {
+    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
 
         let function = ssa.get_main();
@@ -230,16 +221,16 @@ impl CodeGen {
         }
 
         bytecode::Program {
-            functions: functions,
+            functions,
             global_frame_size: global_layouter.total_size,
         }
     }
 
     fn run_function(
         &self,
-        function: &Function<ConstantTaint>,
+        function: &Function,
         cfg: &CFG,
-        type_info: &FunctionTypeInfo<ConstantTaint>,
+        type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
@@ -268,7 +259,7 @@ impl CodeGen {
                         })
                     }
                 }
-                Const::WitnessRef(v) => {
+                Const::Witness(v) => {
                     emitter.push_op(bytecode::OpCode::WitnessRefAlloc {
                         res: layouter.alloc_ptr(*val),
                         data: *v,
@@ -352,10 +343,10 @@ impl CodeGen {
 
     fn run_block_body(
         &self,
-        _function: &Function<ConstantTaint>,
+        _function: &Function,
         block_id: BlockId,
-        block: &Block<ConstantTaint>,
-        type_info: &FunctionTypeInfo<ConstantTaint>,
+        block: &Block,
+        type_info: &FunctionTypeInfo,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
@@ -385,7 +376,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::WitnessRef => {
+                    TypeExpr::WitnessOf(_) => {
                         let result = layouter.alloc_ptr(*val);
                         emitter.push_op(bytecode::OpCode::AddBoxed {
                             res: result,
@@ -555,18 +546,24 @@ impl CodeGen {
                     value: v,
                     target: tgt,
                 } => {
+                    let l_type = type_info.get_value_type(*v);
+                    let r_type = type_info.get_value_type(*r);
+                    if matches!(tgt, ssa::CastTarget::WitnessOf) {
+                        emitter.push_op(bytecode::OpCode::PureToWitnessRef {
+                            res: layouter.alloc_ptr(*r),
+                            v: layouter.get_value(*v),
+                        });
+                        continue;
+                    }
                     let is_nop =
                         matches!(tgt, ssa::CastTarget::Nop | ssa::CastTarget::ArrayToSlice)
-                            || type_info.get_value_type(*v).expr
-                                == type_info.get_value_type(*r).expr;
+                            || l_type.expr == r_type.expr;
                     if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);
                         continue;
                     }
-                    let result = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    let l_type = type_info.get_value_type(*v);
-                    let r_type = type_info.get_value_type(*r);
+                    let result = layouter.alloc_value(*r, &r_type);
                     match (&l_type.expr, &r_type.expr) {
                         (TypeExpr::U(_), TypeExpr::U(_)) => {
                             emitter.push_op(bytecode::OpCode::MovFrame {
@@ -589,7 +586,6 @@ impl CodeGen {
                         }
                         _ => panic!("Unsupported cast: {:?} -> {:?}", l_type, r_type),
                     }
-                    // TODO: Implement this, it _will_ break
                 }
                 ssa::OpCode::Not {
                     result: r,
@@ -620,7 +616,6 @@ impl CodeGen {
                 ssa::OpCode::WriteWitness {
                     result: None,
                     value: v,
-                    witness_annotation: _,
                 } => {
                     emitter.push_op(bytecode::OpCode::WriteWitness {
                         val: layouter.get_value(*v),
@@ -778,7 +773,7 @@ impl CodeGen {
                         .collect::<Vec<_>>();
                     emitter.push_op(bytecode::OpCode::Call {
                         func: bytecode::JumpTarget(fnid.0 as isize),
-                        args: args,
+                        args,
                         ret: r,
                     });
                 }
@@ -868,30 +863,10 @@ impl CodeGen {
                 }
                 ssa::OpCode::FreshWitness {
                     result: r,
-                    result_type: tp,
+                    result_type: _,
                 } => {
-                    assert!(matches!(tp.expr, TypeExpr::WitnessRef));
                     emitter.push_op(bytecode::OpCode::FreshWitness {
                         res: layouter.alloc_ptr(*r),
-                    });
-                }
-                ssa::OpCode::PureToWitnessRef {
-                    result: r,
-                    value: v,
-                    result_annotation: _,
-                } => {
-                    emitter.push_op(bytecode::OpCode::PureToWitnessRef {
-                        res: layouter.alloc_ptr(*r),
-                        v: layouter.get_value(*v),
-                    });
-                }
-                ssa::OpCode::UnboxField {
-                    result: r,
-                    value: v,
-                } => {
-                    emitter.push_op(bytecode::OpCode::UnboxField {
-                        res: layouter.alloc_field(*r),
-                        v: layouter.get_value(*v),
                     });
                 }
                 ssa::OpCode::MulConst {
@@ -933,7 +908,7 @@ impl CodeGen {
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
-                    assert!(type_info.get_value_type(keys[0]).is_witness_ref());
+                    assert!(type_info.get_value_type(keys[0]).is_witness_of());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
                         val: layouter.get_value(keys[0]),
                     });

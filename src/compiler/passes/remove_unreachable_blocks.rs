@@ -17,8 +17,8 @@ impl RemoveUnreachableBlocks {
     }
 }
 
-impl<V: Clone> Pass<V> for RemoveUnreachableBlocks {
-    fn run(&self, ssa: &mut SSA<V>, pass_manager: &crate::compiler::pass_manager::PassManager<V>) {
+impl Pass for RemoveUnreachableBlocks {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         let cfg = pass_manager.get_cfg();
 
         for (function_id, function) in ssa.iter_functions_mut() {
