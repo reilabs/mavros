@@ -171,7 +171,7 @@ impl Debug for Expr {
 }
 
 pub struct CSE {}
- 
+
 impl Pass for CSE {
     fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa, pass_manager.get_cfg());

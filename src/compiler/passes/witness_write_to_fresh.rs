@@ -1,18 +1,14 @@
 use crate::compiler::{
     analysis::types::TypeInfo,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{PassManager, PassInfo, DataPoint, Pass},
-    ssa::{OpCode, SeqType, ValueId, Function, SSA},
+    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
+    ssa::{Function, OpCode, SSA, SeqType, ValueId},
 };
 
 pub struct WitnessWriteToFresh {}
 
 impl Pass for WitnessWriteToFresh {
-    fn run(
-        &self,
-        ssa: &mut SSA,
-        pass_manager: &PassManager,
-    ) {
+    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
         self.do_run(ssa, pass_manager.get_type_info());
     }
 
@@ -26,7 +22,6 @@ impl Pass for WitnessWriteToFresh {
     fn invalidates_cfg(&self) -> bool {
         false
     }
-
 }
 
 impl WitnessWriteToFresh {
@@ -34,11 +29,7 @@ impl WitnessWriteToFresh {
         Self {}
     }
 
-    pub fn do_run(
-        &self,
-        ssa: &mut SSA,
-        type_info: &TypeInfo,
-    ) {
+    pub fn do_run(&self, ssa: &mut SSA, type_info: &TypeInfo) {
         let main_id = ssa.get_main_id();
         let main_function = ssa.get_function_mut(main_id);
         let main_block = main_function.get_block_mut(main_function.get_entry_id());
@@ -71,10 +62,11 @@ impl WitnessWriteToFresh {
             for (_, block) in function.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     let new_instruction = match instruction {
-                        OpCode::WriteWitness { result: r, value: v } => {
-                            let tp = type_info
-                                .get_function(*function_id)
-                                .get_value_type(*v);
+                        OpCode::WriteWitness {
+                            result: r,
+                            value: v,
+                        } => {
+                            let tp = type_info.get_function(*function_id).get_value_type(*v);
                             if tp.is_witness_of() {
                                 panic!("ICE: WriteWitness input has WitnessOf type: {:?}", tp);
                             }
@@ -120,8 +112,7 @@ impl WitnessWriteToFresh {
                         | OpCode::Todo { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::MkTuple { .. }
-                        | OpCode::ValueOf { .. }
-                        => instruction.clone(),
+                        | OpCode::ValueOf { .. } => instruction.clone(),
                     };
                     *instruction = new_instruction;
                 }
@@ -137,12 +128,10 @@ impl WitnessWriteToFresh {
     ) -> ValueId {
         let r = value_id.unwrap_or_else(|| main_function.fresh_value());
         match &tp.expr {
-            TypeExpr::WitnessOf(inner) => {
-                instruction_collector.push(OpCode::FreshWitness {
-                    result: r,
-                    result_type: *inner.clone(),
-                })
-            }
+            TypeExpr::WitnessOf(inner) => instruction_collector.push(OpCode::FreshWitness {
+                result: r,
+                result_type: *inner.clone(),
+            }),
             TypeExpr::Array(inner_type, size) => {
                 let mut value_ids = vec![];
                 for _ in 0..*size {
@@ -160,7 +149,7 @@ impl WitnessWriteToFresh {
                     seq_type: SeqType::Array(*size),
                     elem_type: *inner_type.clone(),
                 });
-            }    
+            }
             TypeExpr::Tuple(child_types) => {
                 let mut value_ids = vec![];
                 for child_type in child_types.iter() {
@@ -177,8 +166,11 @@ impl WitnessWriteToFresh {
                     elems: value_ids,
                     element_types: child_types.clone(),
                 });
-            }    
-            _ => panic!("Unsupported parameter type for witness write to fresh: {}. We only support fields and nested arrays of fields for now", tp),
+            }
+            _ => panic!(
+                "Unsupported parameter type for witness write to fresh: {}. We only support fields and nested arrays of fields for now",
+                tp
+            ),
         }
         r
     }

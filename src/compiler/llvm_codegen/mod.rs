@@ -9,6 +9,9 @@ mod types;
 use std::collections::HashMap;
 use std::path::Path;
 
+use inkwell::AddressSpace;
+use inkwell::IntPredicate;
+use inkwell::OptimizationLevel;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -19,16 +22,13 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionTy
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
-use inkwell::AddressSpace;
-use inkwell::IntPredicate;
-use inkwell::OptimizationLevel;
 
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
-use crate::compiler::flow_analysis::{FlowAnalysis, CFG};
+use crate::compiler::flow_analysis::{CFG, FlowAnalysis};
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BinaryArithOpKind, Block, BlockId, CmpKind, Const, Function, FunctionId, Terminator, ValueId,
-    SSA,
+    BinaryArithOpKind, Block, BlockId, CmpKind, Const, Function, FunctionId, SSA, Terminator,
+    ValueId,
 };
 
 use self::runtime::Runtime;
@@ -68,12 +68,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     /// Compile SSA to LLVM IR
-    pub fn compile(
-        &mut self,
-        ssa: &SSA,
-        flow_analysis: &FlowAnalysis,
-        type_info: &TypeInfo,
-    ) {
+    pub fn compile(&mut self, ssa: &SSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) {
         // First pass: declare all functions
         let main_id = ssa.get_main_id();
         for (fn_id, function) in ssa.iter_functions() {
@@ -153,7 +148,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let entry_block_id = function.get_entry_id();
 
         // Create entry block first (LLVM requires entry block to be first)
-        let entry_bb = self.context.append_basic_block(fn_value, &format!("block_{}", entry_block_id.0));
+        let entry_bb = self
+            .context
+            .append_basic_block(fn_value, &format!("block_{}", entry_block_id.0));
         self.block_map.insert(entry_block_id, entry_bb);
 
         // Create remaining basic blocks
@@ -186,7 +183,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
 
         // Track phi nodes that need incoming values: (target_block, param_index) -> PhiValue
-        let mut phi_nodes: HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>> = HashMap::new();
+        let mut phi_nodes: HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>> =
+            HashMap::new();
 
         // Generate code for each block in dominator order
         for block_id in cfg.get_domination_pre_order() {
@@ -234,7 +232,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             // Block parameters become phi nodes
             for (i, (param_id, param_type)) in block.get_parameters().enumerate() {
                 let llvm_type = self.type_converter.convert_type(param_type);
-                let phi = self.builder.build_phi(llvm_type, &format!("v{}", param_id.0)).unwrap();
+                let phi = self
+                    .builder
+                    .build_phi(llvm_type, &format!("v{}", param_id.0))
+                    .unwrap();
                 self.value_map.insert(*param_id, phi.as_basic_value());
                 phi_nodes.insert((block_id, i), phi);
             }
@@ -299,19 +300,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let result_type = type_info.get_value_type(*result);
 
                 let result_val = match &result_type.expr {
-                    TypeExpr::Field => {
-                        self.compile_field_binop(*kind, lhs_val, rhs_val)
-                    }
-                    TypeExpr::U(_) => {
-                        self.compile_int_binop(*kind, lhs_val, rhs_val)
-                    }
+                    TypeExpr::Field => self.compile_field_binop(*kind, lhs_val, rhs_val),
+                    TypeExpr::U(_) => self.compile_int_binop(*kind, lhs_val, rhs_val),
                     _ => panic!("Unsupported type for binary op: {:?}", result_type),
                 };
 
                 self.value_map.insert(*result, result_val);
             }
 
-            OpCode::Cmp { kind, result, lhs, rhs } => {
+            OpCode::Cmp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } => {
                 let lhs_type = type_info.get_value_type(*lhs);
                 assert!(
                     matches!(lhs_type.expr, TypeExpr::U(_)),
@@ -359,7 +361,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             }
 
-            OpCode::Call { results, function: CallTarget::Static(function), args } => {
+            OpCode::Call {
+                results,
+                function: CallTarget::Static(function),
+                args,
+            } => {
                 let callee = self.function_map[function];
                 let vm_ptr = self.vm_ptr.unwrap();
 
@@ -370,7 +376,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     call_args.push(self.value_map[arg].into());
                 }
 
-                let call_result = self.builder
+                let call_result = self
+                    .builder
                     .build_call(callee, &call_args, &format!("call_f{}", function.0))
                     .unwrap();
 
@@ -380,18 +387,28 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         self.value_map.insert(results[0], val);
                     }
                 } else if results.len() > 1 {
-                    let ret_struct = call_result.try_as_basic_value().left()
+                    let ret_struct = call_result
+                        .try_as_basic_value()
+                        .left()
                         .expect("Expected return value from multi-return call");
                     for (i, result_id) in results.iter().enumerate() {
-                        let val = self.builder
-                            .build_extract_value(ret_struct.into_struct_value(), i as u32, &format!("v{}", result_id.0))
+                        let val = self
+                            .builder
+                            .build_extract_value(
+                                ret_struct.into_struct_value(),
+                                i as u32,
+                                &format!("v{}", result_id.0),
+                            )
                             .unwrap();
                         self.value_map.insert(*result_id, val.into());
                     }
                 }
             }
 
-            OpCode::Call { function: CallTarget::Dynamic(_), .. } => {
+            OpCode::Call {
+                function: CallTarget::Dynamic(_),
+                ..
+            } => {
                 panic!("Dynamic call targets are not supported in LLVM codegen")
             }
 
@@ -530,7 +547,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // Find wasm-ld: try LLVM prefix from env, then fall back to PATH
         let wasm_ld = std::env::var("LLVM_SYS_180_PREFIX")
             .map(|prefix| {
-                let path = std::path::PathBuf::from(&prefix).join("bin").join("wasm-ld");
+                let path = std::path::PathBuf::from(&prefix)
+                    .join("bin")
+                    .join("wasm-ld");
                 if path.exists() {
                     path.to_string_lossy().to_string()
                 } else {
@@ -538,7 +557,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             })
             .unwrap_or_else(|_| "wasm-ld".to_string());
-
 
         let output = Command::new(&wasm_ld)
             .args([
@@ -558,8 +576,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .expect(&format!("Failed to run wasm-ld (tried: {}). Make sure LLVM with wasm-ld is installed and either in PATH or LLVM_SYS_180_PREFIX is set.", wasm_ld));
 
         if !output.status.success() {
-            eprintln!("wasm-ld stdout: {}", String::from_utf8_lossy(&output.stdout));
-            eprintln!("wasm-ld stderr: {}", String::from_utf8_lossy(&output.stderr));
+            eprintln!(
+                "wasm-ld stdout: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "wasm-ld stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             panic!("wasm-ld failed with status: {}", output.status);
         }
 
@@ -582,17 +606,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // Build the wasm-runtime for wasm32
         let output = Command::new("cargo")
             .current_dir(&wasm_runtime_dir)
-            .args([
-                "build",
-                "--target", "wasm32-unknown-unknown",
-                "--release",
-            ])
+            .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
             .output()
             .expect("Failed to run cargo build for wasm-runtime");
 
         if !output.status.success() {
-            eprintln!("wasm-runtime cargo build stdout: {}", String::from_utf8_lossy(&output.stdout));
-            eprintln!("wasm-runtime cargo build stderr: {}", String::from_utf8_lossy(&output.stderr));
+            eprintln!(
+                "wasm-runtime cargo build stdout: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "wasm-runtime cargo build stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             panic!("Failed to build wasm-runtime for wasm32");
         }
 

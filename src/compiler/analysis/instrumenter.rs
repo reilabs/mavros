@@ -29,7 +29,7 @@ impl ScalarKind {
             TypeExpr::Field => ScalarKind::Field,
             TypeExpr::U(s) => ScalarKind::U(*s),
             TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
-            _ => panic!("Not a scalar type: {:?}", tp)
+            _ => panic!("Not a scalar type: {:?}", tp),
         }
     }
 }
@@ -120,7 +120,11 @@ impl Value {
                 (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     instrumenter.record_constraints(1);
-                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(b.unwrap_witness(), cmp_kind, instrumenter)))
+                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(
+                        b.unwrap_witness(),
+                        cmp_kind,
+                        instrumenter,
+                    )))
                 }
                 (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
                 _ => panic!("Cannot compare {:?} and {:?}", self, b),
@@ -130,7 +134,11 @@ impl Value {
                 (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     instrumenter.record_constraints(1);
-                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(b.unwrap_witness(), cmp_kind, instrumenter)))
+                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(
+                        b.unwrap_witness(),
+                        cmp_kind,
+                        instrumenter,
+                    )))
                 }
                 (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
                 _ => panic!("Cannot compare {:?} and {:?}", self, b),
@@ -149,7 +157,11 @@ impl Value {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a + b),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
                 }
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
@@ -158,7 +170,11 @@ impl Value {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a - b),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a - b),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
                 }
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
@@ -172,12 +188,24 @@ impl Value {
                 (Value::WitnessOf(a), Value::WitnessOf(b)) => match (a.as_ref(), b.as_ref()) {
                     (Value::Unknown(_), Value::Unknown(_)) => {
                         instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter)))
+                        Value::WitnessOf(Box::new(a.binary_arith_op(
+                            b,
+                            binary_arith_op_kind,
+                            instrumenter,
+                        )))
                     }
-                    _ => Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter))),
+                    _ => Value::WitnessOf(Box::new(a.binary_arith_op(
+                        b,
+                        binary_arith_op_kind,
+                        instrumenter,
+                    ))),
                 },
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
                 }
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
@@ -188,13 +216,23 @@ impl Value {
                 (_, Value::WitnessOf(b)) => match b.as_ref() {
                     Value::Unknown(_) => {
                         instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b, binary_arith_op_kind, instrumenter)))
+                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                            b,
+                            binary_arith_op_kind,
+                            instrumenter,
+                        )))
                     }
-                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b, binary_arith_op_kind, instrumenter))),
+                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b,
+                        binary_arith_op_kind,
+                        instrumenter,
+                    ))),
                 },
-                (Value::WitnessOf(a), b) => {
-                    Value::WitnessOf(Box::new(a.binary_arith_op(b, binary_arith_op_kind, instrumenter)))
-                }
+                (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
+                    b,
+                    binary_arith_op_kind,
+                    instrumenter,
+                ))),
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
@@ -202,7 +240,11 @@ impl Value {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
                 (Value::Field(_), Value::Field(_)) => todo!(),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(b.unwrap_witness(), binary_arith_op_kind, instrumenter)))
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
                 }
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
@@ -297,12 +339,7 @@ impl Value {
         }
     }
 
-    fn array_get(
-        &self,
-        index: &Value,
-        _tp: &Type,
-        instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
+    fn array_get(&self, index: &Value, _tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
         if matches!(self, Value::Unknown(_)) {
             return Value::Unknown(ScalarKind::Field);
         }
@@ -330,12 +367,7 @@ impl Value {
         }
     }
 
-    fn tuple_get(
-        &self,
-        index: usize,
-        tp: &Type,
-        instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
+    fn tuple_get(&self, index: usize, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             Value::Unknown(_) => Value::Unknown(ScalarKind::Field),
             Value::WitnessOf(inner) => inner.tuple_get(index, tp, instrumenter),
@@ -574,20 +606,18 @@ impl Value {
         match self {
             Value::U(_, 0) => if_true.clone(),
             Value::U(_, _) => if_false.clone(),
-            Value::WitnessOf(inner) => {
-                match inner.as_ref() {
-                    Value::U(_, 0) => if_true.clone(),
-                    Value::U(_, _) => if_false.clone(),
-                    _ => {
-                        if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
-                            instrumenter.record_constraints(1);
-                        }
-                        let mut result = if_true.clone();
-                        result.forget_concrete();
-                        result
+            Value::WitnessOf(inner) => match inner.as_ref() {
+                Value::U(_, 0) => if_true.clone(),
+                Value::U(_, _) => if_false.clone(),
+                _ => {
+                    if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
+                        instrumenter.record_constraints(1);
                     }
+                    let mut result = if_true.clone();
+                    result.forget_concrete();
+                    result
                 }
-            }
+            },
             Value::Unknown(_) => {
                 let mut result = if_true.clone();
                 result.forget_concrete();
@@ -734,7 +764,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn mk_tuple (
+    fn mk_tuple(
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
         _elem_types: &[Type],
@@ -801,11 +831,9 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 tp,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.tuple_get(
-                index,
-                tp,
-                instrumenter.get_specialized(),
-            ),
+            specialized: self
+                .specialized
+                .tuple_get(index, tp, instrumenter.get_specialized()),
         }
     }
 
@@ -1199,11 +1227,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
     }
 
-    fn todo(
-        &mut self,
-        payload: &str,
-        _result_types: &[Type],
-    ) -> Vec<SpecSplitValue> {
+    fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
         panic!("Todo opcode encountered in CostAnalysis: {}", payload);
     }
 
@@ -1414,11 +1438,7 @@ impl CostEstimator {
     }
 
     #[instrument(skip_all, name = "CostEstimator::run")]
-    pub fn run(
-        &self,
-        ssa: &SSA,
-        type_info: &TypeInfo,
-    ) -> CostAnalysis {
+    pub fn run(&self, ssa: &SSA, type_info: &TypeInfo) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
             functions: HashMap::new(),
@@ -1467,9 +1487,7 @@ impl CostEstimator {
                 ValueSignature::Array(vec![elem_sig; 0])
             }
             TypeExpr::Tuple(elems) => {
-                ValueSignature::Tuple(
-                    elems.iter().map(|e| self.type_to_unknown_sig(e)).collect()
-                )
+                ValueSignature::Tuple(elems.iter().map(|e| self.type_to_unknown_sig(e)).collect())
             }
             TypeExpr::Ref(inner) => {
                 ValueSignature::PointerTo(Box::new(self.type_to_unknown_sig(inner)))

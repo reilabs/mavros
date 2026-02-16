@@ -3,10 +3,10 @@ use std::{fs, path::PathBuf, process::ExitCode};
 use ark_ff::UniformRand as _;
 use clap::Parser;
 use mavros::{Error, Project, abi_helpers, compiler::Field, driver::Driver, vm::interpreter};
+use noirc_abi::input_parser::Format;
 use tracing::{error, info, warn};
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
-use noirc_abi::input_parser::Format;
 
 /// The default Noir project path for the CLI to extract from.
 const DEFAULT_NOIR_PROJECT_PATH: &str = "./";
@@ -90,7 +90,9 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
             info!(message = %"Generating LLVM IR");
         }
 
-        driver.compile_llvm_targets(args.emit_llvm, wasm_config).unwrap();
+        driver
+            .compile_llvm_targets(args.emit_llvm, wasm_config)
+            .unwrap();
     }
 
     // Skip VM execution if requested
@@ -257,4 +259,3 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
     }
     Ok(path)
 }
-

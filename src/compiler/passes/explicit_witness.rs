@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ark_ff::{AdditiveGroup, Field as _};
-use ssa_builder::{ssa_append};
+use ssa_builder::ssa_append;
 
 use crate::compiler::{
     Field,
@@ -9,18 +9,15 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{DataPoint, Pass},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget, OpCode, Radix, SSA, SeqType, ValueId
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget,
+        OpCode, Radix, SSA, SeqType, ValueId,
     },
 };
 
 pub struct ExplicitWitness {}
 
 impl Pass for ExplicitWitness {
-    fn run(
-        &self,
-        ssa: &mut SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
+    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
         self.do_run(ssa, pass_manager.get_type_info());
     }
 
@@ -86,14 +83,22 @@ impl ExplicitWitness {
                                     CmpKind::Eq => {
                                         let u1 = CastTarget::U(1);
                                         // Conditionally cast operands to Field (skip if already Field)
-                                        let l_field = if function_type_info.get_value_type(lhs).strip_witness().is_field() {
+                                        let l_field = if function_type_info
+                                            .get_value_type(lhs)
+                                            .strip_witness()
+                                            .is_field()
+                                        {
                                             lhs
                                         } else {
                                             let v = function.fresh_value();
                                             new_instructions.push(OpCode::mk_cast_to_field(v, lhs));
                                             v
                                         };
-                                        let r_field = if function_type_info.get_value_type(rhs).strip_witness().is_field() {
+                                        let r_field = if function_type_info
+                                            .get_value_type(rhs)
+                                            .strip_witness()
+                                            .is_field()
+                                        {
                                             rhs
                                         } else {
                                             let v = function.fresh_value();
@@ -123,7 +128,11 @@ impl ExplicitWitness {
                                         } ->);
                                     }
                                     CmpKind::Lt => {
-                                        let TypeExpr::U(s) = function_type_info.get_value_type(rhs).strip_witness().expr else {
+                                        let TypeExpr::U(s) = function_type_info
+                                            .get_value_type(rhs)
+                                            .strip_witness()
+                                            .expr
+                                        else {
                                             panic!("ICE: rhs is not a U type");
                                         };
                                         let u1 = CastTarget::U(1);
@@ -146,7 +155,12 @@ impl ExplicitWitness {
                                             adjusted_diff_wit := write_witness(adjusted_diff_plain);
                                             constrain(lr_diff, adjustment, adjusted_diff_wit);
                                         } -> adjusted_diff_wit);
-                                        self.gen_witness_rangecheck(function, &mut new_instructions, r.adjusted_diff_wit, s);
+                                        self.gen_witness_rangecheck(
+                                            function,
+                                            &mut new_instructions,
+                                            r.adjusted_diff_wit,
+                                            s,
+                                        );
                                     }
                                 }
                             } else {
@@ -286,7 +300,7 @@ impl ExplicitWitness {
                                 new_instructions.push(instruction);
                                 continue;
                             }
-                            new_instructions.push(OpCode::Constrain { a: a, b: b, c: c });
+                            new_instructions.push(OpCode::Constrain { a, b, c });
                         }
                         OpCode::NextDCoeff { result: _ } => {
                             panic!("ICE: should not be present at this stage");
@@ -325,8 +339,12 @@ impl ExplicitWitness {
                                         TypeExpr::Ref(_) => {
                                             todo!("ref types in witnessed array reads")
                                         }
-                                        TypeExpr::Tuple(_elements) => {todo!("Tuples not supported yet")}
-                                        TypeExpr::Function => panic!("Function type not expected in witnessed array reads"),
+                                        TypeExpr::Tuple(_elements) => {
+                                            todo!("Tuples not supported yet")
+                                        }
+                                        TypeExpr::Function => panic!(
+                                            "Function type not expected in witnessed array reads"
+                                        ),
                                     };
 
                                     let r = ssa_append!(function, new_instructions, {
@@ -342,7 +360,8 @@ impl ExplicitWitness {
                                     if elem_is_witness {
                                         r_pure_val = ssa_append!(function, new_instructions, {
                                             v := value_of(r_pure_val);
-                                        } -> v).v;
+                                        } -> v)
+                                        .v;
                                     }
 
                                     ssa_append!(function, new_instructions, {
@@ -440,7 +459,7 @@ impl ExplicitWitness {
                             let select_witness = function.fresh_value();
                             new_instructions.push(OpCode::Select {
                                 result: select_witness,
-                                cond: cond,
+                                cond,
                                 if_t: l,
                                 if_f: r,
                             });
@@ -492,7 +511,7 @@ impl ExplicitWitness {
                         } => {
                             new_instructions.push(instruction);
                         }
-                        OpCode::MkTuple {..} => {
+                        OpCode::MkTuple { .. } => {
                             new_instructions.push(instruction);
                         }
                         OpCode::Cast {
@@ -522,7 +541,7 @@ impl ExplicitWitness {
                             let casted = function.fresh_value();
                             new_instructions.push(OpCode::Cast {
                                 result: casted,
-                                value: value,
+                                value,
                                 target: CastTarget::Field,
                             });
                             let subbed = function.fresh_value();
@@ -533,7 +552,7 @@ impl ExplicitWitness {
                                 rhs: casted,
                             });
                             new_instructions.push(OpCode::Cast {
-                                result: result,
+                                result,
                                 value: subbed,
                                 target: CastTarget::U(s),
                             });
@@ -613,7 +632,7 @@ impl ExplicitWitness {
                                 });
 
                                 new_instructions.push(OpCode::MkSeq {
-                                    result: result,
+                                    result,
                                     elems: witnesses,
                                     seq_type: SeqType::Array(count),
                                     elem_type: Type::witness_of(Type::field()),
@@ -668,11 +687,7 @@ impl ExplicitWitness {
                                 result_types,
                             });
                         }
-                        OpCode::TupleProj {
-                            result,
-                            tuple,
-                            idx,
-                        } => {
+                        OpCode::TupleProj { result, tuple, idx } => {
                             if let crate::compiler::ssa::TupleIdx::Static(index) = idx {
                                 let tuple_taint =
                                     function_type_info.get_value_type(tuple).is_witness_of();
@@ -685,8 +700,9 @@ impl ExplicitWitness {
                             } else {
                                 panic!("Dynamic tuple indexing should not appear here");
                             }
-                        },
-                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. }
+                        }
+                        OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. }
                         | OpCode::ValueOf { .. } => {
                             new_instructions.push(instruction);
                         }
@@ -710,7 +726,7 @@ impl ExplicitWitness {
         let pure_value = function.fresh_value();
         new_instructions.push(OpCode::ValueOf {
             result: pure_value,
-            value: value,
+            value,
         });
         let bytes_val = function.fresh_value();
         new_instructions.push(OpCode::ToRadix {

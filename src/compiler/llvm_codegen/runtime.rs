@@ -8,11 +8,11 @@
 //! Field elements are represented as [4 x i64] arrays in Montgomery form.
 //! Uses WASM-friendly calling convention: field elements passed by value.
 
+use inkwell::AddressSpace;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
-use inkwell::AddressSpace;
 
 use ark_bn254::Fr;
 
@@ -64,16 +64,14 @@ impl<'ctx> Runtime<'ctx> {
         let field_type = self.field_type();
 
         // Only field_mul remains as an external function
-        let field_mul_type = field_type.fn_type(
-            &[field_type.into(), field_type.into()],
-            false
-        );
+        let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_mul_fn = Some(module.add_function("__field_mul", field_mul_type, None));
     }
 
     /// Define write functions as internal LLVM functions
     fn define_write_functions(&mut self, module: &Module<'ctx>) {
-        self.write_witness_fn = Some(self.define_write_fn(module, "__write_witness", VM_WITNESS_PTR_OFFSET));
+        self.write_witness_fn =
+            Some(self.define_write_fn(module, "__write_witness", VM_WITNESS_PTR_OFFSET));
         self.write_a_fn = Some(self.define_write_fn(module, "__write_a", VM_A_PTR_OFFSET));
         self.write_b_fn = Some(self.define_write_fn(module, "__write_b", VM_B_PTR_OFFSET));
         self.write_c_fn = Some(self.define_write_fn(module, "__write_c", VM_C_PTR_OFFSET));
@@ -92,10 +90,7 @@ impl<'ctx> Runtime<'ctx> {
         let i32_type = self.context.i32_type();
 
         // Function signature: void(ptr vm_ptr, [4 x i64] value)
-        let fn_type = void_type.fn_type(
-            &[ptr_type.into(), field_type.into()],
-            false
-        );
+        let fn_type = void_type.fn_type(&[ptr_type.into(), field_type.into()], false);
 
         let function = module.add_function(name, fn_type, Some(Linkage::Internal));
 
@@ -110,12 +105,14 @@ impl<'ctx> Runtime<'ctx> {
 
         // Get pointer to the write position slot in VM struct (ptr to ptr)
         let write_pos_ptr = unsafe {
-            builder.build_gep(
-                ptr_type,
-                vm_ptr,
-                &[i32_type.const_int((ptr_offset / 4) as u64, false)],
-                "pos_ptr",
-            ).unwrap()
+            builder
+                .build_gep(
+                    ptr_type,
+                    vm_ptr,
+                    &[i32_type.const_int((ptr_offset / 4) as u64, false)],
+                    "pos_ptr",
+                )
+                .unwrap()
         };
 
         // Load current write position directly as pointer
@@ -130,12 +127,14 @@ impl<'ctx> Runtime<'ctx> {
         // Advance write pointer by FIELD_SIZE bytes using GEP on i8
         let i8_type = self.context.i8_type();
         let new_ptr = unsafe {
-            builder.build_gep(
-                i8_type,
-                write_ptr,
-                &[i32_type.const_int(FIELD_SIZE as u64, false)],
-                "new_ptr",
-            ).unwrap()
+            builder
+                .build_gep(
+                    i8_type,
+                    write_ptr,
+                    &[i32_type.const_int(FIELD_SIZE as u64, false)],
+                    "new_ptr",
+                )
+                .unwrap()
         };
 
         // Store updated pointer

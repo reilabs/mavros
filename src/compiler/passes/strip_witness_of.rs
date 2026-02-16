@@ -77,7 +77,12 @@ impl StripWitnessOf {
                 let new_instructions: Vec<_> = old_instructions
                     .into_iter()
                     .filter_map(|mut instr| {
-                        if let OpCode::Cast { result, value, target: CastTarget::WitnessOf } = &instr {
+                        if let OpCode::Cast {
+                            result,
+                            value,
+                            target: CastTarget::WitnessOf,
+                        } = &instr
+                        {
                             replacements.insert(*result, *value);
                             return None;
                         }

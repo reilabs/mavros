@@ -3,9 +3,7 @@ use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
     BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId,
 };
-use crate::compiler::witness_info::{
-    ConstantWitness, FunctionWitnessType, WitnessType,
-};
+use crate::compiler::witness_info::{ConstantWitness, FunctionWitnessType, WitnessType};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // ---------------------------------------------------------------------------
@@ -66,11 +64,7 @@ impl WitnessTypeInference {
         self.functions.get(&func_id).unwrap()
     }
 
-    pub fn set_function_witness_type(
-        &mut self,
-        func_id: FunctionId,
-        wt: FunctionWitnessType,
-    ) {
+    pub fn set_function_witness_type(&mut self, func_id: FunctionId, wt: FunctionWitnessType) {
         self.functions.insert(func_id, wt);
     }
 
@@ -260,14 +254,13 @@ impl WitnessTypeInference {
                 &result.value_wt,
                 &result.block_cfg,
             );
-            self.functions.insert(spec_value.specialized_func_id, final_fwt);
+            self.functions
+                .insert(spec_value.specialized_func_id, final_fwt);
         }
 
         // 5. Remove original unspecialized functions
-        let original_func_ids: HashSet<FunctionId> = specializations
-            .keys()
-            .map(|k| k.original_func_id)
-            .collect();
+        let original_func_ids: HashSet<FunctionId> =
+            specializations.keys().map(|k| k.original_func_id).collect();
         let specialized_func_ids: HashSet<FunctionId> = specializations
             .values()
             .map(|v| v.specialized_func_id)
@@ -505,10 +498,8 @@ impl WitnessTypeInference {
                         elem_type: _tp,
                     } => {
                         let inner = alloc_inner.get(r).unwrap().clone();
-                        value_wt.insert(
-                            *r,
-                            WitnessType::Ref(ConstantWitness::Pure, Box::new(inner)),
-                        );
+                        value_wt
+                            .insert(*r, WitnessType::Ref(ConstantWitness::Pure, Box::new(inner)));
                     }
                     OpCode::Store { ptr, value: v } => {
                         let val_wt = value_wt.get(v).unwrap();
@@ -518,9 +509,8 @@ impl WitnessTypeInference {
                             let current_inner = alloc_inner.get(&origin_id).unwrap().clone();
                             // Join stored value into alloc inner;
                             // cfg_witness contributes to toplevel of what's stored
-                            let store_wt = val_wt.with_toplevel_info(
-                                val_wt.toplevel_info().join(block_cw),
-                            );
+                            let store_wt =
+                                val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
                             // The alloc's elem_type may not match the actual stored value's
                             let new_inner = current_inner.join(&store_wt);
                             alloc_inner.insert(origin_id, new_inner);
@@ -532,9 +522,8 @@ impl WitnessTypeInference {
                         if let Some(origin_id) = origin {
                             let inner = alloc_inner.get(&origin_id).unwrap().clone();
                             let ptr_toplevel = ptr_wt.toplevel_info();
-                            let result_wt = inner.with_toplevel_info(
-                                inner.toplevel_info().join(ptr_toplevel),
-                            );
+                            let result_wt =
+                                inner.with_toplevel_info(inner.toplevel_info().join(ptr_toplevel));
                             value_wt.insert(*r, result_wt);
                         } else {
                             // Ref param — use the Ref's inner type
@@ -599,10 +588,8 @@ impl WitnessTypeInference {
                                 .join(val_wt.toplevel_info())
                                 .join(idx_info),
                         );
-                        let result_wt = WitnessType::Array(
-                            arr_wt.toplevel_info(),
-                            Box::new(result_arr_elem),
-                        );
+                        let result_wt =
+                            WitnessType::Array(arr_wt.toplevel_info(), Box::new(result_arr_elem));
                         value_wt.insert(*r, result_wt);
                     }
                     OpCode::SlicePush {
@@ -618,13 +605,14 @@ impl WitnessTypeInference {
                             let val_wt = value_wt.get(value).unwrap();
                             result_elem_wt = result_elem_wt.join(val_wt);
                         }
-                        let result_wt = WitnessType::Array(
-                            slice_wt.toplevel_info(),
-                            Box::new(result_elem_wt),
-                        );
+                        let result_wt =
+                            WitnessType::Array(slice_wt.toplevel_info(), Box::new(result_elem_wt));
                         value_wt.insert(*r, result_wt);
                     }
-                    OpCode::SliceLen { result: r, slice: _ } => {
+                    OpCode::SliceLen {
+                        result: r,
+                        slice: _,
+                    } => {
                         value_wt.insert(*r, WitnessType::Scalar(ConstantWitness::Pure));
                     }
                     OpCode::Call {
@@ -650,8 +638,7 @@ impl WitnessTypeInference {
                                 value_wt.insert(*result, ret_wt.clone());
                             }
                             // Update alloc_inner from arg_types_out for Ref args
-                            for (arg, arg_out) in
-                                args.iter().zip(callee_spec.arg_types_out.iter())
+                            for (arg, arg_out) in args.iter().zip(callee_spec.arg_types_out.iter())
                             {
                                 if let WitnessType::Ref(_, inner_out) = arg_out {
                                     let origin = Self::find_alloc_origin(arg, alloc_inner);
@@ -668,8 +655,7 @@ impl WitnessTypeInference {
                             // based on the callee function's return type structure
                             let callee_func = ssa.get_function(*callee_id);
                             let callee_return_types = callee_func.get_returns();
-                            for (result, ret_type) in
-                                results.iter().zip(callee_return_types.iter())
+                            for (result, ret_type) in results.iter().zip(callee_return_types.iter())
                             {
                                 let pure_wt = Self::construct_pure_witness_for_type(ret_type);
                                 // Join with existing value if present (from prior iteration)
@@ -685,9 +671,7 @@ impl WitnessTypeInference {
                         function: CallTarget::Dynamic(_),
                         ..
                     } => {
-                        panic!(
-                            "Dynamic call targets are not supported in witness type inference"
-                        );
+                        panic!("Dynamic call targets are not supported in witness type inference");
                     }
                     OpCode::MkSeq {
                         result,
@@ -704,54 +688,32 @@ impl WitnessTypeInference {
                             WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
                         );
                     }
-                    OpCode::Cast {
-                        result, value, ..
-                    }
-                    | OpCode::Truncate {
-                        result,
-                        value,
-                        ..
-                    }
+                    OpCode::Cast { result, value, .. }
+                    | OpCode::Truncate { result, value, .. }
                     | OpCode::Not { result, value } => {
                         let val_wt = value_wt.get(value).unwrap().clone();
                         value_wt.insert(*result, val_wt);
                     }
-                    OpCode::ToBits {
-                        result,
-                        value,
-                        ..
-                    }
-                    | OpCode::ToRadix {
-                        result,
-                        value,
-                        ..
-                    } => {
+                    OpCode::ToBits { result, value, .. }
+                    | OpCode::ToRadix { result, value, .. } => {
                         let val_wt = value_wt.get(value).unwrap().clone();
                         value_wt.insert(
                             *result,
                             WitnessType::Array(ConstantWitness::Pure, Box::new(val_wt)),
                         );
                     }
-                    OpCode::TupleProj {
-                        result,
-                        tuple,
-                        idx,
-                    } => {
+                    OpCode::TupleProj { result, tuple, idx } => {
                         if let TupleIdx::Static(child_index) = idx {
                             let tuple_wt = value_wt.get(tuple).unwrap();
                             match tuple_wt {
                                 WitnessType::Tuple(top, children) => {
                                     let elem_wt = &children[*child_index];
-                                    let result_wt = elem_wt.with_toplevel_info(
-                                        (*top).join(elem_wt.toplevel_info()),
-                                    );
+                                    let result_wt = elem_wt
+                                        .with_toplevel_info((*top).join(elem_wt.toplevel_info()));
                                     value_wt.insert(*result, result_wt);
                                 }
                                 _ => {
-                                    panic!(
-                                        "TupleProj on non-tuple witness type: {:?}",
-                                        tuple_wt
-                                    );
+                                    panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
                                 }
                             }
                         } else {
@@ -767,10 +729,8 @@ impl WitnessTypeInference {
                             .iter()
                             .map(|v| value_wt.get(v).unwrap().clone())
                             .collect();
-                        value_wt.insert(
-                            *result,
-                            WitnessType::Tuple(ConstantWitness::Pure, children),
-                        );
+                        value_wt
+                            .insert(*result, WitnessType::Tuple(ConstantWitness::Pure, children));
                     }
                     OpCode::WriteWitness { .. }
                     | OpCode::Constrain { .. }
@@ -782,10 +742,7 @@ impl WitnessTypeInference {
                     | OpCode::DLookup { .. }
                     | OpCode::Todo { .. }
                     | OpCode::ValueOf { .. } => {
-                        panic!(
-                            "Should not be present at this stage {:?}",
-                            instruction
-                        );
+                        panic!("Should not be present at this stage {:?}", instruction);
                     }
                 }
             }
@@ -797,14 +754,9 @@ impl WitnessTypeInference {
                         // Return types collected after convergence
                     }
                     Terminator::Jmp(target, params) => {
-                        let target_params: Vec<(ValueId, Type)> = func
-                            .get_block(*target)
-                            .get_parameters()
-                            .cloned()
-                            .collect();
-                        for ((target_value, _), param) in
-                            target_params.iter().zip(params.iter())
-                        {
+                        let target_params: Vec<(ValueId, Type)> =
+                            func.get_block(*target).get_parameters().cloned().collect();
+                        for ((target_value, _), param) in target_params.iter().zip(params.iter()) {
                             let param_wt = value_wt.get(param).unwrap();
                             let existing = value_wt.get(target_value).unwrap();
                             let joined = existing.join(param_wt);
@@ -823,18 +775,15 @@ impl WitnessTypeInference {
                             .collect();
                         for param_id in merge_params {
                             let existing = value_wt.get(&param_id).unwrap();
-                            let joined = existing.with_toplevel_info(
-                                existing.toplevel_info().join(cond_toplevel),
-                            );
+                            let joined = existing
+                                .with_toplevel_info(existing.toplevel_info().join(cond_toplevel));
                             value_wt.insert(param_id, joined);
                         }
 
                         let body_blocks = cfg.get_if_body(*block_id);
                         for body_block_id in body_blocks {
                             let existing_cfg = *block_cfg.get(&body_block_id).unwrap();
-                            let new_cfg = existing_cfg
-                                .join(cond_toplevel)
-                                .join(block_cw);
+                            let new_cfg = existing_cfg.join(cond_toplevel).join(block_cw);
                             block_cfg.insert(body_block_id, new_cfg);
                         }
                     }
@@ -900,9 +849,10 @@ impl WitnessTypeInference {
     fn main_arg_witness_type(tp: &Type) -> WitnessType {
         match &tp.expr {
             TypeExpr::U(_) | TypeExpr::Field => WitnessType::Scalar(ConstantWitness::Witness),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
-                WitnessType::Array(ConstantWitness::Pure, Box::new(Self::main_arg_witness_type(inner)))
-            }
+            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => WitnessType::Array(
+                ConstantWitness::Pure,
+                Box::new(Self::main_arg_witness_type(inner)),
+            ),
             TypeExpr::Tuple(elements) => WitnessType::Tuple(
                 ConstantWitness::Pure,
                 elements

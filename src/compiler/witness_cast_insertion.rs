@@ -7,8 +7,8 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Function, OpCode,
-        SSA, SeqType, Terminator, TupleIdx,
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Function, OpCode, SSA, SeqType,
+        Terminator, TupleIdx,
     },
     witness_info::{FunctionWitnessType, WitnessType},
     witness_type_inference::WitnessTypeInference,
@@ -201,9 +201,7 @@ impl WitnessCastInsertion {
                 }
             }
             (TypeExpr::Ref(inner), WitnessType::Ref(top, inner_wt)) => {
-                let base = self
-                    .apply_witness_type(*inner, inner_wt.as_ref())
-                    .ref_of();
+                let base = self.apply_witness_type(*inner, inner_wt.as_ref()).ref_of();
                 if top.is_witness() {
                     Type::witness_of(base)
                 } else {
@@ -259,10 +257,7 @@ impl WitnessCastInsertion {
         let block_param_types: HashMap<BlockId, Vec<Type>> = function
             .get_blocks()
             .map(|(bid, block)| {
-                let types = block
-                    .get_parameters()
-                    .map(|(_, tp)| tp.clone())
-                    .collect();
+                let types = block.get_parameters().map(|(_, tp)| tp.clone()).collect();
                 (*bid, types)
             })
             .collect();
@@ -511,8 +506,7 @@ impl WitnessCastInsertion {
                     }
                     Terminator::JmpIf(cond, if_true, if_false) => {
                         current_block.put_instructions(new_instructions);
-                        current_block
-                            .set_terminator(Terminator::JmpIf(cond, if_true, if_false));
+                        current_block.set_terminator(Terminator::JmpIf(cond, if_true, if_false));
                     }
                 }
             } else {
@@ -604,9 +598,7 @@ impl WitnessCastInsertion {
                     "Tuple field count mismatch in witness cast insertion"
                 );
                 let mut converted_elems = vec![];
-                for (i, (src_ft, tgt_ft)) in
-                    src_fields.iter().zip(tgt_fields.iter()).enumerate()
-                {
+                for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
                     let proj = function.fresh_value();
                     new_instructions.push(OpCode::TupleProj {
                         result: proj,
@@ -676,10 +668,7 @@ impl WitnessCastInsertion {
 
         // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
         current_block.put_instructions(std::mem::take(new_instructions));
-        current_block.set_terminator(Terminator::Jmp(
-            loop_header_id,
-            vec![const_0, initial_dst],
-        ));
+        current_block.set_terminator(Terminator::Jmp(loop_header_id, vec![const_0, initial_dst]));
         let old_block = std::mem::replace(current_block, continuation);
         new_blocks.insert(*current_block_id, old_block);
         *current_block_id = continuation_id;
@@ -798,8 +787,11 @@ impl WitnessCastInsertion {
             TypeExpr::Tuple(fields) => {
                 let mut dummy_elems = vec![];
                 for field_type in fields.iter() {
-                    dummy_elems
-                        .push(self.create_dummy_value(field_type, new_instructions, function));
+                    dummy_elems.push(self.create_dummy_value(
+                        field_type,
+                        new_instructions,
+                        function,
+                    ));
                 }
                 let result = function.fresh_value();
                 new_instructions.push(OpCode::MkTuple {
@@ -813,10 +805,7 @@ impl WitnessCastInsertion {
                 // Pure scalar types — use a zero constant
                 function.push_field_const(ark_bn254::Fr::from(0u64))
             }
-            _ => panic!(
-                "create_dummy_value: unsupported type {:?}",
-                target_type
-            ),
+            _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
     }
 }

@@ -200,7 +200,7 @@ impl DCE {
                             result_type: _,
                         }
                         | OpCode::MkTuple { .. }
-                        | OpCode::ValueOf { .. } => {},
+                        | OpCode::ValueOf { .. } => {}
                         OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
@@ -418,10 +418,7 @@ impl DCE {
         }
     }
 
-    fn generate_definitions(
-        &self,
-        ssa: &Function,
-    ) -> HashMap<ValueId, ValueDefinition> {
+    fn generate_definitions(&self, ssa: &Function) -> HashMap<ValueId, ValueDefinition> {
         let mut definitions = HashMap::new();
 
         for (value_id, _) in ssa.iter_consts() {

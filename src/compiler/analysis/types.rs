@@ -24,7 +24,7 @@ impl TypeInfo {
 }
 
 pub struct FunctionTypeInfo {
-    values: HashMap<ValueId, Type>, 
+    values: HashMap<ValueId, Type>,
 }
 
 impl FunctionTypeInfo {
@@ -40,11 +40,7 @@ impl Types {
         Types {}
     }
 
-    pub fn run(
-        &self,
-        ssa: &SSA,
-        cfg: &FlowAnalysis,
-    ) -> TypeInfo {
+    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis) -> TypeInfo {
         let mut type_info = TypeInfo {
             functions: HashMap::new(),
         };
@@ -82,7 +78,9 @@ impl Types {
                     function_info.values.insert(*value_id, Type::field());
                 }
                 Const::Witness(_) => {
-                    function_info.values.insert(*value_id, Type::witness_of(Type::field()));
+                    function_info
+                        .values
+                        .insert(*value_id, Type::witness_of(Type::field()));
                 }
                 Const::FnPtr(_) => {
                     function_info.values.insert(*value_id, Type::function());
@@ -113,7 +111,12 @@ impl Types {
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
     ) -> Result<(), String> {
         match opcode {
-            OpCode::Cmp { kind: _kind, result, lhs, rhs } => {
+            OpCode::Cmp {
+                kind: _kind,
+                result,
+                lhs,
+                rhs,
+            } => {
                 let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
                     format!(
                         "Left-hand side value {:?} not found in type assignments",
@@ -134,7 +137,12 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::BinaryArithOp { kind: _kind, result, lhs, rhs } => {
+            OpCode::BinaryArithOp {
+                kind: _kind,
+                result,
+                lhs,
+                rhs,
+            } => {
                 let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
                     format!(
                         "Left-hand side value {:?} not found in type assignments",
@@ -152,10 +160,11 @@ impl Types {
                     .insert(*result, lhs_type.get_arithmetic_result_type(rhs_type));
                 Ok(())
             }
-            OpCode::Alloc { result, elem_type: typ } => {
-                function_info
-                    .values
-                    .insert(*result, typ.clone().ref_of());
+            OpCode::Alloc {
+                result,
+                elem_type: typ,
+            } => {
+                function_info.values.insert(*result, typ.clone().ref_of());
                 Ok(())
             }
             OpCode::Store { ptr: _, value: _ } => Ok(()),
@@ -169,51 +178,58 @@ impl Types {
                         ptr_type
                     ));
                 }
-                function_info.values.insert(
-                    *result,
-                    ptr_type.get_refered().clone(),
-                );
+                function_info
+                    .values
+                    .insert(*result, ptr_type.get_refered().clone());
                 Ok(())
             }
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
             OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
-            OpCode::Call { results: result, function, args } => {
-                match function {
-                    CallTarget::Static(fn_id) => {
-                        let (param_types, return_types) = function_types
-                            .get(fn_id)
-                            .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
+            OpCode::Call {
+                results: result,
+                function,
+                args,
+            } => match function {
+                CallTarget::Static(fn_id) => {
+                    let (param_types, return_types) = function_types
+                        .get(fn_id)
+                        .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
 
-                        if args.len() != param_types.len() {
-                            return Err(format!(
-                                "Function {:?} expects {} arguments, got {}",
-                                fn_id,
-                                param_types.len(),
-                                args.len()
-                            ));
-                        }
-
-                        if result.len() != return_types.len() {
-                            return Err(format!(
-                                "Function {:?} expects {} return values, got {}",
-                                fn_id,
-                                return_types.len(),
-                                result.len()
-                            ));
-                        }
-
-                        for (ret, ret_type) in result.iter().zip(return_types.iter()) {
-                            function_info.values.insert(*ret, ret_type.clone());
-                        }
-                        Ok(())
+                    if args.len() != param_types.len() {
+                        return Err(format!(
+                            "Function {:?} expects {} arguments, got {}",
+                            fn_id,
+                            param_types.len(),
+                            args.len()
+                        ));
                     }
-                    CallTarget::Dynamic(_) => {
-                        panic!("Dynamic calls should be eliminated by defunctionalization before type analysis");
+
+                    if result.len() != return_types.len() {
+                        return Err(format!(
+                            "Function {:?} expects {} return values, got {}",
+                            fn_id,
+                            return_types.len(),
+                            result.len()
+                        ));
                     }
+
+                    for (ret, ret_type) in result.iter().zip(return_types.iter()) {
+                        function_info.values.insert(*ret, ret_type.clone());
+                    }
+                    Ok(())
                 }
-            }
-            OpCode::ArrayGet { result, array, index } => {
+                CallTarget::Dynamic(_) => {
+                    panic!(
+                        "Dynamic calls should be eliminated by defunctionalization before type analysis"
+                    );
+                }
+            },
+            OpCode::ArrayGet {
+                result,
+                array,
+                index,
+            } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {
                     format!("Array value {:?} not found in type assignments", array)
                 })?;
@@ -227,13 +243,15 @@ impl Types {
                 } else {
                     element_type
                 };
-                function_info.values.insert(
-                    *result,
-                    result_type,
-                );
+                function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::ArraySet { result, array, index: _, value: _ } => {
+            OpCode::ArraySet {
+                result,
+                array,
+                index: _,
+                value: _,
+            } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {
                     format!("Array value {:?} not found in type assignments", array)
                 })?;
@@ -241,7 +259,12 @@ impl Types {
                 function_info.values.insert(*result, array_type.clone());
                 Ok(())
             }
-            OpCode::SlicePush { result, slice, values: _, dir: _ } => {
+            OpCode::SlicePush {
+                result,
+                slice,
+                values: _,
+                dir: _,
+            } => {
                 let slice_type = function_info.values.get(slice).ok_or_else(|| {
                     format!("Slice value {:?} not found in type assignments", slice)
                 })?;
@@ -251,13 +274,15 @@ impl Types {
             }
             OpCode::SliceLen { result, slice: _ } => {
                 // Result is always u32
-                function_info.values.insert(
-                    *result,
-                    Type::u(32),
-                );
+                function_info.values.insert(*result, Type::u(32));
                 Ok(())
             }
-            OpCode::Select { result, cond, if_t: then, if_f: otherwise } => {
+            OpCode::Select {
+                result,
+                cond,
+                if_t: then,
+                if_f: otherwise,
+            } => {
                 let cond_type = function_info.values.get(cond).ok_or_else(|| {
                     format!("Cond value {:?} not found in type assignments", cond)
                 })?;
@@ -290,14 +315,18 @@ impl Types {
                 let witness_type = function_info.values.get(value).ok_or_else(|| {
                     format!("Witness value {:?} not found in type assignments", value)
                 })?;
-                function_info.values.insert(
-                    *result,
-                    Type::witness_of(witness_type.clone()),
-                );
+                function_info
+                    .values
+                    .insert(*result, Type::witness_of(witness_type.clone()));
                 Ok(())
             }
-            OpCode::FreshWitness { result: r, result_type: tp } => {
-                function_info.values.insert(*r, Type::witness_of(tp.clone()));
+            OpCode::FreshWitness {
+                result: r,
+                result_type: tp,
+            } => {
+                function_info
+                    .values
+                    .insert(*r, Type::witness_of(tp.clone()));
                 Ok(())
             }
             OpCode::Constrain { a: _, b: _, c: _ } => Ok(()),
@@ -305,12 +334,25 @@ impl Types {
                 function_info.values.insert(*v, Type::field());
                 Ok(())
             }
-            OpCode::BumpD { matrix: _, variable: _, sensitivity: _ } => Ok(()),
-            OpCode::MkSeq { result: r, elems: _, seq_type: top_tp, elem_type: t } => {
+            OpCode::BumpD {
+                matrix: _,
+                variable: _,
+                sensitivity: _,
+            } => Ok(()),
+            OpCode::MkSeq {
+                result: r,
+                elems: _,
+                seq_type: top_tp,
+                elem_type: t,
+            } => {
                 function_info.values.insert(*r, top_tp.of(t.clone()));
                 Ok(())
             }
-            OpCode::Cast { result, value, target } => {
+            OpCode::Cast {
+                result,
+                value,
+                target,
+            } => {
                 let value_type = function_info
                     .values
                     .get(value)
@@ -332,21 +374,24 @@ impl Types {
                         }
                     }
                     CastTarget::Nop => value_type.clone(),
-                    CastTarget::ArrayToSlice => {
-                        match &value_type.expr {
-                            crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {
-                                elem.as_ref().clone().slice_of()
-                            }
-                            _ => panic!("ArrayToSlice cast on non-array type"),
+                    CastTarget::ArrayToSlice => match &value_type.expr {
+                        crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {
+                            elem.as_ref().clone().slice_of()
                         }
-                    }
+                        _ => panic!("ArrayToSlice cast on non-array type"),
+                    },
                     CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
                 };
 
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::Truncate { result, value, to_bits: _, from_bits: _ } => {
+            OpCode::Truncate {
+                result,
+                value,
+                to_bits: _,
+                from_bits: _,
+            } => {
                 let value_type = function_info
                     .values
                     .get(value)
@@ -375,10 +420,16 @@ impl Types {
                 function_info.values.insert(*result, inner);
                 Ok(())
             }
-            OpCode::ToBits { result, value, endianness: _, count: output_size } => {
-                let value_type = function_info.values.get(value).ok_or_else(|| {
-                    format!("Value {:?} not found in type assignments", value)
-                })?;
+            OpCode::ToBits {
+                result,
+                value,
+                endianness: _,
+                count: output_size,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
                 let bit_type = if value_type.is_witness_of() {
                     Type::witness_of(Type::u(1))
                 } else {
@@ -388,10 +439,17 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::ToRadix { result, value, radix: _, endianness: _, count: output_size } => {
-                let value_type = function_info.values.get(value).ok_or_else(|| {
-                    format!("Value {:?} not found in type assignments", value)
-                })?;
+            OpCode::ToRadix {
+                result,
+                value,
+                radix: _,
+                endianness: _,
+                count: output_size,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
                 let digit_type = if value_type.is_witness_of() {
                     Type::witness_of(Type::u(8))
                 } else {
@@ -401,13 +459,24 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::DLookup { target: _, keys: _, results: _ } => Ok(()),
-            OpCode::MulConst { result, const_val: _, var } => {
+            OpCode::DLookup {
+                target: _,
+                keys: _,
+                results: _,
+            } => Ok(()),
+            OpCode::MulConst {
+                result,
+                const_val: _,
+                var,
+            } => {
                 let var_type = function_info.values.get(var).unwrap();
                 function_info.values.insert(*result, var_type.clone());
                 Ok(())
             }
-            OpCode::Rangecheck { value: v, max_bits: _ } => {
+            OpCode::Rangecheck {
+                value: v,
+                max_bits: _,
+            } => {
                 let v_type = function_info.values.get(v).unwrap();
                 if !v_type.strip_witness().is_field() {
                     return Err(format!(
@@ -417,39 +486,46 @@ impl Types {
                 }
                 Ok(())
             }
-            OpCode::ReadGlobal { result: r, offset: _, result_type: tp } => {
+            OpCode::ReadGlobal {
+                result: r,
+                offset: _,
+                result_type: tp,
+            } => {
                 function_info.values.insert(*r, tp.clone());
                 Ok(())
             }
-            OpCode::Lookup { target: _, keys: _, results: _ } => Ok(()),
-            OpCode::TupleProj { 
-                result,
-                tuple,
-                idx,
-            } => {
+            OpCode::Lookup {
+                target: _,
+                keys: _,
+                results: _,
+            } => Ok(()),
+            OpCode::TupleProj { result, tuple, idx } => {
                 if let TupleIdx::Static(sz) = idx {
                     let tuple_type = function_info.values.get(tuple).ok_or_else(|| {
                         format!("Tuple value {:?} not found in type assignments", tuple)
                     })?;
                     let element_type = tuple_type.get_tuple_element(*sz);
-                    function_info.values.insert(
-                        *result,
-                        element_type,
-                    );
+                    function_info.values.insert(*result, element_type);
                     Ok(())
                 } else {
                     panic!("Dynamic TupleProj should not appear here")
                 }
             }
-            OpCode::MkTuple { 
+            OpCode::MkTuple {
                 result,
                 elems: _,
                 element_types,
             } => {
-                function_info.values.insert(*result, Type::tuple_of(element_types.clone()));
+                function_info
+                    .values
+                    .insert(*result, Type::tuple_of(element_types.clone()));
                 Ok(())
             }
-            OpCode::Todo { results, result_types, .. } => {
+            OpCode::Todo {
+                results,
+                result_types,
+                ..
+            } => {
                 if results.len() != result_types.len() {
                     return Err(format!(
                         "Todo opcode has {} results but {} result types",
@@ -462,7 +538,10 @@ impl Types {
                 }
                 Ok(())
             }
-            OpCode::InitGlobal { global: _, value: _ } => Ok(()),
+            OpCode::InitGlobal {
+                global: _,
+                value: _,
+            } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
         }
     }

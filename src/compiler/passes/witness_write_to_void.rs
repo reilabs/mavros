@@ -1,7 +1,9 @@
-use std::collections::HashSet;
 use crate::compiler::{
-    pass_manager::{Pass, PassInfo, PassManager}, passes::fix_double_jumps::ValueReplacements, ssa::{OpCode, SSA}
+    pass_manager::{Pass, PassInfo, PassManager},
+    passes::fix_double_jumps::ValueReplacements,
+    ssa::{OpCode, SSA},
 };
+use std::collections::HashSet;
 
 pub struct WitnessWriteToVoid {}
 
@@ -36,13 +38,19 @@ impl WitnessWriteToVoid {
             for (block_id, block) in function.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
-                        OpCode::WriteWitness { result: r, value: b } => {
+                        OpCode::WriteWitness {
+                            result: r,
+                            value: b,
+                        } => {
                             if let Some(r) = r {
                                 replacements.insert(*r, *b);
                             }
                             *r = None;
                         }
-                        OpCode::ValueOf { result: r, value: v } => {
+                        OpCode::ValueOf {
+                            result: r,
+                            value: v,
+                        } => {
                             replacements.insert(*r, *v);
                         }
                         _ => {}
@@ -54,7 +62,11 @@ impl WitnessWriteToVoid {
             // entry-param WriteWitness (which must be removed) from
             // byte-decomposition WriteWitness (which must be kept).
             let entry_param_ids: HashSet<_> = if is_main {
-                function.get_entry().get_parameters().map(|(id, _)| *id).collect()
+                function
+                    .get_entry()
+                    .get_parameters()
+                    .map(|(id, _)| *id)
+                    .collect()
             } else {
                 HashSet::new()
             };
