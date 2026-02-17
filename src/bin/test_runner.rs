@@ -70,7 +70,7 @@ fn run_single(root: PathBuf) {
     emit("START:COMPILED");
     let driver = (|| {
         let project = Project::new(root.clone()).ok()?;
-        let mut driver = Driver::new(project, false);
+        let mut driver = Driver::new(project, false, vec![]);
         driver.run_noir_compiler().ok()?;
         driver.make_struct_access_static().ok()?;
         driver.monomorphize().ok()?;

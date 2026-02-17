@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::{
     Project,
+    foreign_impl_replacement::{self, ForeignImplReplacement},
     compiler::{
         Field,
         analysis::types::Types,
@@ -24,6 +25,7 @@ use crate::{
 
 pub struct Driver {
     project: Project,
+    replacements: Vec<ForeignImplReplacement>,
     initial_ssa: Option<SSA>,
     static_struct_access_ssa: Option<SSA>,
     monomorphized_ssa: Option<SSA>,
@@ -40,7 +42,7 @@ pub enum Error {
 }
 
 impl Driver {
-    pub fn new(project: Project, draw_cfg: bool) -> Self {
+    pub fn new(project: Project, draw_cfg: bool, replacements: Vec<ForeignImplReplacement>) -> Self {
         let dir = project.get_only_crate().root_dir.join("mavros_debug");
         if dir.exists() {
             fs::remove_dir_all(&dir).unwrap();
@@ -48,6 +50,7 @@ impl Driver {
         fs::create_dir(&dir).unwrap();
         Self {
             project,
+            replacements,
             initial_ssa: None,
             static_struct_access_ssa: None,
             monomorphized_ssa: None,
@@ -87,9 +90,14 @@ impl Driver {
         .map_err(Error::NoirCompilerError)?;
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
-        let program =
+        let mut program =
             noirc_frontend::monomorphization::monomorphize(main, &mut context.def_interner, false)
                 .unwrap();
+
+        // Apply foreign function replacements before SSA generation
+        if !self.replacements.is_empty() {
+            foreign_impl_replacement::apply_replacements(&mut program, &self.replacements);
+        }
 
         self.abi = Some(noirc_driver::gen_abi(&context, &main, program.return_visibility(), BTreeMap::default()));
 

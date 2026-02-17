@@ -32,6 +32,10 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    /// Replace foreign/builtin stdlib functions with pure Noir implementations
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub replace_builtins: bool,
 }
 
 /// The main function for the CLI utility, responsible for parsing program
@@ -45,10 +49,19 @@ fn main() -> ExitCode {
         .with(EnvFilter::from_default_env())
         .init();
 
-    run(&args).unwrap_or_else(|err| {
-        eprintln!("Error Encountered: {err:?}");
-        ExitCode::FAILURE
-    })
+    // Use a larger stack for the main thread to handle deeply nested VM dispatch
+    // (e.g., poseidon2 with 56 rounds of nested function calls).
+    let builder = std::thread::Builder::new().stack_size(64 * 1024 * 1024);
+    let handler = builder
+        .spawn(move || {
+            run(&args).unwrap_or_else(|err| {
+                eprintln!("Error Encountered: {err:?}");
+                ExitCode::FAILURE
+            })
+        })
+        .expect("Failed to spawn main thread with larger stack");
+
+    handler.join().expect("Main thread panicked")
 }
 
 /// The main execution of the CLI utility. Should be called directly from the
@@ -60,7 +73,13 @@ fn main() -> ExitCode {
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let project = Project::new(args.root.clone())?;
 
-    let mut driver = Driver::new(project, args.draw_graphs);
+    let replacements = if args.replace_builtins {
+        mavros::foreign_impl_replacement::builtin_replacements()
+    } else {
+        vec![]
+    };
+
+    let mut driver = Driver::new(project, args.draw_graphs, replacements);
 
     driver.run_noir_compiler().unwrap();
     driver.make_struct_access_static().unwrap();
@@ -107,7 +126,6 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let ordered_params = abi_helpers::ordered_params_from_btreemap(driver.abi(), &inputs);
 
     let mut binary = driver.compile_witgen().unwrap();
-
     let witgen_result = interpreter::run(
         &mut binary,
         r1cs.witness_layout,
