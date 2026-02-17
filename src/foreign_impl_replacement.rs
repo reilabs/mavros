@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use std::fs;
 
 use noirc_frontend::monomorphization::ast::{
-    Definition, Expression, FuncId, GlobalId, Literal, Program,
+    Definition, Expression, FuncId, GlobalId, Program,
 };
+use noirc_frontend::monomorphization::visitor::visit_ident_mut;
 use tracing::info;
 
 // ---------------------------------------------------------------------------
@@ -219,57 +220,22 @@ fn rewrite_lowlevel_calls(
     lowlevel_name: &str,
     replacement_func_id: FuncId,
 ) {
-    let empty_func_map = HashMap::new();
-    let empty_global_map = HashMap::new();
+    let rewrite = |expr: &mut Expression| {
+        visit_ident_mut(expr, &mut |ident| match &ident.definition {
+            Definition::LowLevel(name) | Definition::Builtin(name)
+                if name == lowlevel_name =>
+            {
+                ident.definition = Definition::Function(replacement_func_id);
+            }
+            _ => {}
+        });
+    };
 
     for func in &mut program.functions {
-        rewrite_lowlevel_in_expression(
-            &mut func.body,
-            lowlevel_name,
-            replacement_func_id,
-            &empty_func_map,
-            &empty_global_map,
-        );
+        rewrite(&mut func.body);
     }
-
     for (_gid, (_name, _typ, expr)) in program.globals.iter_mut() {
-        rewrite_lowlevel_in_expression(
-            expr,
-            lowlevel_name,
-            replacement_func_id,
-            &empty_func_map,
-            &empty_global_map,
-        );
-    }
-}
-
-/// Walk an expression and replace `Definition::LowLevel(name)` with
-/// `Definition::Function(replacement_id)`. Also handles `Definition::Builtin`.
-fn rewrite_lowlevel_in_expression(
-    expr: &mut Expression,
-    lowlevel_name: &str,
-    replacement_func_id: FuncId,
-    func_map: &HashMap<FuncId, FuncId>,
-    global_map: &HashMap<GlobalId, GlobalId>,
-) {
-    match expr {
-        Expression::Ident(ident) => {
-            match &ident.definition {
-                Definition::LowLevel(name) if name == lowlevel_name => {
-                    ident.definition = Definition::Function(replacement_func_id);
-                }
-                Definition::Builtin(name) if name == lowlevel_name => {
-                    ident.definition = Definition::Function(replacement_func_id);
-                }
-                _ => {}
-            }
-        }
-        _ => {
-            // Recurse into sub-expressions using the general walker
-            walk_expression(expr, &mut |e| {
-                rewrite_lowlevel_in_expression(e, lowlevel_name, replacement_func_id, func_map, global_map);
-            });
-        }
+        rewrite(expr);
     }
 }
 
@@ -282,166 +248,19 @@ fn rewrite_ids_in_expression(
     func_map: &HashMap<FuncId, FuncId>,
     global_map: &HashMap<GlobalId, GlobalId>,
 ) {
-    match expr {
-        Expression::Ident(ident) => {
-            rewrite_definition(&mut ident.definition, func_map, global_map);
+    visit_ident_mut(expr, &mut |ident| {
+        match &mut ident.definition {
+            Definition::Function(id) => {
+                if let Some(new_id) = func_map.get(id) {
+                    *id = *new_id;
+                }
+            }
+            Definition::Global(id) => {
+                if let Some(new_id) = global_map.get(id) {
+                    *id = *new_id;
+                }
+            }
+            _ => {}
         }
-        _ => {}
-    }
-    // Recurse into children
-    walk_expression(expr, &mut |e| {
-        rewrite_ids_in_expression(e, func_map, global_map);
     });
-}
-
-fn rewrite_definition(
-    def: &mut Definition,
-    func_map: &HashMap<FuncId, FuncId>,
-    global_map: &HashMap<GlobalId, GlobalId>,
-) {
-    match def {
-        Definition::Function(id) => {
-            if let Some(new_id) = func_map.get(id) {
-                *id = *new_id;
-            }
-        }
-        Definition::Global(id) => {
-            if let Some(new_id) = global_map.get(id) {
-                *id = *new_id;
-            }
-        }
-        _ => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Generic expression walker — calls `f` on each direct child expression
-// ---------------------------------------------------------------------------
-
-fn walk_expression(expr: &mut Expression, f: &mut impl FnMut(&mut Expression)) {
-    match expr {
-        Expression::Ident(_) => {
-            // Leaf — no children to recurse into
-        }
-        Expression::Literal(lit) => {
-            walk_literal(lit, f);
-        }
-        Expression::Block(exprs) => {
-            for e in exprs.iter_mut() {
-                f(e);
-            }
-        }
-        Expression::Unary(u) => {
-            f(&mut u.rhs);
-        }
-        Expression::Binary(b) => {
-            f(&mut b.lhs);
-            f(&mut b.rhs);
-        }
-        Expression::Index(idx) => {
-            f(&mut idx.collection);
-            f(&mut idx.index);
-        }
-        Expression::Cast(c) => {
-            f(&mut c.lhs);
-        }
-        Expression::For(for_expr) => {
-            f(&mut for_expr.start_range);
-            f(&mut for_expr.end_range);
-            f(&mut for_expr.block);
-        }
-        Expression::Loop(body) => {
-            f(body);
-        }
-        Expression::While(w) => {
-            f(&mut w.condition);
-            f(&mut w.body);
-        }
-        Expression::If(if_expr) => {
-            f(&mut if_expr.condition);
-            f(&mut if_expr.consequence);
-            if let Some(alt) = &mut if_expr.alternative {
-                f(alt);
-            }
-        }
-        Expression::Match(m) => {
-            for case in &mut m.cases {
-                f(&mut case.branch);
-            }
-            if let Some(default) = &mut m.default_case {
-                f(default);
-            }
-        }
-        Expression::Tuple(elems) => {
-            for e in elems.iter_mut() {
-                f(e);
-            }
-        }
-        Expression::ExtractTupleField(inner, _) => {
-            f(inner);
-        }
-        Expression::Call(call) => {
-            f(&mut call.func);
-            for arg in &mut call.arguments {
-                f(arg);
-            }
-        }
-        Expression::Let(let_expr) => {
-            f(&mut let_expr.expression);
-        }
-        Expression::Constrain(expr_inner, _loc, msg) => {
-            f(expr_inner);
-            if let Some(msg_box) = msg {
-                f(&mut msg_box.0);
-            }
-        }
-        Expression::Assign(assign) => {
-            f(&mut assign.expression);
-            walk_lvalue(&mut assign.lvalue, f);
-        }
-        Expression::Semi(inner) | Expression::Clone(inner) | Expression::Drop(inner) => {
-            f(inner);
-        }
-        Expression::Break | Expression::Continue => {}
-    }
-}
-
-fn walk_literal(lit: &mut Literal, f: &mut impl FnMut(&mut Expression)) {
-    match lit {
-        Literal::Array(arr) | Literal::Vector(arr) => {
-            for e in &mut arr.contents {
-                f(e);
-            }
-        }
-        Literal::Repeated { element, .. } => {
-            f(element);
-        }
-        Literal::FmtStr(_, _, expr) => {
-            f(expr);
-        }
-        Literal::Integer(..) | Literal::Bool(_) | Literal::Unit | Literal::Str(_) => {}
-    }
-}
-
-fn walk_lvalue(
-    lvalue: &mut noirc_frontend::monomorphization::ast::LValue,
-    f: &mut impl FnMut(&mut Expression),
-) {
-    use noirc_frontend::monomorphization::ast::LValue;
-    match lvalue {
-        LValue::Ident(_) => {}
-        LValue::Index { array, index, .. } => {
-            walk_lvalue(array, f);
-            f(index);
-        }
-        LValue::MemberAccess { object, .. } => {
-            walk_lvalue(object, f);
-        }
-        LValue::Dereference { reference, .. } => {
-            walk_lvalue(reference, f);
-        }
-        LValue::Clone(inner) => {
-            walk_lvalue(inner, f);
-        }
-    }
 }
