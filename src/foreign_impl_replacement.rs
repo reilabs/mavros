@@ -1,5 +1,6 @@
-use std::fs;
+use std::path::Path;
 
+use noirc_frontend::hir::Context;
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId, GlobalId, Program,
 };
@@ -42,40 +43,14 @@ pub fn apply_replacements(
 }
 
 fn compile_replacement(replacement: &ForeignImplReplacement) -> Program {
-    let tmp_dir = tempfile::tempdir().expect("Failed to create temp directory");
-    let tmp_path = tmp_dir.path();
+    let source = format!("{}\n{}", replacement.noir_source, replacement.main_wrapper);
 
-    let nargo_toml = r#"[package]
-name = "foreign_replacement"
-type = "bin"
-authors = [""]
-compiler_version = ">=0.36.0"
+    let mut file_manager = noirc_driver::file_manager_with_stdlib(Path::new(""));
+    file_manager.add_file_with_source(Path::new("main.nr"), source);
 
-[dependencies]
-"#;
-    fs::write(tmp_path.join("Nargo.toml"), nargo_toml).unwrap();
-
-    let src_dir = tmp_path.join("src");
-    fs::create_dir(&src_dir).unwrap();
-    let main_nr = format!("{}\n{}", replacement.noir_source, replacement.main_wrapper);
-    fs::write(src_dir.join("main.nr"), main_nr).unwrap();
-
-    let toml_path =
-        nargo_toml::get_package_manifest(tmp_path).expect("Failed to find Nargo.toml in temp dir");
-    let workspace = nargo_toml::resolve_workspace_from_toml(
-        &toml_path,
-        nargo_toml::PackageSelection::All,
-        None,
-    )
-    .expect("Failed to resolve replacement workspace");
-
-    let mut file_manager = workspace.new_file_manager();
-    nargo::insert_all_files_for_workspace_into_file_manager(&workspace, &mut file_manager);
     let parsed_files = nargo::parse_all(&file_manager);
-
-    let package = &workspace.members[0];
-    let (mut context, crate_id) =
-        nargo::prepare_package(&file_manager, &parsed_files, package);
+    let mut context = Context::from_ref_file_manager(&file_manager, &parsed_files);
+    let crate_id = noirc_driver::prepare_crate(&mut context, Path::new("main.nr"));
 
     noirc_driver::check_crate(
         &mut context,
