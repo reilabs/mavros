@@ -44,19 +44,11 @@ fn compile_replacement(replacement: &ForeignImplReplacement) -> Program {
     let mut context = Context::from_ref_file_manager(&file_manager, &parsed_files);
     let crate_id = noirc_driver::prepare_crate(&mut context, Path::new("main.nr"));
 
-    noirc_driver::check_crate(
-        &mut context,
-        crate_id,
-        &noirc_driver::CompileOptions {
-            deny_warnings: false,
-            debug_comptime_in_file: None,
-            ..Default::default()
-        },
-    )
-    .expect("Failed to compile replacement Noir code");
+    noirc_driver::check_crate(&mut context, crate_id, &Default::default())
+        .expect("Failed to compile replacement Noir code");
 
     let main = context
-        .get_main_function(context.root_crate_id())
+        .get_main_function(&crate_id)
         .expect("Replacement project has no main function");
 
     noirc_frontend::monomorphization::monomorphize(main, &mut context.def_interner, false)
@@ -70,20 +62,20 @@ fn merge_replacement_into_main(
 ) -> FuncId {
     let func_offset = main_program.functions.len() as u32;
 
-    let main_max_global = main_program
+    let global_offset = main_program
         .globals
         .keys()
         .map(|g| g.0)
         .max()
-        .unwrap_or(0);
-    let global_offset = if replacement_program.globals.is_empty() {
-        0
-    } else {
-        main_max_global + 1
-    };
+        .map_or(0, |max| max + 1);
 
-    let entry_func_id = replacement_program
+    let non_main_functions: Vec<_> = replacement_program
         .functions
+        .into_iter()
+        .filter(|f| !f.is_entry_point)
+        .collect();
+
+    let entry_func_id = non_main_functions
         .iter()
         .find(|f| f.name == entry_function_name)
         .map(|f| FuncId(f.id.0 + func_offset))
@@ -91,20 +83,20 @@ fn merge_replacement_into_main(
             panic!(
                 "Entry function '{}' not found in replacement program. Available: {:?}",
                 entry_function_name,
-                replacement_program.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+                non_main_functions.iter().map(|f| &f.name).collect::<Vec<_>>()
             )
         });
 
-    for mut func in replacement_program.functions {
+    for mut func in non_main_functions {
         func.id = FuncId(func.id.0 + func_offset);
-        func.is_entry_point = false;
-        rewrite_ids_in_expression(&mut func.body, func_offset, global_offset);
+        offset_func_ids(&mut func.body, func_offset);
+        offset_global_ids(&mut func.body, global_offset);
         main_program.functions.push(func);
     }
 
     for (gid, (name, typ, mut expr)) in replacement_program.globals {
         let new_gid = GlobalId(gid.0 + global_offset);
-        rewrite_ids_in_expression(&mut expr, func_offset, global_offset);
+        offset_global_ids(&mut expr, global_offset);
         main_program.globals.insert(new_gid, (name, typ, expr));
     }
 
@@ -130,25 +122,20 @@ fn rewrite_lowlevel_calls(
     for func in &mut program.functions {
         rewrite(&mut func.body);
     }
-    for (_gid, (_name, _typ, expr)) in program.globals.iter_mut() {
-        rewrite(expr);
-    }
 }
 
-fn rewrite_ids_in_expression(
-    expr: &mut Expression,
-    func_offset: u32,
-    global_offset: u32,
-) {
+fn offset_func_ids(expr: &mut Expression, offset: u32) {
     visit_ident_mut(expr, &mut |ident| {
-        match &mut ident.definition {
-            Definition::Function(id) => {
-                *id = FuncId(id.0 + func_offset);
-            }
-            Definition::Global(id) => {
-                *id = GlobalId(id.0 + global_offset);
-            }
-            _ => {}
+        if let Definition::Function(id) = &mut ident.definition {
+            *id = FuncId(id.0 + offset);
+        }
+    });
+}
+
+fn offset_global_ids(expr: &mut Expression, offset: u32) {
+    visit_ident_mut(expr, &mut |ident| {
+        if let Definition::Global(id) = &mut ident.definition {
+            *id = GlobalId(id.0 + offset);
         }
     });
 }
