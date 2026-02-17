@@ -4,7 +4,6 @@
 //! merges them into the main monomorphized program, and rewrites foreign
 //! call sites to point to the replacement functions.
 
-use std::collections::HashMap;
 use std::fs;
 
 use noirc_frontend::monomorphization::ast::{
@@ -154,36 +153,18 @@ fn merge_replacement_into_main(
         .map(|g| g.0)
         .max()
         .unwrap_or(0);
-    let _replacement_max_global = replacement_program
-        .globals
-        .keys()
-        .map(|g| g.0)
-        .max()
-        .unwrap_or(0);
-    // Offset so replacement globals don't collide with main globals
     let global_offset = if replacement_program.globals.is_empty() {
         0
     } else {
         main_max_global + 1
     };
 
-    // Build ID mappings
-    let mut func_id_map: HashMap<FuncId, FuncId> = HashMap::new();
-    for func in &replacement_program.functions {
-        func_id_map.insert(func.id, FuncId(func.id.0 + func_offset));
-    }
-
-    let mut global_id_map: HashMap<GlobalId, GlobalId> = HashMap::new();
-    for gid in replacement_program.globals.keys() {
-        global_id_map.insert(*gid, GlobalId(gid.0 + global_offset));
-    }
-
     // Find the entry function by name
     let entry_func_id = replacement_program
         .functions
         .iter()
         .find(|f| f.name == entry_function_name)
-        .map(|f| func_id_map[&f.id])
+        .map(|f| FuncId(f.id.0 + func_offset))
         .unwrap_or_else(|| {
             panic!(
                 "Entry function '{}' not found in replacement program. Available: {:?}",
@@ -194,17 +175,16 @@ fn merge_replacement_into_main(
 
     // Merge functions (rewrite IDs within each)
     for mut func in replacement_program.functions {
-        func.id = func_id_map[&func.id];
-        func.is_entry_point = false; // not an entry point in the main program
-        rewrite_ids_in_expression(&mut func.body, &func_id_map, &global_id_map);
-        // Also rewrite any function references in parameter default expressions (unlikely but safe)
+        func.id = FuncId(func.id.0 + func_offset);
+        func.is_entry_point = false;
+        rewrite_ids_in_expression(&mut func.body, func_offset, global_offset);
         main_program.functions.push(func);
     }
 
     // Merge globals
     for (gid, (name, typ, mut expr)) in replacement_program.globals {
-        let new_gid = global_id_map[&gid];
-        rewrite_ids_in_expression(&mut expr, &func_id_map, &global_id_map);
+        let new_gid = GlobalId(gid.0 + global_offset);
+        rewrite_ids_in_expression(&mut expr, func_offset, global_offset);
         main_program.globals.insert(new_gid, (name, typ, expr));
     }
 
@@ -245,20 +225,16 @@ fn rewrite_lowlevel_calls(
 
 fn rewrite_ids_in_expression(
     expr: &mut Expression,
-    func_map: &HashMap<FuncId, FuncId>,
-    global_map: &HashMap<GlobalId, GlobalId>,
+    func_offset: u32,
+    global_offset: u32,
 ) {
     visit_ident_mut(expr, &mut |ident| {
         match &mut ident.definition {
             Definition::Function(id) => {
-                if let Some(new_id) = func_map.get(id) {
-                    *id = *new_id;
-                }
+                *id = FuncId(id.0 + func_offset);
             }
             Definition::Global(id) => {
-                if let Some(new_id) = global_map.get(id) {
-                    *id = *new_id;
-                }
+                *id = GlobalId(id.0 + global_offset);
             }
             _ => {}
         }
