@@ -7,21 +7,15 @@ use noirc_frontend::monomorphization::ast::{
 use noirc_frontend::monomorphization::visitor::visit_ident_mut;
 use tracing::info;
 
-const POSEIDON2_PERMUTE_NR: &str = include_str!("../stdlib_noir_impls/poseidon2_permute.nr");
-
 pub struct ForeignImplReplacement {
     pub lowlevel_name: String,
     pub noir_source: String,
-    pub entry_function_name: String,
-    pub main_wrapper: String,
 }
 
 pub fn builtin_replacements() -> Vec<ForeignImplReplacement> {
     vec![ForeignImplReplacement {
         lowlevel_name: "poseidon2_permutation".to_string(),
-        noir_source: POSEIDON2_PERMUTE_NR.to_string(),
-        entry_function_name: "poseidon2_permutation_bn254".to_string(),
-        main_wrapper: "fn main(input: [Field; 4]) -> pub [Field; 4] { poseidon2_permutation_bn254(input) }".to_string(),
+        noir_source: include_str!("../stdlib_noir_impls/poseidon2_permutation.nr").to_string(),
     }]
 }
 
@@ -32,7 +26,7 @@ pub fn apply_replacements(
     for replacement in replacements {
         let replacement_program = compile_replacement(replacement);
         let entry_func_id =
-            merge_replacement_into_main(program, replacement_program, &replacement.entry_function_name);
+            merge_replacement_into_main(program, replacement_program, &replacement.lowlevel_name);
         rewrite_lowlevel_calls(program, &replacement.lowlevel_name, entry_func_id);
         info!(
             message = %"Replaced foreign function",
@@ -43,10 +37,8 @@ pub fn apply_replacements(
 }
 
 fn compile_replacement(replacement: &ForeignImplReplacement) -> Program {
-    let source = format!("{}\n{}", replacement.noir_source, replacement.main_wrapper);
-
     let mut file_manager = noirc_driver::file_manager_with_stdlib(Path::new(""));
-    file_manager.add_file_with_source(Path::new("main.nr"), source);
+    file_manager.add_file_with_source(Path::new("main.nr"), replacement.noir_source.clone());
 
     let parsed_files = nargo::parse_all(&file_manager);
     let mut context = Context::from_ref_file_manager(&file_manager, &parsed_files);

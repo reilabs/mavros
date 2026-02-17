@@ -206,6 +206,10 @@ fn permute(state: [Field; 4], config: Poseidon2Config) -> [Field; 4] {
 
 // ---- Entry point ----
 
-pub fn poseidon2_permutation_bn254(input: [Field; 4]) -> [Field; 4] {
+pub fn poseidon2_permutation(input: [Field; 4]) -> [Field; 4] {
     permute(input, x5_4_config())
+}
+
+fn main(input: [Field; 4]) -> pub [Field; 4] {
+    poseidon2_permutation(input)
 }
