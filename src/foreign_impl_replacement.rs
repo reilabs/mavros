@@ -1,9 +1,3 @@
-//! Replace foreign/builtin function calls with pure Noir implementations.
-//!
-//! This module compiles replacement `.nr` files through the Noir pipeline,
-//! merges them into the main monomorphized program, and rewrites foreign
-//! call sites to point to the replacement functions.
-
 use std::fs;
 
 use noirc_frontend::monomorphization::ast::{
@@ -12,30 +6,15 @@ use noirc_frontend::monomorphization::ast::{
 use noirc_frontend::monomorphization::visitor::visit_ident_mut;
 use tracing::info;
 
-// ---------------------------------------------------------------------------
-// Embedded replacement sources
-// ---------------------------------------------------------------------------
-
 const POSEIDON2_PERMUTE_NR: &str = include_str!("../stdlib_noir_impls/poseidon2_permute.nr");
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-/// Specifies a single foreign function replacement.
 pub struct ForeignImplReplacement {
-    /// The LowLevel/Builtin name to replace (e.g., "poseidon2_permutation")
     pub lowlevel_name: String,
-    /// The Noir source code for the replacement implementation
     pub noir_source: String,
-    /// Name of the entry-point function in the replacement source
     pub entry_function_name: String,
-    /// A `fn main(...)` wrapper that calls the entry function.
-    /// Required so that Noir's monomorphizer has a root.
     pub main_wrapper: String,
 }
 
-/// Returns the built-in set of foreign function replacements shipped with the binary.
 pub fn builtin_replacements() -> Vec<ForeignImplReplacement> {
     vec![ForeignImplReplacement {
         lowlevel_name: "poseidon2_permutation".to_string(),
@@ -45,16 +24,6 @@ pub fn builtin_replacements() -> Vec<ForeignImplReplacement> {
     }]
 }
 
-// ---------------------------------------------------------------------------
-// Top-level entry point
-// ---------------------------------------------------------------------------
-
-/// Apply all foreign function replacements to a monomorphized program.
-///
-/// For each replacement:
-/// 1. Compile the replacement Noir source as a temporary Nargo project
-/// 2. Merge the replacement's monomorphized functions/globals into `program`
-/// 3. Rewrite matching `Definition::LowLevel` call sites to `Definition::Function`
 pub fn apply_replacements(
     program: &mut Program,
     replacements: &[ForeignImplReplacement],
@@ -72,16 +41,10 @@ pub fn apply_replacements(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Compile replacement: create temp Nargo project and run Noir pipeline
-// ---------------------------------------------------------------------------
-
 fn compile_replacement(replacement: &ForeignImplReplacement) -> Program {
-    // Create a temporary Noir project
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp directory");
     let tmp_path = tmp_dir.path();
 
-    // Write Nargo.toml
     let nargo_toml = r#"[package]
 name = "foreign_replacement"
 type = "bin"
@@ -92,13 +55,11 @@ compiler_version = ">=0.36.0"
 "#;
     fs::write(tmp_path.join("Nargo.toml"), nargo_toml).unwrap();
 
-    // Write src/main.nr = replacement source + main wrapper
     let src_dir = tmp_path.join("src");
     fs::create_dir(&src_dir).unwrap();
     let main_nr = format!("{}\n{}", replacement.noir_source, replacement.main_wrapper);
     fs::write(src_dir.join("main.nr"), main_nr).unwrap();
 
-    // Run through the Noir pipeline (mirrors Project::new + Driver::run_noir_compiler)
     let toml_path =
         nargo_toml::get_package_manifest(tmp_path).expect("Failed to find Nargo.toml in temp dir");
     let workspace = nargo_toml::resolve_workspace_from_toml(
@@ -135,10 +96,6 @@ compiler_version = ">=0.36.0"
         .expect("Failed to monomorphize replacement")
 }
 
-// ---------------------------------------------------------------------------
-// Merge replacement program into main program
-// ---------------------------------------------------------------------------
-
 fn merge_replacement_into_main(
     main_program: &mut Program,
     replacement_program: Program,
@@ -146,7 +103,6 @@ fn merge_replacement_into_main(
 ) -> FuncId {
     let func_offset = main_program.functions.len() as u32;
 
-    // Compute global ID offset to avoid collisions
     let main_max_global = main_program
         .globals
         .keys()
@@ -159,7 +115,6 @@ fn merge_replacement_into_main(
         main_max_global + 1
     };
 
-    // Find the entry function by name
     let entry_func_id = replacement_program
         .functions
         .iter()
@@ -173,7 +128,6 @@ fn merge_replacement_into_main(
             )
         });
 
-    // Merge functions (rewrite IDs within each)
     for mut func in replacement_program.functions {
         func.id = FuncId(func.id.0 + func_offset);
         func.is_entry_point = false;
@@ -181,7 +135,6 @@ fn merge_replacement_into_main(
         main_program.functions.push(func);
     }
 
-    // Merge globals
     for (gid, (name, typ, mut expr)) in replacement_program.globals {
         let new_gid = GlobalId(gid.0 + global_offset);
         rewrite_ids_in_expression(&mut expr, func_offset, global_offset);
@@ -190,10 +143,6 @@ fn merge_replacement_into_main(
 
     entry_func_id
 }
-
-// ---------------------------------------------------------------------------
-// Rewrite LowLevel/Builtin call sites in the main program
-// ---------------------------------------------------------------------------
 
 fn rewrite_lowlevel_calls(
     program: &mut Program,
@@ -218,10 +167,6 @@ fn rewrite_lowlevel_calls(
         rewrite(expr);
     }
 }
-
-// ---------------------------------------------------------------------------
-// AST walker: rewrite FuncId and GlobalId references
-// ---------------------------------------------------------------------------
 
 fn rewrite_ids_in_expression(
     expr: &mut Expression,
