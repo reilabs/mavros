@@ -1,8 +1,3 @@
-// Self-contained pure Noir BN254 Poseidon2 permutation (t=4, 56 partial rounds).
-// Inlined from TaceoLabs/noir-poseidon (https://github.com/TaceoLabs/noir-poseidon).
-// No external crate dependencies.
-
-// ---- Helpers ----
 
 fn double(x: Field) -> Field {
     2 * x
@@ -12,7 +7,6 @@ fn vec_add(lhs: [Field; 4], rhs: [Field; 4]) -> [Field; 4] {
     [lhs[0] + rhs[0], lhs[1] + rhs[1], lhs[2] + rhs[2], lhs[3] + rhs[3]]
 }
 
-// ---- S-box (x^5 for BN254) ----
 
 fn sbox_e(x: Field) -> Field {
     let x2 = x * x;
@@ -24,7 +18,6 @@ fn sbox(state: [Field; 4]) -> [Field; 4] {
     [sbox_e(state[0]), sbox_e(state[1]), sbox_e(state[2]), sbox_e(state[3])]
 }
 
-// ---- External (4x4) MDS matrix multiply (Barretenberg-compatible) ----
 
 fn mds_4(state: [Field; 4]) -> [Field; 4] {
     let t_0 = state[0] + state[1];
@@ -36,7 +29,6 @@ fn mds_4(state: [Field; 4]) -> [Field; 4] {
     [t_3 + t_5, t_5, t_2 + t_4, t_4]
 }
 
-// ---- Internal (diagonal) matrix multiply ----
 
 global INTERNAL_DIAG4: [Field; 4] = [
     0x10dc6e9c006ea38b04b1e03b4bd9490c0d03f98929ca1d7fb56821fd19d3b6e7,
@@ -59,7 +51,6 @@ fn internal_4(state: [Field; 4]) -> [Field; 4] {
     diag_mat_mul(state, INTERNAL_DIAG4)
 }
 
-// ---- Round constants (BN254, t=4, 56 partial rounds) ----
 
 struct Poseidon2Config {
     first_full_rc: [[Field; 4]; 4],
@@ -182,29 +173,22 @@ fn x5_4_config() -> Poseidon2Config {
     }
 }
 
-// ---- Core permutation (t=4, 56 partial rounds) ----
 
 fn permute(state: [Field; 4], config: Poseidon2Config) -> [Field; 4] {
-    // Initial linear layer
     let state = mds_4(state);
 
-    // First 4 external (full) rounds
     let state = config.first_full_rc.fold(state, |s: [Field; 4], rc: [Field; 4]| {
         mds_4(sbox(vec_add(s, rc)))
     });
 
-    // 56 internal (partial) rounds
     let state = config.partial_rc.fold(state, |s: [Field; 4], rc: Field| {
         internal_4([sbox_e(s[0] + rc), s[1], s[2], s[3]])
     });
 
-    // Last 4 external (full) rounds
     config.second_full_rc.fold(state, |s: [Field; 4], rc: [Field; 4]| {
         mds_4(sbox(vec_add(s, rc)))
     })
 }
-
-// ---- Entry point ----
 
 pub fn poseidon2_permutation(input: [Field; 4]) -> [Field; 4] {
     permute(input, x5_4_config())

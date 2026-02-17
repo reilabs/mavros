@@ -33,7 +33,6 @@ pub struct ProgramOptions {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
 
-    /// Replace foreign/builtin stdlib functions with pure Noir implementations
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub replace_builtins: bool,
 }
@@ -48,9 +47,8 @@ fn main() -> ExitCode {
         .with(ForestLayer::default())
         .with(EnvFilter::from_default_env())
         .init();
-
-    // Use a larger stack for the main thread to handle deeply nested VM dispatch
-    // (e.g., poseidon2 with 56 rounds of nested function calls).
+    
+    // temporarily increase the stack size for the main thread to avoid stack overflows during deep recursion in the compiler with poseidon
     let builder = std::thread::Builder::new().stack_size(64 * 1024 * 1024);
     let handler = builder
         .spawn(move || {
