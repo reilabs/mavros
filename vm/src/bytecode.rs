@@ -1,18 +1,14 @@
 #![allow(unused_variables)]
 
-use crate::compiler::r1cs_gen::{ConstraintsLayout, WitnessLayout};
-use crate::vm::interpreter::dispatch;
+use crate::{ConstraintsLayout, Field, WitnessLayout};
+use crate::interpreter::dispatch;
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use opcode_gen::interpreter;
 
-use crate::vm::array::{BoxedLayout, BoxedValue};
-use crate::{
-    compiler::Field,
-    vm::interpreter::{Frame, Handler},
-};
+use crate::array::{BoxedLayout, BoxedValue};
+use crate::interpreter::{Frame, Handler};
 
-use crate::vm::array::DataType;
-#[cfg(feature = "plotting")]
+use crate::array::DataType;
 use plotters::prelude::*;
 use std::fmt::Display;
 use std::path::Path;
@@ -63,11 +59,8 @@ impl AllocationInstrumenter {
         self.events.push(AlocationEvent::Free(ty, size));
     }
 
-    /// Returns the final memory usage in bytes. When the `plotting` feature is
-    /// enabled, also writes a PNG chart to `path`.
+    /// Returns the final memory usage in bytes and writes a PNG chart to `path`.
     pub fn plot(&self, path: &Path) -> usize {
-        let _ = path; // used only when "plotting" is enabled
-
         // Calculate memory usage over time
         let mut stack_usage = Vec::new();
         let mut heap_usage = Vec::new();
@@ -99,13 +92,11 @@ impl AllocationInstrumenter {
             return 0; // No events to plot
         }
 
-        #[cfg(feature = "plotting")]
         self.draw_chart(path, &stack_usage, &heap_usage);
 
         *stack_usage.last().unwrap() + *heap_usage.last().unwrap()
     }
 
-    #[cfg(feature = "plotting")]
     fn draw_chart(&self, path: &Path, stack_usage: &[usize], heap_usage: &[usize]) {
         // Calculate total memory usage
         let total_usage: Vec<usize> = stack_usage

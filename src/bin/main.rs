@@ -24,11 +24,9 @@ pub struct ProgramOptions {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub pprint_r1cs: bool,
 
-    #[cfg(feature = "wasm")]
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub emit_llvm: bool,
 
-    #[cfg(feature = "wasm")]
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub emit_wasm: bool,
 
@@ -157,7 +155,6 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
         }
     }
 
-    #[cfg(feature = "wasm")]
     if args.emit_llvm || args.emit_wasm {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");

@@ -2209,6 +2209,7 @@ dependencies = [
  "indoc",
  "inkwell",
  "itertools 0.14.0",
+ "mavros-vm",
  "nargo",
  "nargo_toml",
  "noirc_abi",
@@ -2218,7 +2219,6 @@ dependencies = [
  "noirc_frontend",
  "opcode-gen",
  "petgraph 0.6.5",
- "plotters",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -2231,6 +2231,19 @@ dependencies = [
  "tracing-subscriber",
  "walkdir",
  "wasmtime",
+]
+
+[[package]]
+name = "mavros-vm"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff",
+ "noirc_abi",
+ "opcode-gen",
+ "plotters",
+ "serde",
+ "tracing",
 ]
 
 [[package]]

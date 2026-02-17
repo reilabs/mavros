@@ -2,7 +2,6 @@ pub mod analysis;
 pub mod codegen;
 pub mod flow_analysis;
 pub mod ir;
-#[cfg(feature = "wasm")]
 pub mod llvm_codegen;
 pub mod pass_manager;
 pub mod passes;

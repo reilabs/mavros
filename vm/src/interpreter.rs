@@ -10,14 +10,9 @@ use noirc_abi::input_parser::InputValue;
 use tracing::{field, instrument};
 
 use crate::{
-    compiler::{
-        Field,
-        r1cs_gen::{ConstraintsLayout, WitnessLayout},
-    },
-    vm::{
-        array::{BoxedLayout, BoxedValue},
-        bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
-    },
+    ConstraintsLayout, Field, WitnessLayout,
+    array::{BoxedLayout, BoxedValue},
+    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
 
 pub type Handler = fn(*const u64, Frame, &mut VM);

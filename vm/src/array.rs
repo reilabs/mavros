@@ -7,11 +7,9 @@ use std::{
 use tracing::field;
 
 use crate::{
-    compiler::Field,
-    vm::{
-        bytecode::{AllocationType, VM},
-        interpreter::InputValueOrdered,
-    },
+    Field,
+    bytecode::{AllocationType, VM},
+    interpreter::InputValueOrdered,
 };
 
 #[derive(Debug, Clone, Copy)]

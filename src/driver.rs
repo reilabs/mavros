@@ -375,7 +375,6 @@ impl Driver {
         self.base_witgen_ssa = Some(ssa);
     }
 
-    #[cfg(feature = "wasm")]
     #[tracing::instrument(skip_all)]
     pub fn compile_llvm_targets(
         &mut self,
@@ -416,7 +415,6 @@ impl Driver {
     }
 
     /// Write WASM metadata JSON file
-    #[cfg(feature = "wasm")]
     fn write_wasm_metadata(
         &self,
         wasm_path: &std::path::PathBuf,
@@ -454,7 +452,6 @@ impl Driver {
 }
 
 /// Count the number of field elements in an ABI type
-#[cfg(feature = "wasm")]
 fn count_abi_type_elements(typ: &noirc_abi::AbiType) -> usize {
     use noirc_abi::AbiType;
     match typ {

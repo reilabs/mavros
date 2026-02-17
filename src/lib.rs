@@ -5,7 +5,7 @@ pub mod driver;
 pub mod error;
 pub mod project;
 
-pub mod vm;
+pub use mavros_vm as vm;
 
 pub use compiled_artifacts::CompiledArtifacts;
 pub use error::Error;
