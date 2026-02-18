@@ -1,6 +1,7 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}};
 
 use ark_ff::AdditiveGroup as _;
+use noirc_frontend::ast::FunctionKind;
 use tracing::info;
 
 use crate::{
@@ -90,16 +91,15 @@ impl Driver {
             self.project.parsed_files(),
             self.project.get_only_crate(),
         );
-        noirc_driver::check_crate(
-            &mut context,
-            crate_id,
-            &noirc_driver::CompileOptions {
-                deny_warnings: false,
-                debug_comptime_in_file: None,
-                ..Default::default()
-            },
-        )
-        .map_err(Error::NoirCompilerError)?;
+        noirc_driver::check_crate(&mut context, crate_id, &noirc_driver::CompileOptions::default())
+            .map_err(Error::NoirCompilerError)?;
+
+        for implementation in crate::project::FOREIGN_FUNCTION_IMPLS {
+            let impl_crate_id = noirc_driver::prepare_dependency(&mut context, Path::new(implementation.file));
+            noirc_driver::check_crate(&mut context, impl_crate_id, &noirc_driver::CompileOptions::default())
+                .map_err(Error::NoirCompilerError)?;
+            self.replace_foreign_function(&mut context, &impl_crate_id, implementation.custom_name, implementation.stdlib_internal_name);
+        }
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let program =
@@ -126,6 +126,46 @@ impl Driver {
         .unwrap();
 
         Ok(())
+    }
+
+    fn replace_foreign_function(
+        &self,
+        context: &mut noirc_frontend::hir::Context,
+        impl_crate_id: &noirc_frontend::graph::CrateId,
+        custom_name: &str,
+        stdlib_internal_name: &str,
+    ) {
+        let impl_def_map = context.def_map(impl_crate_id).unwrap();
+        let custom_func_id = impl_def_map
+            .get(impl_def_map.root())
+            .expect("impl crate root module not found")
+            .find_func_with_name(&custom_name.into())
+            .expect("custom function not found");
+
+        let stdlib_internal_id = context
+            .def_interner
+            .find_function(stdlib_internal_name)
+            .expect("stdlib foreign function not found");
+
+        let custom_body = context.def_interner.function(&custom_func_id);
+        context.def_interner.update_fn(stdlib_internal_id, custom_body);
+
+        let custom_meta = context
+            .def_interner
+            .function_meta(&custom_func_id)
+            .clone();
+        let stdlib_meta = context
+            .def_interner
+            .function_meta_mut(&stdlib_internal_id);
+        stdlib_meta.kind = FunctionKind::Normal;
+        // Temporary fix for faulty poseidon implementation
+        stdlib_meta.parameters = custom_meta.parameters;
+        stdlib_meta.typ = custom_meta.typ;
+
+        let modifiers = context
+            .def_interner
+            .function_modifiers_mut(&stdlib_internal_id);
+        modifiers.attributes.function = None;
     }
 
     #[tracing::instrument(skip_all)]

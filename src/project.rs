@@ -1,4 +1,4 @@
-use std::{fmt::Debug, path::PathBuf};
+use std::{fmt::Debug, path::{Path, PathBuf}};
 
 use fm::FileManager;
 use itertools::Itertools;
@@ -18,9 +18,29 @@ pub struct Project {
     nargo_parsed_files: ParsedFiles,
 }
 
+pub struct ForeignFunctionImpl {
+    pub file: &'static str,
+    pub source: &'static str,
+    pub custom_name: &'static str,
+    pub stdlib_internal_name: &'static str,
+}
+
+pub const FOREIGN_FUNCTION_IMPLS: &[ForeignFunctionImpl] = &[
+    ForeignFunctionImpl {
+        file: "poseidon2_permutation.nr",
+        source: include_str!("../stdlib_noir_impls/poseidon2_permutation.nr"),
+        custom_name: "poseidon2_permutation",
+        stdlib_internal_name: "poseidon2_permutation_internal",
+    },
+];
+
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     let mut file_manager = workspace.new_file_manager();
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
+    for implementation in FOREIGN_FUNCTION_IMPLS {
+        file_manager.add_file_with_source_canonical_path(Path::new(implementation.file), implementation.source.to_string());
+    }
+
     let parsed_files = nargo::parse_all(&file_manager);
     (file_manager, parsed_files)
 }
