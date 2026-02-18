@@ -1,6 +1,7 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::{BTreeMap, HashMap}, fs, path::{Path, PathBuf}};
 
 use ark_ff::AdditiveGroup as _;
+use noirc_frontend::{debug::DebugInstrumenter, hir_def::expr::HirExpression, monomorphization::{Monomorphizer, debug_types::DebugTypeTracker}, node_interner::DefinitionKind};
 use tracing::info;
 
 use crate::{
@@ -90,21 +91,89 @@ impl Driver {
             self.project.parsed_files(),
             self.project.get_only_crate(),
         );
-        noirc_driver::check_crate(
-            &mut context,
-            crate_id,
-            &noirc_driver::CompileOptions {
-                deny_warnings: false,
-                debug_comptime_in_file: None,
-                ..Default::default()
-            },
-        )
-        .map_err(Error::NoirCompilerError)?;
+        noirc_driver::check_crate(&mut context, crate_id, &noirc_driver::CompileOptions::default())
+            .map_err(Error::NoirCompilerError)?;
+
+        let impl_crate_id = noirc_driver::prepare_dependency(&mut context, Path::new("poseidon2_permutation.nr"));
+        
+        noirc_driver::check_crate(&mut context, impl_crate_id, &noirc_driver::CompileOptions::default())
+            .map_err(Error::NoirCompilerError)?;
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
-        let program =
-            noirc_frontend::monomorphization::monomorphize(main, &mut context.def_interner, false)
-                .unwrap();
+
+        let replacements = [
+            ("poseidon2_permutation", "poseidon2_permutation_replacement"),
+        ];
+        // Resolve FuncIds and collect call-site bindings before borrowing the interner mutably.
+        let mut call_site_info = Vec::new();
+        for (lowlevel_name, replacement_name) in &replacements {
+            let stdlib_id = context.def_interner.find_function(lowlevel_name)
+                .unwrap_or_else(|| panic!("stdlib function {lowlevel_name} not found"));
+            let replacement_id = context.def_interner.find_function(replacement_name)
+                .unwrap_or_else(|| panic!("replacement function {replacement_name} not found"));
+            let fn_type = context.def_interner.function_meta(&replacement_id).typ.clone();
+
+            for (expr_id, bindings) in &context.def_interner.instantiation_bindings {
+                let expr = context.def_interner.expression(expr_id);
+                if let HirExpression::Ident(ident, _) = expr {
+                    let def = context.def_interner.definition(ident.id);
+                    if let DefinitionKind::Function(func_id) = &def.kind {
+                        if *func_id == stdlib_id {
+                            let location = context.def_interner.expr_location(expr_id);
+                            call_site_info.push((*lowlevel_name, replacement_id, location, bindings.clone(), fn_type.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
+        let mut monomorphizer = Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
+        monomorphizer.compile_main(main).unwrap();
+
+        // Queue each replacement function and collect (lowlevel_name, mono_id) for rewriting.
+        let mut lowlevel_replacements = Vec::new();
+        for (lowlevel_name, replacement_id, location, bindings, fn_type) in call_site_info {
+            let mono_id = monomorphizer.queue_function_with_bindings(
+                replacement_id, location, bindings, fn_type, Vec::new(), None,
+            );
+            lowlevel_replacements.push((lowlevel_name.to_string(), mono_id));
+        }
+
+        monomorphizer.process_queue().unwrap();
+        let mut program = monomorphizer.into_program();
+
+        // Rewrite lowlevel/foreign calls to use the replacement implementations
+        for (lowlevel_name, mono_id) in &lowlevel_replacements {
+            rewrite_lowlevel_calls(&mut program, lowlevel_name, *mono_id);
+        }
+
+        // #[tracing::instrument(level = "trace", skip(main, interner))]
+        // pub fn monomorphize(
+        //     main: node_interner::FuncId,
+        //     interner: &mut NodeInterner,
+        //     force_unconstrained: bool,
+        // ) -> Result<Program, MonomorphizationError> {
+        //     monomorphize_debug(main, interner, &DebugInstrumenter::default(), force_unconstrained)
+        // }
+
+        // /// A more general entry-point for the monomorphization pass containing an optional
+        // /// [DebugInstrumenter] which can be set to [DebugInstrumenter::default] in case it
+        // /// is not desired. If debugging is desired, additional function calls will be inserted
+        // /// to inspect values via debug functions.
+        // pub fn monomorphize_debug(
+        //     main: node_interner::FuncId,
+        //     interner: &mut NodeInterner,
+        //     debug_instrumenter: &DebugInstrumenter,
+        //     force_unconstrained: bool,
+        // ) -> Result<Program, MonomorphizationError> {
+        //     let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(debug_instrumenter);
+        //     let mut monomorphizer = Monomorphizer::new(interner, debug_type_tracker, force_unconstrained);
+        //     monomorphizer.compile_main(main)?;
+
+        //     monomorphizer.process_queue()?;
+        //     Ok(monomorphizer.into_program())
+        // }
 
         self.abi = Some(noirc_driver::gen_abi(
             &context,
@@ -448,6 +517,27 @@ impl Driver {
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
         Ok(())
+    }
+}
+
+/// Rewrite all LowLevel/Builtin calls matching `lowlevel_name` to call `replacement_func_id` instead.
+fn rewrite_lowlevel_calls(
+    program: &mut noirc_frontend::monomorphization::ast::Program,
+    lowlevel_name: &str,
+    replacement_func_id: noirc_frontend::monomorphization::ast::FuncId,
+) {
+    use noirc_frontend::monomorphization::ast::Definition;
+    use noirc_frontend::monomorphization::visitor::visit_ident_mut;
+
+    for func in &mut program.functions {
+        visit_ident_mut(&mut func.body, &mut |ident| match &ident.definition {
+            Definition::LowLevel(name) | Definition::Builtin(name)
+                if name == lowlevel_name =>
+            {
+                ident.definition = Definition::Function(replacement_func_id);
+            }
+            _ => {}
+        });
     }
 }
 

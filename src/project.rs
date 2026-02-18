@@ -1,4 +1,4 @@
-use std::{fmt::Debug, path::PathBuf};
+use std::{fmt::Debug, path::{Path, PathBuf}};
 
 use fm::FileManager;
 use itertools::Itertools;
@@ -21,6 +21,7 @@ pub struct Project {
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     let mut file_manager = workspace.new_file_manager();
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
+    file_manager.add_file_with_source_canonical_path(Path::new("poseidon2_permutation.nr"), include_str!("../stdlib_noir_impls/poseidon2_permutation.nr").to_string());
     let parsed_files = nargo::parse_all(&file_manager);
     (file_manager, parsed_files)
 }
