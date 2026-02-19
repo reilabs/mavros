@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}};
 
 use ark_ff::AdditiveGroup as _;
 use tracing::info;
@@ -90,16 +90,17 @@ impl Driver {
             self.project.parsed_files(),
             self.project.get_only_crate(),
         );
-        noirc_driver::check_crate(
+        noirc_driver::check_crate(&mut context, crate_id, &noirc_driver::CompileOptions::default())
+            .map_err(Error::NoirCompilerError)?;
+
+        let poseidon2_crate_id =
+            noirc_driver::prepare_dependency(&mut context, Path::new("poseidon2/lib.nr"));
+        noirc_driver::add_dep(
             &mut context,
             crate_id,
-            &noirc_driver::CompileOptions {
-                deny_warnings: false,
-                debug_comptime_in_file: None,
-                ..Default::default()
-            },
-        )
-        .map_err(Error::NoirCompilerError)?;
+            poseidon2_crate_id,
+            "poseidon2".parse().unwrap(),
+        );
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let program =
