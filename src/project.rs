@@ -21,19 +21,19 @@ pub struct Project {
 fn add_poseidon2_to_file_manager(file_manager: &mut FileManager) {
     file_manager.add_file_with_source_canonical_path(
         Path::new("poseidon2/lib.nr"),
-        include_str!("../stdlib_replacements/poseidon2/src/lib.nr").to_string(),
+        include_str!("../stdlib_replacements/poseidon2/lib.nr").to_string(),
     );
     file_manager.add_file_with_source_canonical_path(
         Path::new("poseidon2/bn254.nr"),
-        include_str!("../stdlib_replacements/poseidon2/src/bn254.nr").to_string(),
+        include_str!("../stdlib_replacements/poseidon2/bn254.nr").to_string(),
     );
     file_manager.add_file_with_source_canonical_path(
         Path::new("poseidon2/bn254/consts.nr"),
-        include_str!("../stdlib_replacements/poseidon2/src/bn254/consts.nr").to_string(),
+        include_str!("../stdlib_replacements/poseidon2/bn254/consts.nr").to_string(),
     );
     file_manager.add_file_with_source_canonical_path(
         Path::new("poseidon2/bn254/permutation.nr"),
-        include_str!("../stdlib_replacements/poseidon2/src/bn254/permutation.nr").to_string(),
+        include_str!("../stdlib_replacements/poseidon2/bn254/permutation.nr").to_string(),
     );
 }
 
