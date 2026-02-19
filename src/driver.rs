@@ -11,6 +11,7 @@ use tracing::info;
 use crate::{
     Project,
     compiler::{
+        ssa_gen::LowLevelReplacement,
         Field,
         analysis::types::Types,
         codegen::CodeGen,
@@ -136,16 +137,20 @@ impl Driver {
         let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer = Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
-        let mut poseidon2_replacements: HashMap<u32, AstFuncId> = HashMap::new();
+        let mut poseidon2_size_map: HashMap<u32, AstFuncId> = HashMap::new();
         for (size, replacement_id, location, fn_type) in replacement_functions {
             let mono_func_id = monomorphizer.queue_function_with_bindings(
                 replacement_id, location, Default::default(), fn_type.clone(), Vec::new(), None,
             );
-            poseidon2_replacements.insert(size, mono_func_id);
+            poseidon2_size_map.insert(size, mono_func_id);
         }
+        let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
+        lowlevel_replacements.insert(
+            "poseidon2_permutation".to_string(),
+            LowLevelReplacement::ByArraySize(poseidon2_size_map),
+        );
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
-        
 
         self.abi = Some(noirc_driver::gen_abi(
             &context,
@@ -155,7 +160,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(SSA::from_program(&program, poseidon2_replacements));
+        self.initial_ssa = Some(SSA::from_program(&program, lowlevel_replacements));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),

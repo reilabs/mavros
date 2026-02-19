@@ -14,6 +14,7 @@ use noirc_frontend::monomorphization::ast::{
 
 use crate::compiler::ssa::{Function, FunctionId, SSA};
 
+pub use expression_converter::LowLevelReplacement;
 use expression_converter::ExpressionConverter;
 use type_converter::TypeConverter;
 
@@ -29,18 +30,18 @@ pub struct SsaConverter {
     global_slots: HashMap<GlobalId, usize>,
     /// Type converter
     type_converter: TypeConverter,
-    /// Maps array size to replacement AstFuncId for poseidon2_permutation
-    poseidon2_replacements: HashMap<u32, AstFuncId>,
+    /// Maps LowLevel function name to its replacement
+    lowlevel_replacements: HashMap<String, LowLevelReplacement>,
 }
 
 impl SsaConverter {
-    pub fn new(poseidon2_replacements: HashMap<u32, AstFuncId>) -> Self {
+    pub fn new(lowlevel_replacements: HashMap<String, LowLevelReplacement>) -> Self {
         Self {
             constrained_mapper: HashMap::new(),
             unconstrained_mapper: HashMap::new(),
             global_slots: HashMap::new(),
             type_converter: TypeConverter::new(),
-            poseidon2_replacements,
+            lowlevel_replacements,
         }
     }
 
@@ -233,7 +234,7 @@ impl SsaConverter {
                 entry,
                 false,
                 &self.global_slots,
-                &self.poseidon2_replacements,
+                &self.lowlevel_replacements,
             );
 
             for gid in &ordered_ids {
@@ -296,7 +297,7 @@ impl SsaConverter {
             entry_block,
             in_unconstrained,
             &self.global_slots,
-            &self.poseidon2_replacements,
+            &self.lowlevel_replacements,
         );
 
         // Add function parameters as block parameters
@@ -326,8 +327,8 @@ impl SsaConverter {
 
 impl SSA {
     /// Create SSA directly from a monomorphized program.
-    pub fn from_program(program: &Program, poseidon2_replacements: HashMap<u32, AstFuncId>) -> SSA {
-        let mut converter = SsaConverter::new(poseidon2_replacements);
+    pub fn from_program(program: &Program, lowlevel_replacements: HashMap<String, LowLevelReplacement>) -> SSA {
+        let mut converter = SsaConverter::new(lowlevel_replacements);
         converter.convert_program(program)
     }
 }
