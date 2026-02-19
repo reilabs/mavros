@@ -1,9 +1,8 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use mavros::api::{self, ApiError};
-use mavros::{Error, Project, abi_helpers, compiler::Field, driver::Driver, vm::interpreter};
-use noirc_abi::input_parser::Format;
+use mavros::compiler::Field;
 use tracing::{error, info, warn};
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
@@ -12,7 +11,11 @@ use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::Subscr
 const DEFAULT_NOIR_PROJECT_PATH: &str = "./";
 
 #[derive(Clone, Debug, Parser)]
+#[command(name = "mavros")]
 pub struct ProgramOptions {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// The root of the Noir project to extract.
     #[arg(long, value_name = "PATH", default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
     pub root: PathBuf,
@@ -34,6 +37,28 @@ pub struct ProgramOptions {
     pub skip_vm: bool,
 }
 
+#[derive(Clone, Debug, Subcommand)]
+pub enum Command {
+    /// Compile a Noir project and output R1CS and binary artifacts.
+    Compile {
+        /// Path to the Noir project root.
+        #[arg(default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
+        path: PathBuf,
+
+        /// Output path for R1CS constraints (bincode).
+        #[arg(long, default_value = "target/r1cs.bin")]
+        r1cs_output: PathBuf,
+
+        /// Output path for binaries and ABI (JSON).
+        #[arg(long, default_value = "target/basic.json")]
+        binary_output: PathBuf,
+
+        /// Enable debugging mode which will generate graphs.
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        draw_graphs: bool,
+    },
+}
+
 /// The main function for the CLI utility, responsible for parsing program
 /// options and handing them off to the actual execution of the tool.
 fn main() -> ExitCode {
@@ -45,25 +70,93 @@ fn main() -> ExitCode {
         .with(EnvFilter::from_default_env())
         .init();
 
-    run(&args).unwrap_or_else(|err| {
+    let result = match &args.command {
+        Some(Command::Compile {
+            path,
+            r1cs_output,
+            binary_output,
+            draw_graphs,
+        }) => run_compile(path, r1cs_output, binary_output, *draw_graphs),
+        None => run(&args),
+    };
+
+    result.unwrap_or_else(|err| {
         eprintln!("Error Encountered: {err:?}");
         ExitCode::FAILURE
     })
 }
 
-/// Compile phase: compile the Noir project and save artifacts to a file.
-pub fn run_compile(args: &ProgramOptions, output: &PathBuf) -> Result<ExitCode, ApiError> {
-    info!(message = %"Compiling Noir project", root = ?args.root, output = ?output);
+/// Compile phase: compile the Noir project and save R1CS and binary artifacts
+/// to separate files.
+pub fn run_compile(
+    path: &PathBuf,
+    r1cs_output: &PathBuf,
+    binary_output: &PathBuf,
+    draw_graphs: bool,
+) -> Result<ExitCode, ApiError> {
+    info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
-    let artifacts = api::compile_to_artifacts(args.root.clone(), args.draw_graphs)?;
+    let (mut driver, r1cs) = api::compile_to_r1cs(path.clone(), draw_graphs)?;
+    let witgen_binary = api::compile_witgen(&mut driver)?;
+    let ad_binary = api::compile_ad(&driver)?;
 
-    api::save_artifacts(&artifacts, output)?;
+    // Ensure output directories exist
+    if let Some(parent) = r1cs_output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(ApiError::Io)?;
+        }
+    }
+    if let Some(parent) = binary_output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(ApiError::Io)?;
+        }
+    }
+
+    // Save R1CS as bincode
+    let r1cs_bytes = bincode::serialize(&r1cs)
+        .map_err(|e| ApiError::InputsEncode(e.to_string()))?;
+    fs::write(r1cs_output, r1cs_bytes).map_err(ApiError::Io)?;
+
+    // Build ABI info from driver
+    let abi = driver.abi();
+    let abi_params: Vec<serde_json::Value> = abi
+        .parameters
+        .iter()
+        .map(|param| {
+            serde_json::json!({
+                "name": param.name,
+                "type": format!("{:?}", param.typ),
+                "visibility": format!("{:?}", param.visibility),
+            })
+        })
+        .collect();
+    let abi_return = abi.return_type.as_ref().map(|rt| {
+        serde_json::json!({
+            "type": format!("{:?}", rt.abi_type),
+            "visibility": format!("{:?}", rt.visibility),
+        })
+    });
+
+    // Save binaries and ABI as JSON
+    let basic = serde_json::json!({
+        "witgen_binary": witgen_binary,
+        "ad_binary": ad_binary,
+        "abi": {
+            "parameters": abi_params,
+            "return_type": abi_return,
+        },
+    });
+    let basic_json = serde_json::to_string_pretty(&basic)
+        .map_err(|e| ApiError::InputsEncode(e.to_string()))?;
+    fs::write(binary_output, basic_json).map_err(ApiError::Io)?;
 
     info!(
         message = %"Artifacts saved successfully",
-        r1cs_constraints = artifacts.r1cs.constraints.len(),
-        witgen_binary_size = artifacts.witgen_binary.len() * 8,
-        ad_binary_size = artifacts.ad_binary.len() * 8,
+        r1cs_output = ?r1cs_output,
+        binary_output = ?binary_output,
+        r1cs_constraints = r1cs.constraints.len(),
+        witgen_binary_size = witgen_binary.len() * 8,
+        ad_binary_size = ad_binary.len() * 8,
     );
 
     Ok(ExitCode::SUCCESS)

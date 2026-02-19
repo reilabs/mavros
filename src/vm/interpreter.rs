@@ -10,9 +10,14 @@ use noirc_abi::input_parser::InputValue;
 use tracing::{field, instrument};
 
 use crate::{
-    ConstraintsLayout, Field, WitnessLayout,
-    array::{BoxedLayout, BoxedValue},
-    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
+    compiler::{
+        Field,
+        r1cs_gen::{ConstraintsLayout, WitnessLayout},
+    },
+    vm::{
+        array::{BoxedLayout, BoxedValue},
+        bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
+    },
 };
 
 pub type Handler = fn(*const u64, Frame, &mut VM);
@@ -168,7 +173,7 @@ pub struct WitgenResult {
 /// Contains the pre-commitment witness and all intermediate state needed to
 /// complete witness generation in phase 2 (after real Fiat-Shamir challenges
 /// are available).
-#[derive(Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Phase1Result {
     pub out_wit_pre_comm: Vec<Field>,
     pub out_wit_post_comm: Vec<Field>,
@@ -511,3 +516,4 @@ fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
     }
     encoded_value
 }
+

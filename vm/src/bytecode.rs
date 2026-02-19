@@ -32,16 +32,19 @@ impl FramePosition {
 
 pub struct JumpTarget(pub isize);
 
+#[derive(Clone)]
 pub enum AllocationType {
     Stack,
     Heap,
 }
 
+#[derive(Clone)]
 pub enum AlocationEvent {
     Alloc(AllocationType, usize),
     Free(AllocationType, usize),
 }
 
+#[derive(Clone)]
 pub struct AllocationInstrumenter {
     pub events: Vec<AlocationEvent>,
 }
@@ -260,6 +263,7 @@ impl AllocationInstrumenter {
     }
 }
 
+#[derive(Clone)]
 pub struct TableInfo {
     pub multiplicities_wit: *mut Field,
     pub num_indices: usize,

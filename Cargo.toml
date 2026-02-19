@@ -17,7 +17,7 @@ noirc_frontend = { git = "https://github.com/noir-lang/noir.git", branch = "mast
 noirc_evaluator = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_evaluator" }
 noirc_abi = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_abi" }
 
-clap = { version = "4.5.17", features = ["unstable-v5"] }
+clap = { version = "4.5.17", features = ["unstable-v5", "derive"] }
 derivative = "2.2.0"
 indoc = "2.0.5"
 itertools = "0.14.0"
