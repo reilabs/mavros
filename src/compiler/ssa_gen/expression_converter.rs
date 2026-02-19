@@ -52,6 +52,8 @@ pub struct ExpressionConverter<'a> {
     in_unconstrained: bool,
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
+    /// Maps array size to replacement AstFuncId for poseidon2_permutation
+    poseidon2_replacements: &'a HashMap<u32, AstFuncId>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -60,6 +62,7 @@ impl<'a> ExpressionConverter<'a> {
         entry_block: BlockId,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
+        poseidon2_replacements: &'a HashMap<u32, AstFuncId>,
     ) -> Self {
         Self {
             bindings: HashMap::new(),
@@ -70,6 +73,7 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
+            poseidon2_replacements,
         }
     }
 
@@ -1215,10 +1219,42 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_lowlevel_call(
         &mut self,
         name: &str,
-        _call: &noirc_frontend::monomorphization::ast::Call,
-        _function: &mut Function,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        function: &mut Function,
     ) -> Option<ValueId> {
         match name {
+            "poseidon2_permutation" => {
+                let array_size = match &call.return_type {
+                    noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n as u32,
+                    _ => panic!("poseidon2_permutation expected array return type"),
+                };
+                let replacement_id = self
+                    .poseidon2_replacements
+                    .get(&array_size)
+                    .unwrap_or_else(|| {
+                        panic!("No poseidon2 replacement for size {}", array_size)
+                    });
+                let ssa_func_id = self
+                    .function_mapper
+                    .get(replacement_id)
+                    .unwrap_or_else(|| panic!("Replacement function not in function_mapper"));
+
+                let args: Vec<ValueId> = call
+                    .arguments
+                    .iter()
+                    .map(|arg| self.convert_expression(arg, function).unwrap())
+                    .collect();
+
+                let return_size = self.return_size(&call.return_type);
+                let results =
+                    function.push_call(self.current_block, *ssa_func_id, args, return_size);
+
+                if results.is_empty() {
+                    None
+                } else {
+                    Some(results[0])
+                }
+            }
             _ => todo!("LowLevel function '{}' not yet supported", name),
         }
     }

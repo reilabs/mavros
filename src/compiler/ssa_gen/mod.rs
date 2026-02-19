@@ -29,15 +29,18 @@ pub struct SsaConverter {
     global_slots: HashMap<GlobalId, usize>,
     /// Type converter
     type_converter: TypeConverter,
+    /// Maps array size to replacement AstFuncId for poseidon2_permutation
+    poseidon2_replacements: HashMap<u32, AstFuncId>,
 }
 
 impl SsaConverter {
-    pub fn new() -> Self {
+    pub fn new(poseidon2_replacements: HashMap<u32, AstFuncId>) -> Self {
         Self {
             constrained_mapper: HashMap::new(),
             unconstrained_mapper: HashMap::new(),
             global_slots: HashMap::new(),
             type_converter: TypeConverter::new(),
+            poseidon2_replacements,
         }
     }
 
@@ -230,6 +233,7 @@ impl SsaConverter {
                 entry,
                 false,
                 &self.global_slots,
+                &self.poseidon2_replacements,
             );
 
             for gid in &ordered_ids {
@@ -292,6 +296,7 @@ impl SsaConverter {
             entry_block,
             in_unconstrained,
             &self.global_slots,
+            &self.poseidon2_replacements,
         );
 
         // Add function parameters as block parameters
@@ -321,8 +326,8 @@ impl SsaConverter {
 
 impl SSA {
     /// Create SSA directly from a monomorphized program.
-    pub fn from_program(program: &Program) -> SSA {
-        let mut converter = SsaConverter::new();
+    pub fn from_program(program: &Program, poseidon2_replacements: HashMap<u32, AstFuncId>) -> SSA {
+        let mut converter = SsaConverter::new(poseidon2_replacements);
         converter.convert_program(program)
     }
 }

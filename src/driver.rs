@@ -1,9 +1,10 @@
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}};
+use std::{collections::{BTreeMap, HashMap}, fs, path::{Path, PathBuf}};
 
 
 use ark_ff::AdditiveGroup as _;
 use noirc_frontend::debug::DebugInstrumenter;
 use noirc_frontend::monomorphization::Monomorphizer;
+use noirc_frontend::monomorphization::ast::FuncId as AstFuncId;
 use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
 use tracing::info;
 
@@ -120,14 +121,14 @@ impl Driver {
         let perm_local_id = *bn254_module.children.get(&"permutation".into()).unwrap();
         let perm_module = &poseidon2_def_map[perm_local_id];
 
-        let replacement_names = ["t2", "t3", "t4", "t8", "t12", "t16"];
+        let replacement_sizes: [(&str, u32); 6] = [("t2", 2), ("t3", 3), ("t4", 4), ("t8", 8), ("t12", 12), ("t16", 16)];
         let mut replacement_functions = Vec::new();
-        for name in &replacement_names {
+        for (name, size) in &replacement_sizes {
             if let Some(func_id) = perm_module.find_func_with_name(&(*name).into()) {
                 let meta = context.def_interner.function_meta(&func_id);
                 let location = meta.location;
                 let fn_type = meta.typ.clone();
-                replacement_functions.push((func_id, location, fn_type));
+                replacement_functions.push((*size, func_id, location, fn_type));
             }
         }
 
@@ -135,10 +136,12 @@ impl Driver {
         let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer = Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
-        for (replacement_id, location, fn_type) in replacement_functions {
-            monomorphizer.queue_function_with_bindings(
-                replacement_id, location, Default::default(), fn_type, Vec::new(), None,
+        let mut poseidon2_replacements: HashMap<u32, AstFuncId> = HashMap::new();
+        for (size, replacement_id, location, fn_type) in replacement_functions {
+            let mono_func_id = monomorphizer.queue_function_with_bindings(
+                replacement_id, location, Default::default(), fn_type.clone(), Vec::new(), None,
             );
+            poseidon2_replacements.insert(size, mono_func_id);
         }
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
@@ -152,7 +155,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(SSA::from_program(&program));
+        self.initial_ssa = Some(SSA::from_program(&program, poseidon2_replacements));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
