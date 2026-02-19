@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}};
 
+
 use ark_ff::AdditiveGroup as _;
+use noirc_frontend::debug::DebugInstrumenter;
+use noirc_frontend::monomorphization::Monomorphizer;
+use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
 use tracing::info;
 
 use crate::{
@@ -101,11 +105,44 @@ impl Driver {
             poseidon2_crate_id,
             "poseidon2".parse().unwrap(),
         );
+        noirc_driver::check_crate(
+            &mut context,
+            poseidon2_crate_id,
+            &noirc_driver::CompileOptions::default(),
+        )
+        .map_err(Error::NoirCompilerError)?;
+
+        // Look up poseidon2 replacement functions (bn254::permutation::t2..t16)
+        let poseidon2_def_map = context.def_map(&poseidon2_crate_id).unwrap();
+        let root_module = &poseidon2_def_map[poseidon2_def_map.root()];
+        let bn254_local_id = *root_module.children.get(&"bn254".into()).unwrap();
+        let bn254_module = &poseidon2_def_map[bn254_local_id];
+        let perm_local_id = *bn254_module.children.get(&"permutation".into()).unwrap();
+        let perm_module = &poseidon2_def_map[perm_local_id];
+
+        let replacement_names = ["t2", "t3", "t4", "t8", "t12", "t16"];
+        let mut replacement_functions = Vec::new();
+        for name in &replacement_names {
+            if let Some(func_id) = perm_module.find_func_with_name(&(*name).into()) {
+                let meta = context.def_interner.function_meta(&func_id);
+                let location = meta.location;
+                let fn_type = meta.typ.clone();
+                replacement_functions.push((func_id, location, fn_type));
+            }
+        }
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
-        let program =
-            noirc_frontend::monomorphization::monomorphize(main, &mut context.def_interner, false)
-                .unwrap();
+        let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
+        let mut monomorphizer = Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
+        monomorphizer.compile_main(main).unwrap();
+        for (replacement_id, location, fn_type) in replacement_functions {
+            monomorphizer.queue_function_with_bindings(
+                replacement_id, location, Default::default(), fn_type, Vec::new(), None,
+            );
+        }
+        monomorphizer.process_queue().unwrap();
+        let program = monomorphizer.into_program();
+        
 
         self.abi = Some(noirc_driver::gen_abi(
             &context,
