@@ -20,8 +20,12 @@ pub struct Project {
 
 fn add_stdlib_replacements(file_manager: &mut FileManager) {
     file_manager.add_file_with_source_canonical_path(
-        Path::new("poseidon2.nr"),
-        include_str!("../stdlib_replacements/poseidon2.nr").to_string(),
+        Path::new("poseidon2_permutation.nr"),
+        include_str!("../stdlib_replacements/poseidon2_permutation.nr").to_string(),
+    );
+    file_manager.add_file_with_source_canonical_path(
+        Path::new("sha256_compression.nr"),
+        include_str!("../stdlib_replacements/sha256_compression.nr").to_string(),
     );
 }
 

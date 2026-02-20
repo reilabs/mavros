@@ -73,14 +73,24 @@ impl ReplacementCrate {
     }
 }
 
-const POSEIDON2_REPLACEMENT: ReplacementCrate = ReplacementCrate {
-    file_name: "poseidon2.nr",
-    dep_name: "poseidon2",
-    replacements: &[ReplacementSpec {
-        lowlevel_name: "poseidon2_permutation",
-        kind: ReplacementKind::ByArraySize(&[("t2", 2), ("t3", 3), ("t4", 4), ("t8", 8), ("t12", 12), ("t16", 16)]),
-    }],
-};
+const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
+    ReplacementCrate {
+        file_name: "poseidon2_permutation.nr",
+        dep_name: "poseidon2_permutation",
+        replacements: &[ReplacementSpec {
+            lowlevel_name: "poseidon2_permutation",
+            kind: ReplacementKind::ByArraySize(&[("t2", 2), ("t3", 3), ("t4", 4), ("t8", 8), ("t12", 12), ("t16", 16)]),
+        }],
+    },
+    ReplacementCrate {
+        file_name: "sha256_compression.nr",
+        dep_name: "sha256_compression",
+        replacements: &[ReplacementSpec {
+            lowlevel_name: "sha256_compression",
+            kind: ReplacementKind::Single("sha256_compression"),
+        }],
+    },
+];
 
 pub struct Driver {
     project: Project,
@@ -206,9 +216,11 @@ impl Driver {
         noirc_driver::check_crate(&mut context, crate_id, &noirc_driver::CompileOptions::default())
             .map_err(Error::NoirCompilerError)?;
 
-        let poseidon2_functions = Self::prepare_replacement_crate(
-            &mut context, crate_id, &POSEIDON2_REPLACEMENT,
-        )?;
+        let mut prepared_replacements = Vec::new();
+        for replacement in REPLACEMENT_CRATES {
+            let functions = Self::prepare_replacement_crate(&mut context, crate_id, replacement)?;
+            prepared_replacements.push((replacement, functions));
+        }
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
@@ -216,11 +228,9 @@ impl Driver {
         monomorphizer.compile_main(main).unwrap();
 
         let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
-        Self::add_lowlevel_replacements(
-            &POSEIDON2_REPLACEMENT,
-            &poseidon2_functions,
-            &mut monomorphizer, &mut lowlevel_replacements,
-        );
+        for (replacement, functions) in &prepared_replacements {
+            Self::add_lowlevel_replacements(replacement, functions, &mut monomorphizer, &mut lowlevel_replacements);
+        }
 
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();

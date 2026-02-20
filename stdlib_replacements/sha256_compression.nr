@@ -1,14 +1,9 @@
-// SHA-256 compression function implementation following the gnark-sha256 style.
+// SHA-256 compression function implementation following gnark-sha256.
 // Reference: https://github.com/reilabs/gnark-sha256
 //
-// This replaces the #[foreign(sha256_compression)] function in Noir's stdlib
-// with a pure Noir implementation suitable for R1CS constraint generation.
-//
-// Shift and modulo operators are not available, so we use:
-//   right shift:  x / 2^n
-//   left shift:   x * 2^n
-//   rotation:     split at boundary, recombine
-//   wrapping add: sum via u64, subtract carry * 2^32
+// Follows gnark's direct 64-round Schedule/Permute structure.
+// Uses division for right-shift and modular arithmetic for wrapping add,
+// since Noir's >> and << operators are not available in the SSA backend.
 
 global K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -22,63 +17,60 @@ global K: [u32; 64] = [
 ];
 
 // Powers of two for u32: POW2[i] = 2^i for i in 0..32.
-global POW2: [u32; 32] = [
+global POW2: [u32; 33] = [
     1, 2, 4, 8, 16, 32, 64, 128,
     256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
     65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608,
     16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648,
+    0, // sentinel, unused
 ];
 
 // Wrapping u32 addition: (a + b) mod 2^32.
-// Computes in u64 to avoid overflow, then extracts the low 32 bits
-// by dividing out the carry.
 fn wrapping_add(a: u32, b: u32) -> u32 {
     let sum: u64 = a as u64 + b as u64;
     let carry: u64 = sum / 4294967296;
     (sum - carry * 4294967296) as u32
 }
 
-// Right rotation of a 32-bit value by n positions.
-// rotr(x, n) = (x >> n) | (x << (32 - n))
-// Implemented by splitting x at position n and recombining.
-fn rotr(x: u32, n: u32) -> u32 {
-    let hi = x / POW2[n];           // top (32-n) bits
-    let lo = x - hi * POW2[n];      // bottom n bits
-    hi + lo * POW2[32 - n]          // recombine rotated
-}
-
-// Right shift of a 32-bit value by n positions.
+// Right shift: x >> n, implemented as x / 2^n.
 fn shr(x: u32, n: u32) -> u32 {
     x / POW2[n]
 }
 
-// Small sigma0: used in message schedule
+// Right rotation: (x >> n) | (x << (32-n)).
+// Split x at position n and recombine.
+fn rotr(x: u32, n: u32) -> u32 {
+    let hi = x / POW2[n];
+    let lo = x - hi * POW2[n];
+    hi + lo * POW2[32 - n]
+}
+
+// Small sigma0: rotr(x,7) ^ rotr(x,18) ^ shr(x,3)
 fn sigma0(x: u32) -> u32 {
     rotr(x, 7) ^ rotr(x, 18) ^ shr(x, 3)
 }
 
-// Small sigma1: used in message schedule
+// Small sigma1: rotr(x,17) ^ rotr(x,19) ^ shr(x,10)
 fn sigma1(x: u32) -> u32 {
     rotr(x, 17) ^ rotr(x, 19) ^ shr(x, 10)
 }
 
-// Big Sigma0: used in compression rounds
+// Big Sigma0: rotr(a,2) ^ rotr(a,13) ^ rotr(a,22)
 fn big_sigma0(x: u32) -> u32 {
     rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22)
 }
 
-// Big Sigma1: used in compression rounds
+// Big Sigma1: rotr(e,6) ^ rotr(e,11) ^ rotr(e,25)
 fn big_sigma1(x: u32) -> u32 {
     rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25)
 }
 
-// Choice: Ch(e, f, g) = (e AND f) XOR (NOT e AND g)
-// Using algebraic identity to avoid NOT: g XOR (e AND (f XOR g))
+// Ch(e, f, g) = (e & f) ^ (~e & g) = g ^ (e & (f ^ g))
 fn ch(e: u32, f: u32, g: u32) -> u32 {
     g ^ (e & (f ^ g))
 }
 
-// Majority: Maj(a, b, c) = (a AND b) XOR (a AND c) XOR (b AND c)
+// Maj(a, b, c) = (a & b) ^ (a & c) ^ (b & c)
 fn maj(a: u32, b: u32, c: u32) -> u32 {
     (a & b) ^ (a & c) ^ (b & c)
 }
