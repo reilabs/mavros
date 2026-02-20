@@ -2220,6 +2220,7 @@ dependencies = [
  "noirc_frontend",
  "opcode-gen",
  "petgraph 0.6.5",
+ "plotters",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -2254,7 +2255,6 @@ dependencies = [
  "mavros-artifacts",
  "noirc_abi",
  "opcode-gen",
- "plotters",
  "serde",
  "tracing",
 ]

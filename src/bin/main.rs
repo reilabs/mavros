@@ -3,6 +3,7 @@ use std::{fs, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand};
 use mavros::api;
 use mavros::compiler::Field;
+use mavros::plotting;
 
 type Error = Box<dyn std::error::Error>;
 use tracing::{error, info, warn};
@@ -187,9 +188,10 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         info!(message = %"Witgen output is correct");
     }
 
-    let leftover_memory = witgen_result
-        .instrumenter
-        .plot(&api::debug_output_dir(&driver).join("witgen_vm_memory.png"));
+    let leftover_memory = plotting::plot_memory_chart(
+        &witgen_result.instrumenter,
+        &api::debug_output_dir(&driver).join("witgen_vm_memory.png"),
+    );
     if leftover_memory > 0 {
         warn!(message = %"VM memory leak detected", leftover_memory);
     } else {
@@ -244,8 +246,10 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (ad_a, ad_b, ad_c, ad_instrumenter) =
         api::run_ad_from_binary(&mut ad_binary, &r1cs, &ad_coeffs);
 
-    let leftover_memory =
-        ad_instrumenter.plot(&api::debug_output_dir(&driver).join("ad_vm_memory.png"));
+    let leftover_memory = plotting::plot_memory_chart(
+        &ad_instrumenter,
+        &api::debug_output_dir(&driver).join("ad_vm_memory.png"),
+    );
     if leftover_memory > 0 {
         warn!(message = %"AD VM memory leak detected", leftover_memory);
     } else {
