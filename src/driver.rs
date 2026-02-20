@@ -1,11 +1,12 @@
 use std::{collections::{BTreeMap, HashMap}, fs, path::{Path, PathBuf}};
 
-
 use ark_ff::AdditiveGroup as _;
 use noirc_frontend::debug::DebugInstrumenter;
+use noirc_frontend::hir::Context;
 use noirc_frontend::monomorphization::Monomorphizer;
 use noirc_frontend::monomorphization::ast::FuncId as AstFuncId;
 use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
+use noirc_frontend::node_interner::FuncId;
 use tracing::info;
 
 use crate::{
@@ -89,6 +90,24 @@ impl Driver {
         dir
     }
 
+    /// Look up named functions from the root module of a crate, returning their metadata.
+    fn find_functions_in_crate(
+        context: &Context,
+        crate_id: noirc_frontend::graph::CrateId,
+        function_names: &[&str],
+    ) -> Vec<(String, FuncId, noirc_errors::Location, noirc_frontend::Type)> {
+        let def_map = context.def_map(&crate_id).unwrap();
+        let root_module = &def_map[def_map.root()];
+        let mut result = Vec::new();
+        for name in function_names {
+            if let Some(func_id) = root_module.find_func_with_name(&(*name).into()) {
+                let meta = context.def_interner.function_meta(&func_id);
+                result.push((name.to_string(), func_id, meta.location, meta.typ.clone()));
+            }
+        }
+        result
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
@@ -99,56 +118,40 @@ impl Driver {
         noirc_driver::check_crate(&mut context, crate_id, &noirc_driver::CompileOptions::default())
             .map_err(Error::NoirCompilerError)?;
 
-        let poseidon2_crate_id =
-            noirc_driver::prepare_dependency(&mut context, Path::new("poseidon2/lib.nr"));
-        noirc_driver::add_dep(
-            &mut context,
-            crate_id,
-            poseidon2_crate_id,
-            "poseidon2".parse().unwrap(),
+        let impl_crate_id = noirc_driver::prepare_dependency(&mut context, Path::new("poseidon2.nr"));
+        noirc_driver::add_dep(&mut context, crate_id, impl_crate_id, "poseidon2".parse().unwrap());
+        noirc_driver::check_crate(&mut context, impl_crate_id, &noirc_driver::CompileOptions::default())
+            .map_err(Error::NoirCompilerError)?;
+
+        // Look up poseidon2 replacement functions (t2..t16)
+        let poseidon2_functions = Self::find_functions_in_crate(
+            &context,
+            impl_crate_id,
+            &["t2", "t3", "t4", "t8", "t12", "t16"],
         );
-        noirc_driver::check_crate(
-            &mut context,
-            poseidon2_crate_id,
-            &noirc_driver::CompileOptions::default(),
-        )
-        .map_err(Error::NoirCompilerError)?;
-
-        // Look up poseidon2 replacement functions (bn254::permutation::t2..t16)
-        let poseidon2_def_map = context.def_map(&poseidon2_crate_id).unwrap();
-        let root_module = &poseidon2_def_map[poseidon2_def_map.root()];
-        let bn254_local_id = *root_module.children.get(&"bn254".into()).unwrap();
-        let bn254_module = &poseidon2_def_map[bn254_local_id];
-        let perm_local_id = *bn254_module.children.get(&"permutation".into()).unwrap();
-        let perm_module = &poseidon2_def_map[perm_local_id];
-
-        let replacement_sizes: [(&str, u32); 6] = [("t2", 2), ("t3", 3), ("t4", 4), ("t8", 8), ("t12", 12), ("t16", 16)];
-        let mut replacement_functions = Vec::new();
-        for (name, size) in &replacement_sizes {
-            if let Some(func_id) = perm_module.find_func_with_name(&(*name).into()) {
-                let meta = context.def_interner.function_meta(&func_id);
-                let location = meta.location;
-                let fn_type = meta.typ.clone();
-                replacement_functions.push((*size, func_id, location, fn_type));
-            }
-        }
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer = Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
+
+        // Build lowlevel replacements by monomorphizing the replacement functions
+        let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
+
+        let poseidon2_sizes: HashMap<String, u32> = HashMap::from([("t2".to_string(), 2), ("t3".to_string(), 3), ("t4".to_string(), 4), ("t8".to_string(), 8), ("t12".to_string(), 12), ("t16".to_string(), 16)]);
         let mut poseidon2_size_map: HashMap<u32, AstFuncId> = HashMap::new();
-        for (size, replacement_id, location, fn_type) in replacement_functions {
+        for (name, func_id, location, fn_type) in &poseidon2_functions {
+            let size = poseidon2_sizes[name];
             let mono_func_id = monomorphizer.queue_function_with_bindings(
-                replacement_id, location, Default::default(), fn_type.clone(), Vec::new(), None,
+                *func_id, *location, Default::default(), fn_type.clone(), Vec::new(), None,
             );
             poseidon2_size_map.insert(size, mono_func_id);
         }
-        let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
         lowlevel_replacements.insert(
             "poseidon2_permutation".to_string(),
             LowLevelReplacement::ByArraySize(poseidon2_size_map),
         );
+
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
 

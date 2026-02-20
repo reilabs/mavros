@@ -18,29 +18,17 @@ pub struct Project {
     nargo_parsed_files: ParsedFiles,
 }
 
-fn add_poseidon2_to_file_manager(file_manager: &mut FileManager) {
+fn add_stdlib_replacements(file_manager: &mut FileManager) {
     file_manager.add_file_with_source_canonical_path(
-        Path::new("poseidon2/lib.nr"),
-        include_str!("../stdlib_replacements/poseidon2/lib.nr").to_string(),
-    );
-    file_manager.add_file_with_source_canonical_path(
-        Path::new("poseidon2/bn254.nr"),
-        include_str!("../stdlib_replacements/poseidon2/bn254.nr").to_string(),
-    );
-    file_manager.add_file_with_source_canonical_path(
-        Path::new("poseidon2/bn254/consts.nr"),
-        include_str!("../stdlib_replacements/poseidon2/bn254/consts.nr").to_string(),
-    );
-    file_manager.add_file_with_source_canonical_path(
-        Path::new("poseidon2/bn254/permutation.nr"),
-        include_str!("../stdlib_replacements/poseidon2/bn254/permutation.nr").to_string(),
+        Path::new("poseidon2.nr"),
+        include_str!("../stdlib_replacements/poseidon2.nr").to_string(),
     );
 }
 
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     let mut file_manager = workspace.new_file_manager();
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
-    add_poseidon2_to_file_manager(&mut file_manager);
+    add_stdlib_replacements(&mut file_manager);
     let parsed_files = nargo::parse_all(&file_manager);
     (file_manager, parsed_files)
 }

@@ -1,4 +1,94 @@
-use crate::bn254::Poseidon2Bn254Config;
+// ====================
+// Helper functions
+// ====================
+
+
+pub fn vec_add<let T: u32>(lhs: [Field; T], rhs: [Field; T]) -> [Field; T] {
+    let mut result = [0; T];
+    for i in 0..T {
+        result[i] = lhs[i] + rhs[i];
+    }
+    result
+}
+
+#[field(bn254)]
+pub fn sbox<let T: u32>(mut state: [Field; T]) -> [Field; T] {
+    state.map(|x| sbox_e(x))
+}
+
+#[field(bn254)]
+pub fn sbox_e(mut x: Field) -> Field {
+    let mut result = x * x;
+    result *= result;
+    result * x
+}
+
+fn double(x: Field) -> Field {
+    2 * x
+}
+
+#[field(bn254)]
+pub fn mds_2(state: [Field; 2]) -> [Field; 2] {
+    let sum = state[0] + state[1];
+    [sum + state[0], sum + state[1]]
+}
+
+#[field(bn254)]
+pub fn mds_4(mut state: [Field; 4]) -> [Field; 4] {
+    let t_0 = state[0] + state[1];
+    let t_1 = state[2] + state[3];
+    let t_2 = double(state[1]) + t_1;
+    let t_3 = double(state[3]) + t_0;
+    let t_4 = double(double(t_1)) + t_3;
+    let t_5 = double(double(t_0)) + t_2;
+    state[0] = t_3 + t_5;
+    state[1] = t_5;
+    state[2] = t_2 + t_4;
+    state[3] = t_4;
+    state
+}
+
+// ====================
+// Poseidon2 BN254 Core
+// ====================
+
+
+pub struct Poseidon2Bn254Config<let T: u32, let R: u32> {
+    first_full_rc: [[Field; T]; 4],
+    partial_rc: [Field; R],
+    second_full_rc: [[Field; T]; 4],
+}
+
+fn permute_bn254<let T: u32, let R: u32>(
+    mut state: [Field; T],
+    mm_external: fn([Field; T]) -> [Field; T],
+    mm_internal: fn([Field; T]) -> [Field; T],
+    config: Poseidon2Bn254Config<T, R>,
+) -> [Field; T] {
+    state = mm_external(state);
+    for r in 0..4 {
+        state = vec_add(state, config.first_full_rc[r]);
+        state = sbox(state);
+        state = mm_external(state);
+    }
+
+    for r in 0..R {
+        state[0] += config.partial_rc[r];
+        state[0] = sbox_e(state[0]);
+        state = mm_internal(state);
+    }
+    for r in 0..4 {
+        state = vec_add(state, config.second_full_rc[r]);
+        state = sbox(state);
+        state = mm_external(state);
+    }
+    state
+}
+
+// ====================
+// Constants
+// ====================
+
 
 pub fn x5_2_config() -> Poseidon2Bn254Config<2, 56> {
     Poseidon2Bn254Config {
@@ -912,3 +1002,118 @@ pub global internal_diag16: [Field; 16] = [
     0x26cbff872ac3df2a3787878f24ee28b6ad4f1dcab41126b80f4038f40510d7e1,
     0x1ba0b493c987b9c1424ede9239ba100dc005e717aa71ca6d6a605561e379bdce,
 ];
+
+// ====================
+// Permutation functions
+// ====================
+
+
+fn internal_2(state: [Field; 2]) -> [Field; 2] {
+    let sum = state[0] + state[1];
+    [sum + state[0], sum + 2 * state[1]]
+}
+
+fn internal_3(state: [Field; 3]) -> [Field; 3] {
+    let sum = state.reduce(|a, b| a + b);
+    let mut ret_val = [0; 3];
+    ret_val[0] = state[0] + sum;
+    ret_val[1] = state[1] + sum;
+    ret_val[2] = 2 * state[2] + sum;
+    ret_val
+}
+
+fn external_3(mut state: [Field; 3]) -> [Field; 3] {
+    let sum = state.reduce(|a, b| a + b);
+    state[0] += sum;
+    state[1] += sum;
+    state[2] += sum;
+    state
+}
+
+fn external<let T: u32>(mut state: [Field; T]) -> [Field; T] {
+    let mut mds_parts: [[Field; 4]; T / 4] = [[0; 4]; T / 4];
+    for i in 0..T / 4 {
+        let offset = (4 * i);
+        mds_parts[i] = mds_4([
+            state[0 + offset],
+            state[1 + offset],
+            state[2 + offset],
+            state[3 + offset],
+        ]);
+    }
+    for i in 0..T / 4 {
+        for j in 0..4 {
+            state[i * 4 + j] = mds_parts[i][j];
+        }
+    }
+
+    let mut stored = [0; 4];
+    for l in 0..4 {
+        stored[l] = mds_parts[0][l];
+        for j in 1..T / 4 {
+            stored[l] += mds_parts[j][l];
+        }
+    }
+    for i in 0..T / 4 {
+        for j in 0..4 {
+            state[i * 4 + j] += stored[j];
+        }
+    }
+
+    state
+}
+
+fn internal_4(mut state: [Field; 4]) -> [Field; 4] {
+    diag_mat_mul(state, internal_diag4)
+}
+
+fn internal_8(mut state: [Field; 8]) -> [Field; 8] {
+    diag_mat_mul(state, internal_diag8)
+}
+
+fn internal_12(mut state: [Field; 12]) -> [Field; 12] {
+    diag_mat_mul(state, internal_diag12)
+}
+
+fn internal_16(mut state: [Field; 16]) -> [Field; 16] {
+    diag_mat_mul(state, internal_diag16)
+}
+
+fn diag_mat_mul<let T: u32>(mut state: [Field; T], diag: [Field; T]) -> [Field; T] {
+    let sum = state.reduce(|a, b| a + b);
+    for i in 0..T {
+        state[i] *= diag[i];
+        state[i] += sum;
+    }
+    state
+}
+
+#[field(bn254)]
+pub fn t2(input: [Field; 2]) -> [Field; 2] {
+    permute_bn254(input, mds_2, internal_2, x5_2_config())
+}
+
+#[field(bn254)]
+pub fn t3(input: [Field; 3]) -> [Field; 3] {
+    permute_bn254(input, external_3, internal_3, x5_3_config())
+}
+
+#[field(bn254)]
+pub fn t4(input: [Field; 4]) -> [Field; 4] {
+    permute_bn254(input, mds_4, internal_4, x5_4_config())
+}
+
+#[field(bn254)]
+pub fn t8(input: [Field; 8]) -> [Field; 8] {
+    permute_bn254(input, external, internal_8, x5_8_config())
+}
+
+#[field(bn254)]
+pub fn t12(input: [Field; 12]) -> [Field; 12] {
+    permute_bn254(input, external, internal_12, x5_12_config())
+}
+
+#[field(bn254)]
+pub fn t16(input: [Field; 16]) -> [Field; 16] {
+    permute_bn254(input, external, internal_16, x5_16_config())
+}
