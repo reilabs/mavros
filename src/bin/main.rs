@@ -1,8 +1,10 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use mavros::api::{self, ApiError};
+use mavros::api;
 use mavros::compiler::Field;
+
+type Error = Box<dyn std::error::Error>;
 use tracing::{error, info, warn};
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
@@ -93,7 +95,7 @@ pub fn run_compile(
     r1cs_output: &PathBuf,
     binary_output: &PathBuf,
     draw_graphs: bool,
-) -> Result<ExitCode, ApiError> {
+) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = api::compile_to_r1cs(path.clone(), draw_graphs)?;
@@ -103,52 +105,26 @@ pub fn run_compile(
     // Ensure output directories exist
     if let Some(parent) = r1cs_output.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(ApiError::Io)?;
+            fs::create_dir_all(parent)?;
         }
     }
     if let Some(parent) = binary_output.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(ApiError::Io)?;
+            fs::create_dir_all(parent)?;
         }
     }
 
     // Save R1CS as bincode
-    let r1cs_bytes = bincode::serialize(&r1cs)
-        .map_err(|e| ApiError::InputsEncode(e.to_string()))?;
-    fs::write(r1cs_output, r1cs_bytes).map_err(ApiError::Io)?;
+    let r1cs_bytes = bincode::serialize(&r1cs)?;
+    fs::write(r1cs_output, r1cs_bytes)?;
 
-    // Build ABI info from driver
-    let abi = driver.abi();
-    let abi_params: Vec<serde_json::Value> = abi
-        .parameters
-        .iter()
-        .map(|param| {
-            serde_json::json!({
-                "name": param.name,
-                "type": format!("{:?}", param.typ),
-                "visibility": format!("{:?}", param.visibility),
-            })
-        })
-        .collect();
-    let abi_return = abi.return_type.as_ref().map(|rt| {
-        serde_json::json!({
-            "type": format!("{:?}", rt.abi_type),
-            "visibility": format!("{:?}", rt.visibility),
-        })
-    });
-
-    // Save binaries and ABI as JSON
     let basic = serde_json::json!({
         "witgen_binary": witgen_binary,
         "ad_binary": ad_binary,
-        "abi": {
-            "parameters": abi_params,
-            "return_type": abi_return,
-        },
+        "abi": serde_json::to_value(driver.abi())?,
     });
-    let basic_json = serde_json::to_string_pretty(&basic)
-        .map_err(|e| ApiError::InputsEncode(e.to_string()))?;
-    fs::write(binary_output, basic_json).map_err(ApiError::Io)?;
+    let basic_json = serde_json::to_string_pretty(&basic)?;
+    fs::write(binary_output, basic_json)?;
 
     info!(
         message = %"Artifacts saved successfully",
@@ -162,83 +138,10 @@ pub fn run_compile(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Execute phase: load artifacts and run witness generation and AD.
-pub fn run_execute(
-    args: &ProgramOptions,
-    artifacts_path: &PathBuf,
-    output_dir: Option<&PathBuf>,
-) -> Result<ExitCode, ApiError> {
-    info!(message = %"Loading artifacts", path = ?artifacts_path);
-
-    let mut artifacts = api::load_artifacts(artifacts_path)?;
-
-    let r1cs = &artifacts.r1cs;
-
-    let debug_dir = output_dir
-        .cloned()
-        .unwrap_or_else(|| args.root.join("mavros_debug"));
-
-    if !debug_dir.exists() {
-        fs::create_dir_all(&debug_dir).unwrap();
-    }
-
-    // For execute mode, we still need the prover inputs from the project
-    // We need to read the ABI from somewhere - for now, require the project root
-    let (driver, _) = api::compile_to_r1cs(args.root.clone(), false)?;
-    let params = api::read_prover_inputs(&args.root, driver.abi())?;
-
-    let witgen_result = api::run_witgen_from_binary(&mut artifacts.witgen_binary, r1cs, &params);
-
-    let correct = api::check_witgen(r1cs, &witgen_result);
-    if !correct {
-        error!(message = %"Witgen output is incorrect");
-    } else {
-        info!(message = %"Witgen output is correct");
-    }
-
-    let leftover_memory = witgen_result
-        .instrumenter
-        .plot(&debug_dir.join("witgen_vm_memory.png"));
-    if leftover_memory > 0 {
-        warn!(message = %"VM memory leak detected", leftover_memory);
-    } else {
-        info!(message = %"VM memory leak not detected");
-    }
-
-    // Run AD
-    let ad_coeffs: Vec<Field> = api::random_ad_coeffs(r1cs);
-    let (ad_a, ad_b, ad_c, ad_instrumenter) =
-        api::run_ad_from_binary(&mut artifacts.ad_binary, r1cs, &ad_coeffs);
-
-    let leftover_memory = ad_instrumenter.plot(&debug_dir.join("ad_vm_memory.png"));
-    if leftover_memory > 0 {
-        warn!(message = %"AD VM memory leak detected", leftover_memory);
-    } else {
-        info!(message = %"AD VM memory leak not detected");
-    }
-
-    let correct = api::check_ad(r1cs, &ad_coeffs, &ad_a, &ad_b, &ad_c);
-    if !correct {
-        error!(message = %"AD output is incorrect");
-    } else {
-        info!(message = %"AD output is correct");
-    }
-
-    Ok(ExitCode::SUCCESS)
-}
-
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
-///
-/// # Errors
-///
-/// - [`ApiError`] if the extraction process fails for any reason.
-pub fn run(args: &ProgramOptions) -> Result<ExitCode, ApiError> {
+pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = api::compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
-    // info!(
-    //     "R1CS {:?}",
-    //     r1cs
-    // );
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =

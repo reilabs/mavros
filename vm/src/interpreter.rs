@@ -6,8 +6,9 @@ use std::{
 };
 
 use ark_ff::{AdditiveGroup, BigInt, Field as _, Fp, PrimeField as _};
-use noirc_abi::input_parser::InputValue;
 use tracing::{field, instrument};
+
+pub use crate::InputValueOrdered;
 
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
@@ -183,48 +184,6 @@ fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) 
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
         wit[i] = Field::from(wit[i].0.0[0]);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum InputValueOrdered {
-    Field(Field),
-    String(String),
-    Vec(Vec<InputValueOrdered>),
-    Struct(Vec<(String, InputValueOrdered)>),
-}
-
-impl InputValueOrdered {
-    pub fn field_sizes(&self) -> Vec<usize> {
-        match self {
-            InputValueOrdered::Field(_) => vec![4],
-            InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
-            InputValueOrdered::Vec(_) => vec![1],
-            InputValueOrdered::Struct(fields) => {
-                let mut total_size = vec![];
-                for (_field_name, field_value) in fields {
-                    total_size.extend(field_value.field_sizes());
-                }
-                total_size
-            }
-        }
-    }
-
-    pub fn need_reference_counting(&self) -> Vec<bool> {
-        match self {
-            InputValueOrdered::Field(_) => vec![false],
-            InputValueOrdered::String(_) => {
-                panic!("Strings are not supported in need_reference_counting")
-            }
-            InputValueOrdered::Vec(_) => vec![true],
-            InputValueOrdered::Struct(fields) => {
-                let mut reference_counting = vec![];
-                for (_field_name, field_value) in fields {
-                    reference_counting.extend(field_value.need_reference_counting());
-                }
-                reference_counting
-            }
-        }
     }
 }
 

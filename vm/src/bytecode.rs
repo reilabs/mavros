@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 
-use crate::{ConstraintsLayout, Field, WitnessLayout};
 use crate::interpreter::dispatch;
+use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use opcode_gen::interpreter;
 

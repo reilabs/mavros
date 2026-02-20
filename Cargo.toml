@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["opcode-gen", "ssa-builder", "vm", "wasm-runtime"]
+members = ["mavros-artifacts", "opcode-gen", "ssa-builder", "vm", "wasm-runtime"]
 
 [package]
 name = "mavros"
@@ -41,6 +41,7 @@ tracing-forest = "0.1.6"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 rand = "0.8"
 
+mavros-artifacts = { path = "mavros-artifacts" }
 mavros-vm = { path = "vm" }
 opcode-gen = { path = "opcode-gen" }
 ssa-builder = { path = "ssa-builder" }

@@ -2209,6 +2209,7 @@ dependencies = [
  "indoc",
  "inkwell",
  "itertools 0.14.0",
+ "mavros-artifacts",
  "mavros-vm",
  "nargo",
  "nargo_toml",
@@ -2234,11 +2235,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mavros-artifacts"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff",
+ "bincode",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "mavros-vm"
 version = "0.1.0"
 dependencies = [
  "ark-bn254",
  "ark-ff",
+ "mavros-artifacts",
  "noirc_abi",
  "opcode-gen",
  "plotters",

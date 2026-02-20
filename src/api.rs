@@ -4,89 +4,33 @@ use std::{
 };
 
 use crate::{
-    CompiledArtifacts, Project,
+    Project,
     abi_helpers::ordered_params_from_btreemap,
-    api::interpreter::InputValueOrdered,
-    compiled_artifacts::ArtifactError,
     compiler::{Field, r1cs_gen::R1CS},
-    driver::{Driver, Error as DriverError},
+    driver::Driver,
     vm::interpreter,
 };
+use mavros_artifacts::InputValueOrdered;
 use noirc_abi::input_parser::{Format, InputValue};
 
-#[derive(Debug)]
-pub enum ApiError {
-    Project(crate::Error),
-    Driver { inner: DriverError },
-    Io(std::io::Error),
-    UnsupportedInputExt(String),
-    InputsParse(String),
-    InputsEncode(String),
-    Artifact(ArtifactError),
-}
+type Error = Box<dyn std::error::Error>;
 
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApiError::Project(e) => write!(f, "{e}"),
-            ApiError::Driver { inner } => write!(f, "driver error: {inner:?}"),
-            ApiError::Io(e) => write!(f, "{e}"),
-            ApiError::UnsupportedInputExt(ext) => {
-                write!(f, "unsupported input file extension: {ext}")
-            }
-            ApiError::InputsParse(e) => write!(f, "failed to parse inputs: {e}"),
-            ApiError::InputsEncode(e) => write!(f, "failed to encode inputs: {e}"),
-            ApiError::Artifact(e) => write!(f, "artifact error: {e}"),
-        }
-    }
-}
-
-impl From<ArtifactError> for ApiError {
-    fn from(e: ArtifactError) -> Self {
-        ApiError::Artifact(e)
-    }
-}
-
-impl std::error::Error for ApiError {}
-
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), ApiError> {
-    let project = Project::new(root).map_err(ApiError::Project)?;
+pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), Error> {
+    let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
-    driver.run_noir_compiler().unwrap();
-    driver.make_struct_access_static().unwrap();
-    driver.monomorphize().unwrap();
-    driver.explictize_witness().unwrap();
+    driver.run_noir_compiler()?;
+    driver.make_struct_access_static()?;
+    driver.monomorphize()?;
+    driver.explictize_witness()?;
 
-    let r1cs = driver.generate_r1cs().unwrap();
+    let r1cs = driver.generate_r1cs()?;
     Ok((driver, r1cs))
-}
-
-pub fn compile_to_artifacts(
-    root: PathBuf,
-    draw_graphs: bool,
-) -> Result<CompiledArtifacts, ApiError> {
-    let (mut driver, r1cs) = compile_to_r1cs(root, draw_graphs)?;
-    let witgen_binary = compile_witgen(&mut driver)?;
-    let ad_binary = compile_ad(&driver)?;
-    Ok(CompiledArtifacts::new(r1cs, witgen_binary, ad_binary))
-}
-
-pub fn save_artifacts<P: AsRef<Path>>(
-    artifacts: &CompiledArtifacts,
-    path: P,
-) -> Result<(), ApiError> {
-    artifacts.save_to_file(path)?;
-    Ok(())
-}
-
-pub fn load_artifacts<P: AsRef<Path>>(path: P) -> Result<CompiledArtifacts, ApiError> {
-    Ok(CompiledArtifacts::load_from_file(path)?)
 }
 
 pub fn read_prover_inputs(
     root: &Path,
     abi: &noirc_abi::Abi,
-) -> Result<Vec<InputValueOrdered>, ApiError> {
+) -> Result<Vec<InputValueOrdered>, Error> {
     let file_path = root.join("Prover.toml");
     let ext = file_path
         .extension()
@@ -94,11 +38,13 @@ pub fn read_prover_inputs(
         .unwrap_or_default();
 
     let Some(format) = Format::from_ext(ext) else {
-        return Err(ApiError::UnsupportedInputExt(ext.to_string()));
+        return Err(format!("unsupported input file extension: {ext}").into());
     };
 
-    let inputs_src = fs::read_to_string(&file_path).map_err(ApiError::Io)?;
-    let inputs = format.parse(&inputs_src, abi).unwrap();
+    let inputs_src = fs::read_to_string(&file_path)?;
+    let inputs = format
+        .parse(&inputs_src, abi)
+        .map_err(|e| format!("failed to parse inputs: {e}"))?;
     let ordered_params = ordered_params_from_btreemap(abi, &inputs);
 
     Ok(ordered_params)
@@ -136,16 +82,12 @@ pub fn run_witgen_phase2(
     )
 }
 
-pub fn compile_witgen(driver: &mut Driver) -> Result<Vec<u64>, ApiError> {
-    Ok(driver
-        .compile_witgen()
-        .map_err(|e| ApiError::Driver { inner: e })?)
+pub fn compile_witgen(driver: &mut Driver) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_witgen()?)
 }
 
-pub fn compile_ad(driver: &Driver) -> Result<Vec<u64>, ApiError> {
-    Ok(driver
-        .compile_ad()
-        .map_err(|e| ApiError::Driver { inner: e })?)
+pub fn compile_ad(driver: &Driver) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_ad()?)
 }
 
 pub fn run_ad_from_binary(
