@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use mavros_vm::bytecode::{AllocationType, AlocationEvent, AllocationInstrumenter};
+use mavros_vm::bytecode::{AllocationInstrumenter, AllocationType, AlocationEvent};
 use plotters::prelude::*;
 
 /// Computes the memory timeline from allocation events, draws a PNG chart to
