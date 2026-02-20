@@ -48,6 +48,40 @@ use crate::{
     },
 };
 
+enum ReplacementKind {
+    Single(&'static str),
+    ByArraySize(&'static [(&'static str, u32)]),
+}
+
+struct ReplacementSpec {
+    lowlevel_name: &'static str,
+    kind: ReplacementKind,
+}
+
+struct ReplacementCrate {
+    file_name: &'static str,
+    dep_name: &'static str,
+    replacements: &'static [ReplacementSpec],
+}
+
+impl ReplacementCrate {
+    fn function_names(&self) -> Vec<&str> {
+        self.replacements.iter().flat_map(|spec| match &spec.kind {
+            ReplacementKind::Single(name) => vec![*name],
+            ReplacementKind::ByArraySize(entries) => entries.iter().map(|(name, _)| *name).collect(),
+        }).collect()
+    }
+}
+
+const POSEIDON2_REPLACEMENT: ReplacementCrate = ReplacementCrate {
+    file_name: "poseidon2.nr",
+    dep_name: "poseidon2",
+    replacements: &[ReplacementSpec {
+        lowlevel_name: "poseidon2_permutation",
+        kind: ReplacementKind::ByArraySize(&[("t2", 2), ("t3", 3), ("t4", 4), ("t8", 8), ("t12", 12), ("t16", 16)]),
+    }],
+};
+
 pub struct Driver {
     project: Project,
     initial_ssa: Option<SSA>,
@@ -108,6 +142,60 @@ impl Driver {
         result
     }
 
+    /// Prepare a replacement crate and look up its functions.
+    /// Must be called before creating the Monomorphizer (which borrows context.def_interner).
+    fn prepare_replacement_crate(
+        context: &mut Context,
+        crate_id: noirc_frontend::graph::CrateId,
+        replacement: &ReplacementCrate,
+    ) -> Result<Vec<(String, FuncId, noirc_errors::Location, noirc_frontend::Type)>, Error> {
+        let impl_crate_id = noirc_driver::prepare_dependency(context, Path::new(replacement.file_name));
+        noirc_driver::add_dep(context, crate_id, impl_crate_id, replacement.dep_name.parse().unwrap());
+        noirc_driver::check_crate(context, impl_crate_id, &noirc_driver::CompileOptions::default())
+            .map_err(Error::NoirCompilerError)?;
+
+        Ok(Self::find_functions_in_crate(
+            context,
+            impl_crate_id,
+            &replacement.function_names(),
+        ))
+    }
+
+    /// Monomorphize replacement functions and register them as lowlevel replacements.
+    fn add_lowlevel_replacements(
+        replacement: &ReplacementCrate,
+        functions: &[(String, FuncId, noirc_errors::Location, noirc_frontend::Type)],
+        monomorphizer: &mut Monomorphizer,
+        lowlevel_replacements: &mut HashMap<String, LowLevelReplacement>,
+    ) {
+        let functions_by_name: HashMap<&str, &(String, FuncId, noirc_errors::Location, noirc_frontend::Type)> =
+            functions.iter().map(|f| (f.0.as_str(), f)).collect();
+
+        for spec in replacement.replacements {
+            let lowlevel = match &spec.kind {
+                ReplacementKind::Single(name) => {
+                    let (_, func_id, location, fn_type) = functions_by_name[name];
+                    let mono_func_id = monomorphizer.queue_function_with_bindings(
+                        *func_id, *location, Default::default(), fn_type.clone(), Vec::new(), None,
+                    );
+                    LowLevelReplacement::Single(mono_func_id)
+                }
+                ReplacementKind::ByArraySize(entries) => {
+                    let mut size_map: HashMap<u32, AstFuncId> = HashMap::new();
+                    for (name, size) in *entries {
+                        let (_, func_id, location, fn_type) = functions_by_name[name];
+                        let mono_func_id = monomorphizer.queue_function_with_bindings(
+                            *func_id, *location, Default::default(), fn_type.clone(), Vec::new(), None,
+                        );
+                        size_map.insert(*size, mono_func_id);
+                    }
+                    LowLevelReplacement::ByArraySize(size_map)
+                }
+            };
+            lowlevel_replacements.insert(spec.lowlevel_name.to_string(), lowlevel);
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
@@ -118,38 +206,20 @@ impl Driver {
         noirc_driver::check_crate(&mut context, crate_id, &noirc_driver::CompileOptions::default())
             .map_err(Error::NoirCompilerError)?;
 
-        let impl_crate_id = noirc_driver::prepare_dependency(&mut context, Path::new("poseidon2.nr"));
-        noirc_driver::add_dep(&mut context, crate_id, impl_crate_id, "poseidon2".parse().unwrap());
-        noirc_driver::check_crate(&mut context, impl_crate_id, &noirc_driver::CompileOptions::default())
-            .map_err(Error::NoirCompilerError)?;
-
-        // Look up poseidon2 replacement functions (t2..t16)
-        let poseidon2_functions = Self::find_functions_in_crate(
-            &context,
-            impl_crate_id,
-            &["t2", "t3", "t4", "t8", "t12", "t16"],
-        );
+        let poseidon2_functions = Self::prepare_replacement_crate(
+            &mut context, crate_id, &POSEIDON2_REPLACEMENT,
+        )?;
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker = DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer = Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
 
-        // Build lowlevel replacements by monomorphizing the replacement functions
         let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
-
-        let poseidon2_sizes: HashMap<String, u32> = HashMap::from([("t2".to_string(), 2), ("t3".to_string(), 3), ("t4".to_string(), 4), ("t8".to_string(), 8), ("t12".to_string(), 12), ("t16".to_string(), 16)]);
-        let mut poseidon2_size_map: HashMap<u32, AstFuncId> = HashMap::new();
-        for (name, func_id, location, fn_type) in &poseidon2_functions {
-            let size = poseidon2_sizes[name];
-            let mono_func_id = monomorphizer.queue_function_with_bindings(
-                *func_id, *location, Default::default(), fn_type.clone(), Vec::new(), None,
-            );
-            poseidon2_size_map.insert(size, mono_func_id);
-        }
-        lowlevel_replacements.insert(
-            "poseidon2_permutation".to_string(),
-            LowLevelReplacement::ByArraySize(poseidon2_size_map),
+        Self::add_lowlevel_replacements(
+            &POSEIDON2_REPLACEMENT,
+            &poseidon2_functions,
+            &mut monomorphizer, &mut lowlevel_replacements,
         );
 
         monomorphizer.process_queue().unwrap();
