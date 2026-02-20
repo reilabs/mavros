@@ -1,7 +1,7 @@
 use noirc_abi::{AbiType, MAIN_RETURN_NAME, input_parser::InputValue};
 use std::collections::BTreeMap;
 
-use crate::vm::interpreter::InputValueOrdered;
+use mavros_artifacts::InputValueOrdered;
 
 /// Converts a BTreeMap of input values (keyed by parameter name) into a Vec of
 /// InputValueOrdered, ordered according to the ABI parameter order.

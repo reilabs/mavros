@@ -13,4 +13,4 @@ pub mod witness_cast_insertion;
 pub mod witness_info;
 pub mod witness_type_inference;
 
-pub type Field = ark_bn254::Fr;
+pub use mavros_artifacts::Field;

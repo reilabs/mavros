@@ -1,20 +1,15 @@
 #![allow(unused_variables)]
 
-use crate::compiler::r1cs_gen::{ConstraintsLayout, WitnessLayout};
-use crate::vm::interpreter::dispatch;
+use crate::interpreter::dispatch;
+use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use opcode_gen::interpreter;
 
-use crate::vm::array::{BoxedLayout, BoxedValue};
-use crate::{
-    compiler::Field,
-    vm::interpreter::{Frame, Handler},
-};
+use crate::array::{BoxedLayout, BoxedValue};
+use crate::interpreter::{Frame, Handler};
 
-use crate::vm::array::DataType;
-use plotters::prelude::*;
+use crate::array::DataType;
 use std::fmt::Display;
-use std::path::Path;
 use std::ptr;
 
 pub const LIMBS: usize = 4;
@@ -35,16 +30,19 @@ impl FramePosition {
 
 pub struct JumpTarget(pub isize);
 
+#[derive(Clone)]
 pub enum AllocationType {
     Stack,
     Heap,
 }
 
+#[derive(Clone)]
 pub enum AlocationEvent {
     Alloc(AllocationType, usize),
     Free(AllocationType, usize),
 }
 
+#[derive(Clone)]
 pub struct AllocationInstrumenter {
     pub events: Vec<AlocationEvent>,
 }
@@ -62,14 +60,11 @@ impl AllocationInstrumenter {
         self.events.push(AlocationEvent::Free(ty, size));
     }
 
-    pub fn plot(&self, path: &Path) -> usize {
-        // Calculate memory usage over time
-        let mut stack_usage = Vec::new();
-        let mut heap_usage = Vec::new();
+    /// Returns the final memory usage in bytes (0 means no leak).
+    pub fn final_memory_usage(&self) -> usize {
         let mut current_stack = 0usize;
         let mut current_heap = 0usize;
 
-        // Process allocation events to build memory usage timeline
         for event in &self.events {
             match event {
                 AlocationEvent::Alloc(AllocationType::Stack, size) => {
@@ -85,179 +80,13 @@ impl AllocationInstrumenter {
                     current_heap = current_heap.saturating_sub(*size * 8);
                 }
             }
-
-            stack_usage.push(current_stack);
-            heap_usage.push(current_heap);
         }
 
-        if stack_usage.is_empty() {
-            return 0; // No events to plot
-        }
-
-        // Calculate total memory usage
-        let total_usage: Vec<usize> = stack_usage
-            .iter()
-            .zip(heap_usage.iter())
-            .map(|(s, h)| s + h)
-            .collect();
-
-        // Find maximum values for each plot
-        let max_stack = *stack_usage.iter().max().unwrap_or(&1);
-        let max_heap = *heap_usage.iter().max().unwrap_or(&1);
-        let max_total = *total_usage.iter().max().unwrap_or(&1);
-
-        // Create the chart with three subplots side by side
-        let root = BitMapBackend::new(path, (2400, 800)).into_drawing_area();
-        root.fill(&WHITE).unwrap();
-
-        // Split the drawing area into three equal horizontal sections
-        let (left, rest) = root.split_horizontally(800);
-        let (middle, right) = rest.split_horizontally(800);
-
-        // Common Y-axis scale for all plots
-        let common_max = max_total.max(max_stack).max(max_heap);
-
-        // Determine the best unit and conversion factor
-        let (unit, divisor, y_label) = if common_max >= 2 * 1024 * 1024 {
-            ("MB", 1024 * 1024, "Memory Size (MB)".to_string())
-        } else if common_max >= 2 * 1024 {
-            ("KB", 1024, "Memory Size (KB)".to_string())
-        } else {
-            ("B", 1, "Memory Size (bytes)".to_string())
-        };
-
-        // Convert data to the appropriate unit
-        let total_data: Vec<(usize, f64)> = total_usage
-            .iter()
-            .enumerate()
-            .map(|(i, &size)| (i, size as f64 / divisor as f64))
-            .collect();
-
-        let stack_data: Vec<(usize, f64)> = stack_usage
-            .iter()
-            .enumerate()
-            .map(|(i, &size)| (i, size as f64 / divisor as f64))
-            .collect();
-
-        let heap_data: Vec<(usize, f64)> = heap_usage
-            .iter()
-            .enumerate()
-            .map(|(i, &size)| (i, size as f64 / divisor as f64))
-            .collect();
-
-        let y_max = common_max as f64 / divisor as f64;
-
-        // Plot 1: Total Memory Usage
-        let mut chart1 = ChartBuilder::on(&left)
-            .caption("Total Memory Usage", ("sans-serif", 20))
-            .margin(5)
-            .x_label_area_size(30)
-            .y_label_area_size(50)
-            .build_cartesian_2d(0..total_usage.len(), 0.0..y_max)
-            .unwrap();
-
-        chart1
-            .configure_mesh()
-            .x_labels(5)
-            .y_labels(5)
-            .x_desc("Event Number")
-            .y_desc(y_label.clone())
-            .draw()
-            .unwrap();
-
-        chart1
-            .draw_series(
-                total_data
-                    .iter()
-                    .map(|&(x, y)| Rectangle::new([(x, 0.0), (x + 1, y)], GREEN.filled())),
-            )
-            .unwrap()
-            .label("Total Memory")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], GREEN));
-
-        chart1
-            .configure_series_labels()
-            .background_style(&WHITE.mix(0.8))
-            .border_style(&BLACK)
-            .draw()
-            .unwrap();
-
-        // Plot 2: Stack Memory Usage
-        let mut chart2 = ChartBuilder::on(&middle)
-            .caption("Stack Memory Usage", ("sans-serif", 20))
-            .margin(5)
-            .x_label_area_size(30)
-            .y_label_area_size(50)
-            .build_cartesian_2d(0..stack_usage.len(), 0.0..y_max)
-            .unwrap();
-
-        chart2
-            .configure_mesh()
-            .x_labels(5)
-            .y_labels(5)
-            .x_desc("Event Number")
-            .y_desc(y_label.clone())
-            .draw()
-            .unwrap();
-
-        chart2
-            .draw_series(
-                stack_data
-                    .iter()
-                    .map(|&(x, y)| Rectangle::new([(x, 0.0), (x + 1, y)], BLUE.filled())),
-            )
-            .unwrap()
-            .label("Stack Memory")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
-
-        chart2
-            .configure_series_labels()
-            .background_style(&WHITE.mix(0.8))
-            .border_style(&BLACK)
-            .draw()
-            .unwrap();
-
-        // Plot 3: Heap Memory Usage
-        let mut chart3 = ChartBuilder::on(&right)
-            .caption("Heap Memory Usage", ("sans-serif", 20))
-            .margin(5)
-            .x_label_area_size(30)
-            .y_label_area_size(50)
-            .build_cartesian_2d(0..heap_usage.len(), 0.0..y_max)
-            .unwrap();
-
-        chart3
-            .configure_mesh()
-            .x_labels(5)
-            .y_labels(5)
-            .x_desc("Event Number")
-            .y_desc(y_label.clone())
-            .draw()
-            .unwrap();
-
-        chart3
-            .draw_series(
-                heap_data
-                    .iter()
-                    .map(|&(x, y)| Rectangle::new([(x, 0.0), (x + 1, y)], RED.filled())),
-            )
-            .unwrap()
-            .label("Heap Memory")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
-
-        chart3
-            .configure_series_labels()
-            .background_style(&WHITE.mix(0.8))
-            .border_style(&BLACK)
-            .draw()
-            .unwrap();
-
-        root.present().unwrap();
-
-        *stack_usage.last().unwrap() + *heap_usage.last().unwrap()
+        current_stack + current_heap
     }
 }
 
+#[derive(Clone)]
 pub struct TableInfo {
     pub multiplicities_wit: *mut Field,
     pub num_indices: usize,

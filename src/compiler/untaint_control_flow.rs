@@ -140,7 +140,10 @@ impl UntaintControlFlow {
                                 if_t: rhs,
                                 if_f: lhs,
                             });
-                            new_instructions.push(OpCode::AssertEq { lhs, rhs: new_rhs })
+                            new_instructions.push(OpCode::AssertEq {
+                                lhs: lhs,
+                                rhs: new_rhs,
+                            })
                         }
                         None => new_instructions.push(instruction),
                     },

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt::Display, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::compiler::{
     analysis::{
@@ -9,7 +9,9 @@ use crate::compiler::{
     ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, MemOp, Radix, SSA, SliceOpDir},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
-use tracing::{error, instrument, warn};
+use tracing::{instrument, warn};
+
+pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 
 // #[derive(Clone, Debug, Copy, PartialEq, PartialOrd, Eq, Ord)]
 // pub enum WitnessIndex {
@@ -18,8 +20,6 @@ use tracing::{error, instrument, warn};
 //     LookupValueInverse(usize),
 //     LookupValueInverseAux(usize),
 // }
-
-type LC = Vec<(usize, crate::compiler::Field)>;
 
 #[derive(Clone, Debug)]
 struct ArrayData {
@@ -247,13 +247,6 @@ impl Value {
 }
 
 #[derive(Clone, Debug)]
-pub struct R1C {
-    pub a: LC,
-    pub b: LC,
-    pub c: LC,
-}
-
-#[derive(Clone, Debug)]
 pub struct LookupConstraint {
     pub table_id: usize,
     pub elements: Vec<LC>,
@@ -263,39 +256,6 @@ pub struct LookupConstraint {
 pub enum Table {
     Range(u64),
     OfElems(Vec<LC>),
-}
-
-fn field_to_string(c: ark_bn254::Fr) -> String {
-    if c.into_bigint() > crate::compiler::Field::MODULUS_MINUS_ONE_DIV_TWO {
-        format!("-{}", -c)
-    } else {
-        c.to_string()
-    }
-}
-
-impl Display for R1C {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let a_str = self
-            .a
-            .iter()
-            .map(|(i, c)| format!("{} * v{}", field_to_string(*c), i))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        let b_str = self
-            .b
-            .iter()
-            .map(|(i, c)| format!("{} * v{}", field_to_string(*c), i))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        let c_str = self
-            .c
-            .iter()
-            .map(|(i, c)| format!("{} * v{}", field_to_string(*c), i))
-            .collect::<Vec<_>>()
-            .join(" + ");
-
-        write!(f, "({}) * ({}) - ({}) = 0", a_str, b_str, c_str)
-    }
 }
 
 #[derive(Clone)]
@@ -706,121 +666,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 }
 
-#[derive(Clone, Debug, Copy)]
-pub struct WitnessLayout {
-    pub algebraic_size: usize,
-    pub multiplicities_size: usize,
-
-    pub challenges_size: usize,
-
-    pub tables_data_size: usize,
-    pub lookups_data_size: usize,
-}
-
-impl WitnessLayout {
-    pub fn algebraic_start(&self) -> usize {
-        0
-    }
-
-    pub fn algebraic_end(&self) -> usize {
-        self.algebraic_size
-    }
-
-    pub fn multiplicities_start(&self) -> usize {
-        self.algebraic_end()
-    }
-
-    pub fn multiplicities_end(&self) -> usize {
-        self.multiplicities_start() + self.multiplicities_size
-    }
-
-    pub fn challenges_start(&self) -> usize {
-        self.multiplicities_end()
-    }
-
-    pub fn challenges_end(&self) -> usize {
-        self.challenges_start() + self.challenges_size
-    }
-
-    pub fn next_challenge(&mut self) -> usize {
-        let challenge_id = self.challenges_end();
-        self.challenges_size += 1;
-        challenge_id
-    }
-
-    pub fn tables_data_start(&self) -> usize {
-        self.challenges_end()
-    }
-
-    pub fn tables_data_end(&self) -> usize {
-        self.tables_data_size + self.tables_data_start()
-    }
-
-    pub fn next_table_data(&mut self) -> usize {
-        let table_data_id = self.tables_data_end();
-        self.tables_data_size += 1;
-        table_data_id
-    }
-
-    pub fn lookups_data_start(&self) -> usize {
-        self.tables_data_end()
-    }
-
-    pub fn lookups_data_end(&self) -> usize {
-        self.lookups_data_size + self.lookups_data_start()
-    }
-
-    pub fn next_lookups_data(&mut self) -> usize {
-        let lookups_data_id = self.lookups_data_end();
-        self.lookups_data_size += 1;
-        lookups_data_id
-    }
-
-    pub fn size(&self) -> usize {
-        self.algebraic_size
-            + self.multiplicities_size
-            + self.challenges_size
-            + self.tables_data_size
-            + self.lookups_data_size
-    }
-
-    pub fn pre_commitment_size(&self) -> usize {
-        self.algebraic_size + self.multiplicities_size
-    }
-
-    pub fn post_commitment_size(&self) -> usize {
-        self.challenges_size + self.tables_data_size + self.lookups_data_size
-    }
-}
-
-#[derive(Clone, Debug, Copy)]
-pub struct ConstraintsLayout {
-    pub algebraic_size: usize,
-    pub tables_data_size: usize,
-    pub lookups_data_size: usize,
-}
-
-impl ConstraintsLayout {
-    pub fn size(&self) -> usize {
-        self.algebraic_size + self.tables_data_size + self.lookups_data_size
-    }
-
-    pub fn tables_data_start(&self) -> usize {
-        self.algebraic_size
-    }
-
-    pub fn lookups_data_start(&self) -> usize {
-        self.algebraic_size + self.tables_data_size
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct R1CS {
-    pub witness_layout: WitnessLayout,
-    pub constraints_layout: ConstraintsLayout,
-    pub constraints: Vec<R1C>,
-}
-
 impl R1CGen {
     pub fn new() -> Self {
         Self {
@@ -1081,139 +926,5 @@ impl R1CGen {
             constraints_layout,
             constraints: result,
         };
-    }
-}
-
-impl R1CS {
-    pub fn compute_derivatives(
-        &self,
-        coeffs: &[crate::compiler::Field],
-        res_a: &mut [crate::compiler::Field],
-        res_b: &mut [crate::compiler::Field],
-        res_c: &mut [crate::compiler::Field],
-    ) {
-        for (r1c, coeff) in self.constraints.iter().zip(coeffs.iter()) {
-            for (a_ix, a_coeff) in r1c.a.iter() {
-                res_a[*a_ix] += *a_coeff * *coeff;
-            }
-            for (b_ix, b_coeff) in r1c.b.iter() {
-                res_b[*b_ix] += *b_coeff * *coeff;
-            }
-            for (c_ix, c_coeff) in r1c.c.iter() {
-                res_c[*c_ix] += *c_coeff * *coeff;
-            }
-        }
-    }
-
-    pub fn check_witgen_output(
-        &self,
-        pre_comm_witness: &[crate::compiler::Field],
-        post_comm_witness: &[crate::compiler::Field],
-        a: &[crate::compiler::Field],
-        b: &[crate::compiler::Field],
-        c: &[crate::compiler::Field],
-    ) -> bool {
-        let witness = [pre_comm_witness, post_comm_witness].concat();
-        if a.len() != self.constraints_layout.size() {
-            error!(message = %"The a vector has the wrong length", expected = self.constraints_layout.size(), actual = a.len());
-            return false;
-        }
-        if b.len() != self.constraints_layout.size() {
-            error!(message = %"The b vector has the wrong length", expected = self.constraints_layout.size(), actual = b.len());
-            return false;
-        }
-        if c.len() != self.constraints_layout.size() {
-            error!(message = %"The c vector has the wrong length", expected = self.constraints_layout.size(), actual = c.len());
-            return false;
-        }
-        for (i, r1c) in self.constraints.iter().enumerate() {
-            let av = r1c
-                .a
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
-
-            let bv = r1c
-                .b
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
-
-            let cv = r1c
-                .c
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
-            let mut fail = false;
-            if av * bv != cv {
-                error!(message = %"R1CS constraint failed to verify", index = i);
-                fail = true;
-            }
-            if av != a[i] {
-                error!(message = %"Wrong A value for constraint", index = i, actual = a[i].to_string(), expected = av.to_string());
-                fail = true;
-            }
-            if bv != b[i] {
-                error!(message = %"Wrong B value for constraint", index = i, actual = b[i].to_string(), expected = bv.to_string());
-                fail = true;
-            }
-            if cv != c[i] {
-                error!(message = %"Wrong C value for constraint", index = i, actual = c[i].to_string(), expected = cv.to_string());
-                fail = true;
-            }
-            if fail {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    pub fn check_ad_output(
-        &self,
-        coeffs: &[crate::compiler::Field],
-        a: &[crate::compiler::Field],
-        b: &[crate::compiler::Field],
-        c: &[crate::compiler::Field],
-    ) -> bool {
-        let mut a = a.to_vec();
-        let mut b = b.to_vec();
-        let mut c = c.to_vec();
-        for (r1c, coeff) in self.constraints.iter().zip(coeffs.iter()) {
-            for (a_ix, a_coeff) in r1c.a.iter() {
-                a[*a_ix] -= *a_coeff * *coeff;
-            }
-            for (b_ix, b_coeff) in r1c.b.iter() {
-                b[*b_ix] -= *b_coeff * *coeff;
-            }
-            for (c_ix, c_coeff) in r1c.c.iter() {
-                c[*c_ix] -= *c_coeff * *coeff;
-            }
-        }
-        let mut wrongs = 0;
-        for i in 0..a.len() {
-            if a[i] != crate::compiler::Field::ZERO {
-                if wrongs == 0 {
-                    error!(message = %"Wrong A deriv for witness", index = i);
-                }
-                wrongs += 1;
-            }
-            if b[i] != crate::compiler::Field::ZERO {
-                if wrongs == 0 {
-                    error!(message = %"Wrong B deriv for witness", index = i);
-                }
-                wrongs += 1;
-            }
-            if c[i] != crate::compiler::Field::ZERO {
-                if wrongs == 0 {
-                    error!(message = %"Wrong C deriv for witness", index = i);
-                }
-                wrongs += 1;
-            }
-        }
-        if wrongs > 0 {
-            error!("{} out of {} wrong derivatives", wrongs, 3 * a.len());
-            return false;
-        }
-        return true;
     }
 }

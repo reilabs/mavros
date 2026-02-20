@@ -178,8 +178,7 @@ fn run_single(root: PathBuf) {
     // 7. Witgen leak check  (depends on WITGEN_RUN)
     if let Some(result) = &witgen_result {
         emit("START:WITGEN_NOLEAK");
-        let tmpdir = tempfile::tempdir().unwrap();
-        let leftover = result.instrumenter.plot(&tmpdir.path().join("wt.png"));
+        let leftover = result.instrumenter.final_memory_usage();
         emit(if leftover == 0 {
             "END:WITGEN_NOLEAK:ok"
         } else {
@@ -219,8 +218,7 @@ fn run_single(root: PathBuf) {
     // 10. AD leak check  (depends on AD_RUN)
     if let Some((_, _, _, _, instrumenter)) = &ad_result {
         emit("START:AD_NOLEAK");
-        let tmpdir = tempfile::tempdir().unwrap();
-        let leftover = instrumenter.plot(&tmpdir.path().join("ad.png"));
+        let leftover = instrumenter.final_memory_usage();
         emit(if leftover == 0 {
             "END:AD_NOLEAK:ok"
         } else {
