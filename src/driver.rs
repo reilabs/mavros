@@ -58,6 +58,18 @@ pub enum Error {
     NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::NoirCompilerError(diagnostics) => {
+                write!(f, "Noir compiler error ({} diagnostics)", diagnostics.len())
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 impl Driver {
     pub fn new(project: Project, draw_cfg: bool) -> Self {
         let dir = project.get_only_crate().root_dir.join("mavros_debug");

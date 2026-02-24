@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["opcode-gen", "ssa-builder", "wasm-runtime"]
+members = ["mavros-artifacts", "opcode-gen", "ssa-builder", "vm", "wasm-runtime"]
 
 [package]
 name = "mavros"
@@ -17,7 +17,7 @@ noirc_frontend = { git = "https://github.com/noir-lang/noir.git", branch = "mast
 noirc_evaluator = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_evaluator" }
 noirc_abi = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_abi" }
 
-clap = { version = "4.5.17", features = ["unstable-v5"] }
+clap = { version = "4.5.17", features = ["unstable-v5", "derive"] }
 derivative = "2.2.0"
 indoc = "2.0.5"
 itertools = "0.14.0"
@@ -28,22 +28,25 @@ convert_case = "0.8.0"
 serde = { version = "1.0.204", features = ["derive"] }
 serde_json = "1.0"
 toml = { version = "0.8.20" }
-ark-bn254 = "0.5.0"
-ark-ff = "0.5.0"
+ark-bn254 = { version = "0.5.0" }
+ark-ff = { version = "0.5.0" }
+ark-serialize = { version = "0.5.0", features = ["derive"] }
+bincode = "1.3"
 
-# LLVM codegen
 inkwell = { version = "0.5", features = ["llvm18-0"] }
-graphviz-rust = "0.6.0"
-plotters = "0.3.5"
+plotters = { version = "0.3.5" }
+wasmtime = { version = "31" }
+
 tracing = "0.1.41"
 tracing-forest = "0.1.6"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 rand = "0.8"
 
+mavros-artifacts = { path = "mavros-artifacts" }
+mavros-vm = { path = "vm" }
 opcode-gen = { path = "opcode-gen" }
 ssa-builder = { path = "ssa-builder" }
 cargo_metadata = "0.23.1"
-wasmtime = "31"
 
 [dev-dependencies]
 anyhow = "1.0.87"
