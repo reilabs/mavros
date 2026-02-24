@@ -1,4 +1,7 @@
-use std::{fmt::Debug, path::{Path, PathBuf}};
+use std::{
+    fmt::Debug,
+    path::{Path, PathBuf},
+};
 
 use fm::FileManager;
 use itertools::Itertools;

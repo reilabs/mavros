@@ -14,8 +14,8 @@ use noirc_frontend::monomorphization::ast::{
 
 use crate::compiler::ssa::{Function, FunctionId, SSA};
 
-pub use expression_converter::LowLevelReplacement;
 use expression_converter::ExpressionConverter;
+pub use expression_converter::LowLevelReplacement;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
@@ -327,7 +327,10 @@ impl SsaConverter {
 
 impl SSA {
     /// Create SSA directly from a monomorphized program.
-    pub fn from_program(program: &Program, lowlevel_replacements: HashMap<String, LowLevelReplacement>) -> SSA {
+    pub fn from_program(
+        program: &Program,
+        lowlevel_replacements: HashMap<String, LowLevelReplacement>,
+    ) -> SSA {
         let mut converter = SsaConverter::new(lowlevel_replacements);
         converter.convert_program(program)
     }
