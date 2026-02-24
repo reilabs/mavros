@@ -28,8 +28,19 @@ Noir to R1CS compiler with witness generation and automatic differentiation bina
 
 ## Building the Binary
 
+This project provides a pinned dev environment via Nix flakes (Rust nightly + LLVM 18 + libclang, etc.).
+
+### Using Nix (recommended)
+
+1. Install Nix and enable flakes:
+   - Install: https://install.determinate.systems/nix
+   - Enable flakes: add `experimental-features = nix-command flakes` to `~/.config/nix/nix.conf`
+
+2. Enter the dev shell and build:
+
 ```bash
-LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18 cargo build --bin mavros --release
+nix develop
+cargo build --bin mavros --release
 ```
 
 The compiled binary will be at `target/release/mavros`.

@@ -1,8 +1,11 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
+use mavros::Project;
 use mavros::api;
 use mavros::compiler::Field;
+use mavros::compiler::r1cs_gen::R1CS;
+use mavros::driver::Driver;
 use mavros::plotting;
 
 type Error = Box<dyn std::error::Error>;
@@ -89,6 +92,18 @@ fn main() -> ExitCode {
     })
 }
 
+pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), Error> {
+    let project = Project::new(root)?;
+    let mut driver = Driver::new(project, draw_graphs);
+    driver.run_noir_compiler()?;
+    driver.make_struct_access_static()?;
+    driver.monomorphize()?;
+    driver.explictize_witness()?;
+
+    let r1cs = driver.generate_r1cs()?;
+    Ok((driver, r1cs))
+}
+
 /// Compile phase: compile the Noir project and save R1CS and binary artifacts
 /// to separate files.
 pub fn run_compile(
@@ -99,7 +114,7 @@ pub fn run_compile(
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
-    let (mut driver, r1cs) = api::compile_to_r1cs(path.clone(), draw_graphs)?;
+    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
     let witgen_binary = api::compile_witgen(&mut driver)?;
     let ad_binary = api::compile_ad(&driver)?;
 
@@ -142,7 +157,7 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) = api::compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
+    let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =

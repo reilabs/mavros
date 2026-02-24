@@ -368,21 +368,4 @@ impl InputValueOrdered {
             }
         }
     }
-
-    pub fn need_reference_counting(&self) -> Vec<bool> {
-        match self {
-            InputValueOrdered::Field(_) => vec![false],
-            InputValueOrdered::String(_) => {
-                panic!("Strings are not supported in need_reference_counting")
-            }
-            InputValueOrdered::Vec(_) => vec![true],
-            InputValueOrdered::Struct(fields) => {
-                let mut reference_counting = vec![];
-                for (_field_name, field_value) in fields {
-                    reference_counting.extend(field_value.need_reference_counting());
-                }
-                reference_counting
-            }
-        }
-    }
 }
