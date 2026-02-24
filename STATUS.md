@@ -344,6 +344,7 @@
 | noir/test_programs/execution_success/regression_9888 | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/regression_9907 | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/regression_9971 | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_brillig_const_fold_self_dedup | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/regression_brillig_ref_deref_crash | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/regression_capacity_tracker | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/regression_mem2reg_unknown_array_aliases | 💥 | ➖ | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
