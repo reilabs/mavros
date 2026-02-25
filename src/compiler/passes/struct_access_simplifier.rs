@@ -11,7 +11,9 @@ use crate::compiler::{
 pub struct MakeStructAccessStatic {}
 
 impl Pass for MakeStructAccessStatic {
-    fn name(&self) -> &'static str { "make_struct_access_static" }
+    fn name(&self) -> &'static str {
+        "make_struct_access_static"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![ValueDefinitions::id()]

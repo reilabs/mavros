@@ -15,7 +15,9 @@ pub struct PulledProduct {
 }
 
 impl Pass for PullIntoAssert {
-    fn name(&self) -> &'static str { "pull_into_assert" }
+    fn name(&self) -> &'static str {
+        "pull_into_assert"
+    }
     fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }

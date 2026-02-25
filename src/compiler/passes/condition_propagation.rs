@@ -8,7 +8,9 @@ use crate::compiler::{
 pub struct ConditionPropagation {}
 
 impl Pass for ConditionPropagation {
-    fn name(&self) -> &'static str { "condition_propagation" }
+    fn name(&self) -> &'static str {
+        "condition_propagation"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

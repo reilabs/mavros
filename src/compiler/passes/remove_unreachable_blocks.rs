@@ -18,7 +18,9 @@ impl RemoveUnreachableBlocks {
 }
 
 impl Pass for RemoveUnreachableBlocks {
-    fn name(&self) -> &'static str { "remove_unreachable_blocks" }
+    fn name(&self) -> &'static str {
+        "remove_unreachable_blocks"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

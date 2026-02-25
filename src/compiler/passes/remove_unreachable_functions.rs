@@ -17,7 +17,9 @@ impl RemoveUnreachableFunctions {
 }
 
 impl Pass for RemoveUnreachableFunctions {
-    fn name(&self) -> &'static str { "remove_unreachable_functions" }
+    fn name(&self) -> &'static str {
+        "remove_unreachable_functions"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

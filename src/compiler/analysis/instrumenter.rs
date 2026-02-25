@@ -1508,15 +1508,14 @@ impl CostEstimator {
     }
 }
 
-impl crate::compiler::pass_manager::Analysis for Summary {
-    fn dependencies() -> Vec<crate::compiler::pass_manager::AnalysisId> {
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
+
+impl Analysis for Summary {
+    fn dependencies() -> Vec<AnalysisId> {
         vec![TypeInfo::id()]
     }
 
-    fn compute(
-        ssa: &SSA,
-        store: &crate::compiler::pass_manager::AnalysisStore,
-    ) -> Self {
+    fn compute(ssa: &SSA, store: &AnalysisStore) -> Self {
         let type_info = store.get::<TypeInfo>();
         let cost_estimator = CostEstimator::new();
         let cost_analysis = cost_estimator.run(ssa, type_info);

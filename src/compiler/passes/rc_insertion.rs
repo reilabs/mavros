@@ -17,7 +17,9 @@ use crate::compiler::{
 pub struct RCInsertion {}
 
 impl Pass for RCInsertion {
-    fn name(&self) -> &'static str { "rc_insertion" }
+    fn name(&self) -> &'static str {
+        "rc_insertion"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id(), TypeInfo::id()]

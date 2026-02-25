@@ -547,17 +547,15 @@ impl Types {
     }
 }
 
-impl crate::compiler::pass_manager::Analysis for TypeInfo {
-    fn dependencies() -> Vec<crate::compiler::pass_manager::AnalysisId> {
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
+
+impl Analysis for TypeInfo {
+    fn dependencies() -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
     }
 
-    fn compute(
-        ssa: &crate::compiler::ssa::SSA,
-        store: &crate::compiler::pass_manager::AnalysisStore,
-    ) -> Self {
+    fn compute(ssa: &SSA, store: &AnalysisStore) -> Self {
         let cfg = store.get::<FlowAnalysis>();
         Types::new().run(ssa, cfg)
     }
 }
-

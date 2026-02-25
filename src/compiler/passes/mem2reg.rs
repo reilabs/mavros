@@ -14,7 +14,9 @@ use crate::compiler::{
 pub struct Mem2Reg {}
 
 impl Pass for Mem2Reg {
-    fn name(&self) -> &'static str { "mem2reg" }
+    fn name(&self) -> &'static str {
+        "mem2reg"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id(), TypeInfo::id()]

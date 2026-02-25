@@ -99,12 +99,7 @@ impl AnalysisStore {
     pub fn get<A: 'static>(&self) -> &A {
         self.data
             .get(&TypeId::of::<A>())
-            .unwrap_or_else(|| {
-                panic!(
-                    "Analysis {} not found in store",
-                    std::any::type_name::<A>()
-                )
-            })
+            .unwrap_or_else(|| panic!("Analysis {} not found in store", std::any::type_name::<A>()))
             .downcast_ref::<A>()
             .unwrap()
     }
@@ -291,8 +286,7 @@ impl PassManager {
 
         if self.analyses.try_get::<FlowAnalysis>().is_none() {
             let cfg = FlowAnalysis::run(ssa);
-            self.analyses
-                .insert_with_deps::<FlowAnalysis>(cfg, vec![]);
+            self.analyses.insert_with_deps::<FlowAnalysis>(cfg, vec![]);
         }
         let Some(debug_output_dir) = &self.debug_output_dir else {
             return;

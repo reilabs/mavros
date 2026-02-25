@@ -84,11 +84,10 @@ impl ValueDefinitions {
     }
 }
 
-impl crate::compiler::pass_manager::Analysis for ValueDefinitions {
-    fn compute(
-        ssa: &SSA,
-        _store: &crate::compiler::pass_manager::AnalysisStore,
-    ) -> Self {
+use crate::compiler::pass_manager::{Analysis, AnalysisStore};
+
+impl Analysis for ValueDefinitions {
+    fn compute(ssa: &SSA, _store: &AnalysisStore) -> Self {
         ValueDefinitions::from_ssa(ssa)
     }
 }

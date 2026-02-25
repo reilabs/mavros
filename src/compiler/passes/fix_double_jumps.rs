@@ -62,7 +62,9 @@ impl ValueReplacements {
 pub struct FixDoubleJumps {}
 
 impl Pass for FixDoubleJumps {
-    fn name(&self) -> &'static str { "fix_double_jumps" }
+    fn name(&self) -> &'static str {
+        "fix_double_jumps"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

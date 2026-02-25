@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::{types::TypeInfo, value_definitions::{ValueDefinition, ValueDefinitions}},
+    analysis::{
+        types::TypeInfo,
+        value_definitions::{ValueDefinition, ValueDefinitions},
+    },
     flow_analysis::FlowAnalysis,
     ir::r#type::TypeExpr,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -11,7 +14,9 @@ use crate::compiler::{
 pub struct ArithmeticSimplifier {}
 
 impl Pass for ArithmeticSimplifier {
-    fn name(&self) -> &'static str { "arithmetic_simplifier" }
+    fn name(&self) -> &'static str {
+        "arithmetic_simplifier"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![TypeInfo::id(), ValueDefinitions::id()]

@@ -14,7 +14,9 @@ use crate::compiler::{
 pub struct WitnessLowering {}
 
 impl Pass for WitnessLowering {
-    fn name(&self) -> &'static str { "witness_lowering" }
+    fn name(&self) -> &'static str {
+        "witness_lowering"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![TypeInfo::id()]

@@ -9,7 +9,9 @@ use crate::compiler::{
 pub struct DeduplicatePhis {}
 
 impl Pass for DeduplicatePhis {
-    fn name(&self) -> &'static str { "deduplicate_phis" }
+    fn name(&self) -> &'static str {
+        "deduplicate_phis"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

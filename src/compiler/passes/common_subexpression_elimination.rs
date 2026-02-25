@@ -176,7 +176,9 @@ impl Debug for Expr {
 pub struct CSE {}
 
 impl Pass for CSE {
-    fn name(&self) -> &'static str { "cse" }
+    fn name(&self) -> &'static str {
+        "cse"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

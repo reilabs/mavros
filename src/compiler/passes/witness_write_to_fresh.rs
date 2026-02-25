@@ -9,7 +9,9 @@ use crate::compiler::{
 pub struct WitnessWriteToFresh {}
 
 impl Pass for WitnessWriteToFresh {
-    fn name(&self) -> &'static str { "witness_write_to_fresh" }
+    fn name(&self) -> &'static str {
+        "witness_write_to_fresh"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![TypeInfo::id()]

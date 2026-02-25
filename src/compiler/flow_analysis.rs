@@ -889,8 +889,10 @@ impl FlowAnalysis {
     // }
 }
 
-impl crate::compiler::pass_manager::Analysis for FlowAnalysis {
-    fn compute(ssa: &SSA, _store: &crate::compiler::pass_manager::AnalysisStore) -> Self {
+use crate::compiler::pass_manager::{Analysis, AnalysisStore};
+
+impl Analysis for FlowAnalysis {
+    fn compute(ssa: &SSA, _store: &AnalysisStore) -> Self {
         FlowAnalysis::run(ssa)
     }
 }

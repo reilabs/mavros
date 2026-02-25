@@ -563,7 +563,9 @@ impl symbolic_executor::Context<Val> for SpecializationState {
 }
 
 impl Pass for Specializer {
-    fn name(&self) -> &'static str { "specializer" }
+    fn name(&self) -> &'static str {
+        "specializer"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![Summary::id(), TypeInfo::id()]

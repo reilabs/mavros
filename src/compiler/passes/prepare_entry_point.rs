@@ -9,7 +9,9 @@ use crate::compiler::{
 pub struct PrepareEntryPoint {}
 
 impl Pass for PrepareEntryPoint {
-    fn name(&self) -> &'static str { "prepare_entry_point" }
+    fn name(&self) -> &'static str {
+        "prepare_entry_point"
+    }
 
     fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         Self::wrap_main(ssa);

@@ -15,7 +15,9 @@ impl Defunctionalize {
 }
 
 impl Pass for Defunctionalize {
-    fn name(&self) -> &'static str { "defunctionalize" }
+    fn name(&self) -> &'static str {
+        "defunctionalize"
+    }
 
     fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         run_defunctionalize(ssa);

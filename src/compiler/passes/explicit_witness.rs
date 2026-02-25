@@ -18,7 +18,9 @@ use crate::compiler::{
 pub struct ExplicitWitness {}
 
 impl Pass for ExplicitWitness {
-    fn name(&self) -> &'static str { "explicit_witness" }
+    fn name(&self) -> &'static str {
+        "explicit_witness"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![TypeInfo::id()]

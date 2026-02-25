@@ -55,7 +55,9 @@ impl Config {
 }
 
 impl Pass for DCE {
-    fn name(&self) -> &'static str { "dce" }
+    fn name(&self) -> &'static str {
+        "dce"
+    }
 
     fn needs(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

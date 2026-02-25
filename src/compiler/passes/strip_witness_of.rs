@@ -15,7 +15,9 @@ use crate::compiler::{
 pub struct StripWitnessOf {}
 
 impl Pass for StripWitnessOf {
-    fn name(&self) -> &'static str { "strip_witness_of" }
+    fn name(&self) -> &'static str {
+        "strip_witness_of"
+    }
     fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }

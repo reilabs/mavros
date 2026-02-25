@@ -9,7 +9,9 @@ use std::collections::HashSet;
 pub struct WitnessWriteToVoid {}
 
 impl Pass for WitnessWriteToVoid {
-    fn name(&self) -> &'static str { "witness_write_to_void" }
+    fn name(&self) -> &'static str {
+        "witness_write_to_void"
+    }
     fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
