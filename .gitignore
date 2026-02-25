@@ -2,6 +2,8 @@ target
 **/target/**
 mavros_debug
 .DS_store
+Cargo.lock
+.idea/
 settings.local.json
 dist
 node_modules

@@ -1,0 +1,11 @@
+[package]
+name = "mavros-artifacts"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ark-bn254 = { version = "0.5.0" }
+ark-ff = { version = "0.5.0" }
+serde = { version = "1.0.204", features = ["derive"] }
+bincode = "1.3"
+tracing = "0.1.41"

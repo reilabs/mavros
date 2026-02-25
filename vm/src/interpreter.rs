@@ -6,18 +6,14 @@ use std::{
 };
 
 use ark_ff::{AdditiveGroup, BigInt, Field as _, Fp, PrimeField as _};
-use noirc_abi::input_parser::InputValue;
 use tracing::{field, instrument};
 
+pub use crate::InputValueOrdered;
+
 use crate::{
-    compiler::{
-        Field,
-        r1cs_gen::{ConstraintsLayout, WitnessLayout},
-    },
-    vm::{
-        array::{BoxedLayout, BoxedValue},
-        bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, VM},
-    },
+    ConstraintsLayout, Field, WitnessLayout,
+    array::{BoxedLayout, BoxedValue},
+    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
 
 pub type Handler = fn(*const u64, Frame, &mut VM);
@@ -168,6 +164,22 @@ pub struct WitgenResult {
     pub instrumenter: AllocationInstrumenter,
 }
 
+/// Intermediate result from phase 1 of witness generation.
+///
+/// Contains the pre-commitment witness and all intermediate state needed to
+/// complete witness generation in phase 2 (after real Fiat-Shamir challenges
+/// are available).
+#[derive(Clone)]
+pub struct Phase1Result {
+    pub out_wit_pre_comm: Vec<Field>,
+    pub out_wit_post_comm: Vec<Field>,
+    pub out_a: Vec<Field>,
+    pub out_b: Vec<Field>,
+    pub out_c: Vec<Field>,
+    pub tables: Vec<TableInfo>,
+    pub instrumenter: AllocationInstrumenter,
+}
+
 fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) {
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
@@ -175,55 +187,16 @@ fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) 
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum InputValueOrdered {
-    Field(Field),
-    String(String),
-    Vec(Vec<InputValueOrdered>),
-    Struct(Vec<(String, InputValueOrdered)>),
-}
-
-impl InputValueOrdered {
-    pub fn field_sizes(&self) -> Vec<usize> {
-        match self {
-            InputValueOrdered::Field(_) => vec![4],
-            InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
-            InputValueOrdered::Vec(_) => vec![1],
-            InputValueOrdered::Struct(fields) => {
-                let mut total_size = vec![];
-                for (_field_name, field_value) in fields {
-                    total_size.extend(field_value.field_sizes());
-                }
-                total_size
-            }
-        }
-    }
-
-    pub fn need_reference_counting(&self) -> Vec<bool> {
-        match self {
-            InputValueOrdered::Field(_) => vec![false],
-            InputValueOrdered::String(_) => {
-                panic!("Strings are not supported in need_reference_counting")
-            }
-            InputValueOrdered::Vec(_) => vec![true],
-            InputValueOrdered::Struct(fields) => {
-                let mut reference_counting = vec![];
-                for (_field_name, field_value) in fields {
-                    reference_counting.extend(field_value.need_reference_counting());
-                }
-                reference_counting
-            }
-        }
-    }
-}
-
-#[instrument(skip_all, name = "Interpreter::run")]
-pub fn run(
+/// Phase 1 of witness generation: executes the VM to produce the
+/// pre-commitment witness and captures all intermediate state needed for
+/// phase 2.
+#[instrument(skip_all, name = "Interpreter::run_phase1")]
+pub fn run_phase1(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
-) -> WitgenResult {
+) -> Phase1Result {
     let global_frame_size = program[0] as usize;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
     let mut out_b = vec![Field::ZERO; constraints_layout.size()];
@@ -288,30 +261,45 @@ pub fn run(
 
     fix_multiplicities_section(&mut out_wit_pre_comm, witness_layout);
 
-    let mut random =
-        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
-            .unwrap();
-    for i in 0..witness_layout.challenges_size {
-        // so random, wow
-        out_wit_post_comm[i] = random;
-        random = (random + Field::from(17)) * random;
+    Phase1Result {
+        out_wit_pre_comm,
+        out_wit_post_comm,
+        out_a,
+        out_b,
+        out_c,
+        tables: vm.tables,
+        instrumenter: vm.allocation_instrumenter,
+    }
+}
+
+/// Phase 2 of witness generation: uses real Fiat-Shamir challenges to
+/// complete the post-commitment witness and constraint vectors.
+#[instrument(skip_all, name = "Interpreter::run_phase2")]
+pub fn run_phase2(
+    mut phase1: Phase1Result,
+    challenges: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+) -> WitgenResult {
+    // Write real challenges into the post-commitment witness vector.
+    for (i, challenge) in challenges.iter().enumerate() {
+        phase1.out_wit_post_comm[i] = *challenge;
     }
 
     let mut running_prod = Field::from(1);
-    for tbl in vm.tables.iter() {
+    for tbl in phase1.tables.iter() {
         if tbl.num_indices != 1 || tbl.num_values != 0 {
             todo!("wide tables");
         }
 
-        let alpha = out_wit_post_comm[0];
+        let alpha = phase1.out_wit_post_comm[0];
         for i in 0..tbl.length {
             let multiplicity = unsafe { *tbl.multiplicities_wit.offset(i as isize) };
             let denom = alpha - Field::from(i as u64);
-            out_b[tbl.elem_inverses_constraint_section_offset + i] = denom;
-            out_c[tbl.elem_inverses_constraint_section_offset + i] = multiplicity;
+            phase1.out_b[tbl.elem_inverses_constraint_section_offset + i] = denom;
+            phase1.out_c[tbl.elem_inverses_constraint_section_offset + i] = multiplicity;
             if multiplicity != Field::ZERO {
-                // Skip all of inversion logic, it's just zero
-                out_a[tbl.elem_inverses_constraint_section_offset + i] = running_prod;
+                phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = running_prod;
                 running_prod *= denom;
             }
         }
@@ -319,19 +307,19 @@ pub fn run(
 
     let mut running_inv = running_prod.inverse().unwrap();
 
-    for tbl in vm.tables.iter().rev() {
+    for tbl in phase1.tables.iter().rev() {
         if tbl.num_indices != 1 || tbl.num_values != 0 {
             todo!("wide tables");
         }
 
         for i in (0..tbl.length).rev() {
-            let multiplicity = out_c[tbl.elem_inverses_constraint_section_offset + i];
-            let denom = out_b[tbl.elem_inverses_constraint_section_offset + i];
-            let running_prod = out_a[tbl.elem_inverses_constraint_section_offset + i];
+            let multiplicity = phase1.out_c[tbl.elem_inverses_constraint_section_offset + i];
+            let denom = phase1.out_b[tbl.elem_inverses_constraint_section_offset + i];
+            let running_prod = phase1.out_a[tbl.elem_inverses_constraint_section_offset + i];
 
             if multiplicity != Field::ZERO {
                 let elem = running_prod * running_inv;
-                out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
+                phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
                 running_inv *= denom;
             }
         }
@@ -344,49 +332,73 @@ pub fn run(
         let wit_off = witness_layout.lookups_data_start() - witness_layout.challenges_start()
             + current_lookup_off;
 
-        let table_ix = out_a[cnst_off].0.0[0];
-        let table = &vm.tables[table_ix as usize];
+        let table_ix = phase1.out_a[cnst_off].0.0[0];
+        let table = &phase1.tables[table_ix as usize];
         if table.num_indices != 1 || table.num_values != 0 {
             todo!("wide tables");
         }
-        let ix_in_table = out_b[cnst_off].0.0[0];
-        out_a[cnst_off] =
-            out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-        out_b[cnst_off] =
-            out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-        out_c[cnst_off] = Field::ONE;
-        out_wit_post_comm[wit_off] = out_a[cnst_off];
-        out_c[table.elem_inverses_constraint_section_offset + table.length] += out_a[cnst_off];
+        let ix_in_table = phase1.out_b[cnst_off].0.0[0];
+        phase1.out_a[cnst_off] =
+            phase1.out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+        phase1.out_b[cnst_off] =
+            phase1.out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+        phase1.out_c[cnst_off] = Field::ONE;
+        phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
+        phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
+            phase1.out_a[cnst_off];
 
         current_lookup_off += 1;
     }
 
-    for tbl in vm.tables.iter() {
+    for tbl in phase1.tables.iter() {
         if tbl.num_indices != 1 || tbl.num_values != 0 {
             todo!("wide tables");
         }
         for i in 0..tbl.length {
-            let multiplicity = out_c[tbl.elem_inverses_constraint_section_offset + i];
+            let multiplicity = phase1.out_c[tbl.elem_inverses_constraint_section_offset + i];
             if multiplicity != Field::ZERO {
-                let elem = out_a[tbl.elem_inverses_constraint_section_offset + i] * multiplicity;
-                out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
-                out_wit_post_comm[tbl.elem_inverses_witness_section_offset + i] = elem;
-                out_a[tbl.elem_inverses_constraint_section_offset + tbl.length] += elem;
+                let elem =
+                    phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] * multiplicity;
+                phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
+                phase1.out_wit_post_comm[tbl.elem_inverses_witness_section_offset + i] = elem;
+                phase1.out_a[tbl.elem_inverses_constraint_section_offset + tbl.length] += elem;
             }
         }
-        out_b[tbl.elem_inverses_constraint_section_offset + tbl.length] = Field::ONE;
+        phase1.out_b[tbl.elem_inverses_constraint_section_offset + tbl.length] = Field::ONE;
     }
 
-    let result = WitgenResult {
-        out_wit_pre_comm,
-        out_wit_post_comm,
-        out_a,
-        out_b,
-        out_c,
-        instrumenter: vm.allocation_instrumenter,
-    };
+    WitgenResult {
+        out_wit_pre_comm: phase1.out_wit_pre_comm,
+        out_wit_post_comm: phase1.out_wit_post_comm,
+        out_a: phase1.out_a,
+        out_b: phase1.out_b,
+        out_c: phase1.out_c,
+        instrumenter: phase1.instrumenter,
+    }
+}
 
-    result
+// Old method implementation, for posterity
+// Do not use in production
+#[instrument(skip_all, name = "Interpreter::run")]
+pub fn run(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+) -> WitgenResult {
+    let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs);
+
+    // Generate fake challenges (matches the old hardcoded behaviour).
+    let mut fake_challenges = vec![Field::ZERO; witness_layout.challenges_size];
+    let mut random =
+        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
+            .unwrap();
+    for challenge in fake_challenges.iter_mut() {
+        *challenge = random;
+        random = (random + Field::from(17)) * random;
+    }
+
+    run_phase2(phase1, &fake_challenges, witness_layout, constraints_layout)
 }
 
 #[instrument(skip_all, name = "Interpreter::run_ad")]
@@ -447,7 +459,6 @@ fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
                 encoded_value.extend(flatten_params(elem));
             }
         }
-
         InputValueOrdered::Struct(fields) => {
             for (_field_name, field_value) in fields {
                 encoded_value.extend(flatten_params(field_value));
