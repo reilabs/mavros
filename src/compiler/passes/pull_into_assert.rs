@@ -4,7 +4,7 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BinaryArithOpKind, OpCode, SSA, ValueId},
+    ssa::{BinaryArithOpKind, Instruction, OpCode, SSA, ValueId},
 };
 
 pub struct PullIntoAssert {}

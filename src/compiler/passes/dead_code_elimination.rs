@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, Function, OpCode, SSA, Terminator, ValueId},
+    ssa::{BlockId, Function, Instruction, OpCode, SSA, Terminator, ValueId},
 };
 
 pub struct DCE {
