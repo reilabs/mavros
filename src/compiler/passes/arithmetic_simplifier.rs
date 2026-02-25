@@ -1,36 +1,32 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::value_definitions::ValueDefinition,
+    analysis::{types::TypeInfo, value_definitions::{ValueDefinition, ValueDefinitions}},
+    flow_analysis::FlowAnalysis,
     ir::r#type::TypeExpr,
-    pass_manager::{DataPoint, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{CastTarget, CmpKind, OpCode},
 };
 
 pub struct ArithmeticSimplifier {}
 
 impl Pass for ArithmeticSimplifier {
-    fn run(
-        &self,
-        ssa: &mut crate::compiler::ssa::SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
+    fn name(&self) -> &'static str { "arithmetic_simplifier" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id(), ValueDefinitions::id()]
+    }
+
+    fn run(&self, ssa: &mut crate::compiler::ssa::SSA, store: &AnalysisStore) {
         self.do_run(
             ssa,
-            pass_manager.get_type_info(),
-            pass_manager.get_value_definitions(),
+            store.get::<TypeInfo>(),
+            store.get::<ValueDefinitions>(),
         );
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "arithmetic_simplifier",
-            needs: vec![DataPoint::Types, DataPoint::ValueDefinitions],
-        }
-    }
-
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 

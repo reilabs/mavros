@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{Pass, PassInfo, PassManager},
+    pass_manager::{AnalysisStore, Pass},
     ssa::{BlockId, CallTarget, Const, FunctionId, OpCode, SSA, Terminator, TupleIdx, ValueId},
 };
 
@@ -15,22 +15,9 @@ impl Defunctionalize {
 }
 
 impl Pass for Defunctionalize {
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "defunctionalize",
-            needs: vec![],
-        }
-    }
+    fn name(&self) -> &'static str { "defunctionalize" }
 
-    fn invalidates_cfg(&self) -> bool {
-        true
-    }
-
-    fn invalidates_types(&self) -> bool {
-        true
-    }
-
-    fn run(&self, ssa: &mut SSA, _pass_manager: &PassManager) {
+    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         run_defunctionalize(ssa);
     }
 }

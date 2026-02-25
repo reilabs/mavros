@@ -1,6 +1,6 @@
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{Pass, PassInfo},
+    pass_manager::{AnalysisStore, Pass},
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, Function, OpCode, SSA, SeqType, TupleIdx, ValueId,
     },
@@ -9,16 +9,11 @@ use crate::compiler::{
 pub struct PrepareEntryPoint {}
 
 impl Pass for PrepareEntryPoint {
-    fn run(&self, ssa: &mut SSA, _pass_manager: &crate::compiler::pass_manager::PassManager) {
+    fn name(&self) -> &'static str { "prepare_entry_point" }
+
+    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         Self::wrap_main(ssa);
         self.rebuild_main_params(ssa);
-    }
-
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "prepare_entry_point",
-            needs: vec![],
-        }
     }
 }
 

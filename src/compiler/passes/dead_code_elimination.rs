@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    pass_manager::Pass,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BlockId, Function, OpCode, SSA, Terminator, ValueId},
 };
 
@@ -55,15 +55,14 @@ impl Config {
 }
 
 impl Pass for DCE {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg());
+    fn name(&self) -> &'static str { "dce" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "dce",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 }
 

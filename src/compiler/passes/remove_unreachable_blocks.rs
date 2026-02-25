@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::Pass,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BlockId, SSA},
 };
 
@@ -18,8 +18,14 @@ impl RemoveUnreachableBlocks {
 }
 
 impl Pass for RemoveUnreachableBlocks {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        let cfg = pass_manager.get_cfg();
+    fn name(&self) -> &'static str { "remove_unreachable_blocks" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        let cfg = store.get::<FlowAnalysis>();
 
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_cfg = cfg.get_function_cfg(*function_id);
@@ -31,16 +37,5 @@ impl Pass for RemoveUnreachableBlocks {
                 }
             }
         }
-    }
-
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "remove_unreachable_blocks",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
-    }
-
-    fn invalidates_cfg(&self) -> bool {
-        true
     }
 }

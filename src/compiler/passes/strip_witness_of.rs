@@ -1,6 +1,7 @@
 use crate::compiler::{
+    flow_analysis::FlowAnalysis,
     ir::r#type::Type,
-    pass_manager::{Pass, PassInfo, PassManager},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{CastTarget, Const, OpCode, SSA},
 };
@@ -14,19 +15,12 @@ use crate::compiler::{
 pub struct StripWitnessOf {}
 
 impl Pass for StripWitnessOf {
-    fn run(&self, ssa: &mut SSA, _pass_manager: &PassManager) {
+    fn name(&self) -> &'static str { "strip_witness_of" }
+    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
-
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "strip_witness_of",
-            needs: vec![],
-        }
-    }
-
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 

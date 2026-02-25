@@ -1,6 +1,6 @@
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::Pass,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{BlockId, SSA, Terminator, ValueId},
 };
@@ -8,19 +8,18 @@ use crate::compiler::{
 pub struct ConditionPropagation {}
 
 impl Pass for ConditionPropagation {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg());
+    fn name(&self) -> &'static str { "condition_propagation" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "condition_propagation",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 

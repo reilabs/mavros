@@ -2,31 +2,27 @@ use core::panic;
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::value_definitions::ValueDefinition,
-    pass_manager::{DataPoint, Pass},
+    analysis::value_definitions::{ValueDefinition, ValueDefinitions},
+    flow_analysis::FlowAnalysis,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BinaryArithOpKind, Const, OpCode, TupleIdx},
 };
 
 pub struct MakeStructAccessStatic {}
 
 impl Pass for MakeStructAccessStatic {
-    fn run(
-        &self,
-        ssa: &mut crate::compiler::ssa::SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
-        self.do_run(ssa, pass_manager.get_value_definitions());
+    fn name(&self) -> &'static str { "make_struct_access_static" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![ValueDefinitions::id()]
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "make_struct_access_static",
-            needs: vec![DataPoint::ValueDefinitions],
-        }
+    fn run(&self, ssa: &mut crate::compiler::ssa::SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<ValueDefinitions>());
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 

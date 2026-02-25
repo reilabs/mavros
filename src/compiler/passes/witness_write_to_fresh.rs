@@ -1,26 +1,26 @@
 use crate::compiler::{
     analysis::types::TypeInfo,
+    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{Function, OpCode, SSA, SeqType, ValueId},
 };
 
 pub struct WitnessWriteToFresh {}
 
 impl Pass for WitnessWriteToFresh {
-    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
-        self.do_run(ssa, pass_manager.get_type_info());
+    fn name(&self) -> &'static str { "witness_write_to_fresh" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
     }
 
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "witness_write_to_fresh",
-            needs: vec![DataPoint::Types],
-        }
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 

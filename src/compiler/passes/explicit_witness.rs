@@ -6,8 +6,9 @@ use ssa_builder::ssa_append;
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
+    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget,
         OpCode, Radix, SSA, SeqType, ValueId,
@@ -17,19 +18,18 @@ use crate::compiler::{
 pub struct ExplicitWitness {}
 
 impl Pass for ExplicitWitness {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_type_info());
+    fn name(&self) -> &'static str { "explicit_witness" }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "explicit_witness",
-            needs: vec![DataPoint::Types],
-        }
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
