@@ -83,3 +83,11 @@ impl ValueDefinitions {
         self.functions.get(&function_id).unwrap()
     }
 }
+
+use crate::compiler::pass_manager::{Analysis, AnalysisStore};
+
+impl Analysis for ValueDefinitions {
+    fn compute(ssa: &SSA, _store: &AnalysisStore) -> Self {
+        ValueDefinitions::from_ssa(ssa)
+    }
+}

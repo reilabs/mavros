@@ -1,5 +1,6 @@
 use crate::compiler::{
-    pass_manager::{Pass, PassInfo, PassManager},
+    flow_analysis::FlowAnalysis,
+    pass_manager::{Analysis as _, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{OpCode, SSA},
 };
@@ -8,17 +9,14 @@ use std::collections::HashSet;
 pub struct WitnessWriteToVoid {}
 
 impl Pass for WitnessWriteToVoid {
-    fn run(&self, ssa: &mut SSA, _pass_manager: &PassManager) {
+    fn name(&self) -> &'static str {
+        "witness_write_to_void"
+    }
+    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "witness_write_to_void",
-            needs: vec![],
-        }
-    }
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 

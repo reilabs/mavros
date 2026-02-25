@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
+    analysis::types::TypeInfo,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType,
@@ -13,23 +14,16 @@ use crate::compiler::{
 pub struct WitnessLowering {}
 
 impl Pass for WitnessLowering {
-    fn run(
-        &self,
-        ssa: &mut crate::compiler::ssa::SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
-        self.do_run(ssa, pass_manager.get_type_info());
+    fn name(&self) -> &'static str {
+        "witness_lowering"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "witness_lowering",
-            needs: vec![DataPoint::Types],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        true
+    fn run(&self, ssa: &mut crate::compiler::ssa::SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
     }
 }
 

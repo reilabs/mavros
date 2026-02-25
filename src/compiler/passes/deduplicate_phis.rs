@@ -1,22 +1,24 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    pass_manager::Pass,
+    flow_analysis::FlowAnalysis,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BlockId, SSA, Terminator, ValueId},
 };
 
 pub struct DeduplicatePhis {}
 
 impl Pass for DeduplicatePhis {
-    fn run(&self, ssa: &mut SSA, _pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa);
+    fn name(&self) -> &'static str {
+        "deduplicate_phis"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "deduplicate_phis",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+        self.do_run(ssa);
     }
 }
 

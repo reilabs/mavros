@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    pass_manager::Pass,
+    analysis::types::TypeInfo,
+    flow_analysis::FlowAnalysis,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BinaryArithOpKind, OpCode, SSA, ValueId},
 };
 
@@ -13,23 +15,14 @@ pub struct PulledProduct {
 }
 
 impl Pass for PullIntoAssert {
-    fn run(&self, ssa: &mut SSA, _pass_manager: &crate::compiler::pass_manager::PassManager) {
+    fn name(&self) -> &'static str {
+        "pull_into_assert"
+    }
+    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
-
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "pull_into_assert",
-            needs: vec![],
-        }
-    }
-
-    fn invalidates_cfg(&self) -> bool {
-        false
-    }
-
-    fn invalidates_types(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id(), TypeInfo::id()]
     }
 }
 

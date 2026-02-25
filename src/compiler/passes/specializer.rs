@@ -6,12 +6,12 @@ use tracing::{info, instrument};
 use crate::compiler::{
     Field,
     analysis::{
-        instrumenter::{FunctionSignature, SpecializationSummary, ValueSignature},
+        instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
     ir::r#type::Type,
-    pass_manager::{DataPoint, Pass, PassInfo},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
         BinaryArithOpKind, CastTarget, Endianness, Function, FunctionId, MemOp, Radix, SSA,
         SeqType, ValueId,
@@ -563,19 +563,20 @@ impl symbolic_executor::Context<Val> for SpecializationState {
 }
 
 impl Pass for Specializer {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        let summary = pass_manager.get_constraint_instrumentation();
-        for (sig, summary) in summary.functions.iter() {
-            if summary.specialization_total_savings > 0 {
-                self.try_spec(ssa, pass_manager.get_type_info(), summary, sig.clone());
-            }
-        }
+    fn name(&self) -> &'static str {
+        "specializer"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        PassInfo {
-            name: "specializer",
-            needs: vec![DataPoint::ConstraintInstrumentation, DataPoint::Types],
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![Summary::id(), TypeInfo::id()]
+    }
+
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        let summary = store.get::<Summary>();
+        for (sig, summary) in summary.functions.iter() {
+            if summary.specialization_total_savings > 0 {
+                self.try_spec(ssa, store.get::<TypeInfo>(), summary, sig.clone());
+            }
         }
     }
 }

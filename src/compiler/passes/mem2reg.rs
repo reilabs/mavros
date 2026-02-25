@@ -7,22 +7,23 @@ use crate::compiler::passes::fix_double_jumps::ValueReplacements;
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BlockId, Function, OpCode, SSA, Terminator, ValueId},
 };
 
 pub struct Mem2Reg {}
 
 impl Pass for Mem2Reg {
-    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg(), pass_manager.get_type_info());
+    fn name(&self) -> &'static str {
+        "mem2reg"
     }
 
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "mem2reg",
-            needs: vec![DataPoint::CFG, DataPoint::Types],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id(), TypeInfo::id()]
+    }
+
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>(), store.get::<TypeInfo>());
     }
 }
 

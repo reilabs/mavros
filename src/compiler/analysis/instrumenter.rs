@@ -1507,3 +1507,18 @@ impl CostEstimator {
         FunctionSignature { id, params }
     }
 }
+
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
+
+impl Analysis for Summary {
+    fn dependencies() -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
+    }
+
+    fn compute(ssa: &SSA, store: &AnalysisStore) -> Self {
+        let type_info = store.get::<TypeInfo>();
+        let cost_estimator = CostEstimator::new();
+        let cost_analysis = cost_estimator.run(ssa, type_info);
+        cost_analysis.summarize()
+    }
+}

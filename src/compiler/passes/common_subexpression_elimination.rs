@@ -7,7 +7,10 @@ use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ssa::{BinaryArithOpKind, BlockId, CmpKind, Const, Function, OpCode, SSA, TupleIdx, ValueId},
 };
-use crate::compiler::{pass_manager::Pass, passes::fix_double_jumps::ValueReplacements};
+use crate::compiler::{
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    passes::fix_double_jumps::ValueReplacements,
+};
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Expr {
@@ -173,19 +176,20 @@ impl Debug for Expr {
 pub struct CSE {}
 
 impl Pass for CSE {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg());
+    fn name(&self) -> &'static str {
+        "cse"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "cse",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
+    }
+
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
