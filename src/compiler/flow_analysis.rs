@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, OpCode, SSA, Terminator};
+use crate::compiler::ir::r#type::SSAType;
+use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, Instruction, OpCode, SSA, Terminator};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JumpType {
@@ -395,16 +396,18 @@ impl CFG {
 }
 
 impl CFG {
-    pub fn generate_image(
+    pub fn generate_image<Op: Instruction, Ty: SSAType>(
         &self,
         output_path: PathBuf,
-        ssa: &crate::compiler::ssa::SSA,
-        function: &crate::compiler::ssa::Function,
+        ssa: &SSA<Op, Ty>,
+        function: &crate::compiler::ssa::Function<Op, Ty>,
         func_id: FunctionId,
         label: String,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use std::fs;
         use std::process::Command;
+
+        let func_name = |id: FunctionId| ssa.get_function(id).get_name().to_string();
 
         // Generate DOT content
         let mut dot_content = String::new();
@@ -432,7 +435,7 @@ impl CFG {
         for (_, block_id) in &self.node_to_block {
             let block = function.get_block(*block_id);
             let block_content = block.to_string(
-                ssa,
+                &func_name,
                 func_id,
                 *block_id,
                 &crate::compiler::ssa::DefaultSsaAnnotator,
@@ -569,10 +572,10 @@ impl CallGraph {
 }
 
 impl CallGraph {
-    pub fn generate_image(
+    pub fn generate_image<Op: Instruction, Ty: SSAType>(
         &self,
         output_path: PathBuf,
-        ssa: &SSA,
+        ssa: &SSA<Op, Ty>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use std::fs;
         use std::process::Command;
@@ -636,7 +639,7 @@ pub struct FlowAnalysis {
 }
 
 impl FlowAnalysis {
-    pub fn run(ssa: &SSA) -> Self {
+    pub fn run<Op: Instruction, Ty: SSAType>(ssa: &SSA<Op, Ty>) -> Self {
         let mut call_graph = CallGraph::new();
         let mut function_cfgs = HashMap::new();
 
@@ -669,23 +672,8 @@ impl FlowAnalysis {
                     }
                 }
                 for instruction in block.get_instructions() {
-                    match instruction {
-                        OpCode::Call {
-                            results: _,
-                            function: CallTarget::Static(tgt_id),
-                            args: _,
-                        } => {
-                            call_graph.add_call(*func_id, *tgt_id);
-                        }
-                        OpCode::Call {
-                            function: CallTarget::Dynamic(_),
-                            ..
-                        } => {
-                            panic!(
-                                "Dynamic calls should be eliminated by defunctionalization before flow analysis"
-                            );
-                        }
-                        _ => {}
+                    for target_id in instruction.get_static_call_targets() {
+                        call_graph.add_call(*func_id, target_id);
                     }
                 }
             }
@@ -706,7 +694,12 @@ impl FlowAnalysis {
         &self.function_cfgs[&function_id]
     }
 
-    pub fn generate_images(&self, debug_output_dir: PathBuf, ssa: &SSA, phase_label: String) {
+    pub fn generate_images<Op: Instruction, Ty: SSAType>(
+        &self,
+        debug_output_dir: PathBuf,
+        ssa: &SSA<Op, Ty>,
+        phase_label: String,
+    ) {
         if !debug_output_dir.exists() {
             fs::create_dir(&debug_output_dir).unwrap();
         }
@@ -734,159 +727,6 @@ impl FlowAnalysis {
                 .unwrap();
         }
     }
-
-    // pub fn to_graphviz(&self) -> String {
-    //     let mut dot = String::new();
-    //     dot.push_str("digraph FlowAnalysis {\n");
-    //     dot.push_str("  rankdir=TB;\n");
-    //     dot.push_str("  compound=true;\n");
-    //     dot.push_str("  node [shape=box];\n\n");
-
-    //     for (func_id, _) in &self.function_cfgs {
-    //         dot.push_str(&format!(
-    //             "  entry_{} [label=\"\", shape=point, style=invis];\n",
-    //             func_id.0
-    //         ));
-    //         dot.push_str(&format!(
-    //             "  return_{} [label=\"\", shape=point, style=invis];\n",
-    //             func_id.0
-    //         ));
-    //     }
-
-    //     dot.push_str("\n");
-
-    //     dot.push_str("  { rank=source;\n");
-    //     for (func_id, _) in &self.function_cfgs {
-    //         dot.push_str(&format!("    entry_{};\n", func_id.0));
-    //     }
-    //     dot.push_str("  }\n\n");
-
-    //     dot.push_str("  { rank=sink;\n");
-    //     for (func_id, _) in &self.function_cfgs {
-    //         dot.push_str(&format!("    return_{};\n", func_id.0));
-    //     }
-    //     dot.push_str("  }\n\n");
-
-    //     dot.push_str("  subgraph cluster_call_graph {\n");
-    //     dot.push_str("    label=\"Call Graph\";\n");
-    //     dot.push_str("    style=filled;\n");
-    //     dot.push_str("    color=lightgrey;\n");
-    //     dot.push_str("    node [style=filled,color=white];\n");
-
-    //     for (func_id, node_index) in &self.func_to_node {
-    //         dot.push_str(&format!(
-    //             "    func_{} [label=\"fn_{}\"];\n",
-    //             func_id.0, func_id.0
-    //         ));
-    //     }
-
-    //     for edge in self.call_graph.edge_indices() {
-    //         let (source, target) = self.call_graph.edge_endpoints(edge).unwrap();
-    //         let source_func = self.node_to_func[&source];
-    //         let target_func = self.node_to_func[&target];
-    //         dot.push_str(&format!(
-    //             "    func_{} -> func_{};\n",
-    //             source_func.0, target_func.0
-    //         ));
-    //     }
-
-    //     dot.push_str("  }\n\n");
-
-    //     for (func_id, cfg) in &self.function_cfgs {
-    //         dot.push_str(&format!("  subgraph cluster_cfg_{} {{\n", func_id.0));
-    //         dot.push_str(&format!("    label=\"CFG fn_{}\";\n", func_id.0));
-    //         dot.push_str("    style=filled;\n");
-    //         dot.push_str("    color=lightblue;\n");
-    //         dot.push_str("    node [style=filled,color=white];\n");
-
-    //         for (block_id, node_index) in &cfg.block_to_node {
-    //             dot.push_str(&format!(
-    //                 "    block_{}_{} [label=\"block_{}\"];\n",
-    //                 func_id.0, block_id.0, block_id.0
-    //             ));
-    //         }
-
-    //         for edge in cfg.cfg.edge_indices() {
-    //             let (source, target) = cfg.cfg.edge_endpoints(edge).unwrap();
-    //             let edge_weight = &cfg.cfg[edge];
-    //             match edge_weight {
-    //                 JumpType::Jmp => {
-    //                     let source_block = cfg.node_to_block[&source];
-    //                     let target_block = cfg.node_to_block[&target];
-    //                     dot.push_str(&format!(
-    //                         "    block_{}_{} -> block_{}_{};\n",
-    //                         func_id.0, source_block.0, func_id.0, target_block.0
-    //                     ));
-    //                 }
-    //                 JumpType::JmpIf => {
-    //                     let source_block = cfg.node_to_block[&source];
-    //                     let target_block = cfg.node_to_block[&target];
-    //                     dot.push_str(&format!(
-    //                         "    block_{}_{} -> block_{}_{} [color=red];\n",
-    //                         func_id.0, source_block.0, func_id.0, target_block.0
-    //                     ));
-    //                 }
-    //                 _ => {} // Skip Entry and Return edges - they'll be handled outside
-    //             }
-    //         }
-
-    //         dot.push_str("  }\n\n");
-    //     }
-
-    //     // Add entry and return edges outside the subgraphs
-    //     for (func_id, cfg) in &self.function_cfgs {
-    //         for edge in cfg.cfg.edge_indices() {
-    //             let (source, target) = cfg.cfg.edge_endpoints(edge).unwrap();
-    //             let edge_weight = &cfg.cfg[edge];
-    //             match edge_weight {
-    //                 JumpType::Return => {
-    //                     let source_block = cfg.node_to_block[&source];
-    //                     dot.push_str(&format!(
-    //                         "  block_{}_{} -> return_{} [style=dashed, color=red];\n",
-    //                         func_id.0, source_block.0, func_id.0
-    //                     ));
-    //                 }
-    //                 JumpType::Entry => {
-    //                     let target_block = cfg.node_to_block[&target];
-    //                     dot.push_str(&format!(
-    //                         "  entry_{} -> block_{}_{} [style=dashed, color=green];\n",
-    //                         func_id.0, func_id.0, target_block.0
-    //                     ));
-    //                 }
-    //                 _ => {} // Skip Jmp and JmpIf edges - they're handled inside subgraphs
-    //             }
-    //         }
-    //     }
-
-    //     dot.push_str("}\n");
-    //     dot
-    // }
-
-    // pub fn save_as_png(&self, filename: &str) -> Result<(), String> {
-    //     let dot_content = self.to_graphviz();
-
-    //     let temp_dot_file = format!("{}.dot", filename);
-    //     let mut file = fs::File::create(&temp_dot_file)
-    //         .map_err(|e| format!("Failed to create temporary dot file: {}", e))?;
-
-    //     file.write_all(dot_content.as_bytes())
-    //         .map_err(|e| format!("Failed to write dot content: {}", e))?;
-
-    //     let output = Command::new("dot")
-    //         .args(&["-Tpng", &temp_dot_file, "-o", &format!("{}.png", filename)])
-    //         .output()
-    //         .map_err(|e| format!("Failed to execute dot command: {}", e))?;
-
-    //     if !output.status.success() {
-    //         let stderr = String::from_utf8_lossy(&output.stderr);
-    //         return Err(format!("dot command failed: {}", stderr));
-    //     }
-
-    //     fs::remove_file(&temp_dot_file)
-    //         .map_err(|e| format!("Failed to remove temporary dot file: {}", e))?;
-
-    //     Ok(())
-    // }
 }
 
 use crate::compiler::pass_manager::{Analysis, AnalysisStore};
