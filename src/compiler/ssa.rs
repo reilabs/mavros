@@ -1,4 +1,4 @@
-use crate::compiler::ir::r#type::Type;
+use crate::compiler::ir::r#type::{SSAType, Type};
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
 
@@ -25,29 +25,29 @@ pub trait SsaAnnotator {
 pub struct DefaultSsaAnnotator;
 impl SsaAnnotator for DefaultSsaAnnotator {}
 
-struct LocalFunctionAnnotator<'a> {
-    function_id: FunctionId,
-    annotator: &'a dyn SsaAnnotator,
-}
+pub trait Instruction: Clone + std::fmt::Debug + 'static {
+    fn get_inputs(&self) -> impl Iterator<Item = &ValueId>;
+    fn get_results(&self) -> impl Iterator<Item = &ValueId>;
+    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
+    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
 
-impl<'a> LocalFunctionAnnotator<'a> {
-    pub fn new(function_id: FunctionId, annotator: &'a dyn SsaAnnotator) -> Self {
-        Self {
-            function_id,
-            annotator,
-        }
-    }
+    /// Static call targets for building call graphs.
+    fn get_static_call_targets(&self) -> Vec<FunctionId>;
 
-    pub fn annotate_value(&self, value_id: ValueId) -> String {
-        self.annotator.annotate_value(self.function_id, value_id)
-    }
+    /// Display an instruction. Takes closures for function name resolution
+    /// and value annotation (so the trait doesn't depend on SSA).
+    fn display_instruction(
+        &self,
+        func_name: &dyn Fn(FunctionId) -> String,
+        annotate_value: &dyn Fn(ValueId) -> String,
+    ) -> String;
 }
 
 #[derive(Clone)]
-pub struct SSA {
-    functions: HashMap<FunctionId, Function>,
+pub struct SSA<Op: Instruction = OpCode, Ty: SSAType = Type> {
+    functions: HashMap<FunctionId, Function<Op, Ty>>,
     /// Type of each global slot (indexed by slot number)
-    global_types: Vec<Type>,
+    global_types: Vec<Ty>,
     /// Function that initializes all globals (emits InitGlobal opcodes)
     globals_init_fn: Option<FunctionId>,
     /// Function that drops all globals (emits DropGlobal opcodes)
@@ -71,8 +71,10 @@ impl SSA {
             next_function_id: 1,
         }
     }
+}
 
-    pub fn prepare_rebuild(self) -> (SSA, HashMap<FunctionId, Function>, Vec<Type>) {
+impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
+    pub fn prepare_rebuild(self) -> (SSA<Op, Ty>, HashMap<FunctionId, Function<Op, Ty>>, Vec<Ty>) {
         (
             SSA {
                 functions: HashMap::new(),
@@ -87,7 +89,7 @@ impl SSA {
         )
     }
 
-    pub fn insert_function(&mut self, function: Function) -> FunctionId {
+    pub fn insert_function(&mut self, function: Function<Op, Ty>) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
         self.functions.insert(new_id, function);
@@ -102,47 +104,49 @@ impl SSA {
         self.main_id
     }
 
-    pub fn get_main_mut(&mut self) -> &mut Function {
+    pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
             .get_mut(&self.main_id)
             .expect("Main function should exist")
     }
 
-    pub fn get_main(&self) -> &Function {
+    pub fn get_main(&self) -> &Function<Op, Ty> {
         self.functions
             .get(&self.main_id)
             .expect("Main function should exist")
     }
 
-    pub fn get_function(&self, id: FunctionId) -> &Function {
+    pub fn get_function(&self, id: FunctionId) -> &Function<Op, Ty> {
         self.functions.get(&id).expect("Function should exist")
     }
 
-    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function {
+    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function<Op, Ty> {
         self.functions.get_mut(&id).expect("Function should exist")
     }
 
-    pub fn take_function(&mut self, id: FunctionId) -> Function {
+    pub fn take_function(&mut self, id: FunctionId) -> Function<Op, Ty> {
         self.functions.remove(&id).expect("Function should exist")
     }
 
-    pub fn put_function(&mut self, id: FunctionId, function: Function) {
+    pub fn put_function(&mut self, id: FunctionId, function: Function<Op, Ty>) {
         self.functions.insert(id, function);
     }
 
     pub fn add_function(&mut self, name: String) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
-        let function = Function::empty(name);
+        let function = Function::<Op, Ty>::empty(name);
         self.functions.insert(new_id, function);
         new_id
     }
 
-    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function)> {
+    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function<Op, Ty>)> {
         self.functions.iter()
     }
 
-    pub fn iter_functions_mut(&mut self) -> impl Iterator<Item = (&FunctionId, &mut Function)> {
+    pub fn iter_functions_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&FunctionId, &mut Function<Op, Ty>)> {
         self.functions.iter_mut()
     }
 
@@ -150,11 +154,11 @@ impl SSA {
         self.functions.keys().copied()
     }
 
-    pub fn set_global_types(&mut self, types: Vec<Type>) {
+    pub fn set_global_types(&mut self, types: Vec<Ty>) {
         self.global_types = types;
     }
 
-    pub fn get_global_types(&self) -> &[Type] {
+    pub fn get_global_types(&self) -> &[Ty] {
         &self.global_types
     }
 
@@ -179,12 +183,13 @@ impl SSA {
     }
 }
 
-impl SSA {
+impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
     pub fn to_string(&self, value_annotator: &dyn SsaAnnotator) -> String {
+        let func_name = |id: FunctionId| self.get_function(id).get_name().to_string();
         self.functions
             .iter()
             .sorted_by_key(|(fn_id, _)| fn_id.0)
-            .map(|(fn_id, func)| func.to_string(self, *fn_id, value_annotator))
+            .map(|(fn_id, func)| func.to_string(&func_name, *fn_id, value_annotator))
             .join("\n\n")
     }
 }
@@ -210,21 +215,21 @@ pub enum CallTarget {
 }
 
 #[derive(Clone)]
-pub struct Function {
+pub struct Function<Op: Instruction = OpCode, Ty: SSAType = Type> {
     entry_block: BlockId,
-    blocks: HashMap<BlockId, Block>,
+    blocks: HashMap<BlockId, Block<Op, Ty>>,
     name: String,
-    returns: Vec<Type>,
+    returns: Vec<Ty>,
     next_block: u64,
     next_value: u64,
     consts: HashMap<ValueId, Const>,
     consts_to_val: HashMap<Const, ValueId>,
 }
 
-impl Function {
+impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     pub fn to_string(
         &self,
-        ssa: &SSA,
+        func_name: &dyn Fn(FunctionId) -> String,
         id: FunctionId,
         value_annotator: &dyn SsaAnnotator,
     ) -> String {
@@ -245,14 +250,14 @@ impl Function {
             .blocks
             .iter()
             .sorted_by_key(|(bid, _)| bid.0)
-            .map(|(bid, block)| block.to_string(ssa, id, *bid, value_annotator))
+            .map(|(bid, block)| block.to_string(func_name, id, *bid, value_annotator))
             .join("\n");
         let footer = "}".to_string();
         format!("{}\n{}\n{}\n{}", header, consts, blocks, footer)
     }
 }
 
-impl Function {
+impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     pub fn empty(name: String) -> Self {
         let entry = Block::empty();
         let entry_id = BlockId(0);
@@ -270,7 +275,7 @@ impl Function {
         }
     }
 
-    pub fn prepare_rebuild(self) -> (Function, HashMap<BlockId, Block>, Vec<Type>) {
+    pub fn prepare_rebuild(self) -> (Function<Op, Ty>, HashMap<BlockId, Block<Op, Ty>>, Vec<Ty>) {
         (
             Function {
                 entry_block: self.entry_block,
@@ -299,13 +304,13 @@ impl Function {
         return self.next_value as usize;
     }
 
-    pub fn get_entry_mut(&mut self) -> &mut Block {
+    pub fn get_entry_mut(&mut self) -> &mut Block<Op, Ty> {
         self.blocks
             .get_mut(&self.entry_block)
             .expect("Entry block should exist")
     }
 
-    pub fn get_entry(&self) -> &Block {
+    pub fn get_entry(&self) -> &Block<Op, Ty> {
         self.blocks
             .get(&self.entry_block)
             .expect("Entry block should exist")
@@ -315,19 +320,19 @@ impl Function {
         self.entry_block
     }
 
-    pub fn get_block(&self, id: BlockId) -> &Block {
+    pub fn get_block(&self, id: BlockId) -> &Block<Op, Ty> {
         self.blocks.get(&id).expect("Block should exist")
     }
 
-    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block {
+    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block<Op, Ty> {
         self.blocks.get_mut(&id).expect("Block should exist")
     }
 
-    pub fn take_block(&mut self, id: BlockId) -> Block {
+    pub fn take_block(&mut self, id: BlockId) -> Block<Op, Ty> {
         self.blocks.remove(&id).expect("Block should exist")
     }
 
-    pub fn put_block(&mut self, id: BlockId, block: Block) {
+    pub fn put_block(&mut self, id: BlockId, block: Block<Op, Ty>) {
         self.blocks.insert(id, block);
     }
 
@@ -347,18 +352,18 @@ impl Function {
             .is_some()
     }
 
-    pub fn next_virtual_block(&mut self) -> (BlockId, Block) {
+    pub fn next_virtual_block(&mut self) -> (BlockId, Block<Op, Ty>) {
         let new_id = BlockId(self.next_block);
         self.next_block += 1;
         let block = Block::empty();
         (new_id, block)
     }
 
-    pub fn add_return_type(&mut self, typ: Type) {
+    pub fn add_return_type(&mut self, typ: Ty) {
         self.returns.push(typ);
     }
 
-    pub fn get_param_types(&self) -> Vec<Type> {
+    pub fn get_param_types(&self) -> Vec<Ty> {
         self.get_entry()
             .parameters
             .iter()
@@ -374,19 +379,19 @@ impl Function {
         self.consts.iter_mut()
     }
 
-    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Type> {
+    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
         self.returns.iter_mut()
     }
 
-    pub fn get_returns(&self) -> &[Type] {
+    pub fn get_returns(&self) -> &[Ty] {
         &self.returns
     }
 
-    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block)> {
+    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block<Op, Ty>)> {
         self.blocks.iter()
     }
 
-    pub fn add_parameter(&mut self, block_id: BlockId, typ: Type) -> ValueId {
+    pub fn add_parameter(&mut self, block_id: BlockId, typ: Ty) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
@@ -420,6 +425,55 @@ impl Function {
         self.push_const(Const::FnPtr(fn_id))
     }
 
+    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block<Op, Ty>)> {
+        self.blocks.iter_mut()
+    }
+
+    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block<Op, Ty>> {
+        std::mem::take(&mut self.blocks)
+    }
+
+    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block<Op, Ty>>) {
+        self.blocks = blocks;
+    }
+
+    pub fn fresh_value(&mut self) -> ValueId {
+        let value_id = ValueId(self.next_value);
+        self.next_value += 1;
+        value_id
+    }
+
+    pub fn remove_const(&mut self, value_id: ValueId) {
+        let v = self.consts.remove(&value_id);
+        self.consts_to_val.remove(&v.unwrap());
+    }
+
+    pub fn replace_const(&mut self, value_id: ValueId, new_const: Const) {
+        if let Some(old_const) = self.consts.remove(&value_id) {
+            self.consts_to_val.remove(&old_const);
+        }
+        self.consts.insert(value_id, new_const.clone());
+        self.consts_to_val.insert(new_const, value_id);
+    }
+
+    pub fn take_returns(&mut self) -> Vec<Ty> {
+        std::mem::take(&mut self.returns)
+    }
+
+    pub fn code_size(&self) -> usize {
+        self.blocks
+            .values()
+            .map(|b| {
+                b.instructions
+                    .iter()
+                    .map(|i| i.get_inputs().count() + 1)
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+}
+
+impl Function {
     pub fn push_cmp(
         &mut self,
         block_id: BlockId,
@@ -1012,66 +1066,19 @@ impl Function {
             .unwrap()
             .set_terminator(Terminator::Jmp(destination, arguments));
     }
-
-    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block)> {
-        self.blocks.iter_mut()
-    }
-
-    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block> {
-        std::mem::take(&mut self.blocks)
-    }
-
-    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block>) {
-        self.blocks = blocks;
-    }
-
-    pub fn fresh_value(&mut self) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        value_id
-    }
-
-    pub fn remove_const(&mut self, value_id: ValueId) {
-        let v = self.consts.remove(&value_id);
-        self.consts_to_val.remove(&v.unwrap());
-    }
-
-    pub fn replace_const(&mut self, value_id: ValueId, new_const: Const) {
-        if let Some(old_const) = self.consts.remove(&value_id) {
-            self.consts_to_val.remove(&old_const);
-        }
-        self.consts.insert(value_id, new_const.clone());
-        self.consts_to_val.insert(new_const, value_id);
-    }
-
-    pub fn take_returns(&mut self) -> Vec<Type> {
-        std::mem::take(&mut self.returns)
-    }
-
-    pub fn code_size(&self) -> usize {
-        self.blocks
-            .values()
-            .map(|b| {
-                b.instructions
-                    .iter()
-                    .map(|i| i.get_inputs().count() + 1)
-                    .sum::<usize>()
-            })
-            .sum()
-    }
 }
 
 #[derive(Clone)]
-pub struct Block {
-    parameters: Vec<(ValueId, Type)>,
-    instructions: Vec<OpCode>,
+pub struct Block<Op: Instruction = OpCode, Ty: SSAType = Type> {
+    parameters: Vec<(ValueId, Ty)>,
+    instructions: Vec<Op>,
     terminator: Option<Terminator>,
 }
 
-impl Block {
+impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     pub fn to_string(
         &self,
-        ssa: &SSA,
+        func_name: &dyn Fn(FunctionId) -> String,
         func_id: FunctionId,
         id: BlockId,
         value_annotator: &dyn SsaAnnotator,
@@ -1089,11 +1096,18 @@ impl Block {
                 format!("v{} : {}{}", v.0.0, v.1.to_string(), annotation)
             })
             .join(", ");
-        let local_annotator = LocalFunctionAnnotator::new(func_id, value_annotator);
+        let annotate_value = |value: ValueId| -> String {
+            let annotation = value_annotator.annotate_value(func_id, value);
+            if annotation.is_empty() {
+                "".to_string()
+            } else {
+                format!("[{}]", annotation)
+            }
+        };
         let instructions = self
             .instructions
             .iter()
-            .map(|i| format!("    {}", i.to_string(ssa, &local_annotator)))
+            .map(|i| format!("    {}", i.display_instruction(func_name, &annotate_value)))
             .join("\n");
         let terminator = match &self.terminator {
             Some(t) => format!("    {}", t.to_string()),
@@ -1112,7 +1126,7 @@ impl Block {
     }
 }
 
-impl Block {
+impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     pub fn empty() -> Self {
         Block {
             parameters: Vec::new(),
@@ -1121,15 +1135,15 @@ impl Block {
         }
     }
 
-    pub fn take_instructions(&mut self) -> Vec<OpCode> {
+    pub fn take_instructions(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.instructions)
     }
 
-    pub fn put_instructions(&mut self, instructions: Vec<OpCode>) {
+    pub fn put_instructions(&mut self, instructions: Vec<Op>) {
         self.instructions = instructions;
     }
 
-    pub fn push_instruction(&mut self, instruction: OpCode) {
+    pub fn push_instruction(&mut self, instruction: Op) {
         self.instructions.push(instruction);
     }
 
@@ -1137,19 +1151,19 @@ impl Block {
         self.terminator = Some(terminator);
     }
 
-    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Type)> {
+    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Ty)> {
         self.parameters.iter()
     }
 
-    pub fn get_parameters_mut(&mut self) -> impl Iterator<Item = &mut (ValueId, Type)> {
+    pub fn get_parameters_mut(&mut self) -> impl Iterator<Item = &mut (ValueId, Ty)> {
         self.parameters.iter_mut()
     }
 
-    pub fn take_parameters(&mut self) -> Vec<(ValueId, Type)> {
+    pub fn take_parameters(&mut self) -> Vec<(ValueId, Ty)> {
         std::mem::take(&mut self.parameters)
     }
 
-    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Type)>) {
+    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Ty)>) {
         self.parameters = parameters;
     }
 
@@ -1157,15 +1171,15 @@ impl Block {
         self.parameters.iter().map(|(id, _)| id)
     }
 
-    pub fn get_instruction(&self, i: usize) -> &OpCode {
+    pub fn get_instruction(&self, i: usize) -> &Op {
         &self.instructions[i]
     }
 
-    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &OpCode> {
+    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &Op> {
         self.instructions.iter()
     }
 
-    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut OpCode> {
+    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut Op> {
         self.instructions.iter_mut()
     }
 
@@ -1474,16 +1488,43 @@ pub enum OpCode {
     },
 }
 
-impl OpCode {
-    fn to_string(&self, ssa: &SSA, value_annotator: &LocalFunctionAnnotator) -> String {
-        fn annotate(value_annotator: &LocalFunctionAnnotator, value: ValueId) -> String {
-            let annotation = value_annotator.annotate_value(value);
-            if annotation.is_empty() {
-                "".to_string()
-            } else {
-                format!("[{}]", annotation)
-            }
+impl Instruction for OpCode {
+    fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
+        // Calls the inherent method (inherent takes priority over trait in method resolution)
+        let this: &OpCode = self;
+        this.get_inputs()
+    }
+
+    fn get_results(&self) -> impl Iterator<Item = &ValueId> {
+        let this: &OpCode = self;
+        this.get_results()
+    }
+
+    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        let this: &mut OpCode = self;
+        this.get_inputs_mut()
+    }
+
+    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        let this: &mut OpCode = self;
+        this.get_operands_mut()
+    }
+
+    fn get_static_call_targets(&self) -> Vec<FunctionId> {
+        match self {
+            OpCode::Call {
+                function: CallTarget::Static(id),
+                ..
+            } => vec![*id],
+            _ => vec![],
         }
+    }
+
+    fn display_instruction(
+        &self,
+        func_name: &dyn Fn(FunctionId) -> String,
+        annotate_value: &dyn Fn(ValueId) -> String,
+    ) -> String {
         match self {
             OpCode::Cmp {
                 kind,
@@ -1498,7 +1539,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{} {} v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     lhs.0,
                     op_str,
                     rhs.0
@@ -1520,7 +1561,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{} {} v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     lhs.0,
                     op_str,
                     rhs.0
@@ -1529,25 +1570,12 @@ impl OpCode {
             OpCode::Alloc {
                 result,
                 elem_type: typ,
-            } => format!(
-                "v{}{} = alloc({})",
-                result.0,
-                annotate(value_annotator, *result),
-                typ
-            ),
-            OpCode::Store { ptr, value } => format!(
-                "*v{}{} = v{}",
-                ptr.0,
-                annotate(value_annotator, *ptr),
-                value.0
-            ),
+            } => format!("v{}{} = alloc({})", result.0, annotate_value(*result), typ),
+            OpCode::Store { ptr, value } => {
+                format!("*v{}{} = v{}", ptr.0, annotate_value(*ptr), value.0)
+            }
             OpCode::Load { result, ptr } => {
-                format!(
-                    "v{}{} = *v{}",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    ptr.0
-                )
+                format!("v{}{} = *v{}", result.0, annotate_value(*result), ptr.0)
             }
             OpCode::AssertEq { lhs, rhs } => format!("assert v{} == v{}", lhs.0, rhs.0),
             OpCode::AssertR1C {
@@ -1565,14 +1593,14 @@ impl OpCode {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
                     .iter()
-                    .map(|v| format!("v{}{}", v.0, annotate(value_annotator, *v)))
+                    .map(|v| format!("v{}{}", v.0, annotate_value(*v)))
                     .join(", ");
                 match function {
                     CallTarget::Static(fn_id) => {
                         format!(
                             "{} = call {}@{}({})",
                             result_str,
-                            ssa.get_function(*fn_id).get_name(),
+                            func_name(*fn_id),
                             fn_id.0,
                             args_str
                         )
@@ -1590,7 +1618,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{}[v{}]",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     array.0,
                     index.0
                 )
@@ -1604,7 +1632,7 @@ impl OpCode {
                 format!(
                     "v{}{} = (v{}[v{}] = v{})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     array.0,
                     index.0,
                     element.0
@@ -1624,7 +1652,7 @@ impl OpCode {
                 format!(
                     "v{}{} = slice_push_{}(v{}, [{}])",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     dir_str,
                     slice.0,
                     values_str
@@ -1634,7 +1662,7 @@ impl OpCode {
                 format!(
                     "v{}{} = slice_len(v{})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     slice.0
                 )
             }
@@ -1647,7 +1675,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{} ? v{} : v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     cond.0,
                     then.0,
                     otherwise.0
@@ -1655,7 +1683,7 @@ impl OpCode {
             }
             OpCode::WriteWitness { result, value } => {
                 let r_str = if let Some(result) = result {
-                    format!("v{}{} = ", result.0, annotate(value_annotator, *result))
+                    format!("v{}{} = ", result.0, annotate_value(*result))
                 } else {
                     "".to_string()
                 };
@@ -1668,7 +1696,7 @@ impl OpCode {
                 format!(
                     "v{}{} = fresh_witness(): {}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     typ
                 )
             }
@@ -1693,11 +1721,7 @@ impl OpCode {
                 )
             }
             OpCode::NextDCoeff { result } => {
-                format!(
-                    "v{}{} = next_d_coeff()",
-                    result.0,
-                    annotate(value_annotator, *result)
-                )
+                format!("v{}{} = next_d_coeff()", result.0, annotate_value(*result))
             }
             OpCode::BumpD {
                 matrix,
@@ -1738,7 +1762,7 @@ impl OpCode {
                 format!(
                     "v{}{} = [{}] : {} of {}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     values_str,
                     seq_type,
                     typ
@@ -1752,7 +1776,7 @@ impl OpCode {
                 format!(
                     "v{}{} = cast v{} to {}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     target
                 )
@@ -1766,25 +1790,20 @@ impl OpCode {
                 format!(
                     "v{}{} = truncate v{} from {} bits to {} bits",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     in_bits,
                     out_bits
                 )
             }
             OpCode::Not { result, value } => {
-                format!(
-                    "v{}{} = ~v{}",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    value.0
-                )
+                format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
             OpCode::ValueOf { result, value } => {
                 format!(
                     "v{}{} = value_of v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0
                 )
             }
@@ -1797,7 +1816,7 @@ impl OpCode {
                 format!(
                     "v{}{} = to_bits v{} (endianness: {}, size: {})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     endianness,
                     output_size
@@ -1817,7 +1836,7 @@ impl OpCode {
                 format!(
                     "v{}{} = to_radix v{} {} (endianness: {}, size: {})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     radix_str,
                     endianness,
@@ -1839,7 +1858,7 @@ impl OpCode {
                 format!(
                     "v{}{} = mul_const(v{}, v{})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     constant.0,
                     var.0
                 )
@@ -1858,7 +1877,7 @@ impl OpCode {
                 format!(
                     "v{}{} = read_global(g{}, {})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     index,
                     typ
                 )
@@ -1868,7 +1887,7 @@ impl OpCode {
                     format!(
                         "v{}{} = v{}.v{}",
                         result.0,
-                        annotate(value_annotator, *result),
+                        annotate_value(*result),
                         tuple.0,
                         idx.0
                     )
@@ -1877,7 +1896,7 @@ impl OpCode {
                     format!(
                         "v{}{} = v{}.{}",
                         result.0,
-                        annotate(value_annotator, *result),
+                        annotate_value(*result),
                         tuple.0,
                         val
                     )
@@ -1889,12 +1908,7 @@ impl OpCode {
                 element_types: _,
             } => {
                 let elems_str = elems.iter().map(|v| format!("v{}", v.0)).join(", ");
-                format!(
-                    "v{}{} = ({})",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    elems_str
-                )
+                format!("v{}{} = ({})", result.0, annotate_value(*result), elems_str)
             }
             OpCode::Todo {
                 payload,
@@ -2797,3 +2811,7 @@ impl OpCode {
         }
     }
 }
+
+pub type HLSSA = SSA<OpCode, Type>;
+pub type HLFunction = Function<OpCode, Type>;
+pub type HLBlock = Block<OpCode, Type>;
