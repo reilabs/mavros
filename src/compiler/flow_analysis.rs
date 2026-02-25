@@ -729,10 +729,18 @@ impl FlowAnalysis {
     }
 }
 
-use crate::compiler::pass_manager::{Analysis, AnalysisStore};
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
 
-impl Analysis for FlowAnalysis {
-    fn compute(ssa: &SSA, _store: &AnalysisStore) -> Self {
+impl FlowAnalysis {
+    /// HLSSA analysis id — inherent method so callers can write
+    /// `FlowAnalysis::id()` without disambiguating the generic impl.
+    pub fn id() -> AnalysisId {
+        <Self as Analysis>::id()
+    }
+}
+
+impl<Op: Instruction, Ty: SSAType> Analysis<Op, Ty> for FlowAnalysis {
+    fn compute(ssa: &SSA<Op, Ty>, _store: &AnalysisStore) -> Self {
         FlowAnalysis::run(ssa)
     }
 }

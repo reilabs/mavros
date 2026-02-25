@@ -21,18 +21,21 @@ pub struct AnalysisId {
 }
 
 impl AnalysisId {
-    pub fn of<A: Analysis>() -> Self {
+    pub fn of<A: Analysis<Op, Ty>, Op: Instruction, Ty: SSAType>() -> Self {
         Self {
             type_id: TypeId::of::<A>(),
             type_name: std::any::type_name::<A>(),
-            dependencies: A::dependencies,
+            dependencies: <A as Analysis<Op, Ty>>::dependencies,
             compute_and_store: |ssa_any, store| {
                 if !store.contains_type(TypeId::of::<A>()) {
-                    let ssa: &SSA = ssa_any.downcast_ref::<SSA>().expect(
-                        "AnalysisId::compute_and_store: SSA downcast failed (non-HLSSA PassManager?)",
+                    let ssa: &SSA<Op, Ty> = ssa_any.downcast_ref::<SSA<Op, Ty>>().expect(
+                        "AnalysisId::compute_and_store: SSA downcast failed",
                     );
-                    let val = A::compute(ssa, store);
-                    let dep_ids = A::dependencies().iter().map(|d| d.type_id).collect();
+                    let val = <A as Analysis<Op, Ty>>::compute(ssa, store);
+                    let dep_ids = <A as Analysis<Op, Ty>>::dependencies()
+                        .iter()
+                        .map(|d| d.type_id)
+                        .collect();
                     store.insert_with_deps::<A>(val, dep_ids);
                 }
             },
@@ -63,12 +66,12 @@ impl std::fmt::Debug for AnalysisId {
 // Analysis trait
 // ---------------------------------------------------------------------------
 
-pub trait Analysis: Any + 'static {
+pub trait Analysis<Op: Instruction = OpCode, Ty: SSAType = Type>: Any + 'static {
     fn id() -> AnalysisId
     where
         Self: Sized,
     {
-        AnalysisId::of::<Self>()
+        AnalysisId::of::<Self, Op, Ty>()
     }
 
     fn dependencies() -> Vec<AnalysisId>
@@ -78,7 +81,7 @@ pub trait Analysis: Any + 'static {
         vec![]
     }
 
-    fn compute(ssa: &SSA, store: &AnalysisStore) -> Self
+    fn compute(ssa: &SSA<Op, Ty>, store: &AnalysisStore) -> Self
     where
         Self: Sized;
 }
