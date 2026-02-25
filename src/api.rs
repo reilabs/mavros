@@ -15,7 +15,11 @@ use noirc_abi::input_parser::{Format, InputValue};
 
 type Error = Box<dyn std::error::Error>;
 
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool, lowlevel_replacement: bool) -> Result<(Driver, R1CS), Error> {
+pub fn compile_to_r1cs(
+    root: PathBuf,
+    draw_graphs: bool,
+    lowlevel_replacement: bool,
+) -> Result<(Driver, R1CS), Error> {
     let project = Project::new(root, lowlevel_replacement)?;
     let mut driver = Driver::new(project, draw_graphs, lowlevel_replacement);
     driver.run_noir_compiler()?;

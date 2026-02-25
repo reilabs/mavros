@@ -95,7 +95,11 @@ fn main() -> ExitCode {
     })
 }
 
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool, lowlevel_replacement: bool) -> Result<(Driver, R1CS), Error> {
+pub fn compile_to_r1cs(
+    root: PathBuf,
+    draw_graphs: bool,
+    lowlevel_replacement: bool,
+) -> Result<(Driver, R1CS), Error> {
     let project = Project::new(root, lowlevel_replacement)?;
     let mut driver = Driver::new(project, draw_graphs, lowlevel_replacement);
     driver.run_noir_compiler()?;
@@ -160,7 +164,11 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs, args.lowlevel_replacement)?;
+    let (mut driver, r1cs) = compile_to_r1cs(
+        args.root.clone(),
+        args.draw_graphs,
+        args.lowlevel_replacement,
+    )?;
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =
