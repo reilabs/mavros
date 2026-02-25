@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
-    ssa::{BlockId, CallTarget, Const, FunctionId, OpCode, SSA, Terminator, TupleIdx, ValueId},
+    ssa::{BlockId, CallTarget, Const, FunctionId, HLSSA, OpCode, Terminator, TupleIdx, ValueId},
 };
 
 pub struct Defunctionalize {}
@@ -19,16 +19,16 @@ impl Pass for Defunctionalize {
         "defunctionalize"
     }
 
-    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         run_defunctionalize(ssa);
     }
 }
 
-/// For each SSA value that may hold a function pointer, the set of
+/// For each HLSSA value that may hold a function pointer, the set of
 /// concrete FunctionIds it can point to.
 type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
 
-fn run_defunctionalize(ssa: &mut SSA) {
+fn run_defunctionalize(ssa: &mut HLSSA) {
     // Check if there are any FnPtrs at all
     let has_fn_ptrs = ssa
         .get_function_ids()
@@ -217,7 +217,7 @@ fn run_defunctionalize(ssa: &mut SSA) {
 ///   - Static call argument edges (caller → callee params)
 ///   - Static call return edges (callee returns → caller results)
 ///   - Dynamic call return edges (resolved target returns → caller results)
-fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
+fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     let mut reaching: ReachingFns = HashMap::new();
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
@@ -495,7 +495,7 @@ fn compute_reaching_fn_ptrs(ssa: &SSA) -> ReachingFns {
 
 /// Build a dispatch function for a specific call site's reachable targets.
 fn build_dispatch_function(
-    ssa: &mut SSA,
+    ssa: &mut HLSSA,
     counter: u32,
     param_types: &[Type],
     return_types: &[Type],

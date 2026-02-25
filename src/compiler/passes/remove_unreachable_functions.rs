@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::SSA,
+    ssa::HLSSA,
 };
 
 /// Removes functions that are not reachable from main via the call graph.
@@ -25,7 +25,7 @@ impl Pass for RemoveUnreachableFunctions {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let cfg = store.get::<FlowAnalysis>();
         let call_graph = cfg.get_call_graph();
 

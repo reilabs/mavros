@@ -5,8 +5,8 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     ir::r#type::Type,
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId,
-        LookupTarget, MemOp, Radix, SSA, SeqType, SliceOpDir, Terminator,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, HLSSA,
+        LookupTarget, MemOp, Radix, SeqType, SliceOpDir, Terminator,
     },
 };
 
@@ -106,7 +106,7 @@ impl SymbolicExecutor {
     #[instrument(skip_all, name = "SymbolicExecutor::run", level = Level::DEBUG)]
     pub fn run<V, Ctx>(
         &self,
-        ssa: &SSA,
+        ssa: &HLSSA,
         type_info: &TypeInfo,
         entry_point: FunctionId,
         params: Vec<V>,
@@ -123,7 +123,7 @@ impl SymbolicExecutor {
     #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
     fn run_fn<V, Ctx>(
         &self,
-        ssa: &SSA,
+        ssa: &HLSSA,
         type_info: &TypeInfo,
         fn_id: FunctionId,
         mut inputs: Vec<V>,

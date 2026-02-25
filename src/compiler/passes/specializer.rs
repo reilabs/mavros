@@ -13,7 +13,7 @@ use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, CastTarget, Endianness, Function, FunctionId, MemOp, Radix, SSA,
+        BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLFunction, HLSSA, MemOp, Radix,
         SeqType, ValueId,
     },
 };
@@ -35,7 +35,7 @@ enum ConstVal {
 struct Val(ValueId);
 
 struct SpecializationState {
-    function: Function,
+    function: HLFunction,
     const_vals: HashMap<ValueId, ConstVal>,
 }
 
@@ -571,7 +571,7 @@ impl Pass for Specializer {
         vec![Summary::id(), TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let summary = store.get::<Summary>();
         for (sig, summary) in summary.functions.iter() {
             if summary.specialization_total_savings > 0 {
@@ -591,7 +591,7 @@ impl Specializer {
     #[instrument(skip_all, name = "Specializer::try_spec", fields(function = %signature.pretty_print(ssa, true), expected_savings = summary.specialization_total_savings))]
     fn try_spec(
         &self,
-        ssa: &mut SSA,
+        ssa: &mut HLSSA,
         type_info: &TypeInfo,
         summary: &SpecializationSummary,
         signature: FunctionSignature,
@@ -611,7 +611,7 @@ impl Specializer {
         let original_fn = ssa.get_function(signature.get_fun_id());
 
         let mut state = SpecializationState {
-            function: Function::empty(name),
+            function: HLFunction::empty(name),
             const_vals: HashMap::new(),
         };
 
@@ -702,8 +702,8 @@ impl Specializer {
         fn_name: String,
         specialized_id: FunctionId,
         unspecialized_id: FunctionId,
-    ) -> Function {
-        let mut dispatcher = Function::empty(fn_name);
+    ) -> HLFunction {
+        let mut dispatcher = HLFunction::empty(fn_name);
         let mut dispatcher_params = vec![];
         for param in params {
             dispatcher_params.push(dispatcher.add_parameter(dispatcher.get_entry_id(), param));

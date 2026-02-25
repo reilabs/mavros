@@ -7,8 +7,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, Function, FunctionId, OpCode, SSA, Terminator,
-        ValueId,
+        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
+        Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
@@ -37,10 +37,10 @@ impl UntaintControlFlow {
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
     pub fn run(
         &mut self,
-        mut ssa: SSA,
+        mut ssa: HLSSA,
         witness_inference: &WitnessTypeInference,
         flow_analysis: &FlowAnalysis,
-    ) -> SSA {
+    ) -> HLSSA {
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
             let function_wt = witness_inference.get_function_witness_type(function_id);
@@ -62,7 +62,7 @@ impl UntaintControlFlow {
     fn run_function(
         &mut self,
         function_id: FunctionId,
-        function: &mut Function,
+        function: &mut HLFunction,
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
     ) {
@@ -423,7 +423,7 @@ impl UntaintControlFlow {
     /// and insert WriteWitness instructions to convert Field → WitnessOf(Field).
     /// This is needed because the VM writes concrete Field values (4 limbs) to
     /// entry params, but WitnessOf(Field) is pointer-sized (1 slot).
-    fn fix_main_entry_params(ssa: &mut SSA) {
+    fn fix_main_entry_params(ssa: &mut HLSSA) {
         let main_id = ssa.get_main_id();
         let main_fn = ssa.get_function_mut(main_id);
         let entry_id = main_fn.get_entry_id();

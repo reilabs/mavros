@@ -3,7 +3,7 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{Function, OpCode, SSA, SeqType, ValueId},
+    ssa::{HLFunction, HLSSA, OpCode, SeqType, ValueId},
 };
 
 pub struct WitnessWriteToFresh {}
@@ -17,7 +17,7 @@ impl Pass for WitnessWriteToFresh {
         vec![TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<TypeInfo>());
     }
 
@@ -31,7 +31,7 @@ impl WitnessWriteToFresh {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, type_info: &TypeInfo) {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
         let main_id = ssa.get_main_id();
         let main_function = ssa.get_function_mut(main_id);
         let main_block = main_function.get_block_mut(main_function.get_entry_id());
@@ -125,7 +125,7 @@ impl WitnessWriteToFresh {
     fn generate_fresh_witness_for_parameter(
         value_id: Option<ValueId>,
         tp: Type,
-        main_function: &mut Function,
+        main_function: &mut HLFunction,
         instruction_collector: &mut Vec<OpCode>,
     ) -> ValueId {
         let r = value_id.unwrap_or_else(|| main_function.fresh_value());

@@ -1,6 +1,6 @@
-//! LLVM Code Generation for Mavros SSA
+//! LLVM Code Generation for Mavros HLSSA
 //!
-//! This module translates Mavros SSA representation into LLVM IR,
+//! This module translates Mavros HLSSA representation into LLVM IR,
 //! which can then be compiled to native code or WebAssembly.
 
 mod runtime;
@@ -27,14 +27,14 @@ use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::flow_analysis::{CFG, FlowAnalysis};
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BinaryArithOpKind, Block, BlockId, CmpKind, Const, Function, FunctionId, SSA, Terminator,
+    BinaryArithOpKind, BlockId, CmpKind, Const, FunctionId, HLBlock, HLFunction, HLSSA, Terminator,
     ValueId,
 };
 
 use self::runtime::Runtime;
 use self::types::TypeConverter;
 
-/// LLVM Code Generator for Mavros SSA
+/// LLVM Code Generator for Mavros HLSSA
 pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -67,8 +67,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// Compile SSA to LLVM IR
-    pub fn compile(&mut self, ssa: &SSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) {
+    /// Compile HLSSA to LLVM IR
+    pub fn compile(&mut self, ssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) {
         // First pass: declare all functions
         let main_id = ssa.get_main_id();
         for (fn_id, function) in ssa.iter_functions() {
@@ -87,7 +87,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn declare_function(
         &mut self,
         fn_id: FunctionId,
-        function: &Function,
+        function: &HLFunction,
         type_info: &TypeInfo,
         main_id: FunctionId,
     ) {
@@ -135,7 +135,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn compile_function(
         &mut self,
         fn_id: FunctionId,
-        function: &Function,
+        function: &HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
     ) {
@@ -169,7 +169,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // First parameter is always VM*
         self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
-        // Map SSA parameters to LLVM function arguments (starting from index 1)
+        // Map HLSSA parameters to LLVM function arguments (starting from index 1)
         // Field elements are passed directly as [4 x i64] values
         for (i, (param_id, _param_type)) in entry.get_parameters().enumerate() {
             let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
@@ -206,7 +206,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         }
                     }
                     Terminator::JmpIf(_, true_target, false_target) => {
-                        // JmpIf doesn't pass arguments to targets in this SSA
+                        // JmpIf doesn't pass arguments to targets in this HLSSA
                     }
                     Terminator::Return(_) => {}
                 }
@@ -217,7 +217,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile a block, tracking phi nodes for later
     fn compile_block_with_phis(
         &mut self,
-        function: &Function,
+        function: &HLFunction,
         block_id: BlockId,
         type_info: &FunctionTypeInfo,
         phi_nodes: &mut HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>>,
@@ -229,7 +229,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         if block_id != function.get_entry_id() {
             self.builder.position_at_end(bb);
 
-            // Block parameters become phi nodes
+            // HLBlock parameters become phi nodes
             for (i, (param_id, param_type)) in block.get_parameters().enumerate() {
                 let llvm_type = self.type_converter.convert_type(param_type);
                 let phi = self
@@ -453,7 +453,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile a terminator instruction
     fn compile_terminator(
         &mut self,
-        function: &Function,
+        function: &HLFunction,
         current_block_id: BlockId,
         terminator: &Terminator,
     ) {

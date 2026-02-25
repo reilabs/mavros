@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, SSA, Terminator, ValueId},
+    ssa::{BlockId, HLSSA, Terminator, ValueId},
 };
 
 pub struct DeduplicatePhis {}
@@ -17,7 +17,7 @@ impl Pass for DeduplicatePhis {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
 }
@@ -27,7 +27,7 @@ impl DeduplicatePhis {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA) {
+    pub fn do_run(&self, ssa: &mut HLSSA) {
         for (_, function) in ssa.iter_functions_mut() {
             let mut unifications: HashMap<(BlockId, Vec<ValueId>), Vec<BlockId>> = HashMap::new();
             for (block_id, block) in function.get_blocks() {

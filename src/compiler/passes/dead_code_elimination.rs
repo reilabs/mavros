@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, Function, Instruction, OpCode, SSA, Terminator, ValueId},
+    ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator, ValueId},
 };
 
 pub struct DCE {
@@ -63,7 +63,7 @@ impl Pass for DCE {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 }
@@ -73,7 +73,7 @@ impl DCE {
         Self { config }
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let definitions = self.generate_definitions(function);
@@ -419,7 +419,7 @@ impl DCE {
         }
     }
 
-    fn generate_definitions(&self, ssa: &Function) -> HashMap<ValueId, ValueDefinition> {
+    fn generate_definitions(&self, ssa: &HLFunction) -> HashMap<ValueId, ValueDefinition> {
         let mut definitions = HashMap::new();
 
         for (value_id, _) in ssa.iter_consts() {

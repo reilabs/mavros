@@ -8,7 +8,7 @@ use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, Function, OpCode, SSA, Terminator, ValueId},
+    ssa::{BlockId, HLFunction, HLSSA, OpCode, Terminator, ValueId},
 };
 
 pub struct Mem2Reg {}
@@ -22,7 +22,7 @@ impl Pass for Mem2Reg {
         vec![FlowAnalysis::id(), TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<FlowAnalysis>(), store.get::<TypeInfo>());
     }
 }
@@ -32,7 +32,7 @@ impl Mem2Reg {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis, type_info: &TypeInfo) {
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
             if self.escape_safe(function, function_type_info) {
@@ -51,7 +51,7 @@ impl Mem2Reg {
     }
 
     #[instrument(skip_all, level = Level::DEBUG, fields(function = %function.get_name()))]
-    fn run_function(&self, function: &mut Function, cfg: &CFG, type_info: &FunctionTypeInfo) {
+    fn run_function(&self, function: &mut HLFunction, cfg: &CFG, type_info: &FunctionTypeInfo) {
         let (writes, defs) = self.find_pointer_writes_and_defs(function);
         let phi_blocks = self.find_phi_blocks(&writes, &defs, cfg);
         let phi_args = self.initialize_phis(function, &phi_blocks, type_info);
@@ -60,7 +60,7 @@ impl Mem2Reg {
 
     fn remove_ptrs(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         cfg: &CFG,
         phi_map: &HashMap<BlockId, Vec<(ValueId, ValueId)>>,
     ) {
@@ -182,7 +182,7 @@ impl Mem2Reg {
     // and value_id is the id of the pointer that is being replaced
     fn initialize_phis(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         phi_blocks: &HashMap<ValueId, HashSet<BlockId>>,
         type_info: &FunctionTypeInfo,
     ) -> HashMap<BlockId, Vec<(ValueId, ValueId)>> {
@@ -199,7 +199,7 @@ impl Mem2Reg {
 
     fn find_pointer_writes_and_defs(
         &self,
-        function: &Function,
+        function: &HLFunction,
     ) -> (
         HashMap<ValueId, HashSet<BlockId>>,
         HashMap<ValueId, BlockId>,
@@ -264,7 +264,7 @@ impl Mem2Reg {
     // This is _very_ crude. We give up on mem2reg for the entire function
     // if we detect _any_ pointer escaping or entering the function, or being
     // written to another pointer. Obviously this needs a better implementation.
-    fn escape_safe(&self, function: &Function, type_info: &FunctionTypeInfo) -> bool {
+    fn escape_safe(&self, function: &HLFunction, type_info: &FunctionTypeInfo) -> bool {
         for (_, block) in function.get_blocks() {
             for (_, typ) in block.get_parameters() {
                 if self.type_contains_ptr(typ) {

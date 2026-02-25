@@ -44,7 +44,7 @@ pub trait Instruction: Clone + std::fmt::Debug + 'static {
 }
 
 #[derive(Clone)]
-pub struct SSA<Op: Instruction = OpCode, Ty: SSAType = Type> {
+pub struct SSA<Op: Instruction, Ty: SSAType> {
     functions: HashMap<FunctionId, Function<Op, Ty>>,
     /// Type of each global slot (indexed by slot number)
     global_types: Vec<Ty>,
@@ -56,9 +56,13 @@ pub struct SSA<Op: Instruction = OpCode, Ty: SSAType = Type> {
     next_function_id: u64,
 }
 
-impl SSA {
+pub type HLSSA = SSA<OpCode, Type>;
+pub type HLFunction = Function<OpCode, Type>;
+pub type HLBlock = Block<OpCode, Type>;
+
+impl HLSSA {
     pub fn new() -> Self {
-        let main_function = Function::empty("main".to_string());
+        let main_function = HLFunction::empty("main".to_string());
         let main_id = FunctionId(0_u64);
         let mut functions = HashMap::new();
         functions.insert(main_id, main_function);
@@ -215,7 +219,7 @@ pub enum CallTarget {
 }
 
 #[derive(Clone)]
-pub struct Function<Op: Instruction = OpCode, Ty: SSAType = Type> {
+pub struct Function<Op: Instruction, Ty: SSAType> {
     entry_block: BlockId,
     blocks: HashMap<BlockId, Block<Op, Ty>>,
     name: String,
@@ -473,7 +477,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     }
 }
 
-impl Function {
+impl HLFunction {
     pub fn push_cmp(
         &mut self,
         block_id: BlockId,
@@ -1069,7 +1073,7 @@ impl Function {
 }
 
 #[derive(Clone)]
-pub struct Block<Op: Instruction = OpCode, Ty: SSAType = Type> {
+pub struct Block<Op: Instruction, Ty: SSAType> {
     parameters: Vec<(ValueId, Ty)>,
     instructions: Vec<Op>,
     terminator: Option<Terminator>,
@@ -2789,7 +2793,3 @@ impl OpCode {
         }
     }
 }
-
-pub type HLSSA = SSA<OpCode, Type>;
-pub type HLFunction = Function<OpCode, Type>;
-pub type HLBlock = Block<OpCode, Type>;

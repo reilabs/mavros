@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     ir::r#type::Type,
-    ssa::{BlockId, Const, Function, FunctionId, Instruction, OpCode, SSA, ValueId},
+    ssa::{BlockId, Const, FunctionId, HLFunction, HLSSA, Instruction, OpCode, ValueId},
 };
 
 pub enum ValueDefinition {
@@ -30,7 +30,7 @@ impl FunctionValueDefinitions {
         self.definitions.insert(value_id, definition);
     }
 
-    pub fn from_ssa(ssa: &Function) -> Self {
+    pub fn from_ssa(ssa: &HLFunction) -> Self {
         let mut definitions = Self::new();
 
         for (value_id, definition) in ssa.iter_consts() {
@@ -67,7 +67,7 @@ impl ValueDefinitions {
         }
     }
 
-    pub fn from_ssa(ssa: &SSA) -> Self {
+    pub fn from_ssa(ssa: &HLSSA) -> Self {
         let mut definitions = Self::new();
 
         for (function_id, function) in ssa.iter_functions() {
@@ -87,7 +87,7 @@ impl ValueDefinitions {
 use crate::compiler::pass_manager::{Analysis, AnalysisStore};
 
 impl Analysis for ValueDefinitions {
-    fn compute(ssa: &SSA, _store: &AnalysisStore) -> Self {
+    fn compute(ssa: &HLSSA, _store: &AnalysisStore) -> Self {
         ValueDefinitions::from_ssa(ssa)
     }
 }

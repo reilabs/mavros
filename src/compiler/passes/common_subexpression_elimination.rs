@@ -5,7 +5,9 @@ use std::{
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, Const, Function, OpCode, SSA, TupleIdx, ValueId},
+    ssa::{
+        BinaryArithOpKind, BlockId, CmpKind, Const, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+    },
 };
 use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -184,7 +186,7 @@ impl Pass for CSE {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 
@@ -198,7 +200,7 @@ impl CSE {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let exprs = self.gather_expressions(function, cfg);
@@ -277,7 +279,7 @@ impl CSE {
 
     fn gather_expressions(
         &self,
-        ssa: &Function,
+        ssa: &HLFunction,
         cfg: &CFG,
     ) -> HashMap<Expr, Vec<(BlockId, usize, ValueId)>> {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();

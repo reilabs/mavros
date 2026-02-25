@@ -6,8 +6,8 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function,
-            FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId,
+            self, BinaryArithOpKind, BlockId, CmpKind, Const, DMatrix, Endianness, FunctionId,
+            HLBlock, HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, TupleIdx, ValueId,
         },
     },
     vm::{self, bytecode},
@@ -120,7 +120,7 @@ struct GlobalFrameLayouter {
 }
 
 impl GlobalFrameLayouter {
-    fn new(ssa: &SSA) -> Self {
+    fn new(ssa: &HLSSA) -> Self {
         let global_types = ssa.get_global_types();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
@@ -167,7 +167,7 @@ impl CodeGen {
         Self {}
     }
 
-    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
+    pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
 
         let function = ssa.get_main();
@@ -228,7 +228,7 @@ impl CodeGen {
 
     fn run_function(
         &self,
-        function: &Function,
+        function: &HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
@@ -343,9 +343,9 @@ impl CodeGen {
 
     fn run_block_body(
         &self,
-        _function: &Function,
+        _function: &HLFunction,
         block_id: BlockId,
-        block: &Block,
+        block: &HLBlock,
         type_info: &FunctionTypeInfo,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,

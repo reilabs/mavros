@@ -1,7 +1,7 @@
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId,
+    BlockId, CallTarget, FunctionId, HLSSA, OpCode, SsaAnnotator, Terminator, TupleIdx, ValueId,
 };
 use crate::compiler::witness_info::{ConstantWitness, FunctionWitnessType, WitnessType};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -72,7 +72,7 @@ impl WitnessTypeInference {
         self.functions.remove(&func_id);
     }
 
-    pub fn run(&mut self, ssa: &mut SSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
+    pub fn run(&mut self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
         let main_id = ssa.get_main_id();
         let main_func = ssa.get_function(main_id);
 
@@ -279,12 +279,12 @@ impl WitnessTypeInference {
     // ---------------------------------------------------------------------------
 
     fn propagate_function(
-        func: &crate::compiler::ssa::Function,
+        func: &crate::compiler::ssa::HLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
         arg_types: &[WitnessType],
         cfg_witness: ConstantWitness,
         specializations: &HashMap<SpecKey, SpecValue>,
-        ssa: &SSA,
+        ssa: &HLSSA,
     ) -> PropagationResult {
         let entry_id = func.get_entry_id();
         let block_queue: Vec<BlockId> = cfg.get_blocks_bfs().collect();
@@ -446,7 +446,7 @@ impl WitnessTypeInference {
 
     /// Single forward pass over all blocks
     fn propagate_once(
-        func: &crate::compiler::ssa::Function,
+        func: &crate::compiler::ssa::HLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
         block_queue: &[BlockId],
         _entry_id: BlockId,
@@ -454,7 +454,7 @@ impl WitnessTypeInference {
         block_cfg: &mut HashMap<BlockId, ConstantWitness>,
         alloc_inner: &mut HashMap<ValueId, WitnessType>,
         specializations: &HashMap<SpecKey, SpecValue>,
-        ssa: &SSA,
+        ssa: &HLSSA,
     ) {
         for block_id in block_queue {
             let block = func.get_block(*block_id);
@@ -803,7 +803,7 @@ impl WitnessTypeInference {
         ptr: &ValueId,
         alloc_inner: &HashMap<ValueId, WitnessType>,
     ) -> Option<ValueId> {
-        // In SSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
+        // In HLSSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
         // If there's no alloc_inner entry, it's an external ref (function parameter).
         if alloc_inner.contains_key(ptr) {
             Some(*ptr)

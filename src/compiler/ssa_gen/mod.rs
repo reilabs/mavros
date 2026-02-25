@@ -1,7 +1,7 @@
-//! SSA generation from Noir's monomorphized program.
+//! HLSSA generation from Noir's monomorphized program.
 //!
-//! This module converts the monomorphized program directly to mavros SSA format,
-//! bypassing the intermediate Noir SSA representation.
+//! This module converts the monomorphized program directly to mavros HLSSA format,
+//! bypassing the intermediate Noir HLSSA representation.
 
 mod expression_converter;
 mod type_converter;
@@ -12,16 +12,16 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::ssa::{Function, FunctionId, SSA};
+use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
 
 use expression_converter::ExpressionConverter;
 use type_converter::TypeConverter;
 
-/// Converts a monomorphized Program to SSA.
+/// Converts a monomorphized Program to HLSSA.
 pub struct SsaConverter {
-    /// Maps AST function IDs to SSA function IDs (constrained context)
+    /// Maps AST function IDs to HLSSA function IDs (constrained context)
     constrained_mapper: HashMap<AstFuncId, FunctionId>,
-    /// Maps AST function IDs to SSA function IDs (unconstrained context).
+    /// Maps AST function IDs to HLSSA function IDs (unconstrained context).
     /// For natively unconstrained functions, same ID as constrained_mapper.
     /// For constrained functions, points to a separate unconstrained variant.
     unconstrained_mapper: HashMap<AstFuncId, FunctionId>,
@@ -41,9 +41,9 @@ impl SsaConverter {
         }
     }
 
-    /// Convert an entire program to SSA.
-    pub fn convert_program(&mut self, program: &Program) -> SSA {
-        let mut ssa = SSA::new();
+    /// Convert an entire program to HLSSA.
+    pub fn convert_program(&mut self, program: &Program) -> HLSSA {
+        let mut ssa = HLSSA::new();
 
         // Phase 1: Register all functions to handle mutual recursion.
         // For each constrained function, also register an unconstrained variant
@@ -167,7 +167,7 @@ impl SsaConverter {
     }
 
     /// Convert globals: assign slot indices, build init/deinit functions.
-    fn convert_globals(&mut self, program: &Program, ssa: &mut SSA) {
+    fn convert_globals(&mut self, program: &Program, ssa: &mut HLSSA) {
         // Assign slot indices
         let mut global_types = Vec::new();
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
@@ -262,19 +262,19 @@ impl SsaConverter {
         ssa.set_globals_deinit_fn(deinit_fn_id);
     }
 
-    /// Convert a single function to SSA.
+    /// Convert a single function to HLSSA.
     fn convert_function(
         &self,
         ast_func: &AstFunction,
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
-    ) -> Function {
+    ) -> HLFunction {
         let name = if in_unconstrained && !ast_func.unconstrained {
             format!("{}_unconstrained", ast_func.name)
         } else {
             ast_func.name.clone()
         };
-        let mut function = Function::empty(name);
+        let mut function = HLFunction::empty(name);
         let entry_block = function.get_entry_id();
 
         // Add return types
@@ -319,9 +319,9 @@ impl SsaConverter {
     }
 }
 
-impl SSA {
-    /// Create SSA directly from a monomorphized program.
-    pub fn from_program(program: &Program) -> SSA {
+impl HLSSA {
+    /// Create HLSSA directly from a monomorphized program.
+    pub fn from_program(program: &Program) -> HLSSA {
         let mut converter = SsaConverter::new();
         converter.convert_program(program)
     }

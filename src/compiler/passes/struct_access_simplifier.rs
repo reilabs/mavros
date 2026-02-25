@@ -19,7 +19,7 @@ impl Pass for MakeStructAccessStatic {
         vec![ValueDefinitions::id()]
     }
 
-    fn run(&self, ssa: &mut crate::compiler::ssa::SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<ValueDefinitions>());
     }
 
@@ -35,7 +35,7 @@ impl MakeStructAccessStatic {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA,
+        ssa: &mut crate::compiler::ssa::HLSSA,
         value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
