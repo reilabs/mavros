@@ -6,7 +6,7 @@ use crate::compiler::{
     ssa::{CastTarget, Const, HLSSA, OpCode},
 };
 
-/// Strips all `WitnessOf` type wrappers from the HLSSA.
+/// Strips all `WitnessOf` type wrappers from the SSA.
 ///
 /// In the witgen pipeline, all computation is concrete — there's no need
 /// for the WitnessOf distinction. This pass converts all `WitnessOf(X)` types

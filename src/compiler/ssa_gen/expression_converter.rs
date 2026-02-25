@@ -1,4 +1,4 @@
-//! Converts monomorphized AST expressions to HLSSA instructions.
+//! Converts monomorphized AST expressions to SSA instructions.
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,7 +40,7 @@ pub struct ExpressionConverter<'a> {
     bindings: HashMap<LocalId, ValueId>,
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
-    /// Maps AST FuncId to HLSSA FunctionId
+    /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
     /// Type converter
     type_converter: TypeConverter,
@@ -106,7 +106,7 @@ impl<'a> ExpressionConverter<'a> {
         self.current_block
     }
 
-    /// Convert an expression to HLSSA instructions.
+    /// Convert an expression to SSA instructions.
     pub fn convert_expression(
         &mut self,
         expr: &Expression,
@@ -246,7 +246,7 @@ impl<'a> ExpressionConverter<'a> {
             }
             BinaryOpKind::And => function.push_and(self.current_block, lhs, rhs),
             BinaryOpKind::Or => {
-                // TODO: Support Or directly in HLSSA
+                // TODO: Support Or directly in SSA
                 // a || b = !(!a && !b)
                 let not_a = function.push_not(self.current_block, lhs);
                 let not_b = function.push_not(self.current_block, rhs);
@@ -254,7 +254,7 @@ impl<'a> ExpressionConverter<'a> {
                 function.push_not(self.current_block, and)
             }
             BinaryOpKind::Xor => {
-                // TODO: Support Xor directly in HLSSA
+                // TODO: Support Xor directly in SSA
                 // a ^ b = (a || b) && !(a && b)
                 let not_a = function.push_not(self.current_block, lhs);
                 let not_b = function.push_not(self.current_block, rhs);
@@ -965,7 +965,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // Get types for each element
         // Note: For Definition::Function idents, the Noir type may be
-        // Tuple([HLFunction, HLFunction]) (constrained + unconstrained pair),
+        // Tuple([Function, Function]) (constrained + unconstrained pair),
         // but convert_ident produces a single scalar FnPtr value.
         // Use Type::function() to match the actual value produced.
         let types: Vec<_> = exprs

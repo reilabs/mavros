@@ -345,7 +345,7 @@ impl ExplicitWitness {
                                             todo!("Tuples not supported yet")
                                         }
                                         TypeExpr::Function => panic!(
-                                            "HLFunction type not expected in witnessed array reads"
+                                            "Function type not expected in witnessed array reads"
                                         ),
                                     };
 
@@ -613,7 +613,7 @@ impl ExplicitWitness {
                                     Radix::Bytes => LookupTarget::Rangecheck(8),
                                     Radix::Dyn(radix) => LookupTarget::DynRangecheck(radix),
                                 };
-                                // TODO this should probably be an HLSSA loop for codesize reasons.
+                                // TODO this should probably be an SSA loop for codesize reasons.
                                 for i in (0..count).rev() {
                                     let r = ssa_append!(function, new_instructions, {
                                         byte := array_get(hint, ! i as u128 : u32);

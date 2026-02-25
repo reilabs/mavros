@@ -8,7 +8,7 @@ use crate::compiler::{
 
 // Needs to happen because apparently Noir
 // produces dead code paths that have no predecessors.
-// TODO: Check if we need this with our own HLSSA gen.
+// TODO: Check if we need this with our own SSA gen.
 pub struct RemoveUnreachableBlocks {}
 
 impl RemoveUnreachableBlocks {

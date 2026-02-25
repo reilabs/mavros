@@ -1,6 +1,6 @@
-//! LLVM Code Generation for Mavros HLSSA
+//! LLVM Code Generation for Mavros SSA
 //!
-//! This module translates Mavros HLSSA representation into LLVM IR,
+//! This module translates Mavros SSA representation into LLVM IR,
 //! which can then be compiled to native code or WebAssembly.
 
 mod runtime;
@@ -34,7 +34,7 @@ use crate::compiler::ssa::{
 use self::runtime::Runtime;
 use self::types::TypeConverter;
 
-/// LLVM Code Generator for Mavros HLSSA
+/// LLVM Code Generator for Mavros SSA
 pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -67,7 +67,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// Compile HLSSA to LLVM IR
+    /// Compile SSA to LLVM IR
     pub fn compile(&mut self, ssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) {
         // First pass: declare all functions
         let main_id = ssa.get_main_id();
@@ -169,7 +169,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // First parameter is always VM*
         self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
-        // Map HLSSA parameters to LLVM function arguments (starting from index 1)
+        // Map SSA parameters to LLVM function arguments (starting from index 1)
         // Field elements are passed directly as [4 x i64] values
         for (i, (param_id, _param_type)) in entry.get_parameters().enumerate() {
             let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
@@ -206,7 +206,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         }
                     }
                     Terminator::JmpIf(_, true_target, false_target) => {
-                        // JmpIf doesn't pass arguments to targets in this HLSSA
+                        // JmpIf doesn't pass arguments to targets in this SSA
                     }
                     Terminator::Return(_) => {}
                 }
@@ -229,7 +229,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         if block_id != function.get_entry_id() {
             self.builder.position_at_end(bb);
 
-            // HLBlock parameters become phi nodes
+            // Block parameters become phi nodes
             for (i, (param_id, param_type)) in block.get_parameters().enumerate() {
                 let llvm_type = self.type_converter.convert_type(param_type);
                 let phi = self

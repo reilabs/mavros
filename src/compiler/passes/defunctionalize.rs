@@ -24,7 +24,7 @@ impl Pass for Defunctionalize {
     }
 }
 
-/// For each HLSSA value that may hold a function pointer, the set of
+/// For each SSA value that may hold a function pointer, the set of
 /// concrete FunctionIds it can point to.
 type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
 

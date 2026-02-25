@@ -803,7 +803,7 @@ impl WitnessTypeInference {
         ptr: &ValueId,
         alloc_inner: &HashMap<ValueId, WitnessType>,
     ) -> Option<ValueId> {
-        // In HLSSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
+        // In SSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
         // If there's no alloc_inner entry, it's an external ref (function parameter).
         if alloc_inner.contains_key(ptr) {
             Some(*ptr)

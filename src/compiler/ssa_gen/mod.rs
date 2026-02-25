@@ -1,7 +1,7 @@
-//! HLSSA generation from Noir's monomorphized program.
+//! SSA generation from Noir's monomorphized program.
 //!
-//! This module converts the monomorphized program directly to mavros HLSSA format,
-//! bypassing the intermediate Noir HLSSA representation.
+//! This module converts the monomorphized program directly to mavros SSA format,
+//! bypassing the intermediate Noir SSA representation.
 
 mod expression_converter;
 mod type_converter;
@@ -17,11 +17,11 @@ use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
 use expression_converter::ExpressionConverter;
 use type_converter::TypeConverter;
 
-/// Converts a monomorphized Program to HLSSA.
+/// Converts a monomorphized Program to SSA.
 pub struct SsaConverter {
-    /// Maps AST function IDs to HLSSA function IDs (constrained context)
+    /// Maps AST function IDs to SSA function IDs (constrained context)
     constrained_mapper: HashMap<AstFuncId, FunctionId>,
-    /// Maps AST function IDs to HLSSA function IDs (unconstrained context).
+    /// Maps AST function IDs to SSA function IDs (unconstrained context).
     /// For natively unconstrained functions, same ID as constrained_mapper.
     /// For constrained functions, points to a separate unconstrained variant.
     unconstrained_mapper: HashMap<AstFuncId, FunctionId>,
@@ -41,7 +41,7 @@ impl SsaConverter {
         }
     }
 
-    /// Convert an entire program to HLSSA.
+    /// Convert an entire program to SSA.
     pub fn convert_program(&mut self, program: &Program) -> HLSSA {
         let mut ssa = HLSSA::new();
 
@@ -262,7 +262,7 @@ impl SsaConverter {
         ssa.set_globals_deinit_fn(deinit_fn_id);
     }
 
-    /// Convert a single function to HLSSA.
+    /// Convert a single function to SSA.
     fn convert_function(
         &self,
         ast_func: &AstFunction,
@@ -320,7 +320,7 @@ impl SsaConverter {
 }
 
 impl HLSSA {
-    /// Create HLSSA directly from a monomorphized program.
+    /// Create SSA directly from a monomorphized program.
     pub fn from_program(program: &Program) -> HLSSA {
         let mut converter = SsaConverter::new();
         converter.convert_program(program)

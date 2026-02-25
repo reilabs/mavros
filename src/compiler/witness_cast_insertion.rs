@@ -23,7 +23,7 @@ impl WitnessCastInsertion {
 
     #[instrument(skip_all, name = "WitnessCastInsertion::run")]
     pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
-        // Sub-pass 1: Bake WitnessOf into HLSSA types (prepare_rebuild pattern)
+        // Sub-pass 1: Bake WitnessOf into SSA types (prepare_rebuild pattern)
         let ssa = self.apply_types(ssa, witness_inference);
 
         // Compute type info for cast insertion

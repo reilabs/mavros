@@ -125,7 +125,7 @@ impl Driver {
             BTreeMap::default(),
         ));
 
-        // Convert monomorphized AST directly to HLSSA, bypassing Noir's HLSSA generation
+        // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
         self.initial_ssa = Some(HLSSA::from_program(&program));
 
         fs::write(

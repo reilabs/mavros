@@ -45,7 +45,7 @@ impl LivenessAnalysis {
         };
 
         for (function_id, function) in ssa.iter_functions() {
-            trace!("HLFunction {}", function.get_name());
+            trace!("Function {}", function.get_name());
             let function_liveness = self.run_function(function, cfg.get_function_cfg(*function_id));
             result
                 .function_liveness

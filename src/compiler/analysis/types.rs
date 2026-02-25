@@ -196,11 +196,11 @@ impl Types {
                 CallTarget::Static(fn_id) => {
                     let (param_types, return_types) = function_types
                         .get(fn_id)
-                        .ok_or_else(|| format!("HLFunction {:?} not found", fn_id))?;
+                        .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
 
                     if args.len() != param_types.len() {
                         return Err(format!(
-                            "HLFunction {:?} expects {} arguments, got {}",
+                            "Function {:?} expects {} arguments, got {}",
                             fn_id,
                             param_types.len(),
                             args.len()
@@ -209,7 +209,7 @@ impl Types {
 
                     if result.len() != return_types.len() {
                         return Err(format!(
-                            "HLFunction {:?} expects {} return values, got {}",
+                            "Function {:?} expects {} return values, got {}",
                             fn_id,
                             return_types.len(),
                             result.len()
