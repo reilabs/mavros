@@ -62,8 +62,14 @@ pub type HLBlock = Block<OpCode, Type>;
 
 impl HLSSA {
     pub fn new() -> Self {
-        let main_function = HLFunction::empty("main".to_string());
-        let main_id = FunctionId(0_u64);
+        Self::with_main("main".to_string())
+    }
+}
+
+impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
+    pub fn with_main(name: String) -> Self {
+        let main_function = Function::<Op, Ty>::empty(name);
+        let main_id = FunctionId(0);
         let mut functions = HashMap::new();
         functions.insert(main_id, main_function);
         SSA {

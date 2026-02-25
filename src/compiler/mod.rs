@@ -6,6 +6,7 @@ pub mod llvm_codegen;
 pub mod pass_manager;
 pub mod passes;
 pub mod r1cs_gen;
+pub mod llssa;
 pub mod ssa;
 pub mod ssa_gen;
 pub mod untaint_control_flow;
