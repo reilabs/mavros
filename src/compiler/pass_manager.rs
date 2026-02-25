@@ -28,9 +28,9 @@ impl AnalysisId {
             dependencies: <A as Analysis<Op, Ty>>::dependencies,
             compute_and_store: |ssa_any, store| {
                 if !store.contains_type(TypeId::of::<A>()) {
-                    let ssa: &SSA<Op, Ty> = ssa_any.downcast_ref::<SSA<Op, Ty>>().expect(
-                        "AnalysisId::compute_and_store: SSA downcast failed",
-                    );
+                    let ssa: &SSA<Op, Ty> = ssa_any
+                        .downcast_ref::<SSA<Op, Ty>>()
+                        .expect("AnalysisId::compute_and_store: SSA downcast failed");
                     let val = <A as Analysis<Op, Ty>>::compute(ssa, store);
                     let dep_ids = <A as Analysis<Op, Ty>>::dependencies()
                         .iter()

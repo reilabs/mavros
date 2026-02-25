@@ -144,7 +144,9 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
         self.functions.iter()
     }
 
-    pub fn iter_functions_mut(&mut self) -> impl Iterator<Item = (&FunctionId, &mut Function<Op, Ty>)> {
+    pub fn iter_functions_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&FunctionId, &mut Function<Op, Ty>)> {
         self.functions.iter_mut()
     }
 
@@ -1064,7 +1066,6 @@ impl Function {
             .unwrap()
             .set_terminator(Terminator::Jmp(destination, arguments));
     }
-
 }
 
 #[derive(Clone)]
@@ -1569,25 +1570,12 @@ impl Instruction for OpCode {
             OpCode::Alloc {
                 result,
                 elem_type: typ,
-            } => format!(
-                "v{}{} = alloc({})",
-                result.0,
-                annotate_value(*result),
-                typ
-            ),
-            OpCode::Store { ptr, value } => format!(
-                "*v{}{} = v{}",
-                ptr.0,
-                annotate_value(*ptr),
-                value.0
-            ),
+            } => format!("v{}{} = alloc({})", result.0, annotate_value(*result), typ),
+            OpCode::Store { ptr, value } => {
+                format!("*v{}{} = v{}", ptr.0, annotate_value(*ptr), value.0)
+            }
             OpCode::Load { result, ptr } => {
-                format!(
-                    "v{}{} = *v{}",
-                    result.0,
-                    annotate_value(*result),
-                    ptr.0
-                )
+                format!("v{}{} = *v{}", result.0, annotate_value(*result), ptr.0)
             }
             OpCode::AssertEq { lhs, rhs } => format!("assert v{} == v{}", lhs.0, rhs.0),
             OpCode::AssertR1C {
@@ -1733,11 +1721,7 @@ impl Instruction for OpCode {
                 )
             }
             OpCode::NextDCoeff { result } => {
-                format!(
-                    "v{}{} = next_d_coeff()",
-                    result.0,
-                    annotate_value(*result)
-                )
+                format!("v{}{} = next_d_coeff()", result.0, annotate_value(*result))
             }
             OpCode::BumpD {
                 matrix,
@@ -1813,12 +1797,7 @@ impl Instruction for OpCode {
                 )
             }
             OpCode::Not { result, value } => {
-                format!(
-                    "v{}{} = ~v{}",
-                    result.0,
-                    annotate_value(*result),
-                    value.0
-                )
+                format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
             OpCode::ValueOf { result, value } => {
                 format!(
@@ -1929,12 +1908,7 @@ impl Instruction for OpCode {
                 element_types: _,
             } => {
                 let elems_str = elems.iter().map(|v| format!("v{}", v.0)).join(", ");
-                format!(
-                    "v{}{} = ({})",
-                    result.0,
-                    annotate_value(*result),
-                    elems_str
-                )
+                format!("v{}{} = ({})", result.0, annotate_value(*result), elems_str)
             }
             OpCode::Todo {
                 payload,
