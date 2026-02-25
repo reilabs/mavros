@@ -32,6 +32,9 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub lowlevel_replacement: bool,
 }
 
 /// The main function for the CLI utility, responsible for parsing program
@@ -58,9 +61,9 @@ fn main() -> ExitCode {
 ///
 /// - [`Error`] if the extraction process fails for any reason.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let project = Project::new(args.root.clone())?;
+    let project = Project::new(args.root.clone(), args.lowlevel_replacement)?;
 
-    let mut driver = Driver::new(project, args.draw_graphs);
+    let mut driver = Driver::new(project, args.draw_graphs, args.lowlevel_replacement);
 
     driver.run_noir_compiler().unwrap();
     driver.make_struct_access_static().unwrap();

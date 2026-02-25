@@ -45,4 +45,4 @@ Important! A prerequisite for running this debug mode is to have Graphviz instal
 
 On macOS: `brew install graphviz`. 
 
-`RUST_LOG=info RUST_BACKTRACE=1 cargo run --release -- --root=noir_examples/power --public-witness 1 2 3 5 --draw-graphs`
+`RUST_LOG=info RUST_BACKTRACE=1 cargo run --release --bin mavros -- --root=noir_examples/power --draw-graphs --emit_wasm --emit_llvm`
