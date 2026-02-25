@@ -63,18 +63,9 @@ pub enum LLType {
 ### Struct Definitions
 
 ```rust
-/// A named struct layout. Shared via Arc — all instructions referencing the same
-/// struct type hold a clone of the same Arc. No registry, no IDs.
-#[derive(Clone, Debug)]
-pub struct LLStruct(pub Arc<LLStructDef>);
-
-/// Equality by pointer identity. The lowering creates one Arc per unique layout.
-impl PartialEq for LLStruct { ... Arc::ptr_eq ... }
-impl Eq for LLStruct {}
-
-#[derive(Clone, Debug)]
-pub struct LLStructDef {
-    pub name: String,                // for debug output only
+/// Struct layout, owned inline. Structural equality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LLStruct {
     pub fields: Vec<LLFieldType>,
 }
 
@@ -151,25 +142,21 @@ pub enum LLOp {
     // ═══════════════════════════════════════════════════════════════════════
     // Integer Arithmetic — polymorphic over Int(n)
     // ═══════════════════════════════════════════════════════════════════════
-    // All binary ops: lhs and rhs must be same Int(n). Result is Int(n).
-    // Exception: Eq and ULt always produce Int(1).
+    // lhs and rhs must be same Int(n). Result is Int(n).
 
-    Add  { result: ValueId, lhs: ValueId, rhs: ValueId },
-    Sub  { result: ValueId, lhs: ValueId, rhs: ValueId },
-    Mul  { result: ValueId, lhs: ValueId, rhs: ValueId },
-    UDiv { result: ValueId, lhs: ValueId, rhs: ValueId },
-    URem { result: ValueId, lhs: ValueId, rhs: ValueId },
-    And  { result: ValueId, lhs: ValueId, rhs: ValueId },  // bitwise
-    Or   { result: ValueId, lhs: ValueId, rhs: ValueId },  // bitwise
-    Xor  { result: ValueId, lhs: ValueId, rhs: ValueId },  // bitwise
-    Not  { result: ValueId, value: ValueId },               // bitwise
-    Shl  { result: ValueId, value: ValueId, amount: ValueId },
-    UShr { result: ValueId, value: ValueId, amount: ValueId },  // logical shift right
+    IntArith { kind: IntArithOp, result: ValueId, a: ValueId, b: ValueId },
+    // IntArithOp: Add, Sub, Mul, UDiv, URem, And, Or, Xor, Shl, UShr
 
-    /// Equality comparison. lhs/rhs: same Int(n). Result: Int(1).
-    Eq  { result: ValueId, lhs: ValueId, rhs: ValueId },
-    /// Unsigned less-than. lhs/rhs: same Int(n). Result: Int(1).
-    ULt { result: ValueId, lhs: ValueId, rhs: ValueId },
+    /// Bitwise NOT. Int(n) -> Int(n).
+    Not { result: ValueId, value: ValueId },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Integer Comparison — polymorphic over Int(n)
+    // ═══════════════════════════════════════════════════════════════════════
+    // a and b must be same Int(n). Result is always Int(1).
+
+    IntCmp { kind: IntCmpOp, result: ValueId, a: ValueId, b: ValueId },
+    // IntCmpOp: Eq, ULt
 
     /// Truncate: Int(m) -> Int(n) where n < m. Drops high bits.
     Truncate { result: ValueId, value: ValueId, to_bits: u32 },
@@ -182,21 +169,21 @@ pub enum LLOp {
     // All take/produce Struct(FieldElem) SSA values (4 x Int(64) by value).
     // Target implements the actual multi-limb BN254 Montgomery arithmetic.
 
-    FieldAdd { result: ValueId, lhs: ValueId, rhs: ValueId },
-    FieldSub { result: ValueId, lhs: ValueId, rhs: ValueId },
-    FieldMul { result: ValueId, lhs: ValueId, rhs: ValueId },
-    FieldDiv { result: ValueId, lhs: ValueId, rhs: ValueId },
+    FieldArith { kind: FieldArithOp, result: ValueId, a: ValueId, b: ValueId },
+    // FieldArithOp: Add, Sub, Mul, Div
+
+    /// Field negation (unary). Struct(FieldElem) -> Struct(FieldElem).
     FieldNeg { result: ValueId, src: ValueId },
 
-    /// Field equality. Result: Int(1).
-    FieldEq { result: ValueId, lhs: ValueId, rhs: ValueId },
-    /// Field less-than (as integers). Result: Int(1).
-    FieldLt { result: ValueId, lhs: ValueId, rhs: ValueId },
+    /// Field equality. a, b: Struct(FieldElem). Result: Int(1).
+    FieldEq { result: ValueId, a: ValueId, b: ValueId },
 
-    /// Cast Int(64) to field element (embeds integer as field element).
-    FieldFromInt { result: ValueId, value: ValueId },
-    /// Cast field element to Int(64) (result = field mod 2^64).
-    FieldToInt { result: ValueId, src: ValueId },
+    /// Convert field element from Montgomery form to 4 plain limbs.
+    /// Struct(FieldElem) -> (Int(64), Int(64), Int(64), Int(64)).
+    FieldToLimbs { result: ValueId, src: ValueId },
+    /// Convert 4 plain limbs into a field element in Montgomery form.
+    /// (Int(64), Int(64), Int(64), Int(64)) -> Struct(FieldElem).
+    FieldFromLimbs { result: ValueId, limbs: ValueId },
 
     // ═══════════════════════════════════════════════════════════════════════
     // Aggregate Value Ops — SSA-level struct manipulation
@@ -232,12 +219,6 @@ pub enum LLOp {
     // ═══════════════════════════════════════════════════════════════════════
     // Memory
     // ═══════════════════════════════════════════════════════════════════════
-
-    /// Allocate struct on the stack frame. Lifetime = current function.
-    StackAlloc {
-        result: ValueId,       // Ptr
-        struct_type: LLStruct,
-    },
 
     /// Heap allocate. For fixed structs: sizeof(struct). For structs with
     /// FlexArray tail: sizeof(struct) + flex_count * sizeof(flex_elem).
@@ -292,19 +273,6 @@ pub enum LLOp {
         struct_type: LLStruct,
         count: Option<ValueId>,
     },
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Pointer Ops
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Pointer equality. Result: Int(1).
-    PtrEq { result: ValueId, lhs: ValueId, rhs: ValueId },
-
-    /// Reinterpret pointer as integer (for hashing, debugging).
-    PtrToInt { result: ValueId, ptr: ValueId },
-
-    /// Reinterpret integer as pointer. Unsafe. Needed for rare cases.
-    IntToPtr { result: ValueId, value: ValueId },
 
     // ═══════════════════════════════════════════════════════════════════════
     // Selection
@@ -364,7 +332,7 @@ pub enum LLOp {
 | `Slice(T)` | `Ptr` | Ptr to `DynSlice_T` struct |
 | `Ref(T)` | `Ptr` | Ptr to heap-allocated T |
 | `Tuple(...)` | `Struct(...)` or `Ptr` | Small tuples: value. Heap/RC'd: Ptr to struct. |
-| `WitnessOf(T)` | same as `T` | WitnessOf is erased before LLSSA (stripped by witgen path) |
+| `WitnessOf(T)` | same as `T` | Absent in witgen path (stripped). **TODO**: AD path still has WitnessOf — lowering should ICE if encountered until AD design is done. |
 | `Function` | never reaches LLSSA | Eliminated by defunctionalization |
 
 ### Operation Lowering
@@ -373,17 +341,18 @@ pub enum LLOp {
 
 ```
 HLSSA:  %x = Const(42, Field)
-LLSSA:  %x = FieldFromInt(IntConst(42))
+LLSSA:  %limbs = MkStruct(FieldElem, [IntConst(42), IntConst(0), IntConst(0), IntConst(0)])
+        %x     = FieldFromLimbs(%limbs)
 ```
 
 #### Arithmetic
 
 ```
 HLSSA:  %c = BinaryArithOp(Add, %a, %b)   // a, b : Field
-LLSSA:  %c = FieldAdd(%a, %b)              // Struct(FieldElem) values
+LLSSA:  %c = FieldArith(Add, %a, %b)      // Struct(FieldElem) values
 
 HLSSA:  %c = BinaryArithOp(Add, %a, %b)   // a, b : U(32)
-LLSSA:  %c = Add(%a, %b)                   // Int(32) values
+LLSSA:  %c = IntArith(Add, %a, %b)        // Int(32) values
 ```
 
 #### Comparisons
@@ -393,19 +362,21 @@ HLSSA:  %r = Cmp(Eq, %a, %b)    // a, b : Field
 LLSSA:  %r = FieldEq(%a, %b)    // r : Int(1)
 
 HLSSA:  %r = Cmp(Lt, %a, %b)    // a, b : U(32)
-LLSSA:  %r = ULt(%a, %b)        // r : Int(1)
+LLSSA:  %r = IntCmp(ULt, %a, %b)   // r : Int(1)
 ```
 
 #### Cast
 
 ```
 HLSSA:  %y = Cast(%x, target=U(32))   // x : Field
-LLSSA:  %tmp = FieldToInt(%x)          // Int(64)
-        %y   = Truncate(%tmp, 32)      // Int(32)
+LLSSA:  %limbs = FieldToLimbs(%x)          // Struct(FieldElem) — plain limbs
+        %lo    = ExtractField(%limbs, FieldElem, 0)  // Int(64)
+        %y     = Truncate(%lo, 32)         // Int(32)
 
 HLSSA:  %y = Cast(%x, target=Field)    // x : U(32)
-LLSSA:  %ext = ZExt(%x, 64)           // Int(64)
-        %y   = FieldFromInt(%ext)      // Struct(FieldElem)
+LLSSA:  %ext   = ZExt(%x, 64)                        // Int(64)
+        %limbs = MkStruct(FieldElem, [%ext, IntConst(0), IntConst(0), IntConst(0)])
+        %y     = FieldFromLimbs(%limbs)               // Struct(FieldElem)
 ```
 
 #### Tuple Construction (small, stack-resident)
@@ -469,7 +440,7 @@ LLSSA:
   %hdr     = StructFieldPtr(%arr, DynSlice_Field, 0)
   %rc_ptr  = StructFieldPtr(%hdr, SliceHeader, 0)
   %rc      = Load(%rc_ptr, Int(64))
-  %unique  = Eq(%rc, IntConst(1))
+  %unique  = IntCmp(Eq, %rc, IntConst(1))
   JmpIf(%unique, mutate_blk, copy_blk)
 
 mutate_blk:
@@ -481,7 +452,7 @@ mutate_blk:
 
 copy_blk:
   // Decrement old RC
-  %new_rc  = Sub(%rc, IntConst(1))
+  %new_rc  = IntArith(Sub, %rc, IntConst(1))
   Store(%rc_ptr, %new_rc)
   // Allocate new array
   %len_ptr = StructFieldPtr(%hdr, SliceHeader, 1)
@@ -516,7 +487,7 @@ LLSSA:
   %hdr    = StructFieldPtr(%arr, DynSlice_Field, 0)
   %rc_ptr = StructFieldPtr(%hdr, SliceHeader, 0)
   %rc     = Load(%rc_ptr, Int(64))
-  %new_rc = Add(%rc, IntConst(2))
+  %new_rc = IntArith(Add, %rc, IntConst(2))
   Store(%rc_ptr, %new_rc)
 ```
 
@@ -536,9 +507,9 @@ entry:
   %hdr     = StructFieldPtr(%ptr, DynSlice_Field, 0)
   %rc_ptr  = StructFieldPtr(%hdr, SliceHeader, 0)
   %rc      = Load(%rc_ptr, Int(64))
-  %new_rc  = Sub(%rc, IntConst(1))
+  %new_rc  = IntArith(Sub, %rc, IntConst(1))
   Store(%rc_ptr, %new_rc)
-  %dead    = Eq(%new_rc, IntConst(0))
+  %dead    = IntCmp(Eq, %new_rc, IntConst(0))
   JmpIf(%dead, free_blk, done)
 
 free_blk:
@@ -558,7 +529,8 @@ done:
 ```
 HLSSA:  %ref = Alloc(elem_type: Field)
 
-LLSSA:  %ref = StackAlloc(FieldElem)    // or HeapAlloc if it escapes
+LLSSA:  %ref = HeapAlloc(RcFieldRef)    // RcFieldRef = { Inline(RcHeader), Inline(FieldElem) }
+        // init RC, then Store/Load through %ref
 ```
 
 #### Load / Store (through references)
@@ -630,7 +602,7 @@ being inlined at every use site.
 | `ArrayElemPtr` | `getelementptr %elem_type, ptr %p, i64 %index` |
 | `HeapAlloc` | `call @malloc(size)` — size computed from LLVM's `sizeof` |
 | `Free` | `call @free(ptr)` |
-| `FieldAdd` | `call @bn254_add([4 x i64], [4 x i64]) -> [4 x i64]` |
+| `FieldArith` | `call @bn254_{add,sub,mul,div}(...)` |
 | `Select` | `select` |
 | `Trap` | `call @llvm.trap()` + `unreachable` |
 
@@ -649,7 +621,7 @@ LLVM handles this automatically via the target triple.
 | `StructFieldPtr` | `ptr + precomputed_offset` |
 | `HeapAlloc` | `call vm.alloc(layout)` |
 | `Free` | `call vm.dealloc(ptr)` |
-| `FieldAdd` | `field_add` bytecode op |
+| `FieldArith` | `field_{add,sub,mul,div}` bytecode op |
 
 ## Open Questions / Future Work
 
@@ -664,7 +636,7 @@ LLVM handles this automatically via the target triple.
 
 - **Optimization passes on LLSSA**: Once LLSSA exists, we can run target-independent
   optimizations: dead code elimination, common subexpression elimination on pointer arithmetic,
-  stack allocation merging, etc. These are simpler than HLSSA-level optimizations because the
+  etc. These are simpler than HLSSA-level optimizations because the
   IR is lower-level and more uniform.
 
 - **Slice capacity vs length**: Currently slices store `len` (number of elements). If we want
