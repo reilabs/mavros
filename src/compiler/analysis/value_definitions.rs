@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     ir::r#type::Type,
-    ssa::{BlockId, Const, Function, FunctionId, OpCode, SSA, ValueId},
+    ssa::{BlockId, Const, Function, FunctionId, Instruction, OpCode, SSA, ValueId},
 };
 
 pub enum ValueDefinition {

@@ -5,7 +5,7 @@ use tracing::{Level, instrument, trace};
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BlockId, Function, FunctionId, SSA, Terminator, ValueId},
+    ssa::{BlockId, Function, FunctionId, Instruction, SSA, Terminator, ValueId},
 };
 
 pub enum InstructionPosition {

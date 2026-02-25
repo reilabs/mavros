@@ -11,7 +11,7 @@ use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{CastTarget, Function, MemOp, OpCode, SSA, Terminator, ValueId},
+    ssa::{CastTarget, Function, Instruction, MemOp, OpCode, SSA, Terminator, ValueId},
 };
 
 pub struct RCInsertion {}

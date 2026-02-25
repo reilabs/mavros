@@ -1489,27 +1489,6 @@ pub enum OpCode {
 }
 
 impl Instruction for OpCode {
-    fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
-        // Calls the inherent method (inherent takes priority over trait in method resolution)
-        let this: &OpCode = self;
-        this.get_inputs()
-    }
-
-    fn get_results(&self) -> impl Iterator<Item = &ValueId> {
-        let this: &OpCode = self;
-        this.get_results()
-    }
-
-    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
-        let this: &mut OpCode = self;
-        this.get_inputs_mut()
-    }
-
-    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
-        let this: &mut OpCode = self;
-        this.get_operands_mut()
-    }
-
     fn get_static_call_targets(&self) -> Vec<FunctionId> {
         match self {
             OpCode::Call {
@@ -1930,10 +1909,530 @@ impl Instruction for OpCode {
             }
         }
     }
-}
 
-impl OpCode {
-    pub fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+    fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
+        match self {
+            Self::Alloc {
+                result: _,
+                elem_type: _,
+            }
+            | Self::FreshWitness {
+                result: _,
+                result_type: _,
+            }
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
+            Self::Cmp {
+                kind: _,
+                result: _,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::BinaryArithOp {
+                kind: _,
+                result: _,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::ArrayGet {
+                result: _,
+                array: b,
+                index: c,
+            } => vec![b, c].into_iter(),
+            Self::ArraySet {
+                result: _,
+                array: b,
+                index: c,
+                value: d,
+            } => vec![b, c, d].into_iter(),
+            Self::SlicePush {
+                dir: _,
+                result: _,
+                slice: b,
+                values: c,
+            } => {
+                let mut ret_vec = vec![b];
+                ret_vec.extend(c.iter());
+                ret_vec.into_iter()
+            }
+            Self::SliceLen {
+                result: _,
+                slice: b,
+            } => vec![b].into_iter(),
+            Self::AssertEq { lhs: b, rhs: c }
+            | Self::Store { ptr: b, value: c }
+            | Self::BumpD {
+                matrix: _,
+                variable: b,
+                sensitivity: c,
+            }
+            | Self::MulConst {
+                result: _,
+                const_val: b,
+                var: c,
+            } => vec![b, c].into_iter(),
+            Self::Load { result: _, ptr: c }
+            | Self::WriteWitness {
+                result: _,
+                value: c,
+            }
+            | Self::Cast {
+                result: _,
+                value: c,
+                target: _,
+            }
+            | Self::Truncate {
+                result: _,
+                value: c,
+                to_bits: _,
+                from_bits: _,
+            } => vec![c].into_iter(),
+            Self::Call {
+                results: _,
+                function,
+                args: a,
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter());
+                ret_vec.into_iter()
+            }
+            Self::MkSeq {
+                result: _,
+                elems: inputs,
+                seq_type: _,
+                elem_type: _,
+            } => inputs.iter().collect::<Vec<_>>().into_iter(),
+            Self::Select {
+                result: _,
+                cond: b,
+                if_t: c,
+                if_f: d,
+            }
+            | Self::AssertR1C { a: b, b: c, c: d }
+            | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
+            Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::ToBits {
+                result: _,
+                value: v,
+                endianness: _,
+                count: _,
+            } => vec![v].into_iter(),
+            Self::ToRadix {
+                result: _,
+                value: v,
+                radix,
+                endianness: _,
+                count: _,
+            } => {
+                let mut ret_vec = vec![v];
+                match radix {
+                    Radix::Bytes => {}
+                    Radix::Dyn(radix) => {
+                        ret_vec.push(radix);
+                    }
+                }
+                ret_vec.into_iter()
+            }
+            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
+            Self::Rangecheck {
+                value: val,
+                max_bits: _,
+            } => vec![val].into_iter(),
+            Self::ReadGlobal {
+                result: _,
+                offset: _,
+                result_type: _,
+            } => vec![].into_iter(),
+            Self::Lookup {
+                target,
+                keys,
+                results,
+            }
+            | Self::DLookup {
+                target,
+                keys,
+                results,
+            } => {
+                let mut ret_vec = vec![];
+                match target {
+                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::DynRangecheck(v) => {
+                        ret_vec.push(v);
+                    }
+                    LookupTarget::Array(arr) => {
+                        ret_vec.push(arr);
+                    }
+                }
+                ret_vec.extend(keys);
+                ret_vec.extend(results);
+                ret_vec.into_iter()
+            }
+            Self::TupleProj {
+                result: _,
+                tuple,
+                idx,
+            } => match idx {
+                TupleIdx::Static(_size) => vec![tuple].into_iter(),
+                TupleIdx::Dynamic(idx, _tp) => vec![tuple, idx].into_iter(),
+            },
+            OpCode::MkTuple {
+                result: _,
+                elems: e,
+                element_types: _,
+            } => e.iter().collect::<Vec<_>>().into_iter(),
+            Self::Todo { .. } => vec![].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
+        }
+    }
+
+    fn get_results(&self) -> impl Iterator<Item = &ValueId> {
+        match self {
+            Self::Alloc {
+                result: r,
+                elem_type: _,
+            }
+            | Self::FreshWitness {
+                result: r,
+                result_type: _,
+            }
+            | Self::Cmp {
+                kind: _,
+                result: r,
+                lhs: _,
+                rhs: _,
+            }
+            | Self::BinaryArithOp {
+                kind: _,
+                result: r,
+                lhs: _,
+                rhs: _,
+            }
+            | Self::ArrayGet {
+                result: r,
+                array: _,
+                index: _,
+            }
+            | Self::ArraySet {
+                result: r,
+                array: _,
+                index: _,
+                value: _,
+            }
+            | Self::SlicePush {
+                dir: _,
+                result: r,
+                slice: _,
+                values: _,
+            }
+            | Self::SliceLen {
+                result: r,
+                slice: _,
+            }
+            | Self::Load { result: r, ptr: _ }
+            | Self::MkSeq {
+                result: r,
+                elems: _,
+                seq_type: _,
+                elem_type: _,
+            }
+            | Self::Select {
+                result: r,
+                cond: _,
+                if_t: _,
+                if_f: _,
+            }
+            | Self::Cast {
+                result: r,
+                value: _,
+                target: _,
+            }
+            | Self::Truncate {
+                result: r,
+                value: _,
+                to_bits: _,
+                from_bits: _,
+            }
+            | Self::MulConst {
+                result: r,
+                const_val: _,
+                var: _,
+            }
+            | Self::NextDCoeff { result: r }
+            | Self::TupleProj {
+                result: r,
+                tuple: _,
+                idx: _,
+            }
+            | Self::MkTuple {
+                result: r,
+                elems: _,
+                element_types: _,
+            } => vec![r].into_iter(),
+            Self::WriteWitness {
+                result: r,
+                value: _,
+            } => {
+                let ret_vec = r.iter().collect::<Vec<_>>();
+                ret_vec.into_iter()
+            }
+            Self::Call {
+                results: r,
+                function: _,
+                args: _,
+            } => r.iter().collect::<Vec<_>>().into_iter(),
+            Self::Constrain { .. }
+            | Self::BumpD {
+                matrix: _,
+                variable: _,
+                sensitivity: _,
+            }
+            | Self::MemOp { kind: _, value: _ }
+            | Self::Store { ptr: _, value: _ }
+            | Self::AssertEq { lhs: _, rhs: _ }
+            | Self::AssertR1C { a: _, b: _, c: _ }
+            | Self::Rangecheck {
+                value: _,
+                max_bits: _,
+            } => vec![].into_iter(),
+            Self::Not {
+                result: r,
+                value: _,
+            }
+            | Self::ValueOf {
+                result: r,
+                value: _,
+            } => vec![r].into_iter(),
+            Self::ToBits {
+                result: r,
+                value: _,
+                endianness: _,
+                count: _,
+            } => vec![r].into_iter(),
+            Self::ToRadix {
+                result: r,
+                value: _,
+                radix: _,
+                endianness: _,
+                count: _,
+            } => vec![r].into_iter(),
+            Self::ReadGlobal {
+                result: r,
+                offset: _,
+                result_type: _,
+            } => vec![r].into_iter(),
+            Self::Lookup { .. } | Self::DLookup { .. } => vec![].into_iter(),
+            Self::Todo { results, .. } => {
+                let ret_vec: Vec<&ValueId> = results.iter().collect();
+                ret_vec.into_iter()
+            }
+            Self::InitGlobal {
+                global: _,
+                value: _,
+            } => vec![].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
+        }
+    }
+
+    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        match self {
+            Self::Alloc {
+                result: _,
+                elem_type: _,
+            }
+            | Self::FreshWitness {
+                result: _,
+                result_type: _,
+            }
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
+            Self::Cmp {
+                kind: _,
+                result: _,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::BinaryArithOp {
+                kind: _,
+                result: _,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::ArrayGet {
+                result: _,
+                array: b,
+                index: c,
+            }
+            | Self::MulConst {
+                result: _,
+                const_val: b,
+                var: c,
+            } => vec![b, c].into_iter(),
+            Self::ArraySet {
+                result: _,
+                array: b,
+                index: c,
+                value: d,
+            } => vec![b, c, d].into_iter(),
+            Self::SlicePush {
+                dir: _,
+                result: _,
+                slice: b,
+                values: c,
+            } => {
+                let mut ret_vec = vec![b];
+                let values_vec: Vec<&mut ValueId> = c.iter_mut().collect();
+                ret_vec.extend(values_vec);
+                ret_vec.into_iter()
+            }
+            Self::SliceLen {
+                result: _,
+                slice: b,
+            } => vec![b].into_iter(),
+            Self::AssertEq { lhs: b, rhs: c }
+            | Self::Store { ptr: b, value: c }
+            | Self::BumpD {
+                matrix: _,
+                variable: b,
+                sensitivity: c,
+            } => vec![b, c].into_iter(),
+            Self::Load { result: _, ptr: c }
+            | Self::WriteWitness {
+                result: _,
+                value: c,
+            }
+            | Self::Cast {
+                result: _,
+                value: c,
+                target: _,
+            }
+            | Self::Truncate {
+                result: _,
+                value: c,
+                to_bits: _,
+                from_bits: _,
+            } => vec![c].into_iter(),
+            Self::Call {
+                results: _,
+                function,
+                args: a,
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter_mut());
+                ret_vec.into_iter()
+            }
+            Self::MkSeq {
+                result: _,
+                elems: inputs,
+                seq_type: _,
+                elem_type: _,
+            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::MkTuple {
+                result: _,
+                elems: inputs,
+                element_types: _,
+            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::Select {
+                result: _,
+                cond: b,
+                if_t: c,
+                if_f: d,
+            }
+            | Self::AssertR1C { a: b, b: c, c: d }
+            | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
+            Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::ToBits {
+                result: _,
+                value: v,
+                endianness: _,
+                count: _,
+            } => vec![v].into_iter(),
+            Self::ToRadix {
+                result: _,
+                value: v,
+                radix,
+                endianness: _,
+                count: _,
+            } => {
+                let mut ret_vec = vec![v];
+                match radix {
+                    Radix::Bytes => {}
+                    Radix::Dyn(radix) => {
+                        ret_vec.push(radix);
+                    }
+                }
+                ret_vec.into_iter()
+            }
+            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
+            Self::Rangecheck {
+                value: val,
+                max_bits: _,
+            } => vec![val].into_iter(),
+            Self::ReadGlobal {
+                result: _,
+                offset: _,
+                result_type: _,
+            } => vec![].into_iter(),
+            Self::Lookup {
+                target,
+                keys,
+                results,
+            }
+            | Self::DLookup {
+                target,
+                keys,
+                results,
+            } => {
+                let mut ret_vec = vec![];
+                match target {
+                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::DynRangecheck(v) => {
+                        ret_vec.push(v);
+                    }
+                    LookupTarget::Array(arr) => {
+                        ret_vec.push(arr);
+                    }
+                }
+                ret_vec.extend(keys);
+                ret_vec.extend(results);
+                ret_vec.into_iter()
+            }
+            Self::TupleProj {
+                result: _,
+                tuple,
+                idx: _,
+            } => vec![tuple].into_iter(),
+            Self::Todo { .. } => vec![].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
+        }
+    }
+
+    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             Self::Alloc {
                 result: r,
@@ -2133,529 +2632,8 @@ impl OpCode {
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
-
-    pub fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
-        match self {
-            Self::Alloc {
-                result: _,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
-                result: _,
-                result_type: _,
-            }
-            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
-            Self::Cmp {
-                kind: _,
-                result: _,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::BinaryArithOp {
-                kind: _,
-                result: _,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::ArrayGet {
-                result: _,
-                array: b,
-                index: c,
-            }
-            | Self::MulConst {
-                result: _,
-                const_val: b,
-                var: c,
-            } => vec![b, c].into_iter(),
-            Self::ArraySet {
-                result: _,
-                array: b,
-                index: c,
-                value: d,
-            } => vec![b, c, d].into_iter(),
-            Self::SlicePush {
-                dir: _,
-                result: _,
-                slice: b,
-                values: c,
-            } => {
-                let mut ret_vec = vec![b];
-                let values_vec: Vec<&mut ValueId> = c.iter_mut().collect();
-                ret_vec.extend(values_vec);
-                ret_vec.into_iter()
-            }
-            Self::SliceLen {
-                result: _,
-                slice: b,
-            } => vec![b].into_iter(),
-            Self::AssertEq { lhs: b, rhs: c }
-            | Self::Store { ptr: b, value: c }
-            | Self::BumpD {
-                matrix: _,
-                variable: b,
-                sensitivity: c,
-            } => vec![b, c].into_iter(),
-            Self::Load { result: _, ptr: c }
-            | Self::WriteWitness {
-                result: _,
-                value: c,
-            }
-            | Self::Cast {
-                result: _,
-                value: c,
-                target: _,
-            }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            } => vec![c].into_iter(),
-            Self::Call {
-                results: _,
-                function,
-                args: a,
-            } => {
-                let mut ret_vec = Vec::new();
-                if let CallTarget::Dynamic(fn_ptr) = function {
-                    ret_vec.push(fn_ptr);
-                }
-                ret_vec.extend(a.iter_mut());
-                ret_vec.into_iter()
-            }
-            Self::MkSeq {
-                result: _,
-                elems: inputs,
-                seq_type: _,
-                elem_type: _,
-            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
-            Self::MkTuple {
-                result: _,
-                elems: inputs,
-                element_types: _,
-            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
-            Self::Select {
-                result: _,
-                cond: b,
-                if_t: c,
-                if_f: d,
-            }
-            | Self::AssertR1C { a: b, b: c, c: d }
-            | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
-            Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
-                result: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::ToBits {
-                result: _,
-                value: v,
-                endianness: _,
-                count: _,
-            } => vec![v].into_iter(),
-            Self::ToRadix {
-                result: _,
-                value: v,
-                radix,
-                endianness: _,
-                count: _,
-            } => {
-                let mut ret_vec = vec![v];
-                match radix {
-                    Radix::Bytes => {}
-                    Radix::Dyn(radix) => {
-                        ret_vec.push(radix);
-                    }
-                }
-                ret_vec.into_iter()
-            }
-            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
-            Self::Rangecheck {
-                value: val,
-                max_bits: _,
-            } => vec![val].into_iter(),
-            Self::ReadGlobal {
-                result: _,
-                offset: _,
-                result_type: _,
-            } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                keys,
-                results,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-            } => {
-                let mut ret_vec = vec![];
-                match target {
-                    LookupTarget::Rangecheck(_) => {}
-                    LookupTarget::DynRangecheck(v) => {
-                        ret_vec.push(v);
-                    }
-                    LookupTarget::Array(arr) => {
-                        ret_vec.push(arr);
-                    }
-                }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
-                ret_vec.into_iter()
-            }
-            Self::TupleProj {
-                result: _,
-                tuple,
-                idx: _,
-            } => vec![tuple].into_iter(),
-            Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal {
-                global: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::DropGlobal { global: _ } => vec![].into_iter(),
-        }
-    }
-
-    pub fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
-        match self {
-            Self::Alloc {
-                result: _,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
-                result: _,
-                result_type: _,
-            }
-            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
-            Self::Cmp {
-                kind: _,
-                result: _,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::BinaryArithOp {
-                kind: _,
-                result: _,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::ArrayGet {
-                result: _,
-                array: b,
-                index: c,
-            } => vec![b, c].into_iter(),
-            Self::ArraySet {
-                result: _,
-                array: b,
-                index: c,
-                value: d,
-            } => vec![b, c, d].into_iter(),
-            Self::SlicePush {
-                dir: _,
-                result: _,
-                slice: b,
-                values: c,
-            } => {
-                let mut ret_vec = vec![b];
-                ret_vec.extend(c.iter());
-                ret_vec.into_iter()
-            }
-            Self::SliceLen {
-                result: _,
-                slice: b,
-            } => vec![b].into_iter(),
-            Self::AssertEq { lhs: b, rhs: c }
-            | Self::Store { ptr: b, value: c }
-            | Self::BumpD {
-                matrix: _,
-                variable: b,
-                sensitivity: c,
-            }
-            | Self::MulConst {
-                result: _,
-                const_val: b,
-                var: c,
-            } => vec![b, c].into_iter(),
-            Self::Load { result: _, ptr: c }
-            | Self::WriteWitness {
-                result: _,
-                value: c,
-            }
-            | Self::Cast {
-                result: _,
-                value: c,
-                target: _,
-            }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            } => vec![c].into_iter(),
-            Self::Call {
-                results: _,
-                function,
-                args: a,
-            } => {
-                let mut ret_vec = Vec::new();
-                if let CallTarget::Dynamic(fn_ptr) = function {
-                    ret_vec.push(fn_ptr);
-                }
-                ret_vec.extend(a.iter());
-                ret_vec.into_iter()
-            }
-            Self::MkSeq {
-                result: _,
-                elems: inputs,
-                seq_type: _,
-                elem_type: _,
-            } => inputs.iter().collect::<Vec<_>>().into_iter(),
-            Self::Select {
-                result: _,
-                cond: b,
-                if_t: c,
-                if_f: d,
-            }
-            | Self::AssertR1C { a: b, b: c, c: d }
-            | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
-            Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
-                result: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::ToBits {
-                result: _,
-                value: v,
-                endianness: _,
-                count: _,
-            } => vec![v].into_iter(),
-            Self::ToRadix {
-                result: _,
-                value: v,
-                radix,
-                endianness: _,
-                count: _,
-            } => {
-                let mut ret_vec = vec![v];
-                match radix {
-                    Radix::Bytes => {}
-                    Radix::Dyn(radix) => {
-                        ret_vec.push(radix);
-                    }
-                }
-                ret_vec.into_iter()
-            }
-            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
-            Self::Rangecheck {
-                value: val,
-                max_bits: _,
-            } => vec![val].into_iter(),
-            Self::ReadGlobal {
-                result: _,
-                offset: _,
-                result_type: _,
-            } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                keys,
-                results,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-            } => {
-                let mut ret_vec = vec![];
-                match target {
-                    LookupTarget::Rangecheck(_) => {}
-                    LookupTarget::DynRangecheck(v) => {
-                        ret_vec.push(v);
-                    }
-                    LookupTarget::Array(arr) => {
-                        ret_vec.push(arr);
-                    }
-                }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
-                ret_vec.into_iter()
-            }
-            Self::TupleProj {
-                result: _,
-                tuple,
-                idx,
-            } => match idx {
-                TupleIdx::Static(_size) => vec![tuple].into_iter(),
-                TupleIdx::Dynamic(idx, _tp) => vec![tuple, idx].into_iter(),
-            },
-            OpCode::MkTuple {
-                result: _,
-                elems: e,
-                element_types: _,
-            } => e.iter().collect::<Vec<_>>().into_iter(),
-            Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal {
-                global: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::DropGlobal { global: _ } => vec![].into_iter(),
-        }
-    }
-
-    pub fn get_results(&self) -> impl Iterator<Item = &ValueId> {
-        match self {
-            Self::Alloc {
-                result: r,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
-                result: r,
-                result_type: _,
-            }
-            | Self::Cmp {
-                kind: _,
-                result: r,
-                lhs: _,
-                rhs: _,
-            }
-            | Self::BinaryArithOp {
-                kind: _,
-                result: r,
-                lhs: _,
-                rhs: _,
-            }
-            | Self::ArrayGet {
-                result: r,
-                array: _,
-                index: _,
-            }
-            | Self::ArraySet {
-                result: r,
-                array: _,
-                index: _,
-                value: _,
-            }
-            | Self::SlicePush {
-                dir: _,
-                result: r,
-                slice: _,
-                values: _,
-            }
-            | Self::SliceLen {
-                result: r,
-                slice: _,
-            }
-            | Self::Load { result: r, ptr: _ }
-            | Self::MkSeq {
-                result: r,
-                elems: _,
-                seq_type: _,
-                elem_type: _,
-            }
-            | Self::Select {
-                result: r,
-                cond: _,
-                if_t: _,
-                if_f: _,
-            }
-            | Self::Cast {
-                result: r,
-                value: _,
-                target: _,
-            }
-            | Self::Truncate {
-                result: r,
-                value: _,
-                to_bits: _,
-                from_bits: _,
-            }
-            | Self::MulConst {
-                result: r,
-                const_val: _,
-                var: _,
-            }
-            | Self::NextDCoeff { result: r }
-            | Self::TupleProj {
-                result: r,
-                tuple: _,
-                idx: _,
-            }
-            | Self::MkTuple {
-                result: r,
-                elems: _,
-                element_types: _,
-            } => vec![r].into_iter(),
-            Self::WriteWitness {
-                result: r,
-                value: _,
-            } => {
-                let ret_vec = r.iter().collect::<Vec<_>>();
-                ret_vec.into_iter()
-            }
-            Self::Call {
-                results: r,
-                function: _,
-                args: _,
-            } => r.iter().collect::<Vec<_>>().into_iter(),
-            Self::Constrain { .. }
-            | Self::BumpD {
-                matrix: _,
-                variable: _,
-                sensitivity: _,
-            }
-            | Self::MemOp { kind: _, value: _ }
-            | Self::Store { ptr: _, value: _ }
-            | Self::AssertEq { lhs: _, rhs: _ }
-            | Self::AssertR1C { a: _, b: _, c: _ }
-            | Self::Rangecheck {
-                value: _,
-                max_bits: _,
-            } => vec![].into_iter(),
-            Self::Not {
-                result: r,
-                value: _,
-            }
-            | Self::ValueOf {
-                result: r,
-                value: _,
-            } => vec![r].into_iter(),
-            Self::ToBits {
-                result: r,
-                value: _,
-                endianness: _,
-                count: _,
-            } => vec![r].into_iter(),
-            Self::ToRadix {
-                result: r,
-                value: _,
-                radix: _,
-                endianness: _,
-                count: _,
-            } => vec![r].into_iter(),
-            Self::ReadGlobal {
-                result: r,
-                offset: _,
-                result_type: _,
-            } => vec![r].into_iter(),
-            Self::Lookup { .. } | Self::DLookup { .. } => vec![].into_iter(),
-            Self::Todo { results, .. } => {
-                let ret_vec: Vec<&ValueId> = results.iter().collect();
-                ret_vec.into_iter()
-            }
-            Self::InitGlobal {
-                global: _,
-                value: _,
-            } => vec![].into_iter(),
-            Self::DropGlobal { global: _ } => vec![].into_iter(),
-        }
-    }
 }
+
 #[derive(Debug, Clone)]
 pub enum Terminator {
     Jmp(BlockId, Vec<ValueId>),
