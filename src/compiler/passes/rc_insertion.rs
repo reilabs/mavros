@@ -11,7 +11,7 @@ use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{CastTarget, Function, Instruction, MemOp, OpCode, SSA, Terminator, ValueId},
+    ssa::{CastTarget, HLFunction, HLSSA, Instruction, MemOp, OpCode, Terminator, ValueId},
 };
 
 pub struct RCInsertion {}
@@ -25,7 +25,7 @@ impl Pass for RCInsertion {
         vec![FlowAnalysis::id(), TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let cfg = store.get::<FlowAnalysis>();
 
         let liveness = LivenessAnalysis::new().run(ssa, cfg);
@@ -47,7 +47,7 @@ impl RCInsertion {
     #[instrument(skip_all, level = Level::DEBUG, name = "RCInsertion::run_function", fields(function = function.get_name()))]
     fn run_function(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         liveness: &FunctionLiveness,

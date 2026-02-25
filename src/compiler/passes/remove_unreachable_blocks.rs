@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, SSA},
+    ssa::{BlockId, HLSSA},
 };
 
 // Needs to happen because apparently Noir
@@ -26,7 +26,7 @@ impl Pass for RemoveUnreachableBlocks {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let cfg = store.get::<FlowAnalysis>();
 
         for (function_id, function) in ssa.iter_functions_mut() {

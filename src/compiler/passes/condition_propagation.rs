@@ -2,7 +2,7 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BlockId, SSA, Terminator, ValueId},
+    ssa::{BlockId, HLSSA, Terminator, ValueId},
 };
 
 pub struct ConditionPropagation {}
@@ -16,7 +16,7 @@ impl Pass for ConditionPropagation {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 
@@ -30,7 +30,7 @@ impl ConditionPropagation {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let mut replaces: Vec<(BlockId, ValueId, bool)> = vec![];
 

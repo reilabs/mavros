@@ -6,7 +6,7 @@ use crate::compiler::{
         types::TypeInfo,
     },
     ir::r#type::{Type, TypeExpr},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, MemOp, Radix, SSA, SliceOpDir},
+    ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix, SliceOpDir},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
@@ -702,7 +702,7 @@ impl R1CGen {
     }
 
     #[instrument(skip_all, name = "R1CGen::run")]
-    pub fn run(&mut self, ssa: &SSA, type_info: &TypeInfo) {
+    pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) {
         let entry_point = ssa.get_main_id();
         assert!(
             ssa.get_function(entry_point).get_param_types().len() == 0,

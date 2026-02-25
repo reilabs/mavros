@@ -6,7 +6,9 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
-    ssa::{CallTarget, CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
+    ssa::{
+        CallTarget, CastTarget, Const, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+    },
 };
 
 pub struct TypeInfo {
@@ -40,7 +42,7 @@ impl Types {
         Types {}
     }
 
-    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis) -> TypeInfo {
+    pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis) -> TypeInfo {
         let mut type_info = TypeInfo {
             functions: HashMap::new(),
         };
@@ -61,7 +63,7 @@ impl Types {
     #[instrument(skip_all, level = Level::DEBUG, name = "Types::run_function", fields(function = function.get_name()))]
     fn run_function(
         &self,
-        function: &Function,
+        function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
         cfg: &CFG,
     ) -> FunctionTypeInfo {
@@ -554,7 +556,7 @@ impl Analysis for TypeInfo {
         vec![FlowAnalysis::id()]
     }
 
-    fn compute(ssa: &SSA, store: &AnalysisStore) -> Self {
+    fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
         let cfg = store.get::<FlowAnalysis>();
         Types::new().run(ssa, cfg)
     }

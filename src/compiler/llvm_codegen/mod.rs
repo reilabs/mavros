@@ -27,7 +27,7 @@ use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::flow_analysis::{CFG, FlowAnalysis};
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BinaryArithOpKind, Block, BlockId, CmpKind, Const, Function, FunctionId, SSA, Terminator,
+    BinaryArithOpKind, BlockId, CmpKind, Const, FunctionId, HLBlock, HLFunction, HLSSA, Terminator,
     ValueId,
 };
 
@@ -68,7 +68,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     /// Compile SSA to LLVM IR
-    pub fn compile(&mut self, ssa: &SSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) {
+    pub fn compile(&mut self, ssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) {
         // First pass: declare all functions
         let main_id = ssa.get_main_id();
         for (fn_id, function) in ssa.iter_functions() {
@@ -87,7 +87,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn declare_function(
         &mut self,
         fn_id: FunctionId,
-        function: &Function,
+        function: &HLFunction,
         type_info: &TypeInfo,
         main_id: FunctionId,
     ) {
@@ -135,7 +135,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn compile_function(
         &mut self,
         fn_id: FunctionId,
-        function: &Function,
+        function: &HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
     ) {
@@ -217,7 +217,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile a block, tracking phi nodes for later
     fn compile_block_with_phis(
         &mut self,
-        function: &Function,
+        function: &HLFunction,
         block_id: BlockId,
         type_info: &FunctionTypeInfo,
         phi_nodes: &mut HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>>,
@@ -453,7 +453,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile a terminator instruction
     fn compile_terminator(
         &mut self,
-        function: &Function,
+        function: &HLFunction,
         current_block_id: BlockId,
         terminator: &Terminator,
     ) {

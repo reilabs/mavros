@@ -3,7 +3,7 @@ use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{CastTarget, Const, OpCode, SSA},
+    ssa::{CastTarget, Const, HLSSA, OpCode},
 };
 
 /// Strips all `WitnessOf` type wrappers from the SSA.
@@ -18,7 +18,7 @@ impl Pass for StripWitnessOf {
     fn name(&self) -> &'static str {
         "strip_witness_of"
     }
-    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -31,7 +31,7 @@ impl StripWitnessOf {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA) {
+    pub fn do_run(&self, ssa: &mut HLSSA) {
         // Strip from global types
         let new_global_types: Vec<Type> = ssa
             .get_global_types()

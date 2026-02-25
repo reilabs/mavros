@@ -22,7 +22,7 @@ impl Pass for ArithmeticSimplifier {
         vec![TypeInfo::id(), ValueDefinitions::id()]
     }
 
-    fn run(&self, ssa: &mut crate::compiler::ssa::SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
         self.do_run(
             ssa,
             store.get::<TypeInfo>(),
@@ -42,7 +42,7 @@ impl ArithmeticSimplifier {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA,
+        ssa: &mut crate::compiler::ssa::HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
         value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions,
     ) {

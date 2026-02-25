@@ -10,8 +10,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget,
-        OpCode, Radix, SSA, SeqType, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLFunction, HLSSA,
+        LookupTarget, OpCode, Radix, SeqType, ValueId,
     },
 };
 
@@ -26,7 +26,7 @@ impl Pass for ExplicitWitness {
         vec![TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<TypeInfo>());
     }
 
@@ -40,10 +40,10 @@ impl ExplicitWitness {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, type_info: &TypeInfo) {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
-            let mut new_blocks = HashMap::<BlockId, Block>::new();
+            let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
@@ -719,7 +719,7 @@ impl ExplicitWitness {
 
     fn gen_witness_rangecheck(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         new_instructions: &mut Vec<OpCode>,
         value: ValueId,
         max_bits: usize,

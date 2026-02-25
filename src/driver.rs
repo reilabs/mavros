@@ -34,7 +34,7 @@ use crate::{
             witness_write_to_void::WitnessWriteToVoid,
         },
         r1cs_gen::{R1CGen, R1CS},
-        ssa::{DefaultSsaAnnotator, SSA},
+        ssa::{DefaultSsaAnnotator, HLSSA},
         untaint_control_flow::UntaintControlFlow,
         witness_cast_insertion::WitnessCastInsertion,
         witness_type_inference::WitnessTypeInference,
@@ -43,12 +43,12 @@ use crate::{
 
 pub struct Driver {
     project: Project,
-    initial_ssa: Option<SSA>,
-    static_struct_access_ssa: Option<SSA>,
-    monomorphized_ssa: Option<SSA>,
-    explicit_witness_ssa: Option<SSA>,
-    r1cs_ssa: Option<SSA>,
-    base_witgen_ssa: Option<SSA>,
+    initial_ssa: Option<HLSSA>,
+    static_struct_access_ssa: Option<HLSSA>,
+    monomorphized_ssa: Option<HLSSA>,
+    explicit_witness_ssa: Option<HLSSA>,
+    r1cs_ssa: Option<HLSSA>,
+    base_witgen_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
 }
@@ -126,7 +126,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(SSA::from_program(&program));
+        self.initial_ssa = Some(HLSSA::from_program(&program));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),

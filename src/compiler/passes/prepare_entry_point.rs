@@ -2,7 +2,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, Function, OpCode, SSA, SeqType, TupleIdx, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, OpCode, SeqType, TupleIdx,
+        ValueId,
     },
 };
 
@@ -13,7 +14,7 @@ impl Pass for PrepareEntryPoint {
         "prepare_entry_point"
     }
 
-    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         Self::wrap_main(ssa);
         self.rebuild_main_params(ssa);
     }
@@ -24,7 +25,7 @@ impl PrepareEntryPoint {
         Self {}
     }
 
-    fn wrap_main(ssa: &mut SSA) {
+    fn wrap_main(ssa: &mut HLSSA) {
         let original_main_id = ssa.get_main_id();
         let original_main = ssa.get_main();
         let param_types = original_main.get_param_types();
@@ -81,7 +82,7 @@ impl PrepareEntryPoint {
     }
 
     fn assert_eq_deep(
-        wrapper: &mut Function,
+        wrapper: &mut HLFunction,
         block: BlockId,
         result: ValueId,
         public_input: ValueId,
@@ -113,7 +114,7 @@ impl PrepareEntryPoint {
         }
     }
 
-    fn rebuild_main_params(&self, ssa: &mut SSA) {
+    fn rebuild_main_params(&self, ssa: &mut HLSSA) {
         let function = ssa.get_main_mut();
 
         let params: Vec<_> = function.get_entry().get_parameters().cloned().collect();
@@ -139,7 +140,7 @@ impl PrepareEntryPoint {
     fn reconstruct_param(
         value_id: Option<&ValueId>,
         typ: &Type,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
         let mut new_instructions = Vec::new();
         let mut new_parameters = Vec::new();

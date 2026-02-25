@@ -6,7 +6,7 @@ use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, DMatrix, HLBlock, OpCode, SeqType,
         Terminator, TupleIdx, ValueId,
     },
 };
@@ -22,7 +22,7 @@ impl Pass for WitnessLowering {
         vec![TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut crate::compiler::ssa::SSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<TypeInfo>());
     }
 }
@@ -34,7 +34,7 @@ impl WitnessLowering {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA,
+        ssa: &mut crate::compiler::ssa::HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
@@ -514,10 +514,10 @@ impl WitnessLowering {
         source_type: &Type,
         target_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut crate::compiler::ssa::HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> ValueId {
         let converted_source = self.witness_lowering_in_type(source_type);
         if converted_source == *target_type {
@@ -615,10 +615,10 @@ impl WitnessLowering {
         _source_array_type: &Type,
         target_array_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut crate::compiler::ssa::HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> ValueId {
         // Create a properly-typed initial target array filled with dummy elements.
         // This ensures the dst array has the correct memory layout from the start.
@@ -727,7 +727,7 @@ impl WitnessLowering {
         array_len: usize,
         _array_type: &Type,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
+        function: &mut crate::compiler::ssa::HLFunction,
     ) -> ValueId {
         let dummy_elem = self.create_dummy_value(elem_type, new_instructions, function);
         let elems = vec![dummy_elem; array_len];
@@ -748,7 +748,7 @@ impl WitnessLowering {
         &self,
         target_type: &Type,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
+        function: &mut crate::compiler::ssa::HLFunction,
     ) -> ValueId {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
@@ -796,10 +796,10 @@ impl WitnessLowering {
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut crate::compiler::ssa::HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_lowering_in_type(&value_type);
@@ -824,7 +824,7 @@ impl WitnessLowering {
         val: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
+        function: &mut crate::compiler::ssa::HLFunction,
     ) -> ValueId {
         let val_type = type_info.get_value_type(val);
         if val_type.is_witness_of() {

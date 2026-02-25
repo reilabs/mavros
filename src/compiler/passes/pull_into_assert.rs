@@ -4,7 +4,7 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BinaryArithOpKind, Instruction, OpCode, SSA, ValueId},
+    ssa::{BinaryArithOpKind, HLSSA, Instruction, OpCode, ValueId},
 };
 
 pub struct PullIntoAssert {}
@@ -18,7 +18,7 @@ impl Pass for PullIntoAssert {
     fn name(&self) -> &'static str {
         "pull_into_assert"
     }
-    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -31,7 +31,7 @@ impl PullIntoAssert {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA) {
+    pub fn do_run(&self, ssa: &mut HLSSA) {
         for (_, function) in ssa.iter_functions_mut() {
             let mut uses: HashMap<ValueId, usize> = HashMap::new();
             let mut defs: HashMap<ValueId, OpCode> = HashMap::new();

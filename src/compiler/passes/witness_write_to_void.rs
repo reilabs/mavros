@@ -2,7 +2,7 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis as _, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{OpCode, SSA},
+    ssa::{HLSSA, OpCode},
 };
 use std::collections::HashSet;
 
@@ -12,7 +12,7 @@ impl Pass for WitnessWriteToVoid {
     fn name(&self) -> &'static str {
         "witness_write_to_void"
     }
-    fn run(&self, ssa: &mut SSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -25,7 +25,7 @@ impl WitnessWriteToVoid {
         Self {}
     }
 
-    fn do_run(&self, ssa: &mut SSA) {
+    fn do_run(&self, ssa: &mut HLSSA) {
         let main_id = ssa.get_main_id();
 
         for (function_id, function) in ssa.iter_functions_mut() {

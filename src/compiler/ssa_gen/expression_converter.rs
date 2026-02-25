@@ -10,7 +10,7 @@ use noirc_frontend::monomorphization::ast::{
 
 use crate::compiler::ir::r#type::Type;
 use crate::compiler::ssa::{
-    BlockId, CastTarget, Endianness, Function, FunctionId, Radix, SeqType, TupleIdx, ValueId,
+    BlockId, CastTarget, Endianness, FunctionId, HLFunction, Radix, SeqType, TupleIdx, ValueId,
 };
 
 use super::type_converter::TypeConverter;
@@ -84,7 +84,7 @@ impl<'a> ExpressionConverter<'a> {
         local_id: LocalId,
         value_id: ValueId,
         typ: Type,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) {
         let ptr = function.push_alloc(self.current_block, typ);
         function.push_store(self.current_block, ptr, value_id);
@@ -110,7 +110,7 @@ impl<'a> ExpressionConverter<'a> {
     pub fn convert_expression(
         &mut self,
         expr: &Expression,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         match expr {
             Expression::Ident(ident) => self.convert_ident(ident, function),
@@ -171,7 +171,7 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn convert_ident(&mut self, ident: &Ident, function: &mut Function) -> Option<ValueId> {
+    fn convert_ident(&mut self, ident: &Ident, function: &mut HLFunction) -> Option<ValueId> {
         match &ident.definition {
             Definition::Local(local_id) => {
                 let value = *self
@@ -218,7 +218,7 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn convert_binary(&mut self, binary: &Binary, function: &mut Function) -> Option<ValueId> {
+    fn convert_binary(&mut self, binary: &Binary, function: &mut HLFunction) -> Option<ValueId> {
         let lhs = self.convert_expression(&binary.lhs, function).unwrap();
         let rhs = self.convert_expression(&binary.rhs, function).unwrap();
 
@@ -275,7 +275,7 @@ impl<'a> ExpressionConverter<'a> {
         Some(result)
     }
 
-    fn convert_let(&mut self, let_expr: &Let, function: &mut Function) -> Option<ValueId> {
+    fn convert_let(&mut self, let_expr: &Let, function: &mut HLFunction) -> Option<ValueId> {
         let result = self.convert_expression(&let_expr.expression, function);
         let value = result.unwrap_or_else(|| {
             // Unit binding (e.g., `let unit = ()`) — create an empty tuple
@@ -302,7 +302,11 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    fn convert_block(&mut self, exprs: &[Expression], function: &mut Function) -> Option<ValueId> {
+    fn convert_block(
+        &mut self,
+        exprs: &[Expression],
+        function: &mut HLFunction,
+    ) -> Option<ValueId> {
         let mut last_result = None;
         for expr in exprs {
             last_result = self.convert_expression(expr, function);
@@ -310,7 +314,7 @@ impl<'a> ExpressionConverter<'a> {
         last_result
     }
 
-    fn convert_assign(&mut self, assign: &Assign, function: &mut Function) -> Option<ValueId> {
+    fn convert_assign(&mut self, assign: &Assign, function: &mut HLFunction) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
         let new_value = self
@@ -386,7 +390,7 @@ impl<'a> ExpressionConverter<'a> {
         target_field: usize,
         new_value: ValueId,
         noir_type: &noirc_frontend::monomorphization::ast::Type,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> ValueId {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
@@ -415,7 +419,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     /// Read an LValue as a value (for Dereference: get the pointer that the lvalue holds).
-    fn convert_lvalue_to_value(&mut self, lvalue: &LValue, function: &mut Function) -> ValueId {
+    fn convert_lvalue_to_value(&mut self, lvalue: &LValue, function: &mut HLFunction) -> ValueId {
         match lvalue {
             LValue::Ident(ident) => self.convert_ident(ident, function).unwrap(),
             LValue::Dereference { reference, .. } => {
@@ -434,7 +438,7 @@ impl<'a> ExpressionConverter<'a> {
     fn flatten_lvalue(
         &mut self,
         lvalue: &LValue,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> (
         ValueId,
         noirc_frontend::monomorphization::ast::Type,
@@ -482,7 +486,7 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn convert_for(&mut self, for_expr: &For, function: &mut Function) -> Option<ValueId> {
+    fn convert_for(&mut self, for_expr: &For, function: &mut HLFunction) -> Option<ValueId> {
         // Evaluate start and end range in the current block
         let start = self
             .convert_expression(&for_expr.start_range, function)
@@ -569,7 +573,7 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn convert_if(&mut self, if_expr: &If, function: &mut Function) -> Option<ValueId> {
+    fn convert_if(&mut self, if_expr: &If, function: &mut HLFunction) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
         // Fold constant boolean conditions (e.g. if !is_unconstrained())
@@ -638,7 +642,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_unary(
         &mut self,
         unary: &noirc_frontend::monomorphization::ast::Unary,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         if unary.skip {
             return self.convert_expression(&unary.rhs, function);
@@ -699,7 +703,7 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn convert_index(&mut self, index: &Index, function: &mut Function) -> Option<ValueId> {
+    fn convert_index(&mut self, index: &Index, function: &mut HLFunction) -> Option<ValueId> {
         let collection = self
             .convert_expression(&index.collection, function)
             .unwrap();
@@ -712,7 +716,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         tuple_expr: &Expression,
         idx: usize,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         // Expressions always return materialized tuples, so just use projection
         let tuple = self.convert_expression(tuple_expr, function).unwrap();
@@ -723,7 +727,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_cast(
         &mut self,
         cast: &noirc_frontend::monomorphization::ast::Cast,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
@@ -760,7 +764,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_constrain(
         &mut self,
         constraint_expr: &Expression,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         // Special case: if the constraint is a binary equality, emit AssertEq directly
         if let Expression::Binary(binary) = constraint_expr {
@@ -782,7 +786,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_literal(
         &mut self,
         lit: &noirc_frontend::monomorphization::ast::Literal,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Literal;
 
@@ -910,7 +914,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_array_literal(
         &mut self,
         array_lit: &noirc_frontend::monomorphization::ast::ArrayLiteral,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         // Get the element type from the array/slice type
         let (arr_len, elem_ast_type) = match &array_lit.typ {
@@ -942,7 +946,11 @@ impl<'a> ExpressionConverter<'a> {
         Some(result)
     }
 
-    fn convert_tuple(&mut self, exprs: &[Expression], function: &mut Function) -> Option<ValueId> {
+    fn convert_tuple(
+        &mut self,
+        exprs: &[Expression],
+        function: &mut HLFunction,
+    ) -> Option<ValueId> {
         if exprs.is_empty() {
             // Empty struct/tuple — still a value (e.g. A {})
             let tuple = function.push_mk_tuple(self.current_block, vec![], vec![]);
@@ -981,7 +989,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_call(
         &mut self,
         call: &noirc_frontend::monomorphization::ast::Call,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         // Determine the function being called
         match call.func.as_ref() {
@@ -1050,7 +1058,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         name: &str,
         call: &noirc_frontend::monomorphization::ast::Call,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> Option<ValueId> {
         match name {
             "assert_eq" => {
@@ -1216,7 +1224,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         name: &str,
         _call: &noirc_frontend::monomorphization::ast::Call,
-        _function: &mut Function,
+        _function: &mut HLFunction,
     ) -> Option<ValueId> {
         match name {
             _ => todo!("LowLevel function '{}' not yet supported", name),
