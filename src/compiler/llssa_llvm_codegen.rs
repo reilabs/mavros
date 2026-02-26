@@ -26,10 +26,6 @@ use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
 use crate::compiler::hlssa_to_llssa::field_elem_struct;
 
-/// Number of 64-bit limbs in a BN254 field element.
-const FIELD_LIMBS: u32 = 4;
-const FIELD_SIZE: u32 = 32; // 4 × i64 = 32 bytes
-
 /// VM struct layout (offsets in bytes):
 const VM_WITNESS_PTR_OFFSET: u32 = 0;
 const VM_A_PTR_OFFSET: u32 = 4;
@@ -115,15 +111,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// The LLVM type for a field element: `[4 x i64]`.
-    fn field_type(&self) -> inkwell::types::ArrayType<'ctx> {
-        self.context.i64_type().array_type(FIELD_LIMBS)
+    /// The LLVM type for a field element, derived from `field_elem_struct()`.
+    fn field_llvm_type(&self) -> BasicTypeEnum<'ctx> {
+        self.convert_struct_type(&field_elem_struct())
     }
 
     // ── Runtime functions ───────────────────────────────────────────────
 
     fn declare_runtime_functions(&mut self) {
-        let field_type = self.field_type();
+        let field_type = self.field_llvm_type();
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_mul_fn = Some(
             self.module
@@ -142,7 +138,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn define_write_fn(&self, name: &str, ptr_offset: u32) -> FunctionValue<'ctx> {
         let void_type = self.context.void_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let field_type = self.field_type();
+        let field_type = self.field_llvm_type();
         let i32_type = self.context.i32_type();
 
         let fn_type = void_type.fn_type(&[ptr_type.into(), field_type.into()], false);
@@ -155,7 +151,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         builder.position_at_end(entry);
 
         let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-        let value = function.get_nth_param(1).unwrap().into_array_value();
+        let value = function.get_nth_param(1).unwrap().into_struct_value();
 
         let write_pos_ptr = unsafe {
             builder
@@ -175,13 +171,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         builder.build_store(write_ptr, value).unwrap();
 
-        let i8_type = self.context.i8_type();
         let new_ptr = unsafe {
             builder
                 .build_gep(
-                    i8_type,
+                    field_type,
                     write_ptr,
-                    &[i32_type.const_int(FIELD_SIZE as u64, false)],
+                    &[i32_type.const_int(1, false)],
                     "new_ptr",
                 )
                 .unwrap()
@@ -429,21 +424,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type,
                 fields,
             } => {
-                // For FIELD_ELEM, build a [4 x i64] via insertvalue chain
-                assert_eq!(
-                    *struct_type,
-                    field_elem_struct(),
-                    "Only FIELD_ELEM struct supported"
-                );
-                let arr_type = self.field_type();
-                let mut agg = arr_type.get_undef();
+                let llvm_type = self.convert_struct_type(struct_type).into_struct_type();
+                let mut agg = llvm_type.get_undef();
                 for (i, field_id) in fields.iter().enumerate() {
                     let field_val = self.value_map[field_id];
                     agg = self
                         .builder
                         .build_insert_value(agg, field_val, i as u32, "mk")
                         .unwrap()
-                        .into_array_value();
+                        .into_struct_value();
                 }
                 self.value_map.insert(*result, agg.into());
             }
@@ -451,15 +440,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLOp::ExtractField {
                 result,
                 value,
-                struct_type,
+                struct_type: _,
                 field,
             } => {
-                assert_eq!(
-                    *struct_type,
-                    field_elem_struct(),
-                    "Only FIELD_ELEM struct supported"
-                );
-                let agg = self.value_map[value].into_array_value();
+                let agg = self.value_map[value].into_struct_value();
                 let val = self
                     .builder
                     .build_extract_value(agg, *field as u32, &format!("v{}", result.0))
