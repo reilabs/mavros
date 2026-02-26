@@ -417,16 +417,8 @@ impl CFG {
         dot_content.push_str("  labelloc=t;\n");
         dot_content.push_str("  node [shape=box, fontname=\"monospace\"];\n\n");
 
-        let constants = function
-            .iter_consts()
-            .map(|(id, cst)| format!("v{} = {:?}", id.0, cst))
-            .collect::<Vec<_>>()
-            .join("\\l");
-
         // Add special nodes (entry and return)
-        dot_content.push_str(&format!(
-            "  entry [label=\"ENTRY:\\n{constants}\\l\", style=filled, fillcolor=lightgreen];\n"
-        ));
+        dot_content.push_str("  entry [label=\"ENTRY\", style=filled, fillcolor=lightgreen];\n");
         dot_content.push_str(
             "  return [label=\"RETURN\", shape=ellipse, style=filled, fillcolor=lightcoral];\n\n",
         );

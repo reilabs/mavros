@@ -7,7 +7,8 @@ use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        CallTarget, CastTarget, Const, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+        CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx,
+        ValueId,
     },
 };
 
@@ -70,25 +71,6 @@ impl Types {
         let mut function_info = FunctionTypeInfo {
             values: HashMap::new(),
         };
-
-        for (value_id, const_) in function.iter_consts() {
-            match const_ {
-                Const::U(size, _) => {
-                    function_info.values.insert(*value_id, Type::u(*size));
-                }
-                Const::Field(_) => {
-                    function_info.values.insert(*value_id, Type::field());
-                }
-                Const::Witness(_) => {
-                    function_info
-                        .values
-                        .insert(*value_id, Type::witness_of(Type::field()));
-                }
-                Const::FnPtr(_) => {
-                    function_info.values.insert(*value_id, Type::function());
-                }
-            }
-        }
 
         for block_id in cfg.get_domination_pre_order() {
             let block = function.get_block(block_id);
@@ -545,6 +527,15 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
+            OpCode::Const { result, value } => {
+                let ty = match value {
+                    ConstValue::U(size, _) => Type::u(*size),
+                    ConstValue::Field(_) => Type::field(),
+                    ConstValue::FnPtr(_) => Type::function(),
+                };
+                function_info.values.insert(*result, ty);
+                Ok(())
+            }
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::compiler::{
     analysis::value_definitions::{ValueDefinition, ValueDefinitions},
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BinaryArithOpKind, Const, OpCode, TupleIdx},
+    ssa::{BinaryArithOpKind, ConstValue, OpCode, TupleIdx},
 };
 
 pub struct MakeStructAccessStatic {}
@@ -98,9 +98,23 @@ impl MakeStructAccessStatic {
                                             let strides_match =
                                                 match (mul_stride_def, div_stride_def) {
                                                     (
-                                                        ValueDefinition::Const(mul_const),
-                                                        ValueDefinition::Const(div_const),
-                                                    ) => mul_const == div_const,
+                                                        ValueDefinition::Instruction(
+                                                            _,
+                                                            _,
+                                                            OpCode::Const {
+                                                                value: ConstValue::U(s1, v1),
+                                                                ..
+                                                            },
+                                                        ),
+                                                        ValueDefinition::Instruction(
+                                                            _,
+                                                            _,
+                                                            OpCode::Const {
+                                                                value: ConstValue::U(s2, v2),
+                                                                ..
+                                                            },
+                                                        ),
+                                                    ) => v1 == v2 && s1 == s2,
                                                     _ => false,
                                                 };
                                             if !strides_match {
@@ -134,7 +148,7 @@ impl MakeStructAccessStatic {
                                                             let tuple_field_index_val_id_og_definition =
                                                                 value_definitions
                                                                     .get_definition(*rhs);
-                                                            if let ValueDefinition::Const(Const::U(_sz, val)) = tuple_field_index_val_id_og_definition {
+                                                            if let ValueDefinition::Instruction(_, _, OpCode::Const { value: ConstValue::U(_, val), .. }) = tuple_field_index_val_id_og_definition {
                                                                 new_instructions.push(
                                                                 OpCode::TupleProj {
                                                                     result: item_val_id,
@@ -149,7 +163,14 @@ impl MakeStructAccessStatic {
                                                         ),
                                                     }
                                                 }
-                                                ValueDefinition::Const(Const::U(_, val)) => {
+                                                ValueDefinition::Instruction(
+                                                    _,
+                                                    _,
+                                                    OpCode::Const {
+                                                        value: ConstValue::U(_, val),
+                                                        ..
+                                                    },
+                                                ) => {
                                                     new_instructions.push(OpCode::TupleProj {
                                                         result: item_val_id,
                                                         tuple,

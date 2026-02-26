@@ -110,7 +110,8 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_COMPILE");
         match driver.compile_witgen() {
             Ok(b) => {
-                emit("END:WITGEN_COMPILE:ok");
+                let bytes = b.len() * 8;
+                emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
                 Some(b)
             }
             Err(_) => {
@@ -125,7 +126,8 @@ fn run_single(root: PathBuf) {
         emit("START:AD_COMPILE");
         match driver.compile_ad() {
             Ok(b) => {
-                emit("END:AD_COMPILE:ok");
+                let bytes = b.len() * 8;
+                emit(&format!("END:AD_COMPILE:ok:{bytes}"));
                 Some(b)
             }
             Err(_) => {
@@ -553,6 +555,8 @@ struct TestResult {
     steps: HashMap<String, Status>,
     rows: Option<usize>,
     cols: Option<usize>,
+    witgen_bytes: Option<usize>,
+    ad_bytes: Option<usize>,
 }
 
 /// Determined purely from child output:
@@ -689,6 +693,8 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
     let mut ended = HashMap::<String, bool>::new();
     let mut rows = None;
     let mut cols = None;
+    let mut witgen_bytes = None;
+    let mut ad_bytes = None;
 
     for line in lines {
         let parts: Vec<&str> = line.split(':').collect();
@@ -701,6 +707,12 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
                 if *key == "R1CS" && parts.len() >= 5 {
                     rows = parts[3].parse().ok();
                     cols = parts[4].parse().ok();
+                }
+                if *key == "WITGEN_COMPILE" && parts.len() >= 4 {
+                    witgen_bytes = parts[3].parse().ok();
+                }
+                if *key == "AD_COMPILE" && parts.len() >= 4 {
+                    ad_bytes = parts[3].parse().ok();
                 }
             }
             ["END", key, "fail"] => {
@@ -729,6 +741,8 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
         steps,
         rows,
         cols,
+        witgen_bytes,
+        ad_bytes,
     }
 }
 
@@ -739,6 +753,8 @@ struct ParsedRow {
     cells: Vec<String>,
     rows: Option<usize>,
     cols: Option<usize>,
+    witgen_bytes: Option<usize>,
+    ad_bytes: Option<usize>,
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
@@ -751,16 +767,20 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 19 {
+        if cells.len() < 21 {
             continue;
         }
         let rows = cells[3].parse().ok();
         let cols = cells[4].parse().ok();
+        let witgen_bytes = cells[5].parse().ok();
+        let ad_bytes = cells[6].parse().ok();
         result.push(ParsedRow {
             name: cells[0].clone(),
             cells,
             rows,
             cols,
+            witgen_bytes,
+            ad_bytes,
         });
     }
     result
@@ -769,20 +789,20 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
 const REGRESSION_COLS: &[(usize, &str)] = &[
     (1, "Compiled"),
     (2, "R1CS"),
-    (5, "Witgen Compile"),
-    (6, "Witgen Run VM"),
-    (7, "Witgen Correct"),
-    (8, "Witgen No Leak"),
-    (9, "AD Compile"),
-    (10, "AD Run VM"),
-    (11, "AD Correct"),
-    (12, "AD No Leak"),
-    (13, "Witgen WASM Compile"),
-    (14, "Witgen WASM Run"),
-    (15, "Witgen WASM Correct"),
-    (16, "AD WASM Compile"),
-    (17, "AD WASM Run"),
-    (18, "AD WASM Correct"),
+    (7, "Witgen Compile"),
+    (8, "Witgen Run VM"),
+    (9, "Witgen Correct"),
+    (10, "Witgen No Leak"),
+    (11, "AD Compile"),
+    (12, "AD Run VM"),
+    (13, "AD Correct"),
+    (14, "AD No Leak"),
+    (15, "Witgen WASM Compile"),
+    (16, "Witgen WASM Run"),
+    (17, "Witgen WASM Correct"),
+    (18, "AD WASM Compile"),
+    (19, "AD WASM Run"),
+    (20, "AD WASM Correct"),
 ];
 
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
@@ -826,7 +846,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         baseline.iter().map(|r| (r.name.as_str(), r)).collect();
 
     // Track stats for existing tests (tests in both baseline and current)
-    let mut new_checkmarks = 0usize;
+    let mut new_checkmarks: Vec<(String, &str)> = Vec::new(); // (test_name, col_name)
     let mut existing_baseline_checkmarks = 0usize;
     let mut existing_current_checkmarks = 0usize;
     let mut existing_total = 0usize;
@@ -855,7 +875,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         };
 
         // For existing tests: count baseline/current checkmarks and new checkmarks
-        for &(col, _) in REGRESSION_COLS {
+        for &(col, col_name) in REGRESSION_COLS {
             existing_total += 1;
             let base_pass = base.cells[col] == "✅";
             let cur_pass = cur.cells[col] == "✅";
@@ -866,7 +886,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
                 existing_current_checkmarks += 1;
             }
             if !base_pass && cur_pass {
-                new_checkmarks += 1;
+                new_checkmarks.push((cur.name.clone(), col_name));
             }
         }
 
@@ -915,6 +935,52 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
                 ));
             }
         }
+
+        // Check witgen bytecode size changes
+        if let (Some(bw), Some(cw)) = (base.witgen_bytes, cur.witgen_bytes) {
+            if cw > bw {
+                warnings.push(format!(
+                    "| {} | Witgen Size (bytes) | {} | {} | +{} ({:+.1}%) |",
+                    cur.name,
+                    bw,
+                    cw,
+                    cw - bw,
+                    (cw as f64 - bw as f64) / bw as f64 * 100.0
+                ));
+            } else if cw < bw {
+                improvements.push(format!(
+                    "| {} | Witgen Size (bytes) | {} | {} | {} ({:.1}%) |",
+                    cur.name,
+                    bw,
+                    cw,
+                    cw as i64 - bw as i64,
+                    (cw as f64 - bw as f64) / bw as f64 * 100.0
+                ));
+            }
+        }
+
+        // Check AD bytecode size changes
+        if let (Some(ba), Some(ca)) = (base.ad_bytes, cur.ad_bytes) {
+            if ca > ba {
+                warnings.push(format!(
+                    "| {} | AD Size (bytes) | {} | {} | +{} ({:+.1}%) |",
+                    cur.name,
+                    ba,
+                    ca,
+                    ca - ba,
+                    (ca as f64 - ba as f64) / ba as f64 * 100.0
+                ));
+            } else if ca < ba {
+                improvements.push(format!(
+                    "| {} | AD Size (bytes) | {} | {} | {} ({:.1}%) |",
+                    cur.name,
+                    ba,
+                    ca,
+                    ca as i64 - ba as i64,
+                    (ca as f64 - ba as f64) / ba as f64 * 100.0
+                ));
+            }
+        }
     }
 
     // Calculate completion percentages
@@ -944,13 +1010,20 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
     // Print positive news section
     let has_positive_news =
-        new_checkmarks > 0 || existing_pct_change > 0.0 || !improvements.is_empty();
+        !new_checkmarks.is_empty() || existing_pct_change > 0.0 || !improvements.is_empty();
     if has_positive_news {
         println!("### Positive Changes\n");
 
-        if new_checkmarks > 0 || existing_pct_change.abs() > 0.001 {
-            if new_checkmarks > 0 {
-                println!("- {} cell(s) turned into checkmarks ✅", new_checkmarks);
+        if !new_checkmarks.is_empty() || existing_pct_change.abs() > 0.001 {
+            if !new_checkmarks.is_empty() {
+                println!(
+                    "<details>\n<summary>{} cell(s) turned into checkmarks ✅</summary>\n",
+                    new_checkmarks.len()
+                );
+                for (test, col) in &new_checkmarks {
+                    println!("- **{}** / {}", test, col);
+                }
+                println!("\n</details>\n");
             }
             if existing_pct_change.abs() > 0.001 {
                 println!(
@@ -962,51 +1035,58 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         }
 
         if !improvements.is_empty() {
-            println!("**R1CS constraint or witness count decreased:**\n");
+            println!("<details>");
+            println!("<summary><b>R1CS/bytecode size decreased</b></summary>\n");
             println!("| Test | Metric | Before | After | Change |");
             println!("|------|--------|--------|-------|--------|");
             for imp in &improvements {
                 println!("{imp}");
             }
-            println!();
+            println!("\n</details>\n");
         }
     }
 
     if warnings.is_empty() {
         if !has_positive_news {
-            println!("No test improvements or R1CS constraint/witness count changes detected.");
+            println!("No test improvements or R1CS/bytecode size changes detected.");
         } else {
-            println!("No R1CS constraint or witness count growth detected.");
+            println!("No R1CS/bytecode size growth detected.");
         }
         return;
     }
 
     // Print warnings section
     println!("### Warnings\n");
-    println!("**R1CS constraint or witness count growth detected:**\n");
+    println!("<details>");
+    println!("<summary><b>R1CS/bytecode size growth detected</b></summary>\n");
     println!("| Test | Metric | Before | After | Change |");
     println!("|------|--------|--------|-------|--------|");
     for w in &warnings {
         println!("{w}");
     }
+    println!("\n</details>");
 }
 
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | AD WASM Compile | AD WASM Run | AD WASM Correct |\n");
-    md.push_str("|------|----------|------|------|------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|-----------------|-------------|---------------------|\n");
+    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | AD WASM Compile | AD WASM Run | AD WASM Correct |\n");
+    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|-----------------|-------------|---------------------|\n");
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
         let rows = r.rows.map_or("-".to_string(), |v| v.to_string());
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
+        let witgen_sz = r.witgen_bytes.map_or("-".to_string(), |v| v.to_string());
+        let ad_sz = r.ad_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
             rows,
             cols,
+            witgen_sz,
+            ad_sz,
             s("WITGEN_COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),

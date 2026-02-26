@@ -294,11 +294,6 @@ impl WitnessTypeInference {
         let mut block_cfg: HashMap<BlockId, ConstantWitness> = HashMap::new();
         let mut alloc_inner: HashMap<ValueId, WitnessType> = HashMap::new();
 
-        // Initialize constants as Pure
-        for (value_id, _) in func.iter_consts() {
-            value_wt.insert(*value_id, WitnessType::Scalar(ConstantWitness::Pure));
-        }
-
         // Initialize entry block params from arg_types
         let entry_params: Vec<(ValueId, Type)> =
             func.get_entry().get_parameters().cloned().collect();
@@ -743,6 +738,9 @@ impl WitnessTypeInference {
                     | OpCode::Todo { .. }
                     | OpCode::ValueOf { .. } => {
                         panic!("Should not be present at this stage {:?}", instruction);
+                    }
+                    OpCode::Const { result, .. } => {
+                        value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Pure));
                     }
                 }
             }

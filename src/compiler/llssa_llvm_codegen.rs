@@ -419,34 +419,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.value_map.insert(*result, not_val.into());
             }
 
-            LLOp::Truncate {
-                result,
-                value,
-                to_bits,
-            } => {
-                let val = self.value_map[value].into_int_value();
-                let target_type = self.context.custom_width_int_type(*to_bits);
-                let truncated = self
-                    .builder
-                    .build_int_truncate(val, target_type, &format!("v{}", result.0))
-                    .unwrap();
-                self.value_map.insert(*result, truncated.into());
-            }
-
-            LLOp::ZExt {
-                result,
-                value,
-                to_bits,
-            } => {
-                let val = self.value_map[value].into_int_value();
-                let target_type = self.context.custom_width_int_type(*to_bits);
-                let extended = self
-                    .builder
-                    .build_int_z_extend(val, target_type, &format!("v{}", result.0))
-                    .unwrap();
-                self.value_map.insert(*result, extended.into());
-            }
-
             LLOp::FieldArith { kind, result, a, b } => {
                 let lhs = self.value_map[a];
                 let rhs = self.value_map[b];
@@ -466,31 +438,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val);
-            }
-
-            LLOp::FieldEq { result, a, b } => {
-                // Field equality: compare all 4 limbs
-                let a_val = self.value_map[a].into_struct_value();
-                let b_val = self.value_map[b].into_struct_value();
-                let mut eq_acc = self.context.bool_type().const_int(1, false);
-                for i in 0..4u32 {
-                    let a_limb = self
-                        .builder
-                        .build_extract_value(a_val, i, "a_l")
-                        .unwrap()
-                        .into_int_value();
-                    let b_limb = self
-                        .builder
-                        .build_extract_value(b_val, i, "b_l")
-                        .unwrap()
-                        .into_int_value();
-                    let limb_eq = self
-                        .builder
-                        .build_int_compare(IntPredicate::EQ, a_limb, b_limb, "leq")
-                        .unwrap();
-                    eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
-                }
-                self.value_map.insert(*result, eq_acc.into());
             }
 
             LLOp::MkStruct {
@@ -523,23 +470,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .build_extract_value(agg, *field as u32, &format!("v{}", result.0))
                     .unwrap();
                 self.value_map.insert(*result, val);
-            }
-
-            LLOp::InsertField {
-                result,
-                base,
-                struct_type: _,
-                field,
-                value,
-            } => {
-                let agg = self.value_map[base].into_struct_value();
-                let field_val = self.value_map[value];
-                let new_agg = self
-                    .builder
-                    .build_insert_value(agg, field_val, *field as u32, &format!("v{}", result.0))
-                    .unwrap()
-                    .into_struct_value();
-                self.value_map.insert(*result, new_agg.into());
             }
 
             LLOp::Select {
@@ -575,6 +505,76 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.call_write_fn(self.write_witness_fn.unwrap(), vm_ptr, val);
             }
 
+            LLOp::InsertField {
+                result,
+                base,
+                struct_type: _,
+                field,
+                value,
+            } => {
+                let agg = self.value_map[base].into_struct_value();
+                let field_val = self.value_map[value];
+                let new_agg = self
+                    .builder
+                    .build_insert_value(agg, field_val, *field as u32, &format!("v{}", result.0))
+                    .unwrap()
+                    .into_struct_value();
+                self.value_map.insert(*result, new_agg.into());
+            }
+
+            LLOp::Truncate {
+                result,
+                value,
+                to_bits,
+            } => {
+                let val = self.value_map[value].into_int_value();
+                let target_type = self.context.custom_width_int_type(*to_bits);
+                let truncated = self
+                    .builder
+                    .build_int_truncate(val, target_type, &format!("v{}", result.0))
+                    .unwrap();
+                self.value_map.insert(*result, truncated.into());
+            }
+
+            LLOp::ZExt {
+                result,
+                value,
+                to_bits,
+            } => {
+                let val = self.value_map[value].into_int_value();
+                let target_type = self.context.custom_width_int_type(*to_bits);
+                let extended = self
+                    .builder
+                    .build_int_z_extend(val, target_type, &format!("v{}", result.0))
+                    .unwrap();
+                self.value_map.insert(*result, extended.into());
+            }
+
+            LLOp::FieldEq { result, a, b } => {
+                // Field equality: compare all 4 limbs
+                let a_val = self.value_map[a].into_struct_value();
+                let b_val = self.value_map[b].into_struct_value();
+                let mut eq_acc = self.context.bool_type().const_int(1, false);
+                for i in 0..4u32 {
+                    let a_limb = self
+                        .builder
+                        .build_extract_value(a_val, i, "a_l")
+                        .unwrap()
+                        .into_int_value();
+                    let b_limb = self
+                        .builder
+                        .build_extract_value(b_val, i, "b_l")
+                        .unwrap()
+                        .into_int_value();
+                    let limb_eq = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, a_limb, b_limb, "leq")
+                        .unwrap();
+                    eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
+                }
+                self.value_map.insert(*result, eq_acc.into());
+            }
+
             // ── Memory operations ───────────────────────────────────────
 
             LLOp::NullPtr { result } => {
@@ -590,7 +590,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             } => {
                 let struct_ty = self.convert_struct_type(struct_type);
                 let size = struct_ty.size_of().unwrap();
-                // Truncate size to i32 for wasm32 malloc
                 let i32_type = self.context.i32_type();
                 let size_i32 = self
                     .builder
@@ -677,7 +676,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let elem_size = elem_ty.size_of().unwrap();
                 let total_size = if let Some(count_val) = count {
                     let cnt = self.value_map[count_val].into_int_value();
-                    // Extend count to match elem_size width
                     let cnt_ext = self
                         .builder
                         .build_int_z_extend_or_bit_cast(
@@ -692,7 +690,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 } else {
                     elem_size
                 };
-                // Truncate to i32 for wasm32 memcpy intrinsic
                 let i32_type = self.context.i32_type();
                 let total_i32 = self
                     .builder
@@ -704,7 +701,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::Trap => {
-                // Call @llvm.trap() and mark as unreachable
                 let trap_fn = self.module.get_function("llvm.trap").unwrap_or_else(|| {
                     let void_type = self.context.void_type();
                     let trap_type = void_type.fn_type(&[], false);
