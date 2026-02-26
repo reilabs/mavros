@@ -62,7 +62,6 @@ pub struct Driver {
     base_witgen_ssa: Option<SSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
-    lowlevel_replacement: bool,
 }
 
 #[derive(Debug)]
@@ -83,7 +82,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Driver {
-    pub fn new(project: Project, draw_cfg: bool, lowlevel_replacement: bool) -> Self {
+    pub fn new(project: Project, draw_cfg: bool) -> Self {
         let dir = project.get_only_crate().root_dir.join("mavros_debug");
         if dir.exists() {
             fs::remove_dir_all(&dir).unwrap();
@@ -99,7 +98,6 @@ impl Driver {
             base_witgen_ssa: None,
             abi: None,
             draw_cfg,
-            lowlevel_replacement,
         }
     }
 
@@ -123,11 +121,9 @@ impl Driver {
         .map_err(Error::NoirCompilerError)?;
 
         let mut prepared_replacements = Vec::new();
-        if self.lowlevel_replacement {
-            for replacement in REPLACEMENT_CRATES {
-                let functions = prepare_replacement_crate(&mut context, crate_id, replacement)?;
-                prepared_replacements.push((replacement, functions));
-            }
+        for replacement in REPLACEMENT_CRATES {
+            let functions = prepare_replacement_crate(&mut context, crate_id, replacement)?;
+            prepared_replacements.push((replacement, functions));
         }
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();

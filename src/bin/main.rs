@@ -42,8 +42,6 @@ pub struct ProgramOptions {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
 
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    pub lowlevel_replacement: bool,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -98,10 +96,9 @@ fn main() -> ExitCode {
 pub fn compile_to_r1cs(
     root: PathBuf,
     draw_graphs: bool,
-    lowlevel_replacement: bool,
 ) -> Result<(Driver, R1CS), Error> {
-    let project = Project::new(root, lowlevel_replacement)?;
-    let mut driver = Driver::new(project, draw_graphs, lowlevel_replacement);
+    let project = Project::new(root)?;
+    let mut driver = Driver::new(project, draw_graphs);
     driver.run_noir_compiler()?;
     driver.make_struct_access_static()?;
     driver.monomorphize()?;
@@ -121,7 +118,7 @@ pub fn run_compile(
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
-    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, false)?;
+    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
     let witgen_binary = api::compile_witgen(&mut driver)?;
     let ad_binary = api::compile_ad(&driver)?;
 
@@ -167,7 +164,6 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(
         args.root.clone(),
         args.draw_graphs,
-        args.lowlevel_replacement,
     )?;
     if args.pprint_r1cs {
         use std::io::Write;

@@ -107,7 +107,7 @@ This runs the full pipeline (compile + VM execution) and additionally emits `mav
 
 ## Low-Level Replacements
 
-Pass `--lowlevel-replacement` to substitute Noir low-level intrinsics (`poseidon2_permutation`, `sha256_compression`) with pure-Noir implementations from `stdlib_replacements/`.
+Noir low-level intrinsics (`poseidon2_permutation`, `sha256_compression`) are automatically substituted with pure-Noir implementations from `stdlib_replacements/`.
 
 ## Debugging
 

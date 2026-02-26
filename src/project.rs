@@ -34,26 +34,23 @@ fn add_stdlib_replacements(file_manager: &mut FileManager) {
 
 fn parse_workspace(
     workspace: &Workspace,
-    lowlevel_replacement: bool,
 ) -> (FileManager, ParsedFiles) {
     let mut file_manager = workspace.new_file_manager();
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
-    if lowlevel_replacement {
-        add_stdlib_replacements(&mut file_manager);
-    }
+    add_stdlib_replacements(&mut file_manager);
     let parsed_files = nargo::parse_all(&file_manager);
     (file_manager, parsed_files)
 }
 
 impl Project {
-    pub fn new(project_root: PathBuf, lowlevel_replacement: bool) -> Result<Self, Error> {
+    pub fn new(project_root: PathBuf) -> Result<Self, Error> {
         // Workspace loading was done based on https://github.com/noir-lang/noir/blob/c3a43abf9be80c6f89560405b65f5241ed67a6b2/tooling/nargo_cli/src/cli/mod.rs#L180
         let toml_path = nargo_toml::get_package_manifest(&project_root)?;
 
         let nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
 
         let (nargo_file_manager, nargo_parsed_files) =
-            parse_workspace(&nargo_workspace, lowlevel_replacement);
+            parse_workspace(&nargo_workspace);
 
         Ok(Self {
             project_root,
