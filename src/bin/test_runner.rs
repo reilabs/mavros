@@ -846,7 +846,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         baseline.iter().map(|r| (r.name.as_str(), r)).collect();
 
     // Track stats for existing tests (tests in both baseline and current)
-    let mut new_checkmarks = 0usize;
+    let mut new_checkmarks: Vec<(String, &str)> = Vec::new(); // (test_name, col_name)
     let mut existing_baseline_checkmarks = 0usize;
     let mut existing_current_checkmarks = 0usize;
     let mut existing_total = 0usize;
@@ -875,7 +875,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         };
 
         // For existing tests: count baseline/current checkmarks and new checkmarks
-        for &(col, _) in REGRESSION_COLS {
+        for &(col, col_name) in REGRESSION_COLS {
             existing_total += 1;
             let base_pass = base.cells[col] == "✅";
             let cur_pass = cur.cells[col] == "✅";
@@ -886,7 +886,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
                 existing_current_checkmarks += 1;
             }
             if !base_pass && cur_pass {
-                new_checkmarks += 1;
+                new_checkmarks.push((cur.name.clone(), col_name));
             }
         }
 
@@ -1010,13 +1010,20 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
     // Print positive news section
     let has_positive_news =
-        new_checkmarks > 0 || existing_pct_change > 0.0 || !improvements.is_empty();
+        !new_checkmarks.is_empty() || existing_pct_change > 0.0 || !improvements.is_empty();
     if has_positive_news {
         println!("### Positive Changes\n");
 
-        if new_checkmarks > 0 || existing_pct_change.abs() > 0.001 {
-            if new_checkmarks > 0 {
-                println!("- {} cell(s) turned into checkmarks ✅", new_checkmarks);
+        if !new_checkmarks.is_empty() || existing_pct_change.abs() > 0.001 {
+            if !new_checkmarks.is_empty() {
+                println!(
+                    "<details>\n<summary>{} cell(s) turned into checkmarks ✅</summary>\n",
+                    new_checkmarks.len()
+                );
+                for (test, col) in &new_checkmarks {
+                    println!("- **{}** / {}", test, col);
+                }
+                println!("\n</details>\n");
             }
             if existing_pct_change.abs() > 0.001 {
                 println!(
@@ -1028,13 +1035,14 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         }
 
         if !improvements.is_empty() {
-            println!("**R1CS/bytecode size decreased:**\n");
+            println!("<details>");
+            println!("<summary><b>R1CS/bytecode size decreased</b></summary>\n");
             println!("| Test | Metric | Before | After | Change |");
             println!("|------|--------|--------|-------|--------|");
             for imp in &improvements {
                 println!("{imp}");
             }
-            println!();
+            println!("\n</details>\n");
         }
     }
 
@@ -1049,12 +1057,14 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
     // Print warnings section
     println!("### Warnings\n");
-    println!("**R1CS/bytecode size growth detected:**\n");
+    println!("<details open>");
+    println!("<summary><b>R1CS/bytecode size growth detected</b></summary>\n");
     println!("| Test | Metric | Before | After | Change |");
     println!("|------|--------|--------|-------|--------|");
     for w in &warnings {
         println!("{w}");
     }
+    println!("\n</details>");
 }
 
 fn render_markdown(results: &[TestResult]) -> String {
