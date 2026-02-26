@@ -1,6 +1,7 @@
 //! Runtime Library for Mavros WASM
 //!
-//! Provides BN254 field arithmetic and VM write functions called by LLVM-generated WASM.
+//! Provides BN254 field arithmetic, VM write functions, and heap allocation
+//! called by LLVM-generated WASM.
 //! Field elements are 4 x i64 limbs in Montgomery form.
 //!
 //! ABI (matching LLVM's wasm32 lowering of [4 x i64]):
@@ -9,6 +10,26 @@
 
 use ark_bn254::Fr;
 use ark_ff::BigInt;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[no_mangle]
+pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
+    let layout = std::alloc::Layout::from_size_align_unchecked(size as usize, 8);
+    std::alloc::alloc(layout)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn free(_ptr: *mut u8) {
+    // Wasm instances are short-lived — leaked memory is reclaimed when the
+    // instance is dropped. Proper dealloc requires tracking allocation sizes.
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Field arithmetic
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[inline]
 fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> Fr {
@@ -40,6 +61,10 @@ pub unsafe extern "C" fn __field_mul(
     let b = limbs_to_fr(b0, b1, b2, b3);
     write_field(result_ptr, a * b);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VM write functions
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[no_mangle]
 pub unsafe extern "C" fn __write_witness(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v3: i64) {

@@ -41,6 +41,8 @@ pub struct LLVMCodeGen<'ctx> {
     vm_ptr: Option<PointerValue<'ctx>>,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
+    malloc_fn: Option<FunctionValue<'ctx>>,
+    free_fn: Option<FunctionValue<'ctx>>,
     write_witness_fn: Option<FunctionValue<'ctx>>,
     write_a_fn: Option<FunctionValue<'ctx>>,
     write_b_fn: Option<FunctionValue<'ctx>>,
@@ -61,6 +63,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             function_map: HashMap::new(),
             vm_ptr: None,
             field_mul_fn: None,
+            malloc_fn: None,
+            free_fn: None,
             write_witness_fn: None,
             write_a_fn: None,
             write_b_fn: None,
@@ -118,10 +122,29 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     fn declare_runtime_functions(&mut self) {
         let field_type = self.field_llvm_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let void_type = self.context.void_type();
+
+        // __field_mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_mul_fn = Some(
             self.module
                 .add_function("__field_mul", field_mul_type, None),
+        );
+
+        // malloc(i32) -> ptr  (i32 size for wasm32)
+        let malloc_type = ptr_type.fn_type(&[i32_type.into()], false);
+        self.malloc_fn = Some(
+            self.module
+                .add_function("malloc", malloc_type, Some(Linkage::External)),
+        );
+
+        // free(ptr) -> void
+        let free_type = void_type.fn_type(&[ptr_type.into()], false);
+        self.free_fn = Some(
+            self.module
+                .add_function("free", free_type, Some(Linkage::External)),
         );
     }
 
@@ -481,6 +504,217 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let vm_ptr = self.vm_ptr.unwrap();
                 self.call_write_fn(self.write_witness_fn.unwrap(), vm_ptr, val);
             }
+
+            LLOp::InsertField {
+                result,
+                base,
+                struct_type: _,
+                field,
+                value,
+            } => {
+                let agg = self.value_map[base].into_struct_value();
+                let field_val = self.value_map[value];
+                let new_agg = self
+                    .builder
+                    .build_insert_value(agg, field_val, *field as u32, &format!("v{}", result.0))
+                    .unwrap()
+                    .into_struct_value();
+                self.value_map.insert(*result, new_agg.into());
+            }
+
+            LLOp::Truncate {
+                result,
+                value,
+                to_bits,
+            } => {
+                let val = self.value_map[value].into_int_value();
+                let target_type = self.context.custom_width_int_type(*to_bits);
+                let truncated = self
+                    .builder
+                    .build_int_truncate(val, target_type, &format!("v{}", result.0))
+                    .unwrap();
+                self.value_map.insert(*result, truncated.into());
+            }
+
+            LLOp::ZExt {
+                result,
+                value,
+                to_bits,
+            } => {
+                let val = self.value_map[value].into_int_value();
+                let target_type = self.context.custom_width_int_type(*to_bits);
+                let extended = self
+                    .builder
+                    .build_int_z_extend(val, target_type, &format!("v{}", result.0))
+                    .unwrap();
+                self.value_map.insert(*result, extended.into());
+            }
+
+            LLOp::FieldEq { result, a, b } => {
+                // Field equality: compare all 4 limbs
+                let a_val = self.value_map[a].into_struct_value();
+                let b_val = self.value_map[b].into_struct_value();
+                let mut eq_acc = self.context.bool_type().const_int(1, false);
+                for i in 0..4u32 {
+                    let a_limb = self
+                        .builder
+                        .build_extract_value(a_val, i, "a_l")
+                        .unwrap()
+                        .into_int_value();
+                    let b_limb = self
+                        .builder
+                        .build_extract_value(b_val, i, "b_l")
+                        .unwrap()
+                        .into_int_value();
+                    let limb_eq = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, a_limb, b_limb, "leq")
+                        .unwrap();
+                    eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
+                }
+                self.value_map.insert(*result, eq_acc.into());
+            }
+
+            LLOp::NullPtr { result } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let null = ptr_type.const_null();
+                self.value_map.insert(*result, null.into());
+            }
+
+            // ── Memory operations ───────────────────────────────────────
+
+            LLOp::HeapAlloc {
+                result,
+                struct_type,
+                flex_count: _,
+            } => {
+                let struct_ty = self.convert_struct_type(struct_type);
+                let size = struct_ty.size_of().unwrap();
+                // Truncate size to i32 for wasm32 malloc
+                let i32_type = self.context.i32_type();
+                let size_i32 = self
+                    .builder
+                    .build_int_truncate_or_bit_cast(size, i32_type, "size")
+                    .unwrap();
+                let malloc_fn = self.malloc_fn.expect("malloc not declared");
+                let call_site = self
+                    .builder
+                    .build_call(malloc_fn, &[size_i32.into()], "alloc")
+                    .unwrap();
+                let ptr_val = call_site
+                    .try_as_basic_value()
+                    .left()
+                    .expect("malloc should return a value");
+                self.value_map.insert(*result, ptr_val);
+            }
+
+            LLOp::Free { ptr } => {
+                let p = self.value_map[ptr].into_pointer_value();
+                let free_fn = self.free_fn.expect("free not declared");
+                self.builder
+                    .build_call(free_fn, &[p.into()], "")
+                    .unwrap();
+            }
+
+            LLOp::Load { result, ptr, ty } => {
+                let p = self.value_map[ptr].into_pointer_value();
+                let llvm_ty = self.convert_type(ty);
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, p, &format!("v{}", result.0))
+                    .unwrap();
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::Store { ptr, value } => {
+                let p = self.value_map[ptr].into_pointer_value();
+                let v = self.value_map[value];
+                self.builder.build_store(p, v).unwrap();
+            }
+
+            LLOp::StructFieldPtr {
+                result,
+                ptr,
+                struct_type,
+                field,
+            } => {
+                let p = self.value_map[ptr].into_pointer_value();
+                let llvm_struct_ty = self.convert_struct_type(struct_type).into_struct_type();
+                let gep = unsafe {
+                    self.builder
+                        .build_struct_gep(llvm_struct_ty, p, *field as u32, "sfp")
+                        .unwrap()
+                };
+                self.value_map.insert(*result, gep.into());
+            }
+
+            LLOp::ArrayElemPtr {
+                result,
+                ptr,
+                elem_type,
+                index,
+            } => {
+                let p = self.value_map[ptr].into_pointer_value();
+                let idx = self.value_map[index].into_int_value();
+                let llvm_elem_ty = self.convert_struct_type(elem_type);
+                let gep = unsafe {
+                    self.builder
+                        .build_gep(llvm_elem_ty, p, &[idx], "aep")
+                        .unwrap()
+                };
+                self.value_map.insert(*result, gep.into());
+            }
+
+            LLOp::Memcpy {
+                dst,
+                src,
+                struct_type,
+                count,
+            } => {
+                let dst_ptr = self.value_map[dst].into_pointer_value();
+                let src_ptr = self.value_map[src].into_pointer_value();
+                let elem_ty = self.convert_struct_type(struct_type);
+                let elem_size = elem_ty.size_of().unwrap();
+                let total_size = if let Some(count_val) = count {
+                    let cnt = self.value_map[count_val].into_int_value();
+                    // Extend count to match elem_size width
+                    let cnt_ext = self
+                        .builder
+                        .build_int_z_extend_or_bit_cast(
+                            cnt,
+                            elem_size.get_type(),
+                            "cnt_ext",
+                        )
+                        .unwrap();
+                    self.builder
+                        .build_int_mul(elem_size, cnt_ext, "total_size")
+                        .unwrap()
+                } else {
+                    elem_size
+                };
+                // Truncate to i32 for wasm32 memcpy intrinsic
+                let i32_type = self.context.i32_type();
+                let total_i32 = self
+                    .builder
+                    .build_int_truncate_or_bit_cast(total_size, i32_type, "memcpy_size")
+                    .unwrap();
+                self.builder
+                    .build_memcpy(dst_ptr, 1, src_ptr, 1, total_i32)
+                    .unwrap();
+            }
+
+            LLOp::Trap => {
+                // Call @llvm.trap() and mark as unreachable
+                let trap_fn = self.module.get_function("llvm.trap").unwrap_or_else(|| {
+                    let void_type = self.context.void_type();
+                    let trap_type = void_type.fn_type(&[], false);
+                    self.module.add_function("llvm.trap", trap_type, None)
+                });
+                self.builder.build_call(trap_fn, &[], "").unwrap();
+                self.builder.build_unreachable().unwrap();
+            }
+
+            // ── Calls ───────────────────────────────────────────────────
 
             LLOp::Call {
                 results,

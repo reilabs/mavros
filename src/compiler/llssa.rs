@@ -68,6 +68,19 @@ impl LLStruct {
         ])
     }
 
+    /// RC header: { Int(64) } — just a refcount.
+    pub fn rc_header() -> Self {
+        Self::new(vec![LLFieldType::Int(64)])
+    }
+
+    /// RC'd fixed-size array: { Inline(RcHeader), InlineArray(elem_struct, count) }
+    pub fn rc_array(elem: LLStruct, count: usize) -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::InlineArray(elem, count),
+        ])
+    }
+
     /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
     /// Value-safe structs can be used as SSA values (`LLType::Struct`).
     pub fn is_value_safe(&self) -> bool {
