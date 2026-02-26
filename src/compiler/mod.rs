@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod codegen;
 pub mod flow_analysis;
 pub mod ir;
+pub mod llssa;
 pub mod llvm_codegen;
 pub mod pass_manager;
 pub mod passes;
