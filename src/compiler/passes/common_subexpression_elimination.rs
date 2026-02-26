@@ -434,8 +434,8 @@ impl CSE {
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::ValueOf { .. } => {}
-                    | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
+                    | OpCode::ValueOf { .. }
+                    | OpCode::MulConst { .. } => {}
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.not();
