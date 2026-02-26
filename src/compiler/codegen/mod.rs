@@ -589,6 +589,7 @@ impl CodeGen {
                 ssa::OpCode::WriteWitness {
                     result: None,
                     value: v,
+                    ..
                 } => {
                     emitter.push_op(bytecode::OpCode::WriteWitness {
                         val: layouter.get_value(*v),

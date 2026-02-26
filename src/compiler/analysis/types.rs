@@ -292,7 +292,7 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::WriteWitness { result, value } => {
+            OpCode::WriteWitness { result, value, .. } => {
                 let Some(result) = result else {
                     return Ok(());
                 };

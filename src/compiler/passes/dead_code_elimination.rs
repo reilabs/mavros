@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator, ValueId},
+    ssa::{BlockId, FunctionId, HLFunction, HLSSA, Instruction, OpCode, Terminator, ValueId},
 };
 
 pub struct DCE {
@@ -73,6 +73,7 @@ impl DCE {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+        let main_id = ssa.get_main_id();
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let definitions = self.generate_definitions(function);
@@ -84,9 +85,12 @@ impl DCE {
             let mut live_branches: HashSet<BlockId> = HashSet::new();
             let mut worklist: Vec<WorkItem> = vec![];
 
-            for (parameter, _) in function.get_entry().get_parameters() {
-                // All function parameters are live
-                worklist.push(WorkItem::LiveValue(*parameter));
+            // Non-main function parameters are live (conservative without interprocedural analysis).
+            // Main entry params are alive only if they are used (e.g. by pinned WriteWitness).
+            if *function_id != main_id {
+                for (parameter, _) in function.get_entry().get_parameters() {
+                    worklist.push(WorkItem::LiveValue(*parameter));
+                }
             }
 
             // Workaround: mark all blocks as live to preserve empty intermediate blocks.
@@ -133,10 +137,11 @@ impl DCE {
                         } => {
                             worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
-                        OpCode::WriteWitness { .. } => {
-                            // Witness stores are critical after the constraint system is generated.
-                            // Previously, they only matter if the result is used.
-                            if self.config.witness_shape_frozen {
+                        OpCode::WriteWitness { pinned, .. } => {
+                            // Pinned WriteWitness are always alive (they record main inputs
+                            // to the witness tape). Other WriteWitness are alive only after
+                            // the constraint system is generated (witness shape is frozen).
+                            if self.config.witness_shape_frozen || *pinned {
                                 worklist.push(WorkItem::LiveInstruction(*block_id, i));
                             }
                         }

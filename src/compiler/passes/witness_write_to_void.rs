@@ -4,7 +4,6 @@ use crate::compiler::{
     passes::fix_double_jumps::ValueReplacements,
     ssa::{HLSSA, OpCode},
 };
-use std::collections::HashSet;
 
 pub struct WitnessWriteToVoid {}
 
@@ -26,19 +25,16 @@ impl WitnessWriteToVoid {
     }
 
     fn do_run(&self, ssa: &mut HLSSA) {
-        let main_id = ssa.get_main_id();
-
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let is_main = *function_id == main_id;
-            let entry_id = function.get_entry_id();
+        for (_, function) in ssa.iter_functions_mut() {
             let mut replacements = ValueReplacements::new();
 
-            for (block_id, block) in function.get_blocks_mut() {
+            for (_, block) in function.get_blocks_mut() {
                 for instruction in block.get_instructions_mut() {
                     match instruction {
                         OpCode::WriteWitness {
                             result: r,
                             value: b,
+                            ..
                         } => {
                             if let Some(r) = r {
                                 replacements.insert(*r, *b);
@@ -56,41 +52,12 @@ impl WitnessWriteToVoid {
                 }
             }
 
-            // Collect entry block param ValueIds so we can distinguish
-            // entry-param WriteWitness (which must be removed) from
-            // byte-decomposition WriteWitness (which must be kept).
-            let entry_param_ids: HashSet<_> = if is_main {
-                function
-                    .get_entry()
-                    .get_parameters()
-                    .map(|(id, _)| *id)
-                    .collect()
-            } else {
-                HashSet::new()
-            };
-
-            for (block_id, block) in function.get_blocks_mut() {
-                // Remove ValueOf instructions (identity in witgen pipeline) and,
-                // in the main function's entry block, remove only the voided WriteWitness
-                // that correspond to entry param Field→WitnessOf conversions. Their witness
-                // slots overlap with input positions filled by the interpreter. Other voided
-                // WriteWitness (e.g. byte decomposition from rangechecks) must be kept so
-                // their values are written to the witness tape at the correct positions.
-                let is_entry = is_main && *block_id == entry_id;
+            for (_, block) in function.get_blocks_mut() {
+                // Remove ValueOf instructions (identity in witgen pipeline)
                 let old_instructions = block.take_instructions();
                 let new_instructions = old_instructions
                     .into_iter()
-                    .filter(|instr| {
-                        if matches!(instr, OpCode::ValueOf { .. }) {
-                            return false;
-                        }
-                        if is_entry {
-                            if matches!(instr, OpCode::WriteWitness { result: None, value } if entry_param_ids.contains(value)) {
-                                return false;
-                            }
-                        }
-                        true
-                    })
+                    .filter(|instr| !matches!(instr, OpCode::ValueOf { .. }))
                     .collect();
                 block.put_instructions(new_instructions);
 

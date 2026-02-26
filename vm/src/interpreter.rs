@@ -204,9 +204,7 @@ pub fn run_phase1(
     let mut out_wit_pre_comm = vec![Field::ZERO; witness_layout.pre_commitment_size()];
     out_wit_pre_comm[0] = Field::ONE;
     let flat_inputs = flatten_param_vec(ordered_inputs);
-    for i in 0..flat_inputs.len() {
-        out_wit_pre_comm[1 + i] = flat_inputs[i];
-    }
+    // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
     let mut out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
@@ -216,7 +214,7 @@ pub fn run_phase1(
         unsafe {
             out_wit_pre_comm
                 .as_mut_ptr()
-                .offset(1 + flat_inputs.len() as isize)
+                .offset(1)
         },
         unsafe {
             out_wit_pre_comm

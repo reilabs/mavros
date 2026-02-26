@@ -5,7 +5,6 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
         Terminator, ValueId,
@@ -48,12 +47,6 @@ impl UntaintControlFlow {
             self.run_function(function_id, &mut function, function_wt, flow_analysis);
             ssa.put_function(function_id, function);
         }
-
-        // Post-process: wrapper_main's entry params should be plain Field/U types,
-        // not WitnessOf. The VM writes concrete values to these positions.
-        // Insert WriteWitness to bridge Field → WitnessOf(Field) before passing
-        // to original_main.
-        Self::fix_main_entry_params(&mut ssa);
 
         ssa
     }
@@ -421,53 +414,4 @@ impl UntaintControlFlow {
         }
     }
 
-    /// Fix wrapper_main entry params: strip WitnessOf from param types
-    /// and insert WriteWitness instructions to convert Field → WitnessOf(Field).
-    /// This is needed because the VM writes concrete Field values (4 limbs) to
-    /// entry params, but WitnessOf(Field) is pointer-sized (1 slot).
-    fn fix_main_entry_params(ssa: &mut HLSSA) {
-        let main_id = ssa.get_main_id();
-        let main_fn = ssa.get_function_mut(main_id);
-        let entry_id = main_fn.get_entry_id();
-        let entry_block = main_fn.get_block_mut(entry_id);
-
-        let old_params = entry_block.take_parameters();
-        let old_instructions = entry_block.take_instructions();
-
-        let mut new_params = Vec::new();
-        let mut write_witness_instructions = Vec::new();
-        let mut replacements = ValueReplacements::new();
-
-        for (value_id, typ) in &old_params {
-            if typ.is_witness_of() {
-                // Strip WitnessOf from param type — entry params are concrete values
-                let inner_type = typ.strip_witness();
-                new_params.push((*value_id, inner_type));
-
-                // Create WriteWitness to bridge Field → WitnessOf(Field)
-                let witness_val = main_fn.fresh_value();
-                write_witness_instructions.push(OpCode::WriteWitness {
-                    result: Some(witness_val),
-                    value: *value_id,
-                });
-                replacements.insert(*value_id, witness_val);
-            } else {
-                new_params.push((*value_id, typ.clone()));
-            }
-        }
-
-        // Rebuild entry block: params + WriteWitness instructions + original instructions
-        let entry_block = main_fn.get_block_mut(entry_id);
-
-        let mut new_instructions = write_witness_instructions;
-        for mut instruction in old_instructions {
-            replacements.replace_instruction(&mut instruction);
-            new_instructions.push(instruction);
-        }
-
-        entry_block.put_parameters(new_params);
-        // Also fix the terminator (e.g., return args)
-        replacements.replace_terminator(entry_block.get_terminator_mut());
-        entry_block.put_instructions(new_instructions);
-    }
 }

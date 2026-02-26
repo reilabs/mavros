@@ -199,6 +199,7 @@ impl ExplicitWitness {
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
                                 value: mul_plain,
+                                pinned: false,
                             });
                             new_instructions.push(OpCode::Constrain { a: l, b: r, c: res });
                         }
@@ -476,6 +477,7 @@ impl ExplicitWitness {
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
                                 value: select_plain,
+                                pinned: false,
                             });
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
