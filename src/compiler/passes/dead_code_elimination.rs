@@ -20,7 +20,6 @@ enum WorkItem {
 enum ValueDefinition {
     Param(BlockId, usize),
     Instruction(BlockId, usize),
-    Const(ValueId),
 }
 
 pub struct Config {
@@ -83,8 +82,6 @@ impl DCE {
             let mut live_instructions: HashMap<BlockId, HashSet<usize>> = HashMap::new();
             let mut live_params: HashMap<BlockId, HashSet<usize>> = HashMap::new();
             let mut live_branches: HashSet<BlockId> = HashSet::new();
-            let mut live_consts: HashSet<ValueId> = HashSet::new();
-
             let mut worklist: Vec<WorkItem> = vec![];
 
             for (parameter, _) in function.get_entry().get_parameters() {
@@ -201,7 +198,10 @@ impl DCE {
                             result_type: _,
                         }
                         | OpCode::MkTuple { .. }
-                        | OpCode::ValueOf { .. } => {}
+                        | OpCode::ValueOf { .. }
+                        | OpCode::UConst { .. }
+                        | OpCode::FieldConst { .. }
+                        | OpCode::FnPtrConst { .. } => {}
                         OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
@@ -292,9 +292,6 @@ impl DCE {
                                 // The instruction is live
                                 worklist.push(WorkItem::LiveInstruction(*block_id, *i));
                             }
-                            ValueDefinition::Const(value_id) => {
-                                live_consts.insert(*value_id);
-                            }
                         }
                     }
                     WorkItem::LiveInstruction(block_id, i) => {
@@ -321,11 +318,6 @@ impl DCE {
                 }
             }
 
-            for value_id in function.iter_consts().map(|(v, _)| *v).collect::<Vec<_>>() {
-                if !live_consts.contains(&value_id) {
-                    function.remove_const(value_id);
-                }
-            }
 
             for block_id in cfg.get_domination_pre_order() {
                 let mut block = function.take_block(block_id);
@@ -421,10 +413,6 @@ impl DCE {
 
     fn generate_definitions(&self, ssa: &HLFunction) -> HashMap<ValueId, ValueDefinition> {
         let mut definitions = HashMap::new();
-
-        for (value_id, _) in ssa.iter_consts() {
-            definitions.insert(*value_id, ValueDefinition::Const(*value_id));
-        }
 
         for (block_id, block) in ssa.get_blocks() {
             for (i, (val, _)) in block.get_parameters().enumerate() {

@@ -94,7 +94,8 @@ impl PrepareEntryPoint {
             }
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
-                    let index = wrapper.push_u_const(32, i as u128);
+                    let index = wrapper.fresh_value();
+                    wrapper.get_block_mut(block).push_instruction(OpCode::mk_u_const(index, 32, i as u128));
                     let result_elem = wrapper.push_array_get(block, result, index);
                     let input_elem = wrapper.push_array_get(block, public_input, index);
                     Self::assert_eq_deep(wrapper, block, result_elem, input_elem, inner);
@@ -159,8 +160,10 @@ impl PrepareEntryPoint {
 
                 if *size == 1 {
                     // Boolean constraint: x * (x - 1) = 0
-                    let zero = function.push_field_const(ark_bn254::Fr::from(0));
-                    let one = function.push_field_const(ark_bn254::Fr::from(1));
+                    let zero = function.fresh_value();
+                    new_instructions.push(OpCode::mk_field_const(zero, ark_bn254::Fr::from(0)));
+                    let one = function.fresh_value();
+                    new_instructions.push(OpCode::mk_field_const(one, ark_bn254::Fr::from(1)));
                     let x_sub_1 = function.fresh_value();
                     let x_times_x_sub_1 = function.fresh_value();
                     new_instructions.push(OpCode::BinaryArithOp {

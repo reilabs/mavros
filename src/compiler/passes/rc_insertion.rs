@@ -625,6 +625,11 @@ impl RCInsertion {
                     OpCode::ValueOf { .. } => {
                         panic!("ICE: ValueOf should not appear at this stage");
                     }
+                    OpCode::UConst { .. }
+                    | OpCode::FieldConst { .. }
+                    | OpCode::FnPtrConst { .. } => {
+                        new_instructions.push(instruction);
+                    }
                     OpCode::MkTuple {
                         result,
                         elems,

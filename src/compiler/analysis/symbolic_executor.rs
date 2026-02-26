@@ -5,7 +5,7 @@ use crate::compiler::{
     analysis::types::TypeInfo,
     ir::r#type::Type,
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Const, Endianness, FunctionId, HLSSA,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
         LookupTarget, MemOp, Radix, SeqType, SliceOpDir, Terminator,
     },
 };
@@ -138,16 +138,6 @@ impl SymbolicExecutor {
         let fn_type_info = type_info.get_function(fn_id);
         let entry = fn_body.get_entry();
         let mut scope: Vec<Option<V>> = vec![None; fn_body.get_var_num_bound()];
-
-        for (val, cst) in fn_body.iter_consts() {
-            let v = match cst {
-                Const::U(s, v) => V::of_u(*s, *v, ctx),
-                Const::Field(f) => V::of_field(f.clone(), ctx),
-                Const::Witness(_) => todo!(),
-                Const::FnPtr(_) => todo!(),
-            };
-            scope[val.0 as usize] = Some(v);
-        }
 
         let call_result = ctx.on_call(
             fn_id,
@@ -528,6 +518,19 @@ impl SymbolicExecutor {
                     }
                     crate::compiler::ssa::OpCode::ValueOf { .. } => {
                         panic!("ICE: ValueOf should not appear at this stage");
+                    }
+                    crate::compiler::ssa::OpCode::UConst {
+                        result,
+                        size,
+                        value,
+                    } => {
+                        scope[result.0 as usize] = Some(V::of_u(*size, *value, ctx));
+                    }
+                    crate::compiler::ssa::OpCode::FieldConst { result, value } => {
+                        scope[result.0 as usize] = Some(V::of_field(*value, ctx));
+                    }
+                    crate::compiler::ssa::OpCode::FnPtrConst { .. } => {
+                        todo!("FnPtrConst in symbolic executor");
                     }
                 }
             }

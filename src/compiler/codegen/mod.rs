@@ -6,7 +6,7 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, BlockId, CmpKind, Const, DMatrix, Endianness, FunctionId,
+            self, BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId,
             HLBlock, HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, TupleIdx, ValueId,
         },
     },
@@ -240,33 +240,6 @@ impl CodeGen {
         // Entry block params need to be allocated at the beginning of the frame (after return address and return data pointer)
         for (param, tp) in entry.get_parameters() {
             layouter.alloc_value(*param, tp);
-        }
-
-        // Consts get dumped in the first block
-        for (val, constant) in function.iter_consts() {
-            match constant {
-                Const::U(u, v) => emitter.push_op(bytecode::OpCode::MovConst {
-                    res: layouter.alloc_u64(*val, *u),
-                    val: *v as u64,
-                }),
-                Const::Field(v) => {
-                    let start = layouter.alloc_field(*val);
-                    for i in 0..bytecode::LIMBS {
-                        // pushing in montgomery form
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res: start.offset(i as isize),
-                            val: v.0.0[i],
-                        })
-                    }
-                }
-                Const::Witness(v) => {
-                    emitter.push_op(bytecode::OpCode::WitnessRefAlloc {
-                        res: layouter.alloc_ptr(*val),
-                        data: *v,
-                    });
-                }
-                Const::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
-            }
         }
 
         self.run_block_body(
@@ -940,6 +913,28 @@ impl CodeGen {
                         global_offset: global_layouter.get_offset(global_idx),
                         size: global_layouter.get_size(global_idx),
                     });
+                }
+                ssa::OpCode::UConst {
+                    result,
+                    size,
+                    value,
+                } => {
+                    emitter.push_op(bytecode::OpCode::MovConst {
+                        res: layouter.alloc_u64(*result, *size),
+                        val: *value as u64,
+                    });
+                }
+                ssa::OpCode::FieldConst { result, value } => {
+                    let start = layouter.alloc_field(*result);
+                    for i in 0..bytecode::LIMBS {
+                        emitter.push_op(bytecode::OpCode::MovConst {
+                            res: start.offset(i as isize),
+                            val: value.0.0[i],
+                        })
+                    }
+                }
+                ssa::OpCode::FnPtrConst { .. } => {
+                    panic!("FnPtr constants not supported in codegen");
                 }
                 other => panic!("Unsupported instruction: {:?}", other),
             }

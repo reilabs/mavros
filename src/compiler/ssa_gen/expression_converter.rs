@@ -10,7 +10,8 @@ use noirc_frontend::monomorphization::ast::{
 
 use crate::compiler::ir::r#type::Type;
 use crate::compiler::ssa::{
-    BlockId, CastTarget, Endianness, FunctionId, HLFunction, Radix, SeqType, TupleIdx, ValueId,
+    BlockId, CastTarget, Endianness, FunctionId, HLFunction, OpCode, Radix, SeqType, TupleIdx,
+    ValueId,
 };
 
 use super::type_converter::TypeConverter;
@@ -52,6 +53,12 @@ pub struct ExpressionConverter<'a> {
     in_unconstrained: bool,
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
+    /// Dedup cache for u_const
+    u_const_cache: HashMap<(usize, u128), ValueId>,
+    /// Dedup cache for field_const
+    field_const_cache: HashMap<ark_bn254::Fr, ValueId>,
+    /// Dedup cache for fn_ptr_const
+    fn_ptr_const_cache: HashMap<FunctionId, ValueId>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -70,7 +77,62 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
+            u_const_cache: HashMap::new(),
+            field_const_cache: HashMap::new(),
+            fn_ptr_const_cache: HashMap::new(),
         }
+    }
+
+    fn get_or_create_u_const(
+        &mut self,
+        function: &mut HLFunction,
+        size: usize,
+        value: u128,
+    ) -> ValueId {
+        if let Some(&vid) = self.u_const_cache.get(&(size, value)) {
+            return vid;
+        }
+        let vid = function.fresh_value();
+        let entry = function.get_entry_id();
+        function
+            .get_block_mut(entry)
+            .push_instruction(OpCode::mk_u_const(vid, size, value));
+        self.u_const_cache.insert((size, value), vid);
+        vid
+    }
+
+    fn get_or_create_field_const(
+        &mut self,
+        function: &mut HLFunction,
+        value: ark_bn254::Fr,
+    ) -> ValueId {
+        if let Some(&vid) = self.field_const_cache.get(&value) {
+            return vid;
+        }
+        let vid = function.fresh_value();
+        let entry = function.get_entry_id();
+        function
+            .get_block_mut(entry)
+            .push_instruction(OpCode::mk_field_const(vid, value));
+        self.field_const_cache.insert(value, vid);
+        vid
+    }
+
+    fn get_or_create_fn_ptr_const(
+        &mut self,
+        function: &mut HLFunction,
+        fn_id: FunctionId,
+    ) -> ValueId {
+        if let Some(&vid) = self.fn_ptr_const_cache.get(&fn_id) {
+            return vid;
+        }
+        let vid = function.fresh_value();
+        let entry = function.get_entry_id();
+        function
+            .get_block_mut(entry)
+            .push_instruction(OpCode::mk_fn_ptr_const(vid, fn_id));
+        self.fn_ptr_const_cache.insert(fn_id, vid);
+        vid
     }
 
     /// Bind an immutable local variable to a value
@@ -153,7 +215,7 @@ impl<'a> ExpressionConverter<'a> {
                 let loop_index = ctx.loop_index;
                 let index_bit_size = ctx.index_bit_size;
                 // Increment index and jump back to header
-                let one = function.push_u_const(index_bit_size, 1);
+                let one = self.get_or_create_u_const(function, index_bit_size, 1);
                 let next_index = function.push_add(self.current_block, loop_index, one);
                 function.terminate_block_with_jmp(
                     self.current_block,
@@ -194,7 +256,7 @@ impl<'a> ExpressionConverter<'a> {
                     .get(func_id)
                     .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
                 // Return a function pointer constant
-                let value_id = function.push_fn_ptr_const(*ssa_func_id);
+                let value_id = self.get_or_create_fn_ptr_const(function, *ssa_func_id);
                 Some(value_id)
             }
             Definition::Builtin(name) => {
@@ -538,7 +600,7 @@ impl<'a> ExpressionConverter<'a> {
         // Increment the index and jump back to header
         // (only if current block is not already terminated by break/continue)
         if !function.block_is_terminated(self.current_block) {
-            let one = function.push_u_const(index_bit_size, 1);
+            let one = self.get_or_create_u_const(function, index_bit_size, 1);
             let next_index = function.push_add(self.current_block, loop_index, one);
             function.terminate_block_with_jmp(self.current_block, loop_header, vec![next_index]);
         }
@@ -693,7 +755,7 @@ impl<'a> ExpressionConverter<'a> {
                         function.push_not(self.current_block, value)
                     }
                     noirc_frontend::ast::UnaryOp::Minus => {
-                        let zero = function.push_field_const(ark_bn254::Fr::from(0u64));
+                        let zero = self.get_or_create_field_const(function, ark_bn254::Fr::from(0u64));
                         function.push_sub(self.current_block, zero, value)
                     }
                     _ => unreachable!(),
@@ -778,7 +840,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // General case: the constraint expression must evaluate to true (1)
         let result = self.convert_expression(constraint_expr, function).unwrap();
-        let one = function.push_u_const(1, 1);
+        let one = self.get_or_create_u_const(function, 1, 1);
         function.push_assert_eq(self.current_block, result, one);
         None
     }
@@ -793,7 +855,7 @@ impl<'a> ExpressionConverter<'a> {
         match lit {
             Literal::Bool(b) => {
                 let value = if *b { 1 } else { 0 };
-                Some(function.push_u_const(1, value))
+                Some(self.get_or_create_u_const(function, 1, value))
             }
             Literal::Integer(signed_field, typ, _location) => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
@@ -803,7 +865,7 @@ impl<'a> ExpressionConverter<'a> {
                         // Convert SignedField to ark_bn254::Fr directly (both backed by same type)
                         let field_element = signed_field.to_field_element();
                         let field_val = field_element.into_repr();
-                        Some(function.push_field_const(field_val))
+                        Some(self.get_or_create_field_const(function, field_val))
                     }
                     AstType::Integer(signedness, bit_size) => {
                         use noirc_frontend::shared::Signedness;
@@ -813,11 +875,11 @@ impl<'a> ExpressionConverter<'a> {
                         let bits: usize = bit_size.bit_size() as usize;
                         // Get the value as u128
                         let value = signed_field.to_u128();
-                        Some(function.push_u_const(bits, value))
+                        Some(self.get_or_create_u_const(function, bits, value))
                     }
                     AstType::Bool => {
                         let value = signed_field.to_u128();
-                        Some(function.push_u_const(1, value))
+                        Some(self.get_or_create_u_const(function, 1, value))
                     }
                     _ => panic!("Unexpected type for integer literal: {:?}", typ),
                 }
@@ -860,7 +922,7 @@ impl<'a> ExpressionConverter<'a> {
                 let len = s.len();
                 let elems: Vec<ValueId> = s
                     .bytes()
-                    .map(|b| function.push_u_const(8, b as u128))
+                    .map(|b| self.get_or_create_u_const(function, 8, b as u128))
                     .collect();
                 let arr = function.push_mk_array(
                     self.current_block,
@@ -882,7 +944,7 @@ impl<'a> ExpressionConverter<'a> {
                         FmtStrFragment::Interpolation(name, _) => format!("{{{name}}}"),
                     };
                     for c in text.chars() {
-                        codepoints.push(function.push_u_const(32, c as u128));
+                        codepoints.push(self.get_or_create_u_const(function, 32, c as u128));
                     }
                 }
                 let cp_len = codepoints.len();
@@ -1076,7 +1138,7 @@ impl<'a> ExpressionConverter<'a> {
                 let cond = self
                     .convert_expression(&call.arguments[0], function)
                     .unwrap();
-                let t = function.push_u_const(1, 1);
+                let t = self.get_or_create_u_const(function, 1, 1);
                 function.push_assert_eq(self.current_block, cond, t);
                 None
             }
@@ -1090,7 +1152,7 @@ impl<'a> ExpressionConverter<'a> {
                         // function call that emits constraints), then return the
                         // compile-time-known length.
                         self.convert_expression(&call.arguments[0], function);
-                        let value = function.push_u_const(32, *len as u128);
+                        let value = self.get_or_create_u_const(function, 32, *len as u128);
                         Some(value)
                     }
                     noirc_frontend::monomorphization::ast::Type::Vector(_) => {
@@ -1168,7 +1230,7 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "is_unconstrained" => {
-                let value = function.push_u_const(1, if self.in_unconstrained { 1 } else { 0 });
+                let value = self.get_or_create_u_const(function, 1, if self.in_unconstrained { 1 } else { 0 });
                 Some(value)
             }
             "as_witness" => {

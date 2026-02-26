@@ -2,11 +2,10 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     ir::r#type::Type,
-    ssa::{BlockId, Const, FunctionId, HLFunction, HLSSA, Instruction, OpCode, ValueId},
+    ssa::{BlockId, FunctionId, HLFunction, HLSSA, Instruction, OpCode, ValueId},
 };
 
 pub enum ValueDefinition {
-    Const(Const),
     Param(BlockId, usize, Type),
     Instruction(BlockId, usize, OpCode),
 }
@@ -32,10 +31,6 @@ impl FunctionValueDefinitions {
 
     pub fn from_ssa(ssa: &HLFunction) -> Self {
         let mut definitions = Self::new();
-
-        for (value_id, definition) in ssa.iter_consts() {
-            definitions.insert(*value_id, ValueDefinition::Const(definition.clone()));
-        }
 
         for (block_id, block) in ssa.get_blocks() {
             for (i, (val, typ)) in block.get_parameters().enumerate() {

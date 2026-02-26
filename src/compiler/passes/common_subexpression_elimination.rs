@@ -6,7 +6,7 @@ use std::{
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ssa::{
-        BinaryArithOpKind, BlockId, CmpKind, Const, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+        BinaryArithOpKind, BlockId, CmpKind, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
     },
 };
 use crate::compiler::{
@@ -285,15 +285,6 @@ impl CSE {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
 
-        for (value_id, const_) in ssa.iter_consts() {
-            match const_ {
-                Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
-                Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
-                Const::Witness(_) => todo!(),
-                Const::FnPtr(_) => None,
-            };
-        }
-
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
             exprs
                 .get(&value_id)
@@ -472,6 +463,13 @@ impl CSE {
                             *r,
                         ));
                     },
+                    OpCode::UConst { result, size, value } => {
+                        exprs.insert(*result, Expr::UConst(*size, *value));
+                    }
+                    OpCode::FieldConst { result, value } => {
+                        exprs.insert(*result, Expr::fconst(*value));
+                    }
+                    OpCode::FnPtrConst { .. } => {}
                 }
             }
         }

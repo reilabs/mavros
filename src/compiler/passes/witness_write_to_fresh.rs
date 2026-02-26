@@ -114,7 +114,10 @@ impl WitnessWriteToFresh {
                         | OpCode::Todo { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::MkTuple { .. }
-                        | OpCode::ValueOf { .. } => instruction.clone(),
+                        | OpCode::ValueOf { .. }
+                        | OpCode::UConst { .. }
+                        | OpCode::FieldConst { .. }
+                        | OpCode::FnPtrConst { .. } => instruction.clone(),
                     };
                     *instruction = new_instruction;
                 }

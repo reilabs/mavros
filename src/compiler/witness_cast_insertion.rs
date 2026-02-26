@@ -450,7 +450,10 @@ impl WitnessCastInsertion {
                     | OpCode::MkTuple { .. }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. }) => {
+                    | OpCode::DropGlobal { .. }
+                    | OpCode::UConst { .. }
+                    | OpCode::FieldConst { .. }
+                    | OpCode::FnPtrConst { .. }) => {
                         new_instructions.push(op);
                     }
                 }
@@ -662,9 +665,12 @@ impl WitnessCastInsertion {
         let (continuation_id, continuation) = function.next_virtual_block();
 
         // Constants (u32 for array indexing)
-        let const_0 = function.push_u_const(32, 0);
-        let const_1 = function.push_u_const(32, 1);
-        let const_len = function.push_u_const(32, array_len as u128);
+        let const_0 = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_0, 32, 0));
+        let const_1 = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_1, 32, 1));
+        let const_len = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_len, 32, array_len as u128));
 
         // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
         current_block.put_instructions(std::mem::take(new_instructions));
@@ -772,7 +778,8 @@ impl WitnessCastInsertion {
     ) -> crate::compiler::ssa::ValueId {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
-                let dummy_field = function.push_field_const(ark_bn254::Fr::from(0u64));
+                let dummy_field = function.fresh_value();
+                new_instructions.push(OpCode::mk_field_const(dummy_field, ark_bn254::Fr::from(0u64)));
                 let refed = function.fresh_value();
                 new_instructions.push(OpCode::Cast {
                     result: refed,
@@ -803,7 +810,9 @@ impl WitnessCastInsertion {
             }
             TypeExpr::Field | TypeExpr::U(_) => {
                 // Pure scalar types — use a zero constant
-                function.push_field_const(ark_bn254::Fr::from(0u64))
+                let dummy = function.fresh_value();
+                new_instructions.push(OpCode::mk_field_const(dummy, ark_bn254::Fr::from(0u64)));
+                dummy
             }
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }

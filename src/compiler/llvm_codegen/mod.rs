@@ -27,7 +27,7 @@ use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::flow_analysis::{CFG, FlowAnalysis};
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BinaryArithOpKind, BlockId, CmpKind, Const, FunctionId, HLBlock, HLFunction, HLSSA, Terminator,
+    BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLBlock, HLFunction, HLSSA, Terminator,
     ValueId,
 };
 
@@ -176,12 +176,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.value_map.insert(*param_id, param_value);
         }
 
-        // Generate constants
-        for (val_id, constant) in function.iter_consts() {
-            let value = self.compile_const(constant);
-            self.value_map.insert(*val_id, value);
-        }
-
         // Track phi nodes that need incoming values: (target_block, param_index) -> PhiValue
         let mut phi_nodes: HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>> =
             HashMap::new();
@@ -255,25 +249,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     /// Compile a constant value
-    fn compile_const(&self, constant: &Const) -> BasicValueEnum<'ctx> {
-        match constant {
-            Const::U(bits, value) => {
-                let int_type = self.context.custom_width_int_type(*bits as u32);
-                int_type.const_int(*value as u64, false).into()
-            }
-            Const::Field(field_val) => {
-                // Field is represented as [4 x i64] in Montgomery form
-                self.runtime.const_field(field_val)
-            }
-            Const::Witness(_) => {
-                todo!("WitnessRef constants not yet supported in LLVM codegen")
-            }
-            Const::FnPtr(_) => {
-                todo!("FnPtr constants not yet supported in LLVM codegen")
-            }
-        }
-    }
-
     /// Compile a single instruction
     ///
     /// Currently only supports operations needed for the `power` example:
@@ -412,6 +387,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 panic!("Dynamic call targets are not supported in LLVM codegen")
             }
 
+            OpCode::UConst {
+                result,
+                size,
+                value,
+            } => {
+                let int_type = self.context.custom_width_int_type(*size as u32);
+                let val = int_type.const_int(*value as u64, false).into();
+                self.value_map.insert(*result, val);
+            }
+            OpCode::FieldConst { result, value } => {
+                let val = self.runtime.const_field(value);
+                self.value_map.insert(*result, val);
+            }
             // All other opcodes are not yet supported
             _ => {
                 panic!("Unsupported opcode in LLVM codegen: {:?}", instruction);

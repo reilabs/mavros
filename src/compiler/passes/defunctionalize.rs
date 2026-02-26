@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
-    ssa::{BlockId, CallTarget, Const, FunctionId, HLSSA, OpCode, Terminator, TupleIdx, ValueId},
+    ssa::{BlockId, CallTarget, FunctionId, HLSSA, OpCode, Terminator, TupleIdx, ValueId},
 };
 
 pub struct Defunctionalize {}
@@ -35,9 +35,12 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         .collect::<Vec<_>>()
         .iter()
         .any(|fid| {
-            ssa.get_function(*fid)
-                .iter_consts()
-                .any(|(_, c)| matches!(c, Const::FnPtr(_)))
+            let func = ssa.get_function(*fid);
+            func.get_blocks().any(|(_, block)| {
+                block
+                    .get_instructions()
+                    .any(|i| matches!(i, OpCode::FnPtrConst { .. }))
+            })
         });
     if !has_fn_ptrs {
         return;
@@ -101,24 +104,16 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 3: Transformation
 
-    // 3a. Replace Const::FnPtr → Const::U(32, ...) in all functions
+    // 3a. Replace FnPtrConst → UConst(32, ...) in all functions
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in &func_ids {
-        let func = ssa.get_function(*fid);
-        let to_replace: Vec<(ValueId, FunctionId)> = func
-            .iter_consts()
-            .filter_map(|(vid, c)| {
-                if let Const::FnPtr(target) = c {
-                    Some((*vid, *target))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         let func = ssa.get_function_mut(*fid);
-        for (vid, target) in to_replace {
-            func.replace_const(vid, Const::U(32, target.0 as u128));
+        for (_, block) in func.get_blocks_mut() {
+            for instruction in block.get_instructions_mut() {
+                if let OpCode::FnPtrConst { result, fn_id } = instruction {
+                    *instruction = OpCode::mk_u_const(*result, 32, fn_id.0 as u128);
+                }
+            }
         }
     }
 
@@ -266,9 +261,11 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     // Seed from FnPtr consts
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
-        for (vid, c) in func.iter_consts() {
-            if let Const::FnPtr(target) = c {
-                reaching.entry((fid, *vid)).or_default().insert(*target);
+        for (_, block) in func.get_blocks() {
+            for instruction in block.get_instructions() {
+                if let OpCode::FnPtrConst { result, fn_id } = instruction {
+                    reaching.entry((fid, *result)).or_default().insert(*fn_id);
+                }
             }
         }
     }
@@ -527,7 +524,8 @@ fn build_dispatch_function(
 
     if variants.len() == 1 {
         let variant_id = variants[0];
-        let const_val = func.push_u_const(32, variant_id.0 as u128);
+        let const_val = func.fresh_value();
+        func.get_block_mut(entry_block).push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
         func.push_assert_eq(entry_block, fn_id_param, const_val);
         let call_results = func.push_call(
             entry_block,
@@ -543,7 +541,8 @@ fn build_dispatch_function(
             let is_last = i == variants.len() - 1;
 
             if is_last {
-                let const_val = func.push_u_const(32, variant_id.0 as u128);
+                let const_val = func.fresh_value();
+                func.get_block_mut(current_block).push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
                 func.push_assert_eq(current_block, fn_id_param, const_val);
                 let call_results = func.push_call(
                     current_block,
@@ -553,7 +552,8 @@ fn build_dispatch_function(
                 );
                 func.terminate_block_with_jmp(current_block, merge_block, call_results);
             } else {
-                let const_val = func.push_u_const(32, variant_id.0 as u128);
+                let const_val = func.fresh_value();
+                func.get_block_mut(current_block).push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
                 let eq_result = func.push_eq(current_block, fn_id_param, const_val);
 
                 let call_block = func.add_block();

@@ -75,9 +75,11 @@ impl ArithmeticSimplifier {
                                     }
                                     match &v_type.expr {
                                         TypeExpr::U(s) => {
-                                            let cst = function.push_u_const(*s, 1 << bits);
+                                            let cst = function.fresh_value();
+                                            new_instructions.push(OpCode::mk_u_const(cst, *s, 1 << bits));
                                             let r = function.fresh_value();
-                                            let t = function.push_u_const(1, 1);
+                                            let t = function.fresh_value();
+                                            new_instructions.push(OpCode::mk_u_const(t, 1, 1));
                                             new_instructions.push(OpCode::Cmp {
                                                 kind: CmpKind::Lt,
                                                 result: r,

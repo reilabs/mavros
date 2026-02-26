@@ -3,15 +3,14 @@ use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{CastTarget, Const, HLSSA, OpCode},
+    ssa::{CastTarget, HLSSA, OpCode},
 };
 
 /// Strips all `WitnessOf` type wrappers from the SSA.
 ///
 /// In the witgen pipeline, all computation is concrete — there's no need
 /// for the WitnessOf distinction. This pass converts all `WitnessOf(X)` types
-/// back to `X`, removes `Cast { target: WitnessOf }` instructions, and converts
-/// `Const::Witness` to `Const::Field`.
+/// back to `X` and removes `Cast { target: WitnessOf }` instructions.
 pub struct StripWitnessOf {}
 
 impl Pass for StripWitnessOf {
@@ -41,21 +40,6 @@ impl StripWitnessOf {
         ssa.set_global_types(new_global_types);
 
         for (_, function) in ssa.iter_functions_mut() {
-            // Strip from constants: Const::Witness → Const::Field
-            let witness_consts: Vec<_> = function
-                .iter_consts()
-                .filter_map(|(vid, c)| {
-                    if let Const::Witness(v) = c {
-                        Some((*vid, *v))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for (vid, v) in witness_consts {
-                function.replace_const(vid, Const::Field(v));
-            }
-
             // Strip from return types
             for rtp in function.iter_returns_mut() {
                 *rtp = rtp.strip_all_witness();
@@ -126,7 +110,6 @@ impl StripWitnessOf {
             }
             OpCode::Cmp { .. }
             | OpCode::BinaryArithOp { .. }
-            | OpCode::Cast { .. }
             | OpCode::Truncate { .. }
             | OpCode::Not { .. }
             | OpCode::Store { .. }
@@ -153,7 +136,10 @@ impl StripWitnessOf {
             | OpCode::Rangecheck { .. }
             | OpCode::TupleProj { .. }
             | OpCode::InitGlobal { .. }
-            | OpCode::DropGlobal { .. } => {}
+            | OpCode::DropGlobal { .. }
+            | OpCode::UConst { .. }
+            | OpCode::FieldConst { .. }
+            | OpCode::FnPtrConst { .. } => {}
         }
     }
 }
