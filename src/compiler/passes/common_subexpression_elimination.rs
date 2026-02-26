@@ -464,12 +464,25 @@ impl CSE {
                             *r,
                         ));
                     },
-                    OpCode::Const { result, value } => match value {
+                    OpCode::Const {
+                        result: r,
+                        value: cv,
+                    } => match cv {
                         ConstValue::U(size, val) => {
-                            exprs.insert(*result, Expr::UConst(*size, *val));
+                            let expr = Expr::UConst(*size, *val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
                         }
                         ConstValue::Field(val) => {
-                            exprs.insert(*result, Expr::fconst(*val));
+                            let expr = Expr::fconst(*val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
                         }
                         ConstValue::FnPtr(_) => {}
                     }
