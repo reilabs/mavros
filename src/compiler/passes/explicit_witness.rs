@@ -269,7 +269,8 @@ impl ExplicitWitness {
                                 new_instructions.push(instruction);
                                 continue;
                             }
-                            let one = function.push_field_const(ark_ff::Fp::from(1));
+                            let one = function.fresh_value();
+                            new_instructions.push(OpCode::mk_field_const(one, ark_ff::Fp::from(1)));
                             let l = if l_type.strip_witness().is_field() {
                                 l
                             } else {
@@ -425,7 +426,9 @@ impl ExplicitWitness {
                             // If both branches are pure, result is a linear combination
                             // of cond and constants: cond * (l - r) + r. No constraint needed.
                             if !l_taint && !r_taint {
-                                let neg_one = function.push_field_const(ark_ff::Fp::from(-1));
+                                let neg_one = function.fresh_value();
+                                new_instructions
+                                    .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
                                 let neg_r = function.fresh_value();
                                 new_instructions.push(OpCode::BinaryArithOp {
                                     kind: BinaryArithOpKind::Mul,
@@ -476,7 +479,9 @@ impl ExplicitWitness {
                             });
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
-                            let neg_one = function.push_field_const(ark_ff::Fp::from(-1));
+                            let neg_one = function.fresh_value();
+                            new_instructions
+                                .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
                             let neg_r = function.fresh_value();
                             new_instructions.push(OpCode::BinaryArithOp {
                                 kind: BinaryArithOpKind::Mul,
@@ -539,7 +544,9 @@ impl ExplicitWitness {
                                 TypeExpr::U(s) => *s,
                                 e => todo!("Unsupported type for negation: {:?}", e),
                             };
-                            let ones = function.push_field_const(Field::from((1u128 << s) - 1));
+                            let ones = function.fresh_value();
+                            new_instructions
+                                .push(OpCode::mk_field_const(ones, Field::from((1u128 << s) - 1)));
                             let casted = function.fresh_value();
                             new_instructions.push(OpCode::Cast {
                                 result: casted,
@@ -596,9 +603,16 @@ impl ExplicitWitness {
                                     count,
                                 });
                                 let mut witnesses = vec![ValueId(0); count];
-                                let mut current_sum = function.push_field_const(Field::ZERO);
+                                let mut current_sum = function.fresh_value();
+                                new_instructions
+                                    .push(OpCode::mk_field_const(current_sum, Field::ZERO));
                                 let radix_val = match radix {
-                                    Radix::Bytes => function.push_field_const(Field::from(256)),
+                                    Radix::Bytes => {
+                                        let v = function.fresh_value();
+                                        new_instructions
+                                            .push(OpCode::mk_field_const(v, Field::from(256)));
+                                        v
+                                    }
                                     Radix::Dyn(radix) => {
                                         let casted = function.fresh_value();
                                         new_instructions.push(OpCode::Cast {
@@ -627,9 +641,12 @@ impl ExplicitWitness {
                                     witnesses[i] = r.byte_wit;
                                 }
 
+                                let constrain_one = function.fresh_value();
+                                new_instructions
+                                    .push(OpCode::mk_field_const(constrain_one, Field::from(1)));
                                 new_instructions.push(OpCode::Constrain {
                                     a: current_sum,
-                                    b: function.push_field_const(Field::from(1)),
+                                    b: constrain_one,
                                     c: value,
                                 });
 
@@ -705,7 +722,8 @@ impl ExplicitWitness {
                         }
                         OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
-                        | OpCode::ValueOf { .. } => {
+                        | OpCode::ValueOf { .. }
+                        | OpCode::Const { .. } => {
                             new_instructions.push(instruction);
                         }
                     }
@@ -739,9 +757,12 @@ impl ExplicitWitness {
             count: max_bits / 8,
         });
         let chunks = max_bits / 8;
-        let mut result = function.push_field_const(Field::ZERO);
-        let two_to_8 = function.push_field_const(Field::from(256));
-        let one = function.push_field_const(Field::from(1));
+        let mut result = function.fresh_value();
+        new_instructions.push(OpCode::mk_field_const(result, Field::ZERO));
+        let two_to_8 = function.fresh_value();
+        new_instructions.push(OpCode::mk_field_const(two_to_8, Field::from(256)));
+        let one = function.fresh_value();
+        new_instructions.push(OpCode::mk_field_const(one, Field::from(1)));
         for i in 0..chunks {
             result = ssa_append!(function, new_instructions, {
                 byte := array_get(bytes_val, ! i as u128 : u32);

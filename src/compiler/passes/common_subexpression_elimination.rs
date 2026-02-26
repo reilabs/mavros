@@ -6,7 +6,8 @@ use std::{
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ssa::{
-        BinaryArithOpKind, BlockId, CmpKind, Const, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+        BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, TupleIdx,
+        ValueId,
     },
 };
 use crate::compiler::{
@@ -285,15 +286,6 @@ impl CSE {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
 
-        for (value_id, const_) in ssa.iter_consts() {
-            match const_ {
-                Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
-                Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
-                Const::Witness(_) => todo!(),
-                Const::FnPtr(_) => None,
-            };
-        }
-
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
             exprs
                 .get(&value_id)
@@ -442,8 +434,8 @@ impl CSE {
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::ValueOf { .. } => {}
-                    | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
+                    | OpCode::ValueOf { .. }
+                    | OpCode::MulConst { .. } => {}
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.not();
@@ -472,6 +464,28 @@ impl CSE {
                             *r,
                         ));
                     },
+                    OpCode::Const {
+                        result: r,
+                        value: cv,
+                    } => match cv {
+                        ConstValue::U(size, val) => {
+                            let expr = Expr::UConst(*size, *val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
+                        }
+                        ConstValue::Field(val) => {
+                            let expr = Expr::fconst(*val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
+                        }
+                        ConstValue::FnPtr(_) => {}
+                    }
                 }
             }
         }

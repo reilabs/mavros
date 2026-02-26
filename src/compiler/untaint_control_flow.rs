@@ -265,7 +265,9 @@ impl UntaintControlFlow {
                         });
                     }
 
-                    OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
+                    OpCode::InitGlobal { .. }
+                    | OpCode::DropGlobal { .. }
+                    | OpCode::Const { .. } => {
                         new_instructions.push(instruction);
                     }
                     _ => {

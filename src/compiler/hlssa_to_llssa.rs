@@ -17,7 +17,7 @@ use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{
-    BinaryArithOpKind, BlockId, CmpKind, Const, FunctionId, HLFunction, HLSSA, Terminator, ValueId,
+    BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLFunction, HLSSA, Terminator, ValueId,
 };
 
 /// Map an HLSSA type to an LLType.
@@ -105,31 +105,6 @@ fn lower_function(
         }
     }
 
-    // Emit constants as instructions in the entry block
-    let field_struct = LLStruct::field_elem();
-    for (val_id, constant) in function.iter_consts() {
-        match constant {
-            Const::U(bits, value) => {
-                let ll_val = ll_func.push_int_const(ll_entry_id, *bits as u32, *value as u64);
-                val_map.insert(*val_id, ll_val);
-            }
-            Const::Field(fr) => {
-                let limbs = fr.0.0;
-                let l0 = ll_func.push_int_const(ll_entry_id, 64, limbs[0]);
-                let l1 = ll_func.push_int_const(ll_entry_id, 64, limbs[1]);
-                let l2 = ll_func.push_int_const(ll_entry_id, 64, limbs[2]);
-                let l3 = ll_func.push_int_const(ll_entry_id, 64, limbs[3]);
-                let mk =
-                    ll_func.push_mk_struct(ll_entry_id, field_struct.clone(), vec![l0, l1, l2, l3]);
-                val_map.insert(*val_id, mk);
-            }
-            _ => panic!(
-                "Unsupported constant in HLSSA→LLSSA lowering: {:?}",
-                constant
-            ),
-        }
-    }
-
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
         let block = function.get_block(block_id);
@@ -165,7 +140,7 @@ fn lower_instruction(
     fn_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     fn_map: &HashMap<FunctionId, FunctionId>,
 ) {
-    use crate::compiler::ssa::{CallTarget, OpCode};
+    use crate::compiler::ssa::{CallTarget, ConstValue, OpCode};
 
     match instruction {
         OpCode::BinaryArithOp {
@@ -277,6 +252,26 @@ fn lower_instruction(
             let ll_result = ll_func.push_select(block_id, ll_cond, ll_if_t, ll_if_f);
             val_map.insert(*result, ll_result);
         }
+
+        OpCode::Const { result, value } => match value {
+            ConstValue::U(bits, val) => {
+                let ll_val = ll_func.push_int_const(block_id, *bits as u32, *val as u64);
+                val_map.insert(*result, ll_val);
+            }
+            ConstValue::Field(fr) => {
+                let field_struct = LLStruct::field_elem();
+                let limbs = fr.0.0;
+                let l0 = ll_func.push_int_const(block_id, 64, limbs[0]);
+                let l1 = ll_func.push_int_const(block_id, 64, limbs[1]);
+                let l2 = ll_func.push_int_const(block_id, 64, limbs[2]);
+                let l3 = ll_func.push_int_const(block_id, 64, limbs[3]);
+                let mk = ll_func.push_mk_struct(block_id, field_struct, vec![l0, l1, l2, l3]);
+                val_map.insert(*result, mk);
+            }
+            ConstValue::FnPtr(_) => {
+                panic!("FnPtr constants not supported in HLSSA→LLSSA lowering");
+            }
+        },
 
         _ => panic!(
             "Unsupported opcode in HLSSA→LLSSA lowering: {:?}",

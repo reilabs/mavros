@@ -204,14 +204,6 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Const {
-    U(usize, u128),
-    Field(ark_bn254::Fr),
-    Witness(ark_bn254::Fr),
-    FnPtr(FunctionId),
-}
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TupleIdx {
     Static(usize),
@@ -232,8 +224,6 @@ pub struct Function<Op: Instruction, Ty: SSAType> {
     returns: Vec<Ty>,
     next_block: u64,
     next_value: u64,
-    consts: HashMap<ValueId, Const>,
-    consts_to_val: HashMap<Const, ValueId>,
 }
 
 impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
@@ -251,11 +241,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
             self.returns.iter().map(|t| format!("{}", t)).join(", "),
             value_annotator.annotate_function(id)
         );
-        let consts = self
-            .consts
-            .iter()
-            .map(|(id, const_)| format!("  v{} = {:?}", id.0, const_))
-            .join("\n");
         let blocks = self
             .blocks
             .iter()
@@ -263,7 +248,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
             .map(|(bid, block)| block.to_string(func_name, id, *bid, value_annotator))
             .join("\n");
         let footer = "}".to_string();
-        format!("{}\n{}\n{}\n{}", header, consts, blocks, footer)
+        format!("{}\n{}\n{}", header, blocks, footer)
     }
 }
 
@@ -280,8 +265,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
             next_block: 1,
             returns: Vec::new(),
             next_value: 0,
-            consts: HashMap::new(),
-            consts_to_val: HashMap::new(),
         }
     }
 
@@ -294,8 +277,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
                 name: self.name,
                 returns: vec![],
                 next_value: self.next_value,
-                consts: self.consts,
-                consts_to_val: self.consts_to_val,
             },
             self.blocks,
             self.returns,
@@ -381,14 +362,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
             .collect()
     }
 
-    pub fn iter_consts(&self) -> impl Iterator<Item = (&ValueId, &Const)> {
-        self.consts.iter()
-    }
-
-    pub fn iter_consts_mut(&mut self) -> impl Iterator<Item = (&ValueId, &mut Const)> {
-        self.consts.iter_mut()
-    }
-
     pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
         self.returns.iter_mut()
     }
@@ -412,29 +385,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         value_id
     }
 
-    fn push_const(&mut self, value: Const) -> ValueId {
-        if let Some(existing_id) = self.consts_to_val.get(&value) {
-            return *existing_id;
-        }
-        let value_id: ValueId = ValueId(self.next_value);
-        self.next_value += 1;
-        self.consts.insert(value_id, value.clone());
-        self.consts_to_val.insert(value.clone(), value_id);
-        value_id
-    }
-
-    pub fn push_u_const(&mut self, size: usize, value: u128) -> ValueId {
-        self.push_const(Const::U(size, value))
-    }
-
-    pub fn push_field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
-        self.push_const(Const::Field(value))
-    }
-
-    pub fn push_fn_ptr_const(&mut self, fn_id: FunctionId) -> ValueId {
-        self.push_const(Const::FnPtr(fn_id))
-    }
-
     pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block<Op, Ty>)> {
         self.blocks.iter_mut()
     }
@@ -451,19 +401,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         value_id
-    }
-
-    pub fn remove_const(&mut self, value_id: ValueId) {
-        let v = self.consts.remove(&value_id);
-        self.consts_to_val.remove(&v.unwrap());
-    }
-
-    pub fn replace_const(&mut self, value_id: ValueId, new_const: Const) {
-        if let Some(old_const) = self.consts.remove(&value_id) {
-            self.consts_to_val.remove(&old_const);
-        }
-        self.consts.insert(value_id, new_const.clone());
-        self.consts_to_val.insert(new_const, value_id);
     }
 
     pub fn take_returns(&mut self) -> Vec<Ty> {
@@ -1496,6 +1433,17 @@ pub enum OpCode {
     DropGlobal {
         global: usize,
     },
+    Const {
+        result: ValueId,
+        value: ConstValue,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConstValue {
+    U(usize, u128),
+    Field(ark_bn254::Fr),
+    FnPtr(FunctionId),
 }
 
 impl Instruction for OpCode {
@@ -1917,6 +1865,34 @@ impl Instruction for OpCode {
             OpCode::DropGlobal { global } => {
                 format!("drop_global({})", global)
             }
+            OpCode::Const { result, value } => match value {
+                ConstValue::U(size, val) => {
+                    format!(
+                        "v{}{} = u_const({}, {})",
+                        result.0,
+                        annotate_value(*result),
+                        size,
+                        val
+                    )
+                }
+                ConstValue::Field(val) => {
+                    format!(
+                        "v{}{} = field_const({})",
+                        result.0,
+                        annotate_value(*result),
+                        val
+                    )
+                }
+                ConstValue::FnPtr(fn_id) => {
+                    format!(
+                        "v{}{} = fn_ptr_const({}@{})",
+                        result.0,
+                        annotate_value(*result),
+                        func_name(*fn_id),
+                        fn_id.0
+                    )
+                }
+            },
         }
     }
 
@@ -1930,7 +1906,8 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ }
+            | Self::Const { .. } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -2118,6 +2095,7 @@ impl Instruction for OpCode {
                 result: r,
                 result_type: _,
             }
+            | Self::Const { result: r, .. }
             | Self::Cmp {
                 kind: _,
                 result: r,
@@ -2266,7 +2244,8 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ }
+            | Self::Const { .. } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -2453,7 +2432,8 @@ impl Instruction for OpCode {
                 result: r,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: r } => vec![r].into_iter(),
+            | Self::NextDCoeff { result: r }
+            | Self::Const { result: r, .. } => vec![r].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: a,
@@ -2796,6 +2776,27 @@ impl OpCode {
             result,
             lhs,
             rhs,
+        }
+    }
+
+    pub fn mk_u_const(result: ValueId, size: usize, value: u128) -> OpCode {
+        OpCode::Const {
+            result,
+            value: ConstValue::U(size, value),
+        }
+    }
+
+    pub fn mk_field_const(result: ValueId, value: ark_bn254::Fr) -> OpCode {
+        OpCode::Const {
+            result,
+            value: ConstValue::Field(value),
+        }
+    }
+
+    pub fn mk_fn_ptr_const(result: ValueId, fn_id: FunctionId) -> OpCode {
+        OpCode::Const {
+            result,
+            value: ConstValue::FnPtr(fn_id),
         }
     }
 }
