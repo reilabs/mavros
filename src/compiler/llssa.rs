@@ -1,6 +1,6 @@
 use crate::compiler::ir::r#type::SSAType;
 use crate::compiler::ssa::{
-    Block, BlockId, Function, FunctionId, Instruction, Terminator, ValueId, SSA,
+    Block, BlockId, Function, FunctionId, Instruction, SSA, Terminator, ValueId,
 };
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
@@ -200,6 +200,7 @@ pub enum LLOp {
     // ── Constants ────────────────────────────────────────────────────────
     IntConst {
         result: ValueId,
+        bits: u32,
         value: u64,
     },
     NullPtr {
@@ -353,10 +354,9 @@ impl Instruction for LLOp {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             // No inputs (constants / traps / etc.)
-            LLOp::IntConst { .. }
-            | LLOp::NullPtr { .. }
-            | LLOp::GlobalAddr { .. }
-            | LLOp::Trap => vec![].into_iter(),
+            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
 
             // Unary
             LLOp::Not { value, .. }
@@ -390,9 +390,7 @@ impl Instruction for LLOp {
             } => vec![base, val].into_iter(),
 
             // Memory with pointer
-            LLOp::HeapAlloc { flex_count, .. } => {
-                flex_count.iter().collect::<Vec<_>>().into_iter()
-            }
+            LLOp::HeapAlloc { flex_count, .. } => flex_count.iter().collect::<Vec<_>>().into_iter(),
             LLOp::StructFieldPtr { ptr, .. } => vec![ptr].into_iter(),
             LLOp::ArrayElemPtr { ptr, index, .. } => vec![ptr, index].into_iter(),
             LLOp::Memcpy {
@@ -437,20 +435,18 @@ impl Instruction for LLOp {
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
 
             // No result
-            LLOp::Free { .. }
-            | LLOp::Store { .. }
-            | LLOp::Memcpy { .. }
-            | LLOp::Trap => vec![].into_iter(),
+            LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
         }
     }
 
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             // No inputs
-            LLOp::IntConst { .. }
-            | LLOp::NullPtr { .. }
-            | LLOp::GlobalAddr { .. }
-            | LLOp::Trap => vec![].into_iter(),
+            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
 
             // Unary
             LLOp::Not { value, .. }
@@ -511,14 +507,8 @@ impl Instruction for LLOp {
             LLOp::Trap => vec![].into_iter(),
 
             LLOp::Not { result, value }
-            | LLOp::FieldNeg {
-                result,
-                src: value,
-            }
-            | LLOp::FieldToLimbs {
-                result,
-                src: value,
-            }
+            | LLOp::FieldNeg { result, src: value }
+            | LLOp::FieldToLimbs { result, src: value }
             | LLOp::FieldFromLimbs {
                 result,
                 limbs: value,
@@ -544,9 +534,7 @@ impl Instruction for LLOp {
             LLOp::Store { ptr, value } => vec![ptr, value].into_iter(),
             LLOp::Load { result, ptr, .. } => vec![result, ptr].into_iter(),
 
-            LLOp::MkStruct {
-                result, fields, ..
-            } => {
+            LLOp::MkStruct { result, fields, .. } => {
                 let mut v = vec![result];
                 v.extend(fields.iter_mut());
                 v.into_iter()
@@ -578,11 +566,7 @@ impl Instruction for LLOp {
                 v.into_iter()
             }
 
-            LLOp::Call {
-                results,
-                args,
-                ..
-            } => {
+            LLOp::Call { results, args, .. } => {
                 let mut v: Vec<&mut ValueId> = results.iter_mut().collect();
                 v.extend(args.iter_mut());
                 v.into_iter()
@@ -605,29 +589,23 @@ impl Instruction for LLOp {
         let v = |id: ValueId| format!("v{}{}", id.0, annotate_value(id));
         let vr = |id: ValueId| format!("v{}", id.0); // raw, no annotation (for inputs)
         match self {
-            LLOp::IntConst { result, value } => {
-                format!("{} = int_const {}", v(*result), value)
+            LLOp::IntConst {
+                result,
+                bits,
+                value,
+            } => {
+                format!("{} = int_const i{} {}", v(*result), bits, value)
             }
             LLOp::NullPtr { result } => {
                 format!("{} = null_ptr", v(*result))
             }
-            LLOp::IntArith {
-                kind,
-                result,
-                a,
-                b,
-            } => {
+            LLOp::IntArith { kind, result, a, b } => {
                 format!("{} = {} {}, {}", v(*result), kind, vr(*a), vr(*b))
             }
             LLOp::Not { result, value } => {
                 format!("{} = not {}", v(*result), vr(*value))
             }
-            LLOp::IntCmp {
-                kind,
-                result,
-                a,
-                b,
-            } => {
+            LLOp::IntCmp { kind, result, a, b } => {
                 format!("{} = icmp.{} {}, {}", v(*result), kind, vr(*a), vr(*b))
             }
             LLOp::Truncate {
@@ -644,12 +622,7 @@ impl Instruction for LLOp {
             } => {
                 format!("{} = zext {} to i{}", v(*result), vr(*value), to_bits)
             }
-            LLOp::FieldArith {
-                kind,
-                result,
-                a,
-                b,
-            } => {
+            LLOp::FieldArith { kind, result, a, b } => {
                 format!("{} = {} {}, {}", v(*result), kind, vr(*a), vr(*b))
             }
             LLOp::FieldNeg { result, src } => {
@@ -716,12 +689,7 @@ impl Instruction for LLOp {
                     Some(c) => format!(", flex_count={}", vr(*c)),
                     None => "".to_string(),
                 };
-                format!(
-                    "{} = heap_alloc {}{}",
-                    v(*result),
-                    struct_type,
-                    flex_str
-                )
+                format!("{} = heap_alloc {}{}", v(*result), struct_type, flex_str)
             }
             LLOp::Free { ptr } => {
                 format!("free {}", vr(*ptr))
@@ -830,10 +798,14 @@ pub type LLBlock = Block<LLOp, LLType>;
 impl LLFunction {
     // ── Constants ────────────────────────────────────────────────────────
 
-    pub fn push_int_const(&mut self, block_id: BlockId, value: u64) -> ValueId {
+    pub fn push_int_const(&mut self, block_id: BlockId, bits: u32, value: u64) -> ValueId {
         let result = self.fresh_value();
         self.get_block_mut(block_id)
-            .push_instruction(LLOp::IntConst { result, value });
+            .push_instruction(LLOp::IntConst {
+                result,
+                bits,
+                value,
+            });
         result
     }
 
@@ -855,12 +827,7 @@ impl LLFunction {
     ) -> ValueId {
         let result = self.fresh_value();
         self.get_block_mut(block_id)
-            .push_instruction(LLOp::IntArith {
-                kind,
-                result,
-                a,
-                b,
-            });
+            .push_instruction(LLOp::IntArith { kind, result, a, b });
         result
     }
 
@@ -894,12 +861,7 @@ impl LLFunction {
     ) -> ValueId {
         let result = self.fresh_value();
         self.get_block_mut(block_id)
-            .push_instruction(LLOp::IntCmp {
-                kind,
-                result,
-                a,
-                b,
-            });
+            .push_instruction(LLOp::IntCmp { kind, result, a, b });
         result
     }
 
@@ -913,12 +875,7 @@ impl LLFunction {
 
     // ── Width conversion ────────────────────────────────────────────────
 
-    pub fn push_truncate(
-        &mut self,
-        block_id: BlockId,
-        value: ValueId,
-        to_bits: u32,
-    ) -> ValueId {
+    pub fn push_truncate(&mut self, block_id: BlockId, value: ValueId, to_bits: u32) -> ValueId {
         let result = self.fresh_value();
         self.get_block_mut(block_id)
             .push_instruction(LLOp::Truncate {
@@ -931,12 +888,11 @@ impl LLFunction {
 
     pub fn push_zext(&mut self, block_id: BlockId, value: ValueId, to_bits: u32) -> ValueId {
         let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::ZExt {
-                result,
-                value,
-                to_bits,
-            });
+        self.get_block_mut(block_id).push_instruction(LLOp::ZExt {
+            result,
+            value,
+            to_bits,
+        });
         result
     }
 
@@ -951,12 +907,7 @@ impl LLFunction {
     ) -> ValueId {
         let result = self.fresh_value();
         self.get_block_mut(block_id)
-            .push_instruction(LLOp::FieldArith {
-                kind,
-                result,
-                a,
-                b,
-            });
+            .push_instruction(LLOp::FieldArith { kind, result, a, b });
         result
     }
 
@@ -1067,12 +1018,7 @@ impl LLFunction {
             .push_instruction(LLOp::Free { ptr });
     }
 
-    pub fn push_load(
-        &mut self,
-        block_id: BlockId,
-        ptr: ValueId,
-        ty: LLType,
-    ) -> ValueId {
+    pub fn push_load(&mut self, block_id: BlockId, ptr: ValueId, ty: LLType) -> ValueId {
         let result = self.fresh_value();
         self.get_block_mut(block_id)
             .push_instruction(LLOp::Load { result, ptr, ty });
@@ -1128,13 +1074,12 @@ impl LLFunction {
         struct_type: LLStruct,
         count: Option<ValueId>,
     ) {
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Memcpy {
-                dst,
-                src,
-                struct_type,
-                count,
-            });
+        self.get_block_mut(block_id).push_instruction(LLOp::Memcpy {
+            dst,
+            src,
+            struct_type,
+            count,
+        });
     }
 
     // ── Selection ───────────────────────────────────────────────────────
@@ -1147,13 +1092,12 @@ impl LLFunction {
         if_f: ValueId,
     ) -> ValueId {
         let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Select {
-                result,
-                cond,
-                if_t,
-                if_f,
-            });
+        self.get_block_mut(block_id).push_instruction(LLOp::Select {
+            result,
+            cond,
+            if_t,
+            if_f,
+        });
         result
     }
 
@@ -1167,12 +1111,11 @@ impl LLFunction {
         num_results: usize,
     ) -> Vec<ValueId> {
         let results: Vec<ValueId> = (0..num_results).map(|_| self.fresh_value()).collect();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Call {
-                results: results.clone(),
-                func,
-                args,
-            });
+        self.get_block_mut(block_id).push_instruction(LLOp::Call {
+            results: results.clone(),
+            func,
+            args,
+        });
         results
     }
 
@@ -1188,8 +1131,7 @@ impl LLFunction {
     // ── Trap ────────────────────────────────────────────────────────────
 
     pub fn push_trap(&mut self, block_id: BlockId) {
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Trap);
+        self.get_block_mut(block_id).push_instruction(LLOp::Trap);
     }
 
     // ── Terminators ─────────────────────────────────────────────────────
@@ -1336,14 +1278,14 @@ mod tests {
         let entry = func.get_entry_id();
 
         // Build: x = 42; y = 7; z = x + y; return z
-        let x = func.push_int_const(entry, 42);
-        let y = func.push_int_const(entry, 7);
+        let x = func.push_int_const(entry, 64, 42);
+        let y = func.push_int_const(entry, 64, 7);
         let z = func.push_int_add(entry, x, y);
         func.terminate_block_with_return(entry, vec![z]);
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
-        assert!(dump.contains("int_const 42"));
-        assert!(dump.contains("int_const 7"));
+        assert!(dump.contains("int_const i64 42"));
+        assert!(dump.contains("int_const i64 7"));
         assert!(dump.contains("add"));
         assert!(dump.contains("return"));
     }
@@ -1361,13 +1303,13 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        let l0 = func.push_int_const(entry, 1);
-        let l1 = func.push_int_const(entry, 0);
-        let l2 = func.push_int_const(entry, 0);
-        let l3 = func.push_int_const(entry, 0);
+        let l0 = func.push_int_const(entry, 64, 1);
+        let l1 = func.push_int_const(entry, 64, 0);
+        let l2 = func.push_int_const(entry, 64, 0);
+        let l3 = func.push_int_const(entry, 64, 0);
         let s = func.push_mk_struct(entry, field_elem.clone(), vec![l0, l1, l2, l3]);
         let f0 = func.push_extract_field(entry, s, field_elem.clone(), 0);
-        let new_val = func.push_int_const(entry, 99);
+        let new_val = func.push_int_const(entry, 64, 99);
         let s2 = func.push_insert_field(entry, s, field_elem, 0, new_val);
         func.terminate_block_with_return(entry, vec![f0, s2]);
 
@@ -1398,11 +1340,11 @@ mod tests {
         let arr = func.push_heap_alloc(entry, rc_array.clone(), None);
         let rc_ptr = func.push_struct_field_ptr(entry, arr, rc_array.clone(), 0);
         let rc_word = func.push_struct_field_ptr(entry, rc_ptr, rc_header, 0);
-        let one = func.push_int_const(entry, 1);
+        let one = func.push_int_const(entry, 64, 1);
         func.push_store(entry, rc_word, one);
 
         let data = func.push_struct_field_ptr(entry, arr, rc_array, 1);
-        let idx = func.push_int_const(entry, 0);
+        let idx = func.push_int_const(entry, 64, 0);
         let elem_ptr = func.push_array_elem_ptr(entry, data, field_elem, idx);
         let loaded = func.push_load(entry, elem_ptr, LLType::i64());
         func.push_free(entry, arr);
@@ -1424,8 +1366,8 @@ mod tests {
         let func = ssa.get_main_mut();
         let entry = func.get_entry_id();
 
-        let a = func.push_int_const(entry, 1);
-        let b = func.push_int_const(entry, 2);
+        let a = func.push_int_const(entry, 64, 1);
+        let b = func.push_int_const(entry, 64, 2);
         let results = func.push_call(entry, helper_id, vec![a, b], 1);
         let cond = func.push_int_eq(entry, results[0], a);
         let selected = func.push_select(entry, cond, a, b);
@@ -1450,10 +1392,10 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        let l0 = func.push_int_const(entry, 1);
-        let l1 = func.push_int_const(entry, 0);
-        let l2 = func.push_int_const(entry, 0);
-        let l3 = func.push_int_const(entry, 0);
+        let l0 = func.push_int_const(entry, 64, 1);
+        let l1 = func.push_int_const(entry, 64, 0);
+        let l2 = func.push_int_const(entry, 64, 0);
+        let l3 = func.push_int_const(entry, 64, 0);
         let a = func.push_mk_struct(entry, field_elem.clone(), vec![l0, l1, l2, l3]);
         let b = func.push_mk_struct(entry, field_elem, vec![l0, l1, l2, l3]);
 
@@ -1478,7 +1420,7 @@ mod tests {
         let func = ssa.get_main_mut();
         let entry = func.get_entry_id();
 
-        let x = func.push_int_const(entry, 256);
+        let x = func.push_int_const(entry, 64, 256);
         let narrow = func.push_truncate(entry, x, 8);
         let wide = func.push_zext(entry, narrow, 64);
         let gp = func.push_global_addr(entry, 3);
@@ -1501,15 +1443,15 @@ mod tests {
         let else_blk = func.add_block();
         let merge_blk = func.add_block();
 
-        let x = func.push_int_const(entry, 42);
-        let zero = func.push_int_const(entry, 0);
+        let x = func.push_int_const(entry, 64, 42);
+        let zero = func.push_int_const(entry, 64, 0);
         let cond = func.push_int_eq(entry, x, zero);
         func.terminate_block_with_jmp_if(entry, cond, then_blk, else_blk);
 
-        let one = func.push_int_const(then_blk, 1);
+        let one = func.push_int_const(then_blk, 64, 1);
         func.terminate_block_with_jmp(then_blk, merge_blk, vec![one]);
 
-        let two = func.push_int_const(else_blk, 2);
+        let two = func.push_int_const(else_blk, 64, 2);
         func.terminate_block_with_jmp(else_blk, merge_blk, vec![two]);
 
         func.terminate_block_with_return(merge_blk, vec![]);
@@ -1528,7 +1470,7 @@ mod tests {
         let elem = LLStruct::new(vec![LLFieldType::Int(64)]);
         let dst = func.push_null_ptr(entry);
         let src = func.push_null_ptr(entry);
-        let count = func.push_int_const(entry, 10);
+        let count = func.push_int_const(entry, 64, 10);
         func.push_memcpy(entry, dst, src, elem, Some(count));
         func.terminate_block_with_return(entry, vec![]);
 
