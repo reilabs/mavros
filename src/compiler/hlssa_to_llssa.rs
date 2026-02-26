@@ -235,10 +235,7 @@ fn lower_instruction(
                     };
                     ll_func.push_int_cmp(block_id, op, ll_lhs, ll_rhs)
                 }
-                _ => panic!(
-                    "Unsupported type for Cmp in lowering: {:?}",
-                    lhs_type
-                ),
+                _ => panic!("Unsupported type for Cmp in lowering: {:?}", lhs_type),
             };
             val_map.insert(*result, ll_result);
         }
