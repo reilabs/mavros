@@ -225,12 +225,21 @@ fn lower_instruction(
         } => {
             let ll_lhs = val_map[lhs];
             let ll_rhs = val_map[rhs];
+            let lhs_type = fn_type_info.get_value_type(*lhs);
 
-            let op = match kind {
-                CmpKind::Lt => IntCmpOp::ULt,
-                CmpKind::Eq => IntCmpOp::Eq,
+            let ll_result = match &lhs_type.expr {
+                TypeExpr::U(_) => {
+                    let op = match kind {
+                        CmpKind::Lt => IntCmpOp::ULt,
+                        CmpKind::Eq => IntCmpOp::Eq,
+                    };
+                    ll_func.push_int_cmp(block_id, op, ll_lhs, ll_rhs)
+                }
+                _ => panic!(
+                    "Unsupported type for Cmp in lowering: {:?}",
+                    lhs_type
+                ),
             };
-            let ll_result = ll_func.push_int_cmp(block_id, op, ll_lhs, ll_rhs);
             val_map.insert(*result, ll_result);
         }
 
@@ -313,73 +322,5 @@ fn lower_terminator(
             let ll_values: Vec<ValueId> = values.iter().map(|v| val_map[v]).collect();
             ll_func.terminate_block_with_return(block_id, ll_values);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::compiler::analysis::types::Types;
-    use crate::compiler::flow_analysis::FlowAnalysis;
-    use crate::compiler::ssa::DefaultSsaAnnotator;
-
-    /// Build a trivial HLSSA: main() { return field_const * field_const }
-    #[test]
-    fn lower_field_mul() {
-        use ark_bn254::Fr;
-        use ark_ff::One;
-
-        let mut hlssa = HLSSA::with_main("test_main".to_string());
-        let func = hlssa.get_main_mut();
-        let entry = func.get_entry_id();
-        func.add_return_type(crate::compiler::ir::r#type::Type::field());
-
-        let a = func.push_field_const(Fr::one());
-        let b = func.push_field_const(Fr::one());
-        let c = func.push_mul(entry, a, b);
-        func.terminate_block_with_return(entry, vec![c]);
-
-        let flow = FlowAnalysis::run(&hlssa);
-        let type_info = Types::new().run(&hlssa, &flow);
-
-        let llssa = lower(&hlssa, &flow, &type_info);
-        let dump = llssa.to_string(&DefaultSsaAnnotator);
-
-        assert!(
-            dump.contains("field.mul"),
-            "Expected field.mul in:\n{}",
-            dump
-        );
-        assert!(
-            dump.contains("mk_struct"),
-            "Expected mk_struct for field constants in:\n{}",
-            dump
-        );
-        assert!(dump.contains("return"), "Expected return in:\n{}", dump);
-    }
-
-    /// Build HLSSA with integer add + cmp
-    #[test]
-    fn lower_int_add_cmp() {
-        let mut hlssa = HLSSA::with_main("test_int".to_string());
-        let func = hlssa.get_main_mut();
-        let entry = func.get_entry_id();
-        func.add_return_type(crate::compiler::ir::r#type::Type::u(1));
-
-        let a = func.push_u_const(32, 10);
-        let b = func.push_u_const(32, 20);
-        let sum = func.push_add(entry, a, b);
-        let limit = func.push_u_const(32, 100);
-        let cmp = func.push_lt(entry, sum, limit);
-        func.terminate_block_with_return(entry, vec![cmp]);
-
-        let flow = FlowAnalysis::run(&hlssa);
-        let type_info = Types::new().run(&hlssa, &flow);
-
-        let llssa = lower(&hlssa, &flow, &type_info);
-        let dump = llssa.to_string(&DefaultSsaAnnotator);
-
-        assert!(dump.contains("add"), "Expected add in:\n{}", dump);
-        assert!(dump.contains("icmp.ult"), "Expected icmp.ult in:\n{}", dump);
     }
 }

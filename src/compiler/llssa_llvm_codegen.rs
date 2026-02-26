@@ -1,8 +1,7 @@
 //! LLSSA → LLVM Code Generation
 //!
 //! Translates LLSSA into LLVM IR, which can then be compiled to WebAssembly.
-//! Parallel to `llvm_codegen/` but operates on LLSSA + LLType instead of
-//! HLSSA + Type. No TypeInfo is needed — types are explicit in the LLSSA ops.
+//! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no TypeInfo needed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,7 +20,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFunction, LLOp, LLSSA, LLStruct, LLType,
+    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -38,7 +37,7 @@ const VM_B_PTR_OFFSET: u32 = 8;
 const VM_C_PTR_OFFSET: u32 = 12;
 
 /// LLSSA → LLVM Code Generator
-pub struct LLSSACodeGen<'ctx> {
+pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
@@ -54,7 +53,7 @@ pub struct LLSSACodeGen<'ctx> {
     write_c_fn: Option<FunctionValue<'ctx>>,
 }
 
-impl<'ctx> LLSSACodeGen<'ctx> {
+impl<'ctx> LLVMCodeGen<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
@@ -90,13 +89,29 @@ impl<'ctx> LLSSACodeGen<'ctx> {
         }
     }
 
-    /// Convert an LLStruct to an LLVM type.
-    /// FIELD_ELEM (4×i64) is mapped to `[4 x i64]` for runtime compatibility.
+    /// Convert an LLStruct to an LLVM struct type.
     fn convert_struct_type(&self, s: &LLStruct) -> BasicTypeEnum<'ctx> {
-        if *s == field_elem_struct() {
-            self.field_type().into()
-        } else {
-            panic!("Unsupported struct type in LLSSA codegen: {}", s);
+        let fields: Vec<BasicTypeEnum<'ctx>> = s
+            .fields
+            .iter()
+            .map(|f| self.convert_field_type(f))
+            .collect();
+        self.context.struct_type(&fields, false).into()
+    }
+
+    /// Convert an LLFieldType to the corresponding LLVM type.
+    fn convert_field_type(&self, ft: &LLFieldType) -> BasicTypeEnum<'ctx> {
+        match ft {
+            LLFieldType::Int(bits) => self.context.custom_width_int_type(*bits).into(),
+            LLFieldType::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
+            LLFieldType::Inline(s) => self.convert_struct_type(s),
+            LLFieldType::InlineArray(s, n) => {
+                let elem = self.convert_struct_type(s);
+                elem.array_type(*n as u32).into()
+            }
+            LLFieldType::FlexArray(_) => {
+                panic!("FlexArray is not supported in LLVM codegen")
+            }
         }
     }
 
@@ -524,12 +539,6 @@ impl<'ctx> LLSSACodeGen<'ctx> {
                         self.value_map.insert(*result_id, val.into());
                     }
                 }
-            }
-
-            // FieldFromLimbs: identity at LLVM level — already [4 x i64]
-            LLOp::FieldFromLimbs { result, limbs } => {
-                let val = self.value_map[limbs];
-                self.value_map.insert(*result, val);
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),
