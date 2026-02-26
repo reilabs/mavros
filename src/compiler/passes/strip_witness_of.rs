@@ -137,9 +137,7 @@ impl StripWitnessOf {
             | OpCode::TupleProj { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
-            | OpCode::UConst { .. }
-            | OpCode::FieldConst { .. }
-            | OpCode::FnPtrConst { .. } => {}
+            | OpCode::Const { .. } => {}
         }
     }
 }

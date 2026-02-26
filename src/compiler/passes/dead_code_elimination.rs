@@ -199,9 +199,7 @@ impl DCE {
                         }
                         | OpCode::MkTuple { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::UConst { .. }
-                        | OpCode::FieldConst { .. }
-                        | OpCode::FnPtrConst { .. } => {}
+                        | OpCode::Const { .. } => {}
                         OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
@@ -317,7 +315,6 @@ impl DCE {
                     }
                 }
             }
-
 
             for block_id in cfg.get_domination_pre_order() {
                 let mut block = function.take_block(block_id);

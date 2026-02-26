@@ -1427,19 +1427,17 @@ pub enum OpCode {
     DropGlobal {
         global: usize,
     },
-    UConst {
+    Const {
         result: ValueId,
-        size: usize,
-        value: u128,
+        value: ConstValue,
     },
-    FieldConst {
-        result: ValueId,
-        value: ark_bn254::Fr,
-    },
-    FnPtrConst {
-        result: ValueId,
-        fn_id: FunctionId,
-    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConstValue {
+    U(usize, u128),
+    Field(ark_bn254::Fr),
+    FnPtr(FunctionId),
 }
 
 impl Instruction for OpCode {
@@ -1861,36 +1859,34 @@ impl Instruction for OpCode {
             OpCode::DropGlobal { global } => {
                 format!("drop_global({})", global)
             }
-            OpCode::UConst {
-                result,
-                size,
-                value,
-            } => {
-                format!(
-                    "v{}{} = u_const({}, {})",
-                    result.0,
-                    annotate_value(*result),
-                    size,
-                    value
-                )
-            }
-            OpCode::FieldConst { result, value } => {
-                format!(
-                    "v{}{} = field_const({})",
-                    result.0,
-                    annotate_value(*result),
-                    value
-                )
-            }
-            OpCode::FnPtrConst { result, fn_id } => {
-                format!(
-                    "v{}{} = fn_ptr_const({}@{})",
-                    result.0,
-                    annotate_value(*result),
-                    func_name(*fn_id),
-                    fn_id.0
-                )
-            }
+            OpCode::Const { result, value } => match value {
+                ConstValue::U(size, val) => {
+                    format!(
+                        "v{}{} = u_const({}, {})",
+                        result.0,
+                        annotate_value(*result),
+                        size,
+                        val
+                    )
+                }
+                ConstValue::Field(val) => {
+                    format!(
+                        "v{}{} = field_const({})",
+                        result.0,
+                        annotate_value(*result),
+                        val
+                    )
+                }
+                ConstValue::FnPtr(fn_id) => {
+                    format!(
+                        "v{}{} = fn_ptr_const({}@{})",
+                        result.0,
+                        annotate_value(*result),
+                        func_name(*fn_id),
+                        fn_id.0
+                    )
+                }
+            },
         }
     }
 
@@ -1905,9 +1901,7 @@ impl Instruction for OpCode {
                 result_type: _,
             }
             | Self::NextDCoeff { result: _ }
-            | Self::UConst { .. }
-            | Self::FieldConst { .. }
-            | Self::FnPtrConst { .. } => vec![].into_iter(),
+            | Self::Const { .. } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -2095,9 +2089,7 @@ impl Instruction for OpCode {
                 result: r,
                 result_type: _,
             }
-            | Self::UConst { result: r, .. }
-            | Self::FieldConst { result: r, .. }
-            | Self::FnPtrConst { result: r, .. }
+            | Self::Const { result: r, .. }
             | Self::Cmp {
                 kind: _,
                 result: r,
@@ -2247,9 +2239,7 @@ impl Instruction for OpCode {
                 result_type: _,
             }
             | Self::NextDCoeff { result: _ }
-            | Self::UConst { .. }
-            | Self::FieldConst { .. }
-            | Self::FnPtrConst { .. } => vec![].into_iter(),
+            | Self::Const { .. } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -2437,9 +2427,7 @@ impl Instruction for OpCode {
                 result_type: _,
             }
             | Self::NextDCoeff { result: r }
-            | Self::UConst { result: r, .. }
-            | Self::FieldConst { result: r, .. }
-            | Self::FnPtrConst { result: r, .. } => vec![r].into_iter(),
+            | Self::Const { result: r, .. } => vec![r].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: a,
@@ -2786,18 +2774,23 @@ impl OpCode {
     }
 
     pub fn mk_u_const(result: ValueId, size: usize, value: u128) -> OpCode {
-        OpCode::UConst {
+        OpCode::Const {
             result,
-            size,
-            value,
+            value: ConstValue::U(size, value),
         }
     }
 
     pub fn mk_field_const(result: ValueId, value: ark_bn254::Fr) -> OpCode {
-        OpCode::FieldConst { result, value }
+        OpCode::Const {
+            result,
+            value: ConstValue::Field(value),
+        }
     }
 
     pub fn mk_fn_ptr_const(result: ValueId, fn_id: FunctionId) -> OpCode {
-        OpCode::FnPtrConst { result, fn_id }
+        OpCode::Const {
+            result,
+            value: ConstValue::FnPtr(fn_id),
+        }
     }
 }

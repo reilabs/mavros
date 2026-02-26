@@ -519,19 +519,17 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::OpCode::ValueOf { .. } => {
                         panic!("ICE: ValueOf should not appear at this stage");
                     }
-                    crate::compiler::ssa::OpCode::UConst {
-                        result,
-                        size,
-                        value,
-                    } => {
-                        scope[result.0 as usize] = Some(V::of_u(*size, *value, ctx));
-                    }
-                    crate::compiler::ssa::OpCode::FieldConst { result, value } => {
-                        scope[result.0 as usize] = Some(V::of_field(*value, ctx));
-                    }
-                    crate::compiler::ssa::OpCode::FnPtrConst { .. } => {
-                        todo!("FnPtrConst in symbolic executor");
-                    }
+                    crate::compiler::ssa::OpCode::Const { result, value } => match value {
+                        crate::compiler::ssa::ConstValue::U(size, val) => {
+                            scope[result.0 as usize] = Some(V::of_u(*size, *val, ctx));
+                        }
+                        crate::compiler::ssa::ConstValue::Field(val) => {
+                            scope[result.0 as usize] = Some(V::of_field(*val, ctx));
+                        }
+                        crate::compiler::ssa::ConstValue::FnPtr(_) => {
+                            todo!("FnPtrConst in symbolic executor");
+                        }
+                    },
                 }
             }
 

@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
-    ssa::{BlockId, CallTarget, FunctionId, HLSSA, OpCode, Terminator, TupleIdx, ValueId},
+    ssa::{
+        BlockId, CallTarget, ConstValue, FunctionId, HLSSA, OpCode, Terminator, TupleIdx, ValueId,
+    },
 };
 
 pub struct Defunctionalize {}
@@ -37,9 +39,15 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         .any(|fid| {
             let func = ssa.get_function(*fid);
             func.get_blocks().any(|(_, block)| {
-                block
-                    .get_instructions()
-                    .any(|i| matches!(i, OpCode::FnPtrConst { .. }))
+                block.get_instructions().any(|i| {
+                    matches!(
+                        i,
+                        OpCode::Const {
+                            value: ConstValue::FnPtr(_),
+                            ..
+                        }
+                    )
+                })
             })
         });
     if !has_fn_ptrs {
@@ -110,7 +118,11 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         let func = ssa.get_function_mut(*fid);
         for (_, block) in func.get_blocks_mut() {
             for instruction in block.get_instructions_mut() {
-                if let OpCode::FnPtrConst { result, fn_id } = instruction {
+                if let OpCode::Const {
+                    result,
+                    value: ConstValue::FnPtr(fn_id),
+                } = instruction
+                {
                     *instruction = OpCode::mk_u_const(*result, 32, fn_id.0 as u128);
                 }
             }
@@ -263,7 +275,11 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         let func = ssa.get_function(fid);
         for (_, block) in func.get_blocks() {
             for instruction in block.get_instructions() {
-                if let OpCode::FnPtrConst { result, fn_id } = instruction {
+                if let OpCode::Const {
+                    result,
+                    value: ConstValue::FnPtr(fn_id),
+                } = instruction
+                {
                     reaching.entry((fid, *result)).or_default().insert(*fn_id);
                 }
             }
@@ -525,7 +541,8 @@ fn build_dispatch_function(
     if variants.len() == 1 {
         let variant_id = variants[0];
         let const_val = func.fresh_value();
-        func.get_block_mut(entry_block).push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
+        func.get_block_mut(entry_block)
+            .push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
         func.push_assert_eq(entry_block, fn_id_param, const_val);
         let call_results = func.push_call(
             entry_block,
@@ -542,7 +559,8 @@ fn build_dispatch_function(
 
             if is_last {
                 let const_val = func.fresh_value();
-                func.get_block_mut(current_block).push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
+                func.get_block_mut(current_block)
+                    .push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
                 func.push_assert_eq(current_block, fn_id_param, const_val);
                 let call_results = func.push_call(
                     current_block,
@@ -553,7 +571,8 @@ fn build_dispatch_function(
                 func.terminate_block_with_jmp(current_block, merge_block, call_results);
             } else {
                 let const_val = func.fresh_value();
-                func.get_block_mut(current_block).push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
+                func.get_block_mut(current_block)
+                    .push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
                 let eq_result = func.push_eq(current_block, fn_id_param, const_val);
 
                 let call_block = func.add_block();

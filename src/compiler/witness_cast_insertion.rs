@@ -451,9 +451,7 @@ impl WitnessCastInsertion {
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::UConst { .. }
-                    | OpCode::FieldConst { .. }
-                    | OpCode::FnPtrConst { .. }) => {
+                    | OpCode::Const { .. }) => {
                         new_instructions.push(op);
                     }
                 }
@@ -779,7 +777,10 @@ impl WitnessCastInsertion {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
                 let dummy_field = function.fresh_value();
-                new_instructions.push(OpCode::mk_field_const(dummy_field, ark_bn254::Fr::from(0u64)));
+                new_instructions.push(OpCode::mk_field_const(
+                    dummy_field,
+                    ark_bn254::Fr::from(0u64),
+                ));
                 let refed = function.fresh_value();
                 new_instructions.push(OpCode::Cast {
                     result: refed,

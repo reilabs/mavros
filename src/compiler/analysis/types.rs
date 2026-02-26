@@ -7,7 +7,8 @@ use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+        CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx,
+        ValueId,
     },
 };
 
@@ -526,16 +527,13 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
-            OpCode::UConst { result, size, .. } => {
-                function_info.values.insert(*result, Type::u(*size));
-                Ok(())
-            }
-            OpCode::FieldConst { result, .. } => {
-                function_info.values.insert(*result, Type::field());
-                Ok(())
-            }
-            OpCode::FnPtrConst { result, .. } => {
-                function_info.values.insert(*result, Type::function());
+            OpCode::Const { result, value } => {
+                let ty = match value {
+                    ConstValue::U(size, _) => Type::u(*size),
+                    ConstValue::Field(_) => Type::field(),
+                    ConstValue::FnPtr(_) => Type::function(),
+                };
+                function_info.values.insert(*result, ty);
                 Ok(())
             }
         }

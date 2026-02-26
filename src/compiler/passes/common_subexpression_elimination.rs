@@ -6,7 +6,8 @@ use std::{
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ssa::{
-        BinaryArithOpKind, BlockId, CmpKind, HLFunction, HLSSA, OpCode, TupleIdx, ValueId,
+        BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, TupleIdx,
+        ValueId,
     },
 };
 use crate::compiler::{
@@ -463,13 +464,15 @@ impl CSE {
                             *r,
                         ));
                     },
-                    OpCode::UConst { result, size, value } => {
-                        exprs.insert(*result, Expr::UConst(*size, *value));
+                    OpCode::Const { result, value } => match value {
+                        ConstValue::U(size, val) => {
+                            exprs.insert(*result, Expr::UConst(*size, *val));
+                        }
+                        ConstValue::Field(val) => {
+                            exprs.insert(*result, Expr::fconst(*val));
+                        }
+                        ConstValue::FnPtr(_) => {}
                     }
-                    OpCode::FieldConst { result, value } => {
-                        exprs.insert(*result, Expr::fconst(*value));
-                    }
-                    OpCode::FnPtrConst { .. } => {}
                 }
             }
         }

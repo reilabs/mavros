@@ -43,14 +43,18 @@ impl SpecializationState {
     fn push_u_const(&mut self, size: usize, value: u128) -> ValueId {
         let vid = self.function.fresh_value();
         let entry = self.function.get_entry_id();
-        self.function.get_block_mut(entry).push_instruction(OpCode::mk_u_const(vid, size, value));
+        self.function
+            .get_block_mut(entry)
+            .push_instruction(OpCode::mk_u_const(vid, size, value));
         vid
     }
 
     fn push_field_const(&mut self, value: Field) -> ValueId {
         let vid = self.function.fresh_value();
         let entry = self.function.get_entry_id();
-        self.function.get_block_mut(entry).push_instruction(OpCode::mk_field_const(vid, value));
+        self.function
+            .get_block_mut(entry)
+            .push_instruction(OpCode::mk_field_const(vid, value));
         vid
     }
 }
@@ -166,11 +170,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
 
-            (op, a, b) => panic!(
-                "Not yet implemented {:?} {:?}",
-                op,
-                (a, b)
-            ),
+            (op, a, b) => panic!("Not yet implemented {:?} {:?}", op, (a, b)),
         }
     }
 
@@ -733,7 +733,9 @@ impl Specializer {
 
         let entry_block = dispatcher.get_entry_id();
         let mut should_call_spec = dispatcher.fresh_value();
-        dispatcher.get_block_mut(entry_block).push_instruction(OpCode::mk_u_const(should_call_spec, 1, 1));
+        dispatcher
+            .get_block_mut(entry_block)
+            .push_instruction(OpCode::mk_u_const(should_call_spec, 1, 1));
 
         for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
             match psig {
@@ -748,13 +750,17 @@ impl Specializer {
                 }
                 ValueSignature::Field(v) => {
                     let cst = dispatcher.fresh_value();
-                    dispatcher.get_block_mut(entry_block).push_instruction(OpCode::mk_field_const(cst, *v));
+                    dispatcher
+                        .get_block_mut(entry_block)
+                        .push_instruction(OpCode::mk_field_const(cst, *v));
                     let is_eq = dispatcher.push_eq(entry_block, *pval, cst);
                     should_call_spec = dispatcher.push_and(entry_block, should_call_spec, is_eq);
                 }
                 ValueSignature::U(s, v) => {
                     let cst = dispatcher.fresh_value();
-                    dispatcher.get_block_mut(entry_block).push_instruction(OpCode::mk_u_const(cst, *s, *v));
+                    dispatcher
+                        .get_block_mut(entry_block)
+                        .push_instruction(OpCode::mk_u_const(cst, *s, *v));
                     let is_eq = dispatcher.push_eq(entry_block, *pval, cst);
                     should_call_spec = dispatcher.push_and(entry_block, should_call_spec, is_eq);
                 }

@@ -427,7 +427,8 @@ impl ExplicitWitness {
                             // of cond and constants: cond * (l - r) + r. No constraint needed.
                             if !l_taint && !r_taint {
                                 let neg_one = function.fresh_value();
-                                new_instructions.push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
+                                new_instructions
+                                    .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
                                 let neg_r = function.fresh_value();
                                 new_instructions.push(OpCode::BinaryArithOp {
                                     kind: BinaryArithOpKind::Mul,
@@ -479,7 +480,8 @@ impl ExplicitWitness {
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
                             let neg_one = function.fresh_value();
-                            new_instructions.push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
+                            new_instructions
+                                .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
                             let neg_r = function.fresh_value();
                             new_instructions.push(OpCode::BinaryArithOp {
                                 kind: BinaryArithOpKind::Mul,
@@ -543,7 +545,8 @@ impl ExplicitWitness {
                                 e => todo!("Unsupported type for negation: {:?}", e),
                             };
                             let ones = function.fresh_value();
-                            new_instructions.push(OpCode::mk_field_const(ones, Field::from((1u128 << s) - 1)));
+                            new_instructions
+                                .push(OpCode::mk_field_const(ones, Field::from((1u128 << s) - 1)));
                             let casted = function.fresh_value();
                             new_instructions.push(OpCode::Cast {
                                 result: casted,
@@ -601,11 +604,13 @@ impl ExplicitWitness {
                                 });
                                 let mut witnesses = vec![ValueId(0); count];
                                 let mut current_sum = function.fresh_value();
-                                new_instructions.push(OpCode::mk_field_const(current_sum, Field::ZERO));
+                                new_instructions
+                                    .push(OpCode::mk_field_const(current_sum, Field::ZERO));
                                 let radix_val = match radix {
                                     Radix::Bytes => {
                                         let v = function.fresh_value();
-                                        new_instructions.push(OpCode::mk_field_const(v, Field::from(256)));
+                                        new_instructions
+                                            .push(OpCode::mk_field_const(v, Field::from(256)));
                                         v
                                     }
                                     Radix::Dyn(radix) => {
@@ -637,7 +642,8 @@ impl ExplicitWitness {
                                 }
 
                                 let constrain_one = function.fresh_value();
-                                new_instructions.push(OpCode::mk_field_const(constrain_one, Field::from(1)));
+                                new_instructions
+                                    .push(OpCode::mk_field_const(constrain_one, Field::from(1)));
                                 new_instructions.push(OpCode::Constrain {
                                     a: current_sum,
                                     b: constrain_one,
@@ -717,9 +723,7 @@ impl ExplicitWitness {
                         OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::UConst { .. }
-                        | OpCode::FieldConst { .. }
-                        | OpCode::FnPtrConst { .. } => {
+                        | OpCode::Const { .. } => {
                             new_instructions.push(instruction);
                         }
                     }

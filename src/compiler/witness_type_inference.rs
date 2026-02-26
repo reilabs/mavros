@@ -739,9 +739,7 @@ impl WitnessTypeInference {
                     | OpCode::ValueOf { .. } => {
                         panic!("Should not be present at this stage {:?}", instruction);
                     }
-                    OpCode::UConst { result, .. }
-                    | OpCode::FieldConst { result, .. }
-                    | OpCode::FnPtrConst { result, .. } => {
+                    OpCode::Const { result, .. } => {
                         value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Pure));
                     }
                 }

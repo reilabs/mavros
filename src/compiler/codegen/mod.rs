@@ -6,8 +6,8 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId,
-            HLBlock, HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, TupleIdx, ValueId,
+            self, BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId, HLBlock,
+            HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, TupleIdx, ValueId,
         },
     },
     vm::{self, bytecode},
@@ -914,28 +914,26 @@ impl CodeGen {
                         size: global_layouter.get_size(global_idx),
                     });
                 }
-                ssa::OpCode::UConst {
-                    result,
-                    size,
-                    value,
-                } => {
-                    emitter.push_op(bytecode::OpCode::MovConst {
-                        res: layouter.alloc_u64(*result, *size),
-                        val: *value as u64,
-                    });
-                }
-                ssa::OpCode::FieldConst { result, value } => {
-                    let start = layouter.alloc_field(*result);
-                    for i in 0..bytecode::LIMBS {
+                ssa::OpCode::Const { result, value } => match value {
+                    ssa::ConstValue::U(size, val) => {
                         emitter.push_op(bytecode::OpCode::MovConst {
-                            res: start.offset(i as isize),
-                            val: value.0.0[i],
-                        })
+                            res: layouter.alloc_u64(*result, *size),
+                            val: *val as u64,
+                        });
                     }
-                }
-                ssa::OpCode::FnPtrConst { .. } => {
-                    panic!("FnPtr constants not supported in codegen");
-                }
+                    ssa::ConstValue::Field(val) => {
+                        let start = layouter.alloc_field(*result);
+                        for i in 0..bytecode::LIMBS {
+                            emitter.push_op(bytecode::OpCode::MovConst {
+                                res: start.offset(i as isize),
+                                val: val.0.0[i],
+                            })
+                        }
+                    }
+                    ssa::ConstValue::FnPtr(_) => {
+                        panic!("FnPtr constants not supported in codegen");
+                    }
+                },
                 other => panic!("Unsupported instruction: {:?}", other),
             }
         }

@@ -261,7 +261,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         instruction: &crate::compiler::ssa::OpCode,
         type_info: &FunctionTypeInfo,
     ) {
-        use crate::compiler::ssa::{CallTarget, OpCode};
+        use crate::compiler::ssa::{CallTarget, ConstValue, OpCode};
 
         match instruction {
             OpCode::BinaryArithOp {
@@ -387,19 +387,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 panic!("Dynamic call targets are not supported in LLVM codegen")
             }
 
-            OpCode::UConst {
-                result,
-                size,
-                value,
-            } => {
-                let int_type = self.context.custom_width_int_type(*size as u32);
-                let val = int_type.const_int(*value as u64, false).into();
-                self.value_map.insert(*result, val);
-            }
-            OpCode::FieldConst { result, value } => {
-                let val = self.runtime.const_field(value);
-                self.value_map.insert(*result, val);
-            }
+            OpCode::Const { result, value } => match value {
+                ConstValue::U(size, val) => {
+                    let int_type = self.context.custom_width_int_type(*size as u32);
+                    let val = int_type.const_int(*val as u64, false).into();
+                    self.value_map.insert(*result, val);
+                }
+                ConstValue::Field(val) => {
+                    let val = self.runtime.const_field(val);
+                    self.value_map.insert(*result, val);
+                }
+                ConstValue::FnPtr(_) => {
+                    panic!("FnPtr constants not supported in LLVM codegen");
+                }
+            },
             // All other opcodes are not yet supported
             _ => {
                 panic!("Unsupported opcode in LLVM codegen: {:?}", instruction);

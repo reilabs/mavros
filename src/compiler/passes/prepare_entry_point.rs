@@ -95,7 +95,9 @@ impl PrepareEntryPoint {
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
                     let index = wrapper.fresh_value();
-                    wrapper.get_block_mut(block).push_instruction(OpCode::mk_u_const(index, 32, i as u128));
+                    wrapper
+                        .get_block_mut(block)
+                        .push_instruction(OpCode::mk_u_const(index, 32, i as u128));
                     let result_elem = wrapper.push_array_get(block, result, index);
                     let input_elem = wrapper.push_array_get(block, public_input, index);
                     Self::assert_eq_deep(wrapper, block, result_elem, input_elem, inner);

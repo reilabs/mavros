@@ -418,9 +418,7 @@ impl CFG {
         dot_content.push_str("  node [shape=box, fontname=\"monospace\"];\n\n");
 
         // Add special nodes (entry and return)
-        dot_content.push_str(
-            "  entry [label=\"ENTRY\", style=filled, fillcolor=lightgreen];\n",
-        );
+        dot_content.push_str("  entry [label=\"ENTRY\", style=filled, fillcolor=lightgreen];\n");
         dot_content.push_str(
             "  return [label=\"RETURN\", shape=ellipse, style=filled, fillcolor=lightcoral];\n\n",
         );

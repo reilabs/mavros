@@ -232,7 +232,10 @@ impl WitnessLowering {
                                     BinaryArithOpKind::Sub => {
                                         // Lower Sub(wit, wit) to Add(a, MulConst(-1, b))
                                         let neg_one = function.fresh_value();
-                                        new_instructions.push(OpCode::mk_field_const(neg_one, ark_bn254::Fr::from(-1i64)));
+                                        new_instructions.push(OpCode::mk_field_const(
+                                            neg_one,
+                                            ark_bn254::Fr::from(-1i64),
+                                        ));
                                         let neg_b = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_b,
@@ -290,7 +293,10 @@ impl WitnessLowering {
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
                                         let neg_one = function.fresh_value();
-                                        new_instructions.push(OpCode::mk_field_const(neg_one, ark_bn254::Fr::from(-1i64)));
+                                        new_instructions.push(OpCode::mk_field_const(
+                                            neg_one,
+                                            ark_bn254::Fr::from(-1i64),
+                                        ));
                                         let neg_rhs = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_rhs,
@@ -451,9 +457,7 @@ impl WitnessLowering {
                         | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::UConst { .. }
-                        | OpCode::FieldConst { .. }
-                        | OpCode::FnPtrConst { .. } => {
+                        | OpCode::Const { .. } => {
                             new_instructions.push(instruction);
                         }
                         OpCode::MkTuple {
@@ -759,7 +763,10 @@ impl WitnessLowering {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
                 let dummy_field = function.fresh_value();
-                new_instructions.push(OpCode::mk_field_const(dummy_field, ark_bn254::Fr::from(0u64)));
+                new_instructions.push(OpCode::mk_field_const(
+                    dummy_field,
+                    ark_bn254::Fr::from(0u64),
+                ));
                 let refed = function.fresh_value();
                 new_instructions.push(OpCode::Cast {
                     result: refed,

@@ -267,9 +267,7 @@ impl UntaintControlFlow {
 
                     OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::UConst { .. }
-                    | OpCode::FieldConst { .. }
-                    | OpCode::FnPtrConst { .. } => {
+                    | OpCode::Const { .. } => {
                         new_instructions.push(instruction);
                     }
                     _ => {
