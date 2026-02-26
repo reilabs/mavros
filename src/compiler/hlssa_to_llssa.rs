@@ -110,6 +110,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
 
     // First pass: create all functions (so we can map FunctionIds)
     fn_map.insert(main_id, llssa.get_main_id());
+
     for (fn_id, function) in hlssa.iter_functions() {
         if *fn_id == main_id {
             continue;
