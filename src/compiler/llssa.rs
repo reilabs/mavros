@@ -58,6 +58,16 @@ impl LLStruct {
         LLStruct { fields }
     }
 
+    /// 4×i64 struct representing a BN254 field element in Montgomery form.
+    pub fn field_elem() -> Self {
+        Self::new(vec![
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+        ])
+    }
+
     /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
     /// Value-safe structs can be used as SSA values (`LLType::Struct`).
     pub fn is_value_safe(&self) -> bool {
@@ -342,6 +352,18 @@ pub enum LLOp {
         global_id: usize,
     },
 
+    // ── VM / Constraint ─────────────────────────────────────────────────
+    /// R1CS constraint: a * b = c
+    Constrain {
+        a: ValueId,
+        b: ValueId,
+        c: ValueId,
+    },
+    /// Write a field element to the witness tape
+    WriteWitness {
+        value: ValueId,
+    },
+
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -403,6 +425,10 @@ impl Instruction for LLOp {
 
             // Call
             LLOp::Call { args, .. } => args.iter().collect::<Vec<_>>().into_iter(),
+
+            // VM / Constraint
+            LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
+            LLOp::WriteWitness { value } => vec![value].into_iter(),
         }
     }
 
@@ -435,9 +461,12 @@ impl Instruction for LLOp {
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
 
             // No result
-            LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
-                vec![].into_iter()
-            }
+            LLOp::Free { .. }
+            | LLOp::Store { .. }
+            | LLOp::Memcpy { .. }
+            | LLOp::Constrain { .. }
+            | LLOp::WriteWitness { .. }
+            | LLOp::Trap => vec![].into_iter(),
         }
     }
 
@@ -495,6 +524,10 @@ impl Instruction for LLOp {
 
             // Call
             LLOp::Call { args, .. } => args.iter_mut().collect::<Vec<_>>().into_iter(),
+
+            // VM / Constraint
+            LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
+            LLOp::WriteWitness { value } => vec![value].into_iter(),
         }
     }
 
@@ -571,6 +604,10 @@ impl Instruction for LLOp {
                 v.extend(args.iter_mut());
                 v.into_iter()
             }
+
+            // VM / Constraint
+            LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
+            LLOp::WriteWitness { value } => vec![value].into_iter(),
         }
     }
 
@@ -777,6 +814,12 @@ impl Instruction for LLOp {
             }
             LLOp::GlobalAddr { result, global_id } => {
                 format!("{} = global_addr g{}", v(*result), global_id)
+            }
+            LLOp::Constrain { a, b, c } => {
+                format!("constrain {}, {}, {}", vr(*a), vr(*b), vr(*c))
+            }
+            LLOp::WriteWitness { value } => {
+                format!("write_witness {}", vr(*value))
             }
             LLOp::Trap => "trap".to_string(),
         }
@@ -1126,6 +1169,18 @@ impl LLFunction {
         self.get_block_mut(block_id)
             .push_instruction(LLOp::GlobalAddr { result, global_id });
         result
+    }
+
+    // ── VM / Constraint ─────────────────────────────────────────────────
+
+    pub fn push_constrain(&mut self, block_id: BlockId, a: ValueId, b: ValueId, c: ValueId) {
+        self.get_block_mut(block_id)
+            .push_instruction(LLOp::Constrain { a, b, c });
+    }
+
+    pub fn push_write_witness(&mut self, block_id: BlockId, value: ValueId) {
+        self.get_block_mut(block_id)
+            .push_instruction(LLOp::WriteWitness { value });
     }
 
     // ── Trap ────────────────────────────────────────────────────────────
