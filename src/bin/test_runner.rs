@@ -422,23 +422,13 @@ fn run_wasm(
     let memory_type = wasmtime::MemoryType::new(pages, None);
     let memory = Memory::new(&mut store, memory_type)?;
 
-    // Pre-initialize witness buffer like the VM interpreter does:
+    // Pre-initialize witness buffer:
     // - witness[0] = Field::ONE (the constant 1)
-    // - witness[1..1+num_inputs] = flattened input values
-    let flat_inputs: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
-    let num_pre_init = 1 + flat_inputs.len();
-
-    // Write constant ONE at witness[0]
+    // - witness[1..] written by the program via WriteWitness instructions
     write_field_to_memory(&memory, &mut store, witness_ptr, <Field as ArkField>::ONE);
 
-    // Write inputs at witness[1..]
-    for (i, &field) in flat_inputs.iter().enumerate() {
-        let ptr = witness_ptr + ((1 + i) * FIELD_SIZE) as u32;
-        write_field_to_memory(&memory, &mut store, ptr, field);
-    }
-
-    // Compute the write pointer that skips the pre-initialized entries
-    let witness_write_ptr = witness_ptr + (num_pre_init * FIELD_SIZE) as u32;
+    // Write pointer starts right after the ONE constant
+    let witness_write_ptr = witness_ptr + FIELD_SIZE as u32;
 
     // Initialize VM struct with buffer pointers
     // Note: witness_ptr in struct points to where WASM should START writing (after pre-init)

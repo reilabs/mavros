@@ -52,7 +52,42 @@ impl WitnessWriteToFresh {
                                 result_type: tp.clone(),
                             }
                         }
-                        _ => instruction.clone(),
+                        OpCode::Cmp { .. }
+                        | OpCode::Cast { .. }
+                        | OpCode::MkSeq { .. }
+                        | OpCode::Alloc { .. }
+                        | OpCode::BinaryArithOp { .. }
+                        | OpCode::Truncate { .. }
+                        | OpCode::Not { .. }
+                        | OpCode::Store { .. }
+                        | OpCode::Load { .. }
+                        | OpCode::AssertEq { .. }
+                        | OpCode::AssertR1C { .. }
+                        | OpCode::Call { .. }
+                        | OpCode::ArrayGet { .. }
+                        | OpCode::ArraySet { .. }
+                        | OpCode::SlicePush { .. }
+                        | OpCode::SliceLen { .. }
+                        | OpCode::Select { .. }
+                        | OpCode::ToBits { .. }
+                        | OpCode::ToRadix { .. }
+                        | OpCode::MemOp { .. }
+                        | OpCode::FreshWitness { .. }
+                        | OpCode::Constrain { .. }
+                        | OpCode::NextDCoeff { .. }
+                        | OpCode::MulConst { .. }
+                        | OpCode::BumpD { .. }
+                        | OpCode::Rangecheck { .. }
+                        | OpCode::Lookup { .. }
+                        | OpCode::DLookup { .. }
+                        | OpCode::ReadGlobal { .. }
+                        | OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. }
+                        | OpCode::Todo { .. }
+                        | OpCode::TupleProj { .. }
+                        | OpCode::MkTuple { .. }
+                        | OpCode::ValueOf { .. }
+                        | OpCode::Const { .. } => instruction.clone(),
                     };
                     *instruction = new_instruction;
                 }
