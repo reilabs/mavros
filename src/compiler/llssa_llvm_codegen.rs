@@ -24,8 +24,6 @@ use crate::compiler::llssa::{
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
-use crate::compiler::hlssa_to_llssa::field_elem_struct;
-
 /// VM struct layout (offsets in bytes):
 const VM_WITNESS_PTR_OFFSET: u32 = 0;
 const VM_A_PTR_OFFSET: u32 = 4;
@@ -111,9 +109,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// The LLVM type for a field element, derived from `field_elem_struct()`.
+    /// The LLVM type for a field element, derived from `LLStruct::field_elem()`.
     fn field_llvm_type(&self) -> BasicTypeEnum<'ctx> {
-        self.convert_struct_type(&field_elem_struct())
+        self.convert_struct_type(&LLStruct::field_elem())
     }
 
     // ── Runtime functions ───────────────────────────────────────────────

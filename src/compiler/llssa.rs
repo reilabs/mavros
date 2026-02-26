@@ -58,6 +58,16 @@ impl LLStruct {
         LLStruct { fields }
     }
 
+    /// 4×i64 struct representing a BN254 field element in Montgomery form.
+    pub fn field_elem() -> Self {
+        Self::new(vec![
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+        ])
+    }
+
     /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
     /// Value-safe structs can be used as SSA values (`LLType::Struct`).
     pub fn is_value_safe(&self) -> bool {

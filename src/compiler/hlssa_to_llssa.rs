@@ -20,20 +20,10 @@ use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, Const, FunctionId, HLFunction, HLSSA, Terminator, ValueId,
 };
 
-/// 4×i64 struct representing a BN254 field element in Montgomery form.
-pub fn field_elem_struct() -> LLStruct {
-    LLStruct::new(vec![
-        LLFieldType::Int(64),
-        LLFieldType::Int(64),
-        LLFieldType::Int(64),
-        LLFieldType::Int(64),
-    ])
-}
-
 /// Map an HLSSA type to an LLType.
 fn lower_type(ty: &crate::compiler::ir::r#type::Type) -> LLType {
     match &ty.expr {
-        TypeExpr::Field => LLType::Struct(field_elem_struct()),
+        TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
         TypeExpr::U(bits) => LLType::Int(*bits as u32),
         _ => panic!("Unsupported type in HLSSA→LLSSA lowering: {}", ty),
     }
@@ -116,7 +106,7 @@ fn lower_function(
     }
 
     // Emit constants as instructions in the entry block
-    let field_struct = field_elem_struct();
+    let field_struct = LLStruct::field_elem();
     for (val_id, constant) in function.iter_consts() {
         match constant {
             Const::U(bits, value) => {
