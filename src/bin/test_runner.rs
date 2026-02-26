@@ -1057,7 +1057,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
     // Print warnings section
     println!("### Warnings\n");
-    println!("<details open>");
+    println!("<details>");
     println!("<summary><b>R1CS/bytecode size growth detected</b></summary>\n");
     println!("| Test | Metric | Before | After | Change |");
     println!("|------|--------|--------|-------|--------|");
