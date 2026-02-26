@@ -17,13 +17,11 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue,
-};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFunction, LLOp, LLStruct, LLType, LLSSA,
+    FieldArithOp, IntArithOp, IntCmpOp, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -112,7 +110,10 @@ impl<'ctx> LLSSACodeGen<'ctx> {
     fn declare_runtime_functions(&mut self) {
         let field_type = self.field_type();
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_mul_fn = Some(self.module.add_function("__field_mul", field_mul_type, None));
+        self.field_mul_fn = Some(
+            self.module
+                .add_function("__field_mul", field_mul_type, None),
+        );
     }
 
     fn define_write_functions(&mut self) {
@@ -195,12 +196,7 @@ impl<'ctx> LLSSACodeGen<'ctx> {
         }
     }
 
-    fn declare_function(
-        &mut self,
-        fn_id: FunctionId,
-        function: &LLFunction,
-        main_id: FunctionId,
-    ) {
+    fn declare_function(&mut self, fn_id: FunctionId, function: &LLFunction, main_id: FunctionId) {
         let entry = function.get_entry();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
 
@@ -249,10 +245,9 @@ impl<'ctx> LLSSACodeGen<'ctx> {
         let entry_block_id = function.get_entry_id();
 
         // Create entry block
-        let entry_bb = self.context.append_basic_block(
-            fn_value,
-            &format!("block_{}", entry_block_id.0),
-        );
+        let entry_bb = self
+            .context
+            .append_basic_block(fn_value, &format!("block_{}", entry_block_id.0));
         self.block_map.insert(entry_block_id, entry_bb);
 
         // Create remaining blocks
@@ -353,12 +348,7 @@ impl<'ctx> LLSSACodeGen<'ctx> {
                 self.value_map.insert(*result, val.into());
             }
 
-            LLOp::IntArith {
-                kind,
-                result,
-                a,
-                b,
-            } => {
+            LLOp::IntArith { kind, result, a, b } => {
                 let lhs = self.value_map[a].into_int_value();
                 let rhs = self.value_map[b].into_int_value();
                 let name = &format!("v{}", result.0);
@@ -375,12 +365,7 @@ impl<'ctx> LLSSACodeGen<'ctx> {
                 self.value_map.insert(*result, val.into());
             }
 
-            LLOp::IntCmp {
-                kind,
-                result,
-                a,
-                b,
-            } => {
+            LLOp::IntCmp { kind, result, a, b } => {
                 let lhs = self.value_map[a].into_int_value();
                 let rhs = self.value_map[b].into_int_value();
                 let predicate = match kind {
@@ -403,12 +388,7 @@ impl<'ctx> LLSSACodeGen<'ctx> {
                 self.value_map.insert(*result, not_val.into());
             }
 
-            LLOp::FieldArith {
-                kind,
-                result,
-                a,
-                b,
-            } => {
+            LLOp::FieldArith { kind, result, a, b } => {
                 let lhs = self.value_map[a];
                 let rhs = self.value_map[b];
 

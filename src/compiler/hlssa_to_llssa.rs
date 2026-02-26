@@ -14,7 +14,7 @@ use crate::compiler::analysis::types::TypeInfo;
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::TypeExpr;
 use crate::compiler::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLStruct, LLType, LLSSA,
+    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, Const, FunctionId, HLFunction, HLSSA, Terminator, ValueId,
@@ -124,16 +124,13 @@ fn lower_function(
                 val_map.insert(*val_id, ll_val);
             }
             Const::Field(fr) => {
-                let limbs = fr.0 .0;
+                let limbs = fr.0.0;
                 let l0 = ll_func.push_int_const(ll_entry_id, 64, limbs[0]);
                 let l1 = ll_func.push_int_const(ll_entry_id, 64, limbs[1]);
                 let l2 = ll_func.push_int_const(ll_entry_id, 64, limbs[2]);
                 let l3 = ll_func.push_int_const(ll_entry_id, 64, limbs[3]);
-                let mk = ll_func.push_mk_struct(
-                    ll_entry_id,
-                    field_struct.clone(),
-                    vec![l0, l1, l2, l3],
-                );
+                let mk =
+                    ll_func.push_mk_struct(ll_entry_id, field_struct.clone(), vec![l0, l1, l2, l3]);
                 val_map.insert(*val_id, mk);
             }
             _ => panic!(
@@ -322,8 +319,8 @@ fn lower_terminator(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::flow_analysis::FlowAnalysis;
     use crate::compiler::analysis::types::Types;
+    use crate::compiler::flow_analysis::FlowAnalysis;
     use crate::compiler::ssa::DefaultSsaAnnotator;
 
     /// Build a trivial HLSSA: main() { return field_const * field_const }
@@ -348,8 +345,16 @@ mod tests {
         let llssa = lower(&hlssa, &flow, &type_info);
         let dump = llssa.to_string(&DefaultSsaAnnotator);
 
-        assert!(dump.contains("field.mul"), "Expected field.mul in:\n{}", dump);
-        assert!(dump.contains("mk_struct"), "Expected mk_struct for field constants in:\n{}", dump);
+        assert!(
+            dump.contains("field.mul"),
+            "Expected field.mul in:\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("mk_struct"),
+            "Expected mk_struct for field constants in:\n{}",
+            dump
+        );
         assert!(dump.contains("return"), "Expected return in:\n{}", dump);
     }
 
