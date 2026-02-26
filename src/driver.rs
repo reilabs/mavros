@@ -393,7 +393,8 @@ impl Driver {
         emit_llvm: bool,
         wasm_config: Option<(std::path::PathBuf, &R1CS)>,
     ) -> Result<Option<String>, Error> {
-        use crate::compiler::llvm_codegen::LLVMCodeGen;
+        use crate::compiler::hlssa_to_llssa;
+        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
         use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
@@ -403,9 +404,14 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
 
+        // Lower HLSSA → LLSSA
+        let llssa = hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info);
+
+        // Compile LLSSA → LLVM
+        let ll_flow_analysis = FlowAnalysis::run(&llssa);
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "mavros_module");
-        codegen.compile(ssa, &flow_analysis, &type_info);
+        codegen.compile(&llssa, &ll_flow_analysis);
 
         let llvm_ir = if emit_llvm {
             let ir = codegen.get_ir();
