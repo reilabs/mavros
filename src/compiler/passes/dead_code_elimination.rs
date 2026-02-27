@@ -294,11 +294,13 @@ impl DCE {
                                                 .get_block(*caller_block)
                                                 .get_instruction(*caller_i)
                                             {
-                                                if *i < args.len() {
-                                                    worklist.push(WorkItem::LiveValue(
-                                                        *caller_fn, args[*i],
-                                                    ));
-                                                }
+                                                assert!(
+                                                    *i < args.len(),
+                                                    "ICE: live callee entry param index out of bounds at callsite"
+                                                );
+                                                worklist.push(WorkItem::LiveValue(
+                                                    *caller_fn, args[*i],
+                                                ));
                                             }
                                         }
                                     }
@@ -312,10 +314,11 @@ impl DCE {
                                 let jumpin_block = function.get_block(pred);
                                 match jumpin_block.get_terminator() {
                                     Some(Terminator::Jmp(_, params)) => {
-                                        if *i < params.len() {
-                                            worklist
-                                                .push(WorkItem::LiveValue(function_id, params[*i]));
-                                        }
+                                        assert!(
+                                            *i < params.len(),
+                                            "ICE: phi param index out of bounds in predecessor jump"
+                                        );
+                                        worklist.push(WorkItem::LiveValue(function_id, params[*i]));
                                     }
                                     _ => panic!(
                                         "ICE: the block has phis, so jumps into it must be Jmps"
@@ -376,10 +379,12 @@ impl DCE {
                     let function = ssa.get_function(function_id);
                     for (block_id, block) in function.get_blocks() {
                         if let Some(Terminator::Return(values)) = block.get_terminator() {
-                            if slot < values.len() {
-                                worklist.push(WorkItem::LiveBlock(function_id, *block_id));
-                                worklist.push(WorkItem::LiveValue(function_id, values[slot]));
-                            }
+                            assert!(
+                                slot < values.len(),
+                                "ICE: return slot index out of bounds for return terminator"
+                            );
+                            worklist.push(WorkItem::LiveBlock(function_id, *block_id));
+                            worklist.push(WorkItem::LiveValue(function_id, values[slot]));
                         }
                     }
                 }

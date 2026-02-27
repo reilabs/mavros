@@ -410,15 +410,11 @@ fn run_wasm(
     let memory_type = wasmtime::MemoryType::new(pages, None);
     let memory = Memory::new(&mut store, memory_type)?;
 
-    // Program writes the full witness tape, including witness[0] = 1.
-    let witness_write_ptr = witness_ptr;
-
     // Initialize VM struct with buffer pointers
-    // witness_ptr in struct points to where WASM should start writing.
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
-        data[off..off + 4].copy_from_slice(&witness_write_ptr.to_le_bytes());
+        data[off..off + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + 4..off + 8].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + 8..off + 12].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + 12..off + 16].copy_from_slice(&c_ptr.to_le_bytes());
