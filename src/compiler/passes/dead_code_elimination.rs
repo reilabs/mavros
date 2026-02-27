@@ -115,6 +115,7 @@ impl DCE {
 
         for function_id in &function_ids {
             let function = ssa.get_function(*function_id);
+            worklist.push(WorkItem::LiveBlock(*function_id, function.get_entry_id()));
 
             if self.config.preserve_all_blocks {
                 for (block_id, _) in function.get_blocks() {
