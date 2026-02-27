@@ -1619,7 +1619,11 @@ impl Instruction for OpCode {
                     otherwise.0
                 )
             }
-            OpCode::WriteWitness { result, value, pinned } => {
+            OpCode::WriteWitness {
+                result,
+                value,
+                pinned,
+            } => {
                 let r_str = if let Some(result) = result {
                     format!("v{}{} = ", result.0, annotate_value(*result))
                 } else {

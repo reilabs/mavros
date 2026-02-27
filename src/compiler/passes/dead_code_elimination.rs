@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, CallTarget, FunctionId, HLFunction, HLSSA, Instruction, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, CallTarget, FunctionId, HLFunction, HLSSA, Instruction, OpCode, Terminator,
+        ValueId,
+    },
 };
 
 pub struct DCE {
@@ -93,10 +96,11 @@ impl DCE {
                         ..
                     } = instruction
                     {
-                        static_calls_by_callee
-                            .entry(*callee)
-                            .or_default()
-                            .push((*function_id, *block_id, i));
+                        static_calls_by_callee.entry(*callee).or_default().push((
+                            *function_id,
+                            *block_id,
+                            i,
+                        ));
                     }
                 }
             }
@@ -131,7 +135,11 @@ impl DCE {
                         }
                         OpCode::AssertEq { lhs, rhs } => {
                             if lhs != rhs {
-                                worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
                         }
                         OpCode::AssertR1C { .. }
@@ -149,17 +157,29 @@ impl DCE {
                         }
                         OpCode::WriteWitness { pinned, .. } => {
                             if self.config.witness_shape_frozen || *pinned {
-                                worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
                         }
                         OpCode::FreshWitness { .. } => {
                             if self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
                         }
                         OpCode::ToBits { .. } | OpCode::ToRadix { .. } => {
                             if !self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
                         }
                         OpCode::Load { .. }
@@ -233,7 +253,11 @@ impl DCE {
                     }
                 }
                 WorkItem::LiveValue(function_id, value_id) => {
-                    if live_values.entry(function_id).or_default().contains(&value_id) {
+                    if live_values
+                        .entry(function_id)
+                        .or_default()
+                        .contains(&value_id)
+                    {
                         continue;
                     }
                     live_values.entry(function_id).or_default().insert(value_id);
@@ -260,12 +284,10 @@ impl DCE {
 
                             let function = ssa.get_function(function_id);
                             if *block_id == function.get_entry_id() {
-                                if live_entry_params
-                                    .entry(function_id)
-                                    .or_default()
-                                    .insert(*i)
-                                {
-                                    if let Some(callsites) = static_calls_by_callee.get(&function_id) {
+                                if live_entry_params.entry(function_id).or_default().insert(*i) {
+                                    if let Some(callsites) =
+                                        static_calls_by_callee.get(&function_id)
+                                    {
                                         for (caller_fn, caller_block, caller_i) in callsites {
                                             let caller = ssa.get_function(*caller_fn);
                                             if let OpCode::Call { args, .. } = caller
@@ -274,8 +296,7 @@ impl DCE {
                                             {
                                                 if *i < args.len() {
                                                     worklist.push(WorkItem::LiveValue(
-                                                        *caller_fn,
-                                                        args[*i],
+                                                        *caller_fn, args[*i],
                                                     ));
                                                 }
                                             }
@@ -292,7 +313,8 @@ impl DCE {
                                 match jumpin_block.get_terminator() {
                                     Some(Terminator::Jmp(_, params)) => {
                                         if *i < params.len() {
-                                            worklist.push(WorkItem::LiveValue(function_id, params[*i]));
+                                            worklist
+                                                .push(WorkItem::LiveValue(function_id, params[*i]));
                                         }
                                     }
                                     _ => panic!(

@@ -413,5 +413,4 @@ impl UntaintControlFlow {
             function.put_block(block_id, block);
         }
     }
-
 }

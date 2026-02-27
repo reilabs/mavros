@@ -727,14 +727,13 @@ impl WitnessTypeInference {
                         value_wt
                             .insert(*result, WitnessType::Tuple(ConstantWitness::Pure, children));
                     }
-                    OpCode::WriteWitness { result, value: _, .. } => {
+                    OpCode::WriteWitness {
+                        result, value: _, ..
+                    } => {
                         // WriteWitness records a value on the witness tape.
                         // Its output is always Witness-typed.
                         if let Some(result) = result {
-                            value_wt.insert(
-                                *result,
-                                WitnessType::Scalar(ConstantWitness::Witness),
-                            );
+                            value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Witness));
                         }
                     }
                     OpCode::Constrain { .. }
