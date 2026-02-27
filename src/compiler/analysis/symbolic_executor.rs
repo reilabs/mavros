@@ -358,6 +358,7 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::OpCode::WriteWitness {
                         result: r,
                         value: a,
+                        ..
                     } => {
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         if let Some(r) = r {

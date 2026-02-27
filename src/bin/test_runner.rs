@@ -8,7 +8,7 @@ use std::{
 
 use cargo_metadata::MetadataCommand;
 
-use ark_ff::{Field as ArkField, UniformRand as _};
+use ark_ff::UniformRand as _;
 use mavros::{
     Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
     vm::interpreter,
@@ -357,18 +357,6 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
 }
 
 /// Write a field element to WASM memory (writes Montgomery form)
-fn write_field_to_memory(memory: &Memory, store: &mut Store<()>, ptr: u32, field: Field) {
-    // Access the internal Montgomery representation directly
-    // field.0 is the BigInt, field.0.0 is the [u64; 4] limbs in Montgomery form
-    let limbs = field.0.0;
-    let offset = ptr as usize;
-    let data = memory.data_mut(store);
-    data[offset..offset + 8].copy_from_slice(&limbs[0].to_le_bytes());
-    data[offset + 8..offset + 16].copy_from_slice(&limbs[1].to_le_bytes());
-    data[offset + 16..offset + 24].copy_from_slice(&limbs[2].to_le_bytes());
-    data[offset + 24..offset + 32].copy_from_slice(&limbs[3].to_le_bytes());
-}
-
 /// Flatten an InputValueOrdered into a list of Field elements
 fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<Field> {
     let mut result = Vec::new();
@@ -422,30 +410,11 @@ fn run_wasm(
     let memory_type = wasmtime::MemoryType::new(pages, None);
     let memory = Memory::new(&mut store, memory_type)?;
 
-    // Pre-initialize witness buffer like the VM interpreter does:
-    // - witness[0] = Field::ONE (the constant 1)
-    // - witness[1..1+num_inputs] = flattened input values
-    let flat_inputs: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
-    let num_pre_init = 1 + flat_inputs.len();
-
-    // Write constant ONE at witness[0]
-    write_field_to_memory(&memory, &mut store, witness_ptr, <Field as ArkField>::ONE);
-
-    // Write inputs at witness[1..]
-    for (i, &field) in flat_inputs.iter().enumerate() {
-        let ptr = witness_ptr + ((1 + i) * FIELD_SIZE) as u32;
-        write_field_to_memory(&memory, &mut store, ptr, field);
-    }
-
-    // Compute the write pointer that skips the pre-initialized entries
-    let witness_write_ptr = witness_ptr + (num_pre_init * FIELD_SIZE) as u32;
-
     // Initialize VM struct with buffer pointers
-    // Note: witness_ptr in struct points to where WASM should START writing (after pre-init)
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
-        data[off..off + 4].copy_from_slice(&witness_write_ptr.to_le_bytes());
+        data[off..off + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + 4..off + 8].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + 8..off + 12].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + 12..off + 16].copy_from_slice(&c_ptr.to_le_bytes());

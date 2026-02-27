@@ -241,6 +241,7 @@ impl RCInsertion {
                     | OpCode::WriteWitness {
                         result: _,
                         value: _,
+                        pinned: _,
                     }
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::Lookup {

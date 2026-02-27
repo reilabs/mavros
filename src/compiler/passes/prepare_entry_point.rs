@@ -1,6 +1,7 @@
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, OpCode, SeqType, TupleIdx,
         ValueId,
@@ -17,6 +18,7 @@ impl Pass for PrepareEntryPoint {
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         Self::wrap_main(ssa);
         self.rebuild_main_params(ssa);
+        Self::insert_witness_writes(ssa);
     }
 }
 
@@ -115,6 +117,48 @@ impl PrepareEntryPoint {
                 wrapper.push_assert_eq(block, result, public_input);
             }
         }
+    }
+
+    /// Insert pinned WriteWitness instructions in wrapper_main entry.
+    /// The first write emits constant one for witness[0], then writes each entry param.
+    fn insert_witness_writes(ssa: &mut HLSSA) {
+        let main = ssa.get_main_mut();
+        let entry_id = main.get_entry_id();
+
+        // Collect entry params
+        let params: Vec<ValueId> = main
+            .get_entry()
+            .get_parameters()
+            .map(|(id, _)| *id)
+            .collect();
+
+        // witness[0] must be constant one, emitted by the program.
+        let witness_one_value = main.fresh_value();
+        let one_const_value = main.fresh_value();
+        let mut write_witness_instructions = vec![
+            OpCode::mk_field_const(one_const_value, ark_bn254::Fr::from(1u64)),
+            OpCode::mk_pinned_write_witness(witness_one_value, one_const_value),
+        ];
+
+        // Create WriteWitness for each param and build replacements.
+        // These writes are naturally live because their results replace the params in the entry body.
+        let mut replacements = ValueReplacements::new();
+        for param_id in &params {
+            let witness_val = main.fresh_value();
+            write_witness_instructions.push(OpCode::mk_write_witness(witness_val, *param_id));
+            replacements.insert(*param_id, witness_val);
+        }
+
+        // Prepend WriteWitness instructions and apply replacements to existing instructions
+        let entry_block = main.get_block_mut(entry_id);
+        let old_instructions = entry_block.take_instructions();
+        let mut new_instructions = write_witness_instructions;
+        for mut instruction in old_instructions {
+            replacements.replace_instruction(&mut instruction);
+            new_instructions.push(instruction);
+        }
+        entry_block.put_instructions(new_instructions);
+        replacements.replace_terminator(entry_block.get_terminator_mut());
     }
 
     fn rebuild_main_params(&self, ssa: &mut HLSSA) {

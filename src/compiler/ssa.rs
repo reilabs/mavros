@@ -1369,6 +1369,7 @@ pub enum OpCode {
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
+        pinned: bool,
     },
     FreshWitness {
         result: ValueId,
@@ -1618,13 +1619,18 @@ impl Instruction for OpCode {
                     otherwise.0
                 )
             }
-            OpCode::WriteWitness { result, value } => {
+            OpCode::WriteWitness {
+                result,
+                value,
+                pinned,
+            } => {
                 let r_str = if let Some(result) = result {
                     format!("v{}{} = ", result.0, annotate_value(*result))
                 } else {
                     "".to_string()
                 };
-                format!("{}write_witness(v{})", r_str, value.0)
+                let pinned_str = if *pinned { " [pinned]" } else { "" };
+                format!("{}write_witness(v{}){}", r_str, value.0, pinned_str)
             }
             OpCode::FreshWitness {
                 result,
@@ -1961,6 +1967,7 @@ impl Instruction for OpCode {
             | Self::WriteWitness {
                 result: _,
                 value: c,
+                pinned: _,
             }
             | Self::Cast {
                 result: _,
@@ -2172,6 +2179,7 @@ impl Instruction for OpCode {
             Self::WriteWitness {
                 result: r,
                 value: _,
+                pinned: _,
             } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
                 ret_vec.into_iter()
@@ -2300,6 +2308,7 @@ impl Instruction for OpCode {
             | Self::WriteWitness {
                 result: _,
                 value: c,
+                pinned: _,
             }
             | Self::Cast {
                 result: _,
@@ -2500,6 +2509,7 @@ impl Instruction for OpCode {
             Self::WriteWitness {
                 result: a,
                 value: b,
+                pinned: _,
             } => {
                 let mut ret_vec = a.iter_mut().collect::<Vec<_>>();
                 ret_vec.push(b);
@@ -2673,6 +2683,15 @@ impl OpCode {
         OpCode::WriteWitness {
             result: Some(result),
             value: value_id,
+            pinned: false,
+        }
+    }
+
+    pub fn mk_pinned_write_witness(result: ValueId, value_id: ValueId) -> OpCode {
+        OpCode::WriteWitness {
+            result: Some(result),
+            value: value_id,
+            pinned: true,
         }
     }
 

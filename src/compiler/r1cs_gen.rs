@@ -670,7 +670,7 @@ impl R1CGen {
     pub fn new() -> Self {
         Self {
             constraints: vec![],
-            next_witness: 1, // 0 is reserved for constant one
+            next_witness: 0,
             tables: vec![],
             lookups: vec![],
         }
