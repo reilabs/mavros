@@ -140,11 +140,12 @@ impl PrepareEntryPoint {
             OpCode::mk_pinned_write_witness(witness_one_value, one_const_value),
         ];
 
-        // Create pinned WriteWitness for each param and build replacements.
+        // Create WriteWitness for each param and build replacements.
+        // These writes are naturally live because their results replace the params in the entry body.
         let mut replacements = ValueReplacements::new();
         for param_id in &params {
             let witness_val = main.fresh_value();
-            write_witness_instructions.push(OpCode::mk_pinned_write_witness(witness_val, *param_id));
+            write_witness_instructions.push(OpCode::mk_write_witness(witness_val, *param_id));
             replacements.insert(*param_id, witness_val);
         }
 

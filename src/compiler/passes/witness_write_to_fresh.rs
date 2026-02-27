@@ -38,7 +38,7 @@ impl WitnessWriteToFresh {
                         OpCode::WriteWitness {
                             result: r,
                             value: v,
-                            ..
+                            pinned: _,
                         } => {
                             let tp = type_info.get_function(*function_id).get_value_type(*v);
                             if tp.is_witness_of() {
