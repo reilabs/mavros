@@ -8,7 +8,7 @@ use std::{
 
 use cargo_metadata::MetadataCommand;
 
-use ark_ff::{Field as ArkField, UniformRand as _};
+use ark_ff::UniformRand as _;
 use mavros::{
     Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
     vm::interpreter,
@@ -357,18 +357,6 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
 }
 
 /// Write a field element to WASM memory (writes Montgomery form)
-fn write_field_to_memory(memory: &Memory, store: &mut Store<()>, ptr: u32, field: Field) {
-    // Access the internal Montgomery representation directly
-    // field.0 is the BigInt, field.0.0 is the [u64; 4] limbs in Montgomery form
-    let limbs = field.0.0;
-    let offset = ptr as usize;
-    let data = memory.data_mut(store);
-    data[offset..offset + 8].copy_from_slice(&limbs[0].to_le_bytes());
-    data[offset + 8..offset + 16].copy_from_slice(&limbs[1].to_le_bytes());
-    data[offset + 16..offset + 24].copy_from_slice(&limbs[2].to_le_bytes());
-    data[offset + 24..offset + 32].copy_from_slice(&limbs[3].to_le_bytes());
-}
-
 /// Flatten an InputValueOrdered into a list of Field elements
 fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<Field> {
     let mut result = Vec::new();
@@ -422,16 +410,11 @@ fn run_wasm(
     let memory_type = wasmtime::MemoryType::new(pages, None);
     let memory = Memory::new(&mut store, memory_type)?;
 
-    // Pre-initialize witness buffer:
-    // - witness[0] = Field::ONE (the constant 1)
-    // - witness[1..] written by the program via WriteWitness instructions
-    write_field_to_memory(&memory, &mut store, witness_ptr, <Field as ArkField>::ONE);
-
-    // Write pointer starts right after the ONE constant
-    let witness_write_ptr = witness_ptr + FIELD_SIZE as u32;
+    // Program writes the full witness tape, including witness[0] = 1.
+    let witness_write_ptr = witness_ptr;
 
     // Initialize VM struct with buffer pointers
-    // Note: witness_ptr in struct points to where WASM should START writing (after pre-init)
+    // witness_ptr in struct points to where WASM should start writing.
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;

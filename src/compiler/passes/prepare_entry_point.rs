@@ -119,8 +119,8 @@ impl PrepareEntryPoint {
         }
     }
 
-    /// Insert pinned WriteWitness for each entry param of wrapper_main.
-    /// This ensures main inputs are written to the witness tape by the program itself.
+    /// Insert pinned WriteWitness instructions in wrapper_main entry.
+    /// The first write emits constant one for witness[0], then writes each entry param.
     fn insert_witness_writes(ssa: &mut HLSSA) {
         let main = ssa.get_main_mut();
         let entry_id = main.get_entry_id();
@@ -132,8 +132,15 @@ impl PrepareEntryPoint {
             .map(|(id, _)| *id)
             .collect();
 
-        // Create pinned WriteWitness for each param and build replacements
-        let mut write_witness_instructions = Vec::new();
+        // witness[0] must be constant one, emitted by the program.
+        let witness_one_value = main.fresh_value();
+        let one_const_value = main.fresh_value();
+        let mut write_witness_instructions = vec![
+            OpCode::mk_field_const(one_const_value, ark_bn254::Fr::from(1u64)),
+            OpCode::mk_pinned_write_witness(witness_one_value, one_const_value),
+        ];
+
+        // Create pinned WriteWitness for each param and build replacements.
         let mut replacements = ValueReplacements::new();
         for param_id in &params {
             let witness_val = main.fresh_value();
