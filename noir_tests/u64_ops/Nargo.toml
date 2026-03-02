@@ -1,0 +1,5 @@
+[package]
+name = "u64_ops"
+type = "bin"
+
+[dependencies]

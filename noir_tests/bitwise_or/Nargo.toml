@@ -1,0 +1,5 @@
+[package]
+name = "bitwise_or"
+type = "bin"
+
+[dependencies]

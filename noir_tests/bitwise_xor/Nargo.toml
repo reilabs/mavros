@@ -1,0 +1,5 @@
+[package]
+name = "bitwise_xor"
+type = "bin"
+
+[dependencies]

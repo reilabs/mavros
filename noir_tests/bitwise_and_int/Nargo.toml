@@ -1,0 +1,5 @@
+[package]
+name = "bitwise_and_int"
+type = "bin"
+
+[dependencies]

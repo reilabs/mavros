@@ -1,0 +1,5 @@
+[package]
+name = "u8_arithmetic"
+type = "bin"
+
+[dependencies]

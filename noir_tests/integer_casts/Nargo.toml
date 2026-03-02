@@ -1,0 +1,5 @@
+[package]
+name = "integer_casts"
+type = "bin"
+
+[dependencies]
