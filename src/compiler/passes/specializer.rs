@@ -524,6 +524,10 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(_) => todo!(),
         }
     }
+
+    fn make_unknown(_ty: &Type, _ctx: &mut SpecializationState) -> Self {
+        panic!("ICE: unconstrained calls should not reach specializer")
+    }
 }
 
 impl symbolic_executor::Context<Val> for SpecializationState {

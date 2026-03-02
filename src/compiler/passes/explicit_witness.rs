@@ -505,8 +505,20 @@ impl ExplicitWitness {
                                 lhs: res,
                                 rhs: neg_r,
                             });
+                            let cond_type = function_type_info.get_value_type(cond);
+                            let cond_field = if cond_type.strip_witness().is_field() {
+                                cond
+                            } else {
+                                let casted = function.fresh_value();
+                                new_instructions.push(OpCode::Cast {
+                                    result: casted,
+                                    value: cond,
+                                    target: CastTarget::Field,
+                                });
+                                casted
+                            };
                             new_instructions.push(OpCode::Constrain {
-                                a: cond,
+                                a: cond_field,
                                 b: l_sub_r,
                                 c: res_sub_r,
                             });

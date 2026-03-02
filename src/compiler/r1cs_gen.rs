@@ -664,6 +664,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
     ) -> Self {
         todo!("ToRadix R1CS generation not yet implemented")
     }
+
+    fn make_unknown(_ty: &Type, _ctx: &mut R1CGen) -> Self {
+        panic!("ICE: unconstrained calls should be DCE'd before R1CS gen")
+    }
 }
 
 impl R1CGen {

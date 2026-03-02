@@ -59,6 +59,7 @@ where
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
+    fn make_unknown(ty: &Type, ctx: &mut Context) -> Self;
 }
 
 pub trait Context<V> {
@@ -251,10 +252,11 @@ impl SymbolicExecutor {
                         unconstrained,
                     } => {
                         if *unconstrained {
-                            // Unconstrained calls: assign dummy zero values to results
-                            // (results are immediately replaced by WriteWitness pipeline)
-                            for val in returns.iter() {
-                                scope[val.0 as usize] = Some(V::of_u(8, 0, ctx));
+                            // Unconstrained calls are not followed — set outputs to unknown
+                            for result in returns.iter() {
+                                let result_type = fn_type_info.get_value_type(*result);
+                                scope[result.0 as usize] =
+                                    Some(V::make_unknown(result_type, ctx));
                             }
                         } else {
                             let params = arguments

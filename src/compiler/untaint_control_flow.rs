@@ -230,11 +230,13 @@ impl UntaintControlFlow {
                         mut args,
                         unconstrained,
                     } => {
-                        match block_taint {
-                            Some(arg) => {
-                                args.push(arg);
+                        if !unconstrained {
+                            match block_taint {
+                                Some(arg) => {
+                                    args.push(arg);
+                                }
+                                None => {}
                             }
-                            None => {}
                         }
                         new_instructions.push(OpCode::Call {
                             results: ret,

@@ -277,9 +277,42 @@ impl WitnessTypeInference {
             .values()
             .map(|v| v.specialized_func_id)
             .collect();
-        for orig_id in original_func_ids {
-            if !specialized_func_ids.contains(&orig_id) {
-                ssa.take_function(orig_id);
+
+        // Build original → specialized mapping so we can update call targets
+        // in remaining unprocessed functions (e.g. unconstrained function bodies).
+        let mut orig_to_specialized: HashMap<FunctionId, FunctionId> = HashMap::new();
+        for (spec_key, spec_value) in &specializations {
+            orig_to_specialized
+                .entry(spec_key.original_func_id)
+                .or_insert(spec_value.specialized_func_id);
+        }
+
+        for orig_id in &original_func_ids {
+            if !specialized_func_ids.contains(orig_id) {
+                ssa.take_function(*orig_id);
+            }
+        }
+
+        // Update call targets in remaining functions not processed by WTI
+        // (e.g. unconstrained function bodies that reference now-removed originals).
+        let remaining_func_ids: Vec<FunctionId> = ssa
+            .get_function_ids()
+            .filter(|id| !specialized_func_ids.contains(id))
+            .collect();
+        for func_id in remaining_func_ids {
+            let func = ssa.get_function_mut(func_id);
+            for (_, block) in func.get_blocks_mut() {
+                for instr in block.get_instructions_mut() {
+                    if let OpCode::Call {
+                        function: CallTarget::Static(target),
+                        ..
+                    } = instr
+                    {
+                        if let Some(&new_target) = orig_to_specialized.get(target) {
+                            *target = new_target;
+                        }
+                    }
+                }
             }
         }
 
