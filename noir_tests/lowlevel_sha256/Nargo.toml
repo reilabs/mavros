@@ -1,0 +1,5 @@
+[package]
+name = "lowlevel_sha256"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"

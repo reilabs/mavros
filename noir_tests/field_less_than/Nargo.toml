@@ -1,0 +1,5 @@
+[package]
+name = "field_less_than"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"
