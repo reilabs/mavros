@@ -19,9 +19,10 @@ pub struct ReplacementSpec {
 }
 
 pub struct ReplacementCrate {
-    file_name: &'static str,
-    dep_name: &'static str,
-    replacements: &'static [ReplacementSpec],
+    pub file_name: &'static str,
+    pub dep_name: &'static str,
+    pub source: &'static str,
+    pub replacements: &'static [ReplacementSpec],
 }
 
 impl ReplacementCrate {
@@ -42,6 +43,7 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
     ReplacementCrate {
         file_name: "poseidon2_permutation.nr",
         dep_name: "poseidon2_permutation",
+        source: include_str!("../stdlib_replacements/poseidon2_permutation.nr"),
         replacements: &[ReplacementSpec {
             lowlevel_name: "poseidon2_permutation",
             kind: ReplacementKind::ByArraySize(&[
@@ -57,6 +59,7 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
     ReplacementCrate {
         file_name: "sha256_compression.nr",
         dep_name: "sha256_compression",
+        source: include_str!("../stdlib_replacements/sha256_compression.nr"),
         replacements: &[ReplacementSpec {
             lowlevel_name: "sha256_compression",
             kind: ReplacementKind::Single("sha256_compression"),
