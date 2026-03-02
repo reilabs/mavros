@@ -48,7 +48,8 @@ use crate::{
         witness_type_inference::WitnessTypeInference,
     },
     lowlevel_replacement::{
-        REPLACEMENT_CRATES, add_lowlevel_replacements, prepare_replacement_crate,
+        REPLACEMENT_CRATES, add_lowlevel_replacements, find_needed_lowlevels,
+        prepare_replacement_crate,
     },
 };
 
@@ -133,14 +134,23 @@ impl Driver {
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
 
+        monomorphizer.process_queue().unwrap();
+        let needed_lowlevels = find_needed_lowlevels(&monomorphizer);
+
         let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
         for (replacement, functions) in &prepared_replacements {
-            add_lowlevel_replacements(
-                replacement,
-                functions,
-                &mut monomorphizer,
-                &mut lowlevel_replacements,
-            );
+            if replacement
+                .lowlevel_names()
+                .iter()
+                .any(|name| needed_lowlevels.contains(*name))
+            {
+                add_lowlevel_replacements(
+                    replacement,
+                    functions,
+                    &mut monomorphizer,
+                    &mut lowlevel_replacements,
+                );
+            }
         }
 
         monomorphizer.process_queue().unwrap();

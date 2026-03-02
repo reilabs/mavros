@@ -31,9 +31,7 @@ fn add_stdlib_replacements(file_manager: &mut FileManager) {
     }
 }
 
-fn parse_workspace(
-    workspace: &Workspace,
-) -> (FileManager, ParsedFiles) {
+fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     let mut file_manager = workspace.new_file_manager();
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
     add_stdlib_replacements(&mut file_manager);
@@ -48,8 +46,7 @@ impl Project {
 
         let nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
 
-        let (nargo_file_manager, nargo_parsed_files) =
-            parse_workspace(&nargo_workspace);
+        let (nargo_file_manager, nargo_parsed_files) = parse_workspace(&nargo_workspace);
 
         Ok(Self {
             project_root,

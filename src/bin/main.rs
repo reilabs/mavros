@@ -41,7 +41,6 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
-
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -93,10 +92,7 @@ fn main() -> ExitCode {
     })
 }
 
-pub fn compile_to_r1cs(
-    root: PathBuf,
-    draw_graphs: bool,
-) -> Result<(Driver, R1CS), Error> {
+pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
     driver.run_noir_compiler()?;
@@ -161,10 +157,7 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) = compile_to_r1cs(
-        args.root.clone(),
-        args.draw_graphs,
-    )?;
+    let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =
