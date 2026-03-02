@@ -64,6 +64,13 @@ impl WitnessTypeInference {
         self.functions.get(&func_id).unwrap()
     }
 
+    pub fn try_get_function_witness_type(
+        &self,
+        func_id: FunctionId,
+    ) -> Option<&FunctionWitnessType> {
+        self.functions.get(&func_id)
+    }
+
     pub fn set_function_witness_type(&mut self, func_id: FunctionId, wt: FunctionWitnessType) {
         self.functions.insert(func_id, wt);
     }
@@ -230,9 +237,14 @@ impl WitnessTypeInference {
                 for instruction in block.get_instructions_mut() {
                     if let OpCode::Call {
                         function: CallTarget::Static(func_id),
+                        unconstrained,
                         ..
                     } = instruction
                     {
+                        if *unconstrained {
+                            // Skip unconstrained calls — not specialized
+                            continue;
+                        }
                         let call_site = call_site_iter.next().unwrap();
                         let callee_key = SpecKey {
                             original_func_id: call_site.callee_func_id,
@@ -268,6 +280,29 @@ impl WitnessTypeInference {
         for orig_id in original_func_ids {
             if !specialized_func_ids.contains(&orig_id) {
                 ssa.take_function(orig_id);
+            }
+        }
+
+        // 6. Remove functions that have no witness type and are not referenced by any call
+        //    (e.g. unconstrained variants of constrained functions that are never called)
+        let mut referenced_func_ids: HashSet<FunctionId> = HashSet::new();
+        for (_, func) in ssa.iter_functions() {
+            for (_, block) in func.get_blocks() {
+                for instr in block.get_instructions() {
+                    if let OpCode::Call {
+                        function: CallTarget::Static(target),
+                        ..
+                    } = instr
+                    {
+                        referenced_func_ids.insert(*target);
+                    }
+                }
+            }
+        }
+        let all_func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+        for func_id in all_func_ids {
+            if !self.functions.contains_key(&func_id) && !referenced_func_ids.contains(&func_id) {
+                ssa.take_function(func_id);
             }
         }
 
@@ -371,8 +406,13 @@ impl WitnessTypeInference {
                     results: _,
                     function: CallTarget::Static(callee_id),
                     args,
+                    unconstrained,
                 } = instruction
                 {
+                    if *unconstrained {
+                        // Skip unconstrained calls — not specialized
+                        continue;
+                    }
                     let callee_arg_types: Vec<WitnessType> = args
                         .iter()
                         .map(|v| value_wt.get(v).unwrap().clone())
@@ -614,51 +654,67 @@ impl WitnessTypeInference {
                         results,
                         function: CallTarget::Static(callee_id),
                         args,
+                        unconstrained,
                     } => {
-                        let callee_arg_types: Vec<WitnessType> = args
-                            .iter()
-                            .map(|v| value_wt.get(v).unwrap().clone())
-                            .collect();
-                        let callee_key = SpecKey {
-                            original_func_id: *callee_id,
-                            arg_types: callee_arg_types,
-                            cfg_witness: block_cw,
-                        };
-
-                        if let Some(callee_spec) = specializations.get(&callee_key) {
-                            // Use callee's return types
-                            for (result, ret_wt) in
-                                results.iter().zip(callee_spec.return_types.iter())
-                            {
-                                value_wt.insert(*result, ret_wt.clone());
-                            }
-                            // Update alloc_inner from arg_types_out for Ref args
-                            for (arg, arg_out) in args.iter().zip(callee_spec.arg_types_out.iter())
-                            {
-                                if let WitnessType::Ref(_, inner_out) = arg_out {
-                                    let origin = Self::find_alloc_origin(arg, alloc_inner);
-                                    if let Some(origin_id) = origin {
-                                        let current_inner =
-                                            alloc_inner.get(&origin_id).unwrap().clone();
-                                        let new_inner = current_inner.join(inner_out);
-                                        alloc_inner.insert(origin_id, new_inner);
-                                    }
-                                }
-                            }
-                        } else {
-                            // Specialization not yet registered — use optimistic Pure returns
-                            // based on the callee function's return type structure
+                        if *unconstrained {
+                            // Unconstrained calls produce pure witness values
+                            // (their outputs go through WriteWitness in PrepareEntryPoint)
                             let callee_func = ssa.get_function(*callee_id);
                             let callee_return_types = callee_func.get_returns();
-                            for (result, ret_type) in results.iter().zip(callee_return_types.iter())
+                            for (result, ret_type) in
+                                results.iter().zip(callee_return_types.iter())
                             {
                                 let pure_wt = Self::construct_pure_witness_for_type(ret_type);
-                                // Join with existing value if present (from prior iteration)
-                                let result_wt = value_wt
-                                    .get(result)
-                                    .map(|existing| existing.join(&pure_wt))
-                                    .unwrap_or(pure_wt);
-                                value_wt.insert(*result, result_wt);
+                                value_wt.insert(*result, pure_wt);
+                            }
+                        } else {
+                            let callee_arg_types: Vec<WitnessType> = args
+                                .iter()
+                                .map(|v| value_wt.get(v).unwrap().clone())
+                                .collect();
+                            let callee_key = SpecKey {
+                                original_func_id: *callee_id,
+                                arg_types: callee_arg_types,
+                                cfg_witness: block_cw,
+                            };
+
+                            if let Some(callee_spec) = specializations.get(&callee_key) {
+                                // Use callee's return types
+                                for (result, ret_wt) in
+                                    results.iter().zip(callee_spec.return_types.iter())
+                                {
+                                    value_wt.insert(*result, ret_wt.clone());
+                                }
+                                // Update alloc_inner from arg_types_out for Ref args
+                                for (arg, arg_out) in
+                                    args.iter().zip(callee_spec.arg_types_out.iter())
+                                {
+                                    if let WitnessType::Ref(_, inner_out) = arg_out {
+                                        let origin = Self::find_alloc_origin(arg, alloc_inner);
+                                        if let Some(origin_id) = origin {
+                                            let current_inner =
+                                                alloc_inner.get(&origin_id).unwrap().clone();
+                                            let new_inner = current_inner.join(inner_out);
+                                            alloc_inner.insert(origin_id, new_inner);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Specialization not yet registered — use optimistic Pure returns
+                                // based on the callee function's return type structure
+                                let callee_func = ssa.get_function(*callee_id);
+                                let callee_return_types = callee_func.get_returns();
+                                for (result, ret_type) in
+                                    results.iter().zip(callee_return_types.iter())
+                                {
+                                    let pure_wt = Self::construct_pure_witness_for_type(ret_type);
+                                    // Join with existing value if present (from prior iteration)
+                                    let result_wt = value_wt
+                                        .get(result)
+                                        .map(|existing| existing.join(&pure_wt))
+                                        .unwrap_or(pure_wt);
+                                    value_wt.insert(*result, result_wt);
+                                }
                             }
                         }
                     }

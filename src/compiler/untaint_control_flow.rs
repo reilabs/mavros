@@ -42,10 +42,12 @@ impl UntaintControlFlow {
     ) -> HLSSA {
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
-            let function_wt = witness_inference.get_function_witness_type(function_id);
-            let mut function = ssa.take_function(function_id);
-            self.run_function(function_id, &mut function, function_wt, flow_analysis);
-            ssa.put_function(function_id, function);
+            if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
+            {
+                let mut function = ssa.take_function(function_id);
+                self.run_function(function_id, &mut function, function_wt, flow_analysis);
+                ssa.put_function(function_id, function);
+            }
         }
 
         ssa
@@ -226,6 +228,7 @@ impl UntaintControlFlow {
                         results: ret,
                         function: CallTarget::Static(tgt),
                         mut args,
+                        unconstrained,
                     } => {
                         match block_taint {
                             Some(arg) => {
@@ -237,6 +240,7 @@ impl UntaintControlFlow {
                             results: ret,
                             function: CallTarget::Static(tgt),
                             args,
+                            unconstrained,
                         });
                     }
                     OpCode::Call {
@@ -260,7 +264,8 @@ impl UntaintControlFlow {
 
                     OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::Const { .. } => {
+                    | OpCode::Const { .. }
+                    | OpCode::ValueOf { .. } => {
                         new_instructions.push(instruction);
                     }
                     _ => {

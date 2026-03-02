@@ -45,9 +45,14 @@ impl WitnessCastInsertion {
         result_ssa.set_global_types(old_global_types);
 
         for (function_id, function) in functions.into_iter() {
-            let function_wt = witness_inference.get_function_witness_type(function_id);
-            let new_function = self.apply_types_to_function(function, function_wt);
-            result_ssa.put_function(function_id, new_function);
+            if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
+            {
+                let new_function = self.apply_types_to_function(function, function_wt);
+                result_ssa.put_function(function_id, new_function);
+            } else {
+                // Function has no witness type (unreachable or unconstrained-only) — keep as-is
+                result_ssa.put_function(function_id, function);
+            }
         }
 
         result_ssa
@@ -418,6 +423,36 @@ impl WitnessCastInsertion {
                             cond,
                             if_t,
                             if_f,
+                        });
+                    }
+                    OpCode::Call {
+                        results,
+                        function: call_target,
+                        args,
+                        unconstrained: true,
+                    } => {
+                        // Unconstrained call: strip WitnessOf from args using ValueOf
+                        let new_args: Vec<_> = args
+                            .into_iter()
+                            .map(|arg| {
+                                let arg_type = type_info.get_value_type(arg);
+                                if arg_type.is_witness_of() {
+                                    let fresh = function.fresh_value();
+                                    new_instructions.push(OpCode::ValueOf {
+                                        result: fresh,
+                                        value: arg,
+                                    });
+                                    fresh
+                                } else {
+                                    arg
+                                }
+                            })
+                            .collect();
+                        new_instructions.push(OpCode::Call {
+                            results,
+                            function: call_target,
+                            args: new_args,
+                            unconstrained: true,
                         });
                     }
                     op @ (OpCode::Cmp { .. }

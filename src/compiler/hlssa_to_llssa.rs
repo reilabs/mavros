@@ -225,6 +225,7 @@ fn lower_instruction(
             results,
             function: CallTarget::Static(callee),
             args,
+            unconstrained: _,
         } => {
             let ll_callee = fn_map[callee];
             let ll_args: Vec<ValueId> = args.iter().map(|a| val_map[a]).collect();

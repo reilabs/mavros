@@ -634,6 +634,7 @@ impl HLFunction {
                 results: return_values.clone(),
                 function: CallTarget::Static(fn_id),
                 args,
+                unconstrained: false,
             });
         return_values
     }
@@ -659,6 +660,33 @@ impl HLFunction {
                 results: return_values.clone(),
                 function: CallTarget::Dynamic(fn_ptr),
                 args,
+                unconstrained: false,
+            });
+        return_values
+    }
+
+    pub fn push_call_unconstrained(
+        &mut self,
+        block_id: BlockId,
+        fn_id: FunctionId,
+        args: Vec<ValueId>,
+        return_size: usize,
+    ) -> Vec<ValueId> {
+        let mut return_values = Vec::new();
+        for _ in 0..return_size {
+            let value_id = ValueId(self.next_value);
+            self.next_value += 1;
+            return_values.push(value_id);
+        }
+        self.blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .instructions
+            .push(OpCode::Call {
+                results: return_values.clone(),
+                function: CallTarget::Static(fn_id),
+                args,
+                unconstrained: true,
             });
         return_values
     }
@@ -1317,6 +1345,7 @@ pub enum OpCode {
         results: Vec<ValueId>,
         function: CallTarget,
         args: Vec<ValueId>,
+        unconstrained: bool,
     },
     ArrayGet {
         result: ValueId,
@@ -1527,24 +1556,34 @@ impl Instruction for OpCode {
                 results: result,
                 function,
                 args,
+                unconstrained,
             } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
                     .iter()
                     .map(|v| format!("v{}{}", v.0, annotate_value(*v)))
                     .join(", ");
+                let call_prefix = if *unconstrained {
+                    "call_unconstrained"
+                } else {
+                    "call"
+                };
                 match function {
                     CallTarget::Static(fn_id) => {
                         format!(
-                            "{} = call {}@{}({})",
+                            "{} = {} {}@{}({})",
                             result_str,
+                            call_prefix,
                             func_name(*fn_id),
                             fn_id.0,
                             args_str
                         )
                     }
                     CallTarget::Dynamic(fn_ptr) => {
-                        format!("{} = call_indirect v{}({})", result_str, fn_ptr.0, args_str)
+                        format!(
+                            "{} = {}_indirect v{}({})",
+                            result_str, call_prefix, fn_ptr.0, args_str
+                        )
                     }
                 }
             }
@@ -1984,6 +2023,7 @@ impl Instruction for OpCode {
                 results: _,
                 function,
                 args: a,
+                unconstrained: _,
             } => {
                 let mut ret_vec = Vec::new();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -2188,6 +2228,7 @@ impl Instruction for OpCode {
                 results: r,
                 function: _,
                 args: _,
+                unconstrained: _,
             } => r.iter().collect::<Vec<_>>().into_iter(),
             Self::Constrain { .. }
             | Self::BumpD {
@@ -2325,6 +2366,7 @@ impl Instruction for OpCode {
                 results: _,
                 function,
                 args: a,
+                unconstrained: _,
             } => {
                 let mut ret_vec = Vec::new();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -2519,6 +2561,7 @@ impl Instruction for OpCode {
                 results: r,
                 function,
                 args: a,
+                unconstrained: _,
             } => {
                 let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
                 if let CallTarget::Dynamic(fn_ptr) = function {

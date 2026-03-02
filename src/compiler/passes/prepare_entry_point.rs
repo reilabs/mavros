@@ -3,8 +3,8 @@ use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, OpCode, SeqType, TupleIdx,
-        ValueId,
+        BinaryArithOpKind, BlockId, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
+        SeqType, TupleIdx, ValueId,
     },
 };
 
@@ -19,6 +19,7 @@ impl Pass for PrepareEntryPoint {
         Self::wrap_main(ssa);
         self.rebuild_main_params(ssa);
         Self::insert_witness_writes(ssa);
+        Self::process_unconstrained_calls(ssa);
     }
 }
 
@@ -159,6 +160,208 @@ impl PrepareEntryPoint {
         }
         entry_block.put_instructions(new_instructions);
         replacements.replace_terminator(entry_block.get_terminator_mut());
+    }
+
+    /// Process unconstrained call results: flatten to Fields, WriteWitness,
+    /// rangecheck + reconstruct, and replace original results.
+    fn process_unconstrained_calls(ssa: &mut HLSSA) {
+        // Collect callee return types first (need to borrow ssa immutably)
+        let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+
+        // Collect (function_id, block_id, instruction_index, callee_id, result_value_id)
+        // for all unconstrained calls
+        let mut unconstrained_call_sites: Vec<(FunctionId, BlockId, usize, FunctionId, ValueId)> =
+            Vec::new();
+
+        for &fid in &func_ids {
+            let function = ssa.get_function(fid);
+            for (&bid, block) in function.get_blocks() {
+                for (idx, instr) in block.get_instructions().enumerate() {
+                    if let OpCode::Call {
+                        unconstrained: true,
+                        results,
+                        function: CallTarget::Static(callee_id),
+                        ..
+                    } = instr
+                    {
+                        if !results.is_empty() {
+                            unconstrained_call_sites.push((fid, bid, idx, *callee_id, results[0]));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process each call site
+        for (fid, bid, _idx, callee_id, result_vid) in unconstrained_call_sites {
+            // Get callee return types
+            let return_types: Vec<Type> = ssa.get_function(callee_id).get_returns().to_vec();
+            if return_types.is_empty() {
+                continue;
+            }
+            let return_type = return_types[0].clone();
+
+            let function = ssa.get_function_mut(fid);
+
+            let (reconstructed_val, mut extra_instructions) =
+                Self::flatten_witness_reconstruct(&result_vid, &return_type, function);
+
+            // Build replacement map
+            let mut replacements = ValueReplacements::new();
+            replacements.insert(result_vid, reconstructed_val);
+
+            // Insert extra instructions after the unconstrained Call in the block's instruction list
+            // and apply replacements to the ORIGINAL instructions that come after
+            let block = function.get_block_mut(bid);
+            let old_instructions = block.take_instructions();
+            let extra_count = extra_instructions.len();
+            let mut new_instructions = Vec::new();
+            let mut found_call = false;
+            for mut instr in old_instructions {
+                if found_call {
+                    // Apply replacement to original instructions after the call+extras
+                    replacements.replace_instruction(&mut instr);
+                }
+                let is_the_call = if let OpCode::Call {
+                    unconstrained: true,
+                    results,
+                    ..
+                } = &instr
+                {
+                    !results.is_empty() && results[0] == result_vid
+                } else {
+                    false
+                };
+                new_instructions.push(instr);
+                if is_the_call {
+                    // Insert extra instructions (these should NOT get replacements applied)
+                    new_instructions.extend(extra_instructions.drain(..));
+                    found_call = true;
+                }
+            }
+            block.put_instructions(new_instructions);
+            replacements.replace_terminator(block.get_terminator_mut());
+        }
+    }
+
+    /// Flatten a call result to field-level, WriteWitness each field, rangecheck + reconstruct.
+    /// Returns (reconstructed_value_id, instructions_to_insert).
+    fn flatten_witness_reconstruct(
+        value_id: &ValueId,
+        typ: &Type,
+        function: &mut HLFunction,
+    ) -> (ValueId, Vec<OpCode>) {
+        let mut instructions = Vec::new();
+
+        match &typ.expr {
+            TypeExpr::Field => {
+                // WriteWitness the field value directly
+                let ww_result = function.fresh_value();
+                instructions.push(OpCode::mk_write_witness(ww_result, *value_id));
+                (ww_result, instructions)
+            }
+            TypeExpr::U(size) => {
+                // Cast to Field, WriteWitness, rangecheck, cast back
+                let as_field = function.fresh_value();
+                instructions.push(OpCode::mk_cast_to_field(as_field, *value_id));
+                let ww_result = function.fresh_value();
+                instructions.push(OpCode::mk_write_witness(ww_result, as_field));
+
+                if *size == 1 {
+                    // Boolean constraint: x * (x - 1) = 0
+                    let zero = function.fresh_value();
+                    instructions.push(OpCode::mk_field_const(zero, ark_bn254::Fr::from(0)));
+                    let one = function.fresh_value();
+                    instructions.push(OpCode::mk_field_const(one, ark_bn254::Fr::from(1)));
+                    let x_sub_1 = function.fresh_value();
+                    let x_times_x_sub_1 = function.fresh_value();
+                    instructions.push(OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::Sub,
+                        result: x_sub_1,
+                        lhs: ww_result,
+                        rhs: one,
+                    });
+                    instructions.push(OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::Mul,
+                        result: x_times_x_sub_1,
+                        lhs: ww_result,
+                        rhs: x_sub_1,
+                    });
+                    instructions.push(OpCode::AssertEq {
+                        lhs: x_times_x_sub_1,
+                        rhs: zero,
+                    });
+                } else {
+                    instructions.push(OpCode::Rangecheck {
+                        value: ww_result,
+                        max_bits: *size,
+                    });
+                }
+
+                let casted = function.fresh_value();
+                instructions.push(OpCode::Cast {
+                    result: casted,
+                    value: ww_result,
+                    target: CastTarget::U(*size),
+                });
+                (casted, instructions)
+            }
+            TypeExpr::Array(inner, size) => {
+                let mut elems = Vec::new();
+                for i in 0..*size {
+                    let index = function.fresh_value();
+                    instructions.push(OpCode::mk_u_const(index, 32, i as u128));
+                    let elem = function.fresh_value();
+                    instructions.push(OpCode::ArrayGet {
+                        result: elem,
+                        array: *value_id,
+                        index,
+                    });
+                    let (reconstructed_elem, child_instructions) =
+                        Self::flatten_witness_reconstruct(&elem, inner, function);
+                    instructions.extend(child_instructions);
+                    elems.push(reconstructed_elem);
+                }
+                let reconstructed = function.fresh_value();
+                instructions.push(OpCode::MkSeq {
+                    result: reconstructed,
+                    elems,
+                    seq_type: SeqType::Array(*size),
+                    elem_type: *inner.clone(),
+                });
+                (reconstructed, instructions)
+            }
+            TypeExpr::Tuple(element_types) => {
+                let mut elems = Vec::new();
+                let mut elem_types = Vec::new();
+                for (i, elem_type) in element_types.iter().enumerate() {
+                    let proj = function.fresh_value();
+                    instructions.push(OpCode::TupleProj {
+                        result: proj,
+                        tuple: *value_id,
+                        idx: TupleIdx::Static(i),
+                    });
+                    let (reconstructed_elem, child_instructions) =
+                        Self::flatten_witness_reconstruct(&proj, elem_type, function);
+                    instructions.extend(child_instructions);
+                    elems.push(reconstructed_elem);
+                    elem_types.push(elem_type.clone());
+                }
+                let reconstructed = function.fresh_value();
+                instructions.push(OpCode::MkTuple {
+                    result: reconstructed,
+                    elems,
+                    element_types: elem_types,
+                });
+                (reconstructed, instructions)
+            }
+            _ => {
+                // For other types, just WriteWitness directly
+                let ww_result = function.fresh_value();
+                instructions.push(OpCode::mk_write_witness(ww_result, *value_id));
+                (ww_result, instructions)
+            }
+        }
     }
 
     fn rebuild_main_params(&self, ssa: &mut HLSSA) {

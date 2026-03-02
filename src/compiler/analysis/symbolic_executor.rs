@@ -248,15 +248,24 @@ impl SymbolicExecutor {
                         results: returns,
                         function: crate::compiler::ssa::CallTarget::Static(function_id),
                         args: arguments,
+                        unconstrained,
                     } => {
-                        let params = arguments
-                            .iter()
-                            .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
-                            .collect::<Vec<_>>();
-                        let outputs =
-                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
-                        for (i, val) in returns.iter().enumerate() {
-                            scope[val.0 as usize] = Some(outputs[i].clone());
+                        if *unconstrained {
+                            // Unconstrained calls: assign dummy zero values to results
+                            // (results are immediately replaced by WriteWitness pipeline)
+                            for val in returns.iter() {
+                                scope[val.0 as usize] = Some(V::of_u(8, 0, ctx));
+                            }
+                        } else {
+                            let params = arguments
+                                .iter()
+                                .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
+                                .collect::<Vec<_>>();
+                            let outputs =
+                                self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
+                            for (i, val) in returns.iter().enumerate() {
+                                scope[val.0 as usize] = Some(outputs[i].clone());
+                            }
                         }
                     }
                     crate::compiler::ssa::OpCode::Call {
@@ -517,8 +526,9 @@ impl SymbolicExecutor {
                             scope[result_id.0 as usize] = Some(result_value.clone());
                         }
                     }
-                    crate::compiler::ssa::OpCode::ValueOf { .. } => {
-                        panic!("ICE: ValueOf should not appear at this stage");
+                    crate::compiler::ssa::OpCode::ValueOf { result, value } => {
+                        // ValueOf strips WitnessOf wrapper — symbolically same value
+                        scope[result.0 as usize] = scope[value.0 as usize].clone();
                     }
                     crate::compiler::ssa::OpCode::Const { result, value } => match value {
                         crate::compiler::ssa::ConstValue::U(size, val) => {

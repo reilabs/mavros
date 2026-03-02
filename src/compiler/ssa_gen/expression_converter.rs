@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
     Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If, Index,
-    LValue, Let, LocalId,
+    LValue, Let, LocalId, While,
 };
 
 use crate::compiler::ir::r#type::Type;
@@ -29,8 +29,8 @@ enum AccessStep {
 struct LoopContext {
     loop_header: BlockId,
     exit_block: BlockId,
-    loop_index: ValueId,
-    index_bit_size: usize,
+    /// Only for `for` loops — (index_value, bit_size), used by Continue to increment.
+    for_loop_index: Option<(ValueId, usize)>,
 }
 
 /// Converts expressions within a single function.
@@ -43,6 +43,8 @@ pub struct ExpressionConverter<'a> {
     mutable_locals: HashSet<LocalId>,
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+    /// Set of AST function IDs that are natively unconstrained
+    natively_unconstrained: &'a HashSet<AstFuncId>,
     /// Type converter
     type_converter: TypeConverter,
     /// Current block we're building
@@ -60,6 +62,7 @@ pub struct ExpressionConverter<'a> {
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+        natively_unconstrained: &'a HashSet<AstFuncId>,
         entry_block: BlockId,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
@@ -68,6 +71,7 @@ impl<'a> ExpressionConverter<'a> {
             bindings: HashMap::new(),
             mutable_locals: HashSet::new(),
             function_mapper,
+            natively_unconstrained,
             type_converter: TypeConverter::new(),
             current_block: entry_block,
             loop_stack: Vec::new(),
@@ -170,20 +174,27 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Continue => {
                 let ctx = self.loop_stack.last().expect("continue outside of loop");
                 let loop_header = ctx.loop_header;
-                let loop_index = ctx.loop_index;
-                let index_bit_size = ctx.index_bit_size;
-                // Increment index and jump back to header
-                let one = self.get_or_create_const(function, ConstValue::U(index_bit_size, 1));
-                let next_index = function.push_add(self.current_block, loop_index, one);
-                function.terminate_block_with_jmp(
-                    self.current_block,
-                    loop_header,
-                    vec![next_index],
-                );
+                let for_loop_index = ctx.for_loop_index;
+                if let Some((loop_index, index_bit_size)) = for_loop_index {
+                    // For loop: increment index and jump back to header
+                    let one =
+                        self.get_or_create_const(function, ConstValue::U(index_bit_size, 1));
+                    let next_index = function.push_add(self.current_block, loop_index, one);
+                    function.terminate_block_with_jmp(
+                        self.current_block,
+                        loop_header,
+                        vec![next_index],
+                    );
+                } else {
+                    // While/loop: just jump back to header with no args
+                    function.terminate_block_with_jmp(self.current_block, loop_header, vec![]);
+                }
                 // Create a dead block for any subsequent code
                 self.current_block = function.add_block();
                 None
             }
+            Expression::While(w) => self.convert_while(w, function),
+            Expression::Loop(body) => self.convert_loop(body, function),
             _ => todo!(
                 "Expression type not yet supported: {:?}",
                 std::mem::discriminant(expr)
@@ -546,8 +557,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header,
             exit_block,
-            loop_index,
-            index_bit_size,
+            for_loop_index: Some((loop_index, index_bit_size)),
         });
 
         // Execute the loop body
@@ -567,6 +577,82 @@ impl<'a> ExpressionConverter<'a> {
         self.current_block = exit_block;
 
         // For loops don't produce a value
+        None
+    }
+
+    fn convert_while(&mut self, while_expr: &While, function: &mut HLFunction) -> Option<ValueId> {
+        // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
+        let loop_header = function.add_block();
+        let loop_body = function.add_block();
+        let exit_block = function.add_block();
+
+        // Jump from current block to loop header
+        function.terminate_block_with_jmp(self.current_block, loop_header, vec![]);
+
+        // In loop header: evaluate condition, branch
+        self.current_block = loop_header;
+        let cond = self
+            .convert_expression(&while_expr.condition, function)
+            .unwrap();
+        function.terminate_block_with_jmp_if(loop_header, cond, loop_body, exit_block);
+
+        // In loop body: push context, convert body, pop context, jump back to header
+        self.current_block = loop_body;
+        self.loop_stack.push(LoopContext {
+            loop_header,
+            exit_block,
+            for_loop_index: None,
+        });
+
+        self.convert_expression(&while_expr.body, function);
+
+        self.loop_stack.pop();
+
+        // Jump back to header (if not already terminated by break/continue)
+        if !function.block_is_terminated(self.current_block) {
+            function.terminate_block_with_jmp(self.current_block, loop_header, vec![]);
+        }
+
+        // Continue in exit block
+        self.current_block = exit_block;
+
+        // While loops don't produce a value
+        None
+    }
+
+    fn convert_loop(
+        &mut self,
+        body: &Expression,
+        function: &mut HLFunction,
+    ) -> Option<ValueId> {
+        // loop { body } — only exits via break
+        let loop_block = function.add_block();
+        let exit_block = function.add_block();
+
+        // Jump from current block to loop block
+        function.terminate_block_with_jmp(self.current_block, loop_block, vec![]);
+
+        // In loop block: push context, convert body, pop context, jump back
+        self.current_block = loop_block;
+        self.loop_stack.push(LoopContext {
+            loop_header: loop_block,
+            exit_block,
+            for_loop_index: None,
+        });
+
+        self.convert_expression(body, function);
+
+        self.loop_stack.pop();
+
+        // Jump back to loop block (if not already terminated by break/continue)
+        if !function.block_is_terminated(self.current_block) {
+            function.terminate_block_with_jmp(self.current_block, loop_block, vec![]);
+        }
+
+        // Continue in exit block (only reachable via break)
+        self.current_block = exit_block;
+
+        // Loop doesn't produce a value
         None
     }
 
@@ -1036,8 +1122,20 @@ impl<'a> ExpressionConverter<'a> {
                         let return_type = &call.return_type;
                         let return_size = self.return_size(return_type);
 
-                        let results =
-                            function.push_call(self.current_block, *ssa_func_id, args, return_size);
+                        // Constrained calling unconstrained: emit unconstrained call
+                        let is_unconstrained_call = !self.in_unconstrained
+                            && self.natively_unconstrained.contains(func_id);
+
+                        let results = if is_unconstrained_call {
+                            function.push_call_unconstrained(
+                                self.current_block,
+                                *ssa_func_id,
+                                args,
+                                return_size,
+                            )
+                        } else {
+                            function.push_call(self.current_block, *ssa_func_id, args, return_size)
+                        };
 
                         if results.is_empty() {
                             None

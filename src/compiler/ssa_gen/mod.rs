@@ -6,7 +6,7 @@
 mod expression_converter;
 mod type_converter;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
@@ -25,6 +25,8 @@ pub struct SsaConverter {
     /// For natively unconstrained functions, same ID as constrained_mapper.
     /// For constrained functions, points to a separate unconstrained variant.
     unconstrained_mapper: HashMap<AstFuncId, FunctionId>,
+    /// Set of AST function IDs that are natively unconstrained
+    natively_unconstrained: HashSet<AstFuncId>,
     /// Maps GlobalId to global slot index
     global_slots: HashMap<GlobalId, usize>,
     /// Type converter
@@ -36,6 +38,7 @@ impl SsaConverter {
         Self {
             constrained_mapper: HashMap::new(),
             unconstrained_mapper: HashMap::new(),
+            natively_unconstrained: HashSet::new(),
             global_slots: HashMap::new(),
             type_converter: TypeConverter::new(),
         }
@@ -59,6 +62,7 @@ impl SsaConverter {
             if func.unconstrained {
                 // Natively unconstrained: same ID in both contexts
                 self.unconstrained_mapper.insert(func.id, ssa_id);
+                self.natively_unconstrained.insert(func.id);
             } else {
                 // Constrained: create a separate unconstrained variant
                 let variant_id = ssa.add_function(format!("{}_unconstrained", func.name));
@@ -227,6 +231,7 @@ impl SsaConverter {
             // We need an ExpressionConverter to evaluate initializer expressions
             let mut expr_converter = ExpressionConverter::new_with_globals(
                 &self.constrained_mapper,
+                &self.natively_unconstrained,
                 entry,
                 false,
                 &self.global_slots,
@@ -289,6 +294,7 @@ impl SsaConverter {
         // Create expression converter
         let mut expr_converter = ExpressionConverter::new_with_globals(
             function_mapper,
+            &self.natively_unconstrained,
             entry_block,
             in_unconstrained,
             &self.global_slots,

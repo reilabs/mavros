@@ -130,6 +130,12 @@ impl DCE {
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
                     match instruction {
+                        OpCode::Call {
+                            unconstrained: true,
+                            ..
+                        } => {
+                            // Unconstrained calls are NOT initially live — DCE'd when results unused
+                        }
                         OpCode::Call { .. } | OpCode::Store { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                         }
@@ -414,6 +420,7 @@ impl DCE {
                         results,
                         function: CallTarget::Static(callee),
                         args,
+                        unconstrained: _,
                     } = &mut instruction
                     {
                         let mut new_args = vec![];
