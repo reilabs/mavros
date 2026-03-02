@@ -1,36 +1,37 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::value_definitions::ValueDefinition,
+    analysis::{
+        types::TypeInfo,
+        value_definitions::{ValueDefinition, ValueDefinitions},
+    },
+    flow_analysis::FlowAnalysis,
     ir::r#type::TypeExpr,
-    pass_manager::{DataPoint, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{CastTarget, CmpKind, OpCode},
 };
 
 pub struct ArithmeticSimplifier {}
 
 impl Pass for ArithmeticSimplifier {
-    fn run(
-        &self,
-        ssa: &mut crate::compiler::ssa::SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
+    fn name(&self) -> &'static str {
+        "arithmetic_simplifier"
+    }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id(), ValueDefinitions::id()]
+    }
+
+    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
         self.do_run(
             ssa,
-            pass_manager.get_type_info(),
-            pass_manager.get_value_definitions(),
+            store.get::<TypeInfo>(),
+            store.get::<ValueDefinitions>(),
         );
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "arithmetic_simplifier",
-            needs: vec![DataPoint::Types, DataPoint::ValueDefinitions],
-        }
-    }
-
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
@@ -41,7 +42,7 @@ impl ArithmeticSimplifier {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA,
+        ssa: &mut crate::compiler::ssa::HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
         value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions,
     ) {
@@ -74,9 +75,15 @@ impl ArithmeticSimplifier {
                                     }
                                     match &v_type.expr {
                                         TypeExpr::U(s) => {
-                                            let cst = function.push_u_const(*s, 1 << bits);
+                                            let cst = function.fresh_value();
+                                            new_instructions.push(OpCode::mk_u_const(
+                                                cst,
+                                                *s,
+                                                1 << bits,
+                                            ));
                                             let r = function.fresh_value();
-                                            let t = function.push_u_const(1, 1);
+                                            let t = function.fresh_value();
+                                            new_instructions.push(OpCode::mk_u_const(t, 1, 1));
                                             new_instructions.push(OpCode::Cmp {
                                                 kind: CmpKind::Lt,
                                                 result: r,

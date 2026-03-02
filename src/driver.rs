@@ -41,7 +41,7 @@ use crate::{
             witness_write_to_void::WitnessWriteToVoid,
         },
         r1cs_gen::{R1CGen, R1CS},
-        ssa::{DefaultSsaAnnotator, SSA},
+        ssa::{DefaultSsaAnnotator, HLSSA},
         ssa_gen::LowLevelReplacement,
         untaint_control_flow::UntaintControlFlow,
         witness_cast_insertion::WitnessCastInsertion,
@@ -55,12 +55,12 @@ use crate::{
 
 pub struct Driver {
     project: Project,
-    initial_ssa: Option<SSA>,
-    static_struct_access_ssa: Option<SSA>,
-    monomorphized_ssa: Option<SSA>,
-    explicit_witness_ssa: Option<SSA>,
-    r1cs_ssa: Option<SSA>,
-    base_witgen_ssa: Option<SSA>,
+    initial_ssa: Option<HLSSA>,
+    static_struct_access_ssa: Option<HLSSA>,
+    monomorphized_ssa: Option<HLSSA>,
+    explicit_witness_ssa: Option<HLSSA>,
+    r1cs_ssa: Option<HLSSA>,
+    base_witgen_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
 }
@@ -164,7 +164,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(SSA::from_program(&program, lowlevel_replacements));
+        self.initial_ssa = Some(HLSSA::from_program(&program, lowlevel_replacements));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
@@ -278,6 +278,8 @@ impl Driver {
                 Box::new(Specializer::new(5.0)),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(ExplicitWitness::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(FixDoubleJumps::new()),
             ],
         );
@@ -373,6 +375,8 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
@@ -431,7 +435,8 @@ impl Driver {
         emit_llvm: bool,
         wasm_config: Option<(std::path::PathBuf, &R1CS)>,
     ) -> Result<Option<String>, Error> {
-        use crate::compiler::llvm_codegen::LLVMCodeGen;
+        use crate::compiler::hlssa_to_llssa;
+        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
         use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
@@ -441,9 +446,14 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
 
+        // Lower HLSSA → LLSSA
+        let llssa = hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info);
+
+        // Compile LLSSA → LLVM
+        let ll_flow_analysis = FlowAnalysis::run(&llssa);
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "mavros_module");
-        codegen.compile(ssa, &flow_analysis, &type_info);
+        codegen.compile(&llssa, &ll_flow_analysis);
 
         let llvm_ir = if emit_llvm {
             let ir = codegen.get_ir();

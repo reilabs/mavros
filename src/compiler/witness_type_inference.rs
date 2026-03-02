@@ -1,7 +1,7 @@
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BlockId, CallTarget, FunctionId, OpCode, SSA, SsaAnnotator, Terminator, TupleIdx, ValueId,
+    BlockId, CallTarget, FunctionId, HLSSA, OpCode, SsaAnnotator, Terminator, TupleIdx, ValueId,
 };
 use crate::compiler::witness_info::{ConstantWitness, FunctionWitnessType, WitnessType};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -72,15 +72,15 @@ impl WitnessTypeInference {
         self.functions.remove(&func_id);
     }
 
-    pub fn run(&mut self, ssa: &mut SSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
+    pub fn run(&mut self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
         let main_id = ssa.get_main_id();
         let main_func = ssa.get_function(main_id);
 
-        // 1. Compute main's arg types: scalars=Witness, containers=Pure with Witness elems
+        // 1. Compute main's arg types: all Pure (WriteWitness in PrepareEntryPoint bridges to Witness)
         let main_arg_types: Vec<WitnessType> = main_func
             .get_entry()
             .get_parameters()
-            .map(|(_, tp)| Self::main_arg_witness_type(tp))
+            .map(|(_, tp)| Self::construct_pure_witness_for_type(tp))
             .collect();
 
         let main_return_types: Vec<WitnessType> = main_func
@@ -279,12 +279,12 @@ impl WitnessTypeInference {
     // ---------------------------------------------------------------------------
 
     fn propagate_function(
-        func: &crate::compiler::ssa::Function,
+        func: &crate::compiler::ssa::HLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
         arg_types: &[WitnessType],
         cfg_witness: ConstantWitness,
         specializations: &HashMap<SpecKey, SpecValue>,
-        ssa: &SSA,
+        ssa: &HLSSA,
     ) -> PropagationResult {
         let entry_id = func.get_entry_id();
         let block_queue: Vec<BlockId> = cfg.get_blocks_bfs().collect();
@@ -293,11 +293,6 @@ impl WitnessTypeInference {
         let mut value_wt: HashMap<ValueId, WitnessType> = HashMap::new();
         let mut block_cfg: HashMap<BlockId, ConstantWitness> = HashMap::new();
         let mut alloc_inner: HashMap<ValueId, WitnessType> = HashMap::new();
-
-        // Initialize constants as Pure
-        for (value_id, _) in func.iter_consts() {
-            value_wt.insert(*value_id, WitnessType::Scalar(ConstantWitness::Pure));
-        }
 
         // Initialize entry block params from arg_types
         let entry_params: Vec<(ValueId, Type)> =
@@ -446,7 +441,7 @@ impl WitnessTypeInference {
 
     /// Single forward pass over all blocks
     fn propagate_once(
-        func: &crate::compiler::ssa::Function,
+        func: &crate::compiler::ssa::HLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
         block_queue: &[BlockId],
         _entry_id: BlockId,
@@ -454,7 +449,7 @@ impl WitnessTypeInference {
         block_cfg: &mut HashMap<BlockId, ConstantWitness>,
         alloc_inner: &mut HashMap<ValueId, WitnessType>,
         specializations: &HashMap<SpecKey, SpecValue>,
-        ssa: &SSA,
+        ssa: &HLSSA,
     ) {
         for block_id in block_queue {
             let block = func.get_block(*block_id);
@@ -732,8 +727,16 @@ impl WitnessTypeInference {
                         value_wt
                             .insert(*result, WitnessType::Tuple(ConstantWitness::Pure, children));
                     }
-                    OpCode::WriteWitness { .. }
-                    | OpCode::Constrain { .. }
+                    OpCode::WriteWitness {
+                        result, value: _, ..
+                    } => {
+                        // WriteWitness records a value on the witness tape.
+                        // Its output is always Witness-typed.
+                        if let Some(result) = result {
+                            value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Witness));
+                        }
+                    }
+                    OpCode::Constrain { .. }
                     | OpCode::FreshWitness { .. }
                     | OpCode::BumpD { .. }
                     | OpCode::NextDCoeff { .. }
@@ -743,6 +746,9 @@ impl WitnessTypeInference {
                     | OpCode::Todo { .. }
                     | OpCode::ValueOf { .. } => {
                         panic!("Should not be present at this stage {:?}", instruction);
+                    }
+                    OpCode::Const { result, .. } => {
+                        value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Pure));
                     }
                 }
             }
@@ -842,28 +848,6 @@ impl WitnessTypeInference {
                 .join(then_wt.toplevel_info())
                 .join(otherwise_wt.toplevel_info()),
         )
-    }
-
-    /// Compute witness type for a main function argument.
-    /// Scalars are Witness (private inputs), containers are Pure with Witness elements.
-    fn main_arg_witness_type(tp: &Type) -> WitnessType {
-        match &tp.expr {
-            TypeExpr::U(_) | TypeExpr::Field => WitnessType::Scalar(ConstantWitness::Witness),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => WitnessType::Array(
-                ConstantWitness::Pure,
-                Box::new(Self::main_arg_witness_type(inner)),
-            ),
-            TypeExpr::Tuple(elements) => WitnessType::Tuple(
-                ConstantWitness::Pure,
-                elements
-                    .iter()
-                    .map(|e| Self::main_arg_witness_type(e))
-                    .collect(),
-            ),
-            TypeExpr::Ref(_) => panic!("Ref in main signature"),
-            TypeExpr::WitnessOf(_) => panic!("WitnessOf should not be present at this stage"),
-            TypeExpr::Function => WitnessType::Scalar(ConstantWitness::Pure),
-        }
     }
 
     fn construct_pure_witness_for_type(typ: &Type) -> WitnessType {

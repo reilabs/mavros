@@ -1,24 +1,24 @@
 use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{Pass, PassInfo},
+    pass_manager::{AnalysisStore, Pass},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, Function, OpCode, SSA, SeqType, TupleIdx, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, OpCode, SeqType, TupleIdx,
+        ValueId,
     },
 };
 
 pub struct PrepareEntryPoint {}
 
 impl Pass for PrepareEntryPoint {
-    fn run(&self, ssa: &mut SSA, _pass_manager: &crate::compiler::pass_manager::PassManager) {
-        Self::wrap_main(ssa);
-        self.rebuild_main_params(ssa);
+    fn name(&self) -> &'static str {
+        "prepare_entry_point"
     }
 
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "prepare_entry_point",
-            needs: vec![],
-        }
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+        Self::wrap_main(ssa);
+        self.rebuild_main_params(ssa);
+        Self::insert_witness_writes(ssa);
     }
 }
 
@@ -27,7 +27,7 @@ impl PrepareEntryPoint {
         Self {}
     }
 
-    fn wrap_main(ssa: &mut SSA) {
+    fn wrap_main(ssa: &mut HLSSA) {
         let original_main_id = ssa.get_main_id();
         let original_main = ssa.get_main();
         let param_types = original_main.get_param_types();
@@ -84,7 +84,7 @@ impl PrepareEntryPoint {
     }
 
     fn assert_eq_deep(
-        wrapper: &mut Function,
+        wrapper: &mut HLFunction,
         block: BlockId,
         result: ValueId,
         public_input: ValueId,
@@ -96,7 +96,10 @@ impl PrepareEntryPoint {
             }
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
-                    let index = wrapper.push_u_const(32, i as u128);
+                    let index = wrapper.fresh_value();
+                    wrapper
+                        .get_block_mut(block)
+                        .push_instruction(OpCode::mk_u_const(index, 32, i as u128));
                     let result_elem = wrapper.push_array_get(block, result, index);
                     let input_elem = wrapper.push_array_get(block, public_input, index);
                     Self::assert_eq_deep(wrapper, block, result_elem, input_elem, inner);
@@ -116,7 +119,49 @@ impl PrepareEntryPoint {
         }
     }
 
-    fn rebuild_main_params(&self, ssa: &mut SSA) {
+    /// Insert pinned WriteWitness instructions in wrapper_main entry.
+    /// The first write emits constant one for witness[0], then writes each entry param.
+    fn insert_witness_writes(ssa: &mut HLSSA) {
+        let main = ssa.get_main_mut();
+        let entry_id = main.get_entry_id();
+
+        // Collect entry params
+        let params: Vec<ValueId> = main
+            .get_entry()
+            .get_parameters()
+            .map(|(id, _)| *id)
+            .collect();
+
+        // witness[0] must be constant one, emitted by the program.
+        let witness_one_value = main.fresh_value();
+        let one_const_value = main.fresh_value();
+        let mut write_witness_instructions = vec![
+            OpCode::mk_field_const(one_const_value, ark_bn254::Fr::from(1u64)),
+            OpCode::mk_pinned_write_witness(witness_one_value, one_const_value),
+        ];
+
+        // Create WriteWitness for each param and build replacements.
+        // These writes are naturally live because their results replace the params in the entry body.
+        let mut replacements = ValueReplacements::new();
+        for param_id in &params {
+            let witness_val = main.fresh_value();
+            write_witness_instructions.push(OpCode::mk_write_witness(witness_val, *param_id));
+            replacements.insert(*param_id, witness_val);
+        }
+
+        // Prepend WriteWitness instructions and apply replacements to existing instructions
+        let entry_block = main.get_block_mut(entry_id);
+        let old_instructions = entry_block.take_instructions();
+        let mut new_instructions = write_witness_instructions;
+        for mut instruction in old_instructions {
+            replacements.replace_instruction(&mut instruction);
+            new_instructions.push(instruction);
+        }
+        entry_block.put_instructions(new_instructions);
+        replacements.replace_terminator(entry_block.get_terminator_mut());
+    }
+
+    fn rebuild_main_params(&self, ssa: &mut HLSSA) {
         let function = ssa.get_main_mut();
 
         let params: Vec<_> = function.get_entry().get_parameters().cloned().collect();
@@ -142,7 +187,7 @@ impl PrepareEntryPoint {
     fn reconstruct_param(
         value_id: Option<&ValueId>,
         typ: &Type,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
         let mut new_instructions = Vec::new();
         let mut new_parameters = Vec::new();
@@ -161,8 +206,10 @@ impl PrepareEntryPoint {
 
                 if *size == 1 {
                     // Boolean constraint: x * (x - 1) = 0
-                    let zero = function.push_field_const(ark_bn254::Fr::from(0));
-                    let one = function.push_field_const(ark_bn254::Fr::from(1));
+                    let zero = function.fresh_value();
+                    new_instructions.push(OpCode::mk_field_const(zero, ark_bn254::Fr::from(0)));
+                    let one = function.fresh_value();
+                    new_instructions.push(OpCode::mk_field_const(one, ark_bn254::Fr::from(1)));
                     let x_sub_1 = function.fresh_value();
                     let x_times_x_sub_1 = function.fresh_value();
                     new_instructions.push(OpCode::BinaryArithOp {

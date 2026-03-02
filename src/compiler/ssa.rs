@@ -1,4 +1,4 @@
-use crate::compiler::ir::r#type::Type;
+use crate::compiler::ir::r#type::{SSAType, Type};
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
 
@@ -25,29 +25,29 @@ pub trait SsaAnnotator {
 pub struct DefaultSsaAnnotator;
 impl SsaAnnotator for DefaultSsaAnnotator {}
 
-struct LocalFunctionAnnotator<'a> {
-    function_id: FunctionId,
-    annotator: &'a dyn SsaAnnotator,
-}
+pub trait Instruction: Clone + std::fmt::Debug + 'static {
+    fn get_inputs(&self) -> impl Iterator<Item = &ValueId>;
+    fn get_results(&self) -> impl Iterator<Item = &ValueId>;
+    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
+    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
 
-impl<'a> LocalFunctionAnnotator<'a> {
-    pub fn new(function_id: FunctionId, annotator: &'a dyn SsaAnnotator) -> Self {
-        Self {
-            function_id,
-            annotator,
-        }
-    }
+    /// Static call targets for building call graphs.
+    fn get_static_call_targets(&self) -> Vec<FunctionId>;
 
-    pub fn annotate_value(&self, value_id: ValueId) -> String {
-        self.annotator.annotate_value(self.function_id, value_id)
-    }
+    /// Display an instruction. Takes closures for function name resolution
+    /// and value annotation (so the trait doesn't depend on SSA).
+    fn display_instruction(
+        &self,
+        func_name: &dyn Fn(FunctionId) -> String,
+        annotate_value: &dyn Fn(ValueId) -> String,
+    ) -> String;
 }
 
 #[derive(Clone)]
-pub struct SSA {
-    functions: HashMap<FunctionId, Function>,
+pub struct SSA<Op: Instruction, Ty: SSAType> {
+    functions: HashMap<FunctionId, Function<Op, Ty>>,
     /// Type of each global slot (indexed by slot number)
-    global_types: Vec<Type>,
+    global_types: Vec<Ty>,
     /// Function that initializes all globals (emits InitGlobal opcodes)
     globals_init_fn: Option<FunctionId>,
     /// Function that drops all globals (emits DropGlobal opcodes)
@@ -56,10 +56,20 @@ pub struct SSA {
     next_function_id: u64,
 }
 
-impl SSA {
+pub type HLSSA = SSA<OpCode, Type>;
+pub type HLFunction = Function<OpCode, Type>;
+pub type HLBlock = Block<OpCode, Type>;
+
+impl HLSSA {
     pub fn new() -> Self {
-        let main_function = Function::empty("main".to_string());
-        let main_id = FunctionId(0_u64);
+        Self::with_main("main".to_string())
+    }
+}
+
+impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
+    pub fn with_main(name: String) -> Self {
+        let main_function = Function::<Op, Ty>::empty(name);
+        let main_id = FunctionId(0);
         let mut functions = HashMap::new();
         functions.insert(main_id, main_function);
         SSA {
@@ -71,8 +81,10 @@ impl SSA {
             next_function_id: 1,
         }
     }
+}
 
-    pub fn prepare_rebuild(self) -> (SSA, HashMap<FunctionId, Function>, Vec<Type>) {
+impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
+    pub fn prepare_rebuild(self) -> (SSA<Op, Ty>, HashMap<FunctionId, Function<Op, Ty>>, Vec<Ty>) {
         (
             SSA {
                 functions: HashMap::new(),
@@ -87,7 +99,7 @@ impl SSA {
         )
     }
 
-    pub fn insert_function(&mut self, function: Function) -> FunctionId {
+    pub fn insert_function(&mut self, function: Function<Op, Ty>) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
         self.functions.insert(new_id, function);
@@ -102,47 +114,49 @@ impl SSA {
         self.main_id
     }
 
-    pub fn get_main_mut(&mut self) -> &mut Function {
+    pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
             .get_mut(&self.main_id)
             .expect("Main function should exist")
     }
 
-    pub fn get_main(&self) -> &Function {
+    pub fn get_main(&self) -> &Function<Op, Ty> {
         self.functions
             .get(&self.main_id)
             .expect("Main function should exist")
     }
 
-    pub fn get_function(&self, id: FunctionId) -> &Function {
+    pub fn get_function(&self, id: FunctionId) -> &Function<Op, Ty> {
         self.functions.get(&id).expect("Function should exist")
     }
 
-    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function {
+    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function<Op, Ty> {
         self.functions.get_mut(&id).expect("Function should exist")
     }
 
-    pub fn take_function(&mut self, id: FunctionId) -> Function {
+    pub fn take_function(&mut self, id: FunctionId) -> Function<Op, Ty> {
         self.functions.remove(&id).expect("Function should exist")
     }
 
-    pub fn put_function(&mut self, id: FunctionId, function: Function) {
+    pub fn put_function(&mut self, id: FunctionId, function: Function<Op, Ty>) {
         self.functions.insert(id, function);
     }
 
     pub fn add_function(&mut self, name: String) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
-        let function = Function::empty(name);
+        let function = Function::<Op, Ty>::empty(name);
         self.functions.insert(new_id, function);
         new_id
     }
 
-    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function)> {
+    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function<Op, Ty>)> {
         self.functions.iter()
     }
 
-    pub fn iter_functions_mut(&mut self) -> impl Iterator<Item = (&FunctionId, &mut Function)> {
+    pub fn iter_functions_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&FunctionId, &mut Function<Op, Ty>)> {
         self.functions.iter_mut()
     }
 
@@ -150,11 +164,11 @@ impl SSA {
         self.functions.keys().copied()
     }
 
-    pub fn set_global_types(&mut self, types: Vec<Type>) {
+    pub fn set_global_types(&mut self, types: Vec<Ty>) {
         self.global_types = types;
     }
 
-    pub fn get_global_types(&self) -> &[Type] {
+    pub fn get_global_types(&self) -> &[Ty] {
         &self.global_types
     }
 
@@ -179,22 +193,15 @@ impl SSA {
     }
 }
 
-impl SSA {
+impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
     pub fn to_string(&self, value_annotator: &dyn SsaAnnotator) -> String {
+        let func_name = |id: FunctionId| self.get_function(id).get_name().to_string();
         self.functions
             .iter()
             .sorted_by_key(|(fn_id, _)| fn_id.0)
-            .map(|(fn_id, func)| func.to_string(self, *fn_id, value_annotator))
+            .map(|(fn_id, func)| func.to_string(&func_name, *fn_id, value_annotator))
             .join("\n\n")
     }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Const {
-    U(usize, u128),
-    Field(ark_bn254::Fr),
-    Witness(ark_bn254::Fr),
-    FnPtr(FunctionId),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -210,21 +217,19 @@ pub enum CallTarget {
 }
 
 #[derive(Clone)]
-pub struct Function {
+pub struct Function<Op: Instruction, Ty: SSAType> {
     entry_block: BlockId,
-    blocks: HashMap<BlockId, Block>,
+    blocks: HashMap<BlockId, Block<Op, Ty>>,
     name: String,
-    returns: Vec<Type>,
+    returns: Vec<Ty>,
     next_block: u64,
     next_value: u64,
-    consts: HashMap<ValueId, Const>,
-    consts_to_val: HashMap<Const, ValueId>,
 }
 
-impl Function {
+impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     pub fn to_string(
         &self,
-        ssa: &SSA,
+        func_name: &dyn Fn(FunctionId) -> String,
         id: FunctionId,
         value_annotator: &dyn SsaAnnotator,
     ) -> String {
@@ -236,23 +241,18 @@ impl Function {
             self.returns.iter().map(|t| format!("{}", t)).join(", "),
             value_annotator.annotate_function(id)
         );
-        let consts = self
-            .consts
-            .iter()
-            .map(|(id, const_)| format!("  v{} = {:?}", id.0, const_))
-            .join("\n");
         let blocks = self
             .blocks
             .iter()
             .sorted_by_key(|(bid, _)| bid.0)
-            .map(|(bid, block)| block.to_string(ssa, id, *bid, value_annotator))
+            .map(|(bid, block)| block.to_string(func_name, id, *bid, value_annotator))
             .join("\n");
         let footer = "}".to_string();
-        format!("{}\n{}\n{}\n{}", header, consts, blocks, footer)
+        format!("{}\n{}\n{}", header, blocks, footer)
     }
 }
 
-impl Function {
+impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     pub fn empty(name: String) -> Self {
         let entry = Block::empty();
         let entry_id = BlockId(0);
@@ -265,12 +265,10 @@ impl Function {
             next_block: 1,
             returns: Vec::new(),
             next_value: 0,
-            consts: HashMap::new(),
-            consts_to_val: HashMap::new(),
         }
     }
 
-    pub fn prepare_rebuild(self) -> (Function, HashMap<BlockId, Block>, Vec<Type>) {
+    pub fn prepare_rebuild(self) -> (Function<Op, Ty>, HashMap<BlockId, Block<Op, Ty>>, Vec<Ty>) {
         (
             Function {
                 entry_block: self.entry_block,
@@ -279,8 +277,6 @@ impl Function {
                 name: self.name,
                 returns: vec![],
                 next_value: self.next_value,
-                consts: self.consts,
-                consts_to_val: self.consts_to_val,
             },
             self.blocks,
             self.returns,
@@ -299,13 +295,13 @@ impl Function {
         return self.next_value as usize;
     }
 
-    pub fn get_entry_mut(&mut self) -> &mut Block {
+    pub fn get_entry_mut(&mut self) -> &mut Block<Op, Ty> {
         self.blocks
             .get_mut(&self.entry_block)
             .expect("Entry block should exist")
     }
 
-    pub fn get_entry(&self) -> &Block {
+    pub fn get_entry(&self) -> &Block<Op, Ty> {
         self.blocks
             .get(&self.entry_block)
             .expect("Entry block should exist")
@@ -315,19 +311,19 @@ impl Function {
         self.entry_block
     }
 
-    pub fn get_block(&self, id: BlockId) -> &Block {
+    pub fn get_block(&self, id: BlockId) -> &Block<Op, Ty> {
         self.blocks.get(&id).expect("Block should exist")
     }
 
-    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block {
+    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block<Op, Ty> {
         self.blocks.get_mut(&id).expect("Block should exist")
     }
 
-    pub fn take_block(&mut self, id: BlockId) -> Block {
+    pub fn take_block(&mut self, id: BlockId) -> Block<Op, Ty> {
         self.blocks.remove(&id).expect("Block should exist")
     }
 
-    pub fn put_block(&mut self, id: BlockId, block: Block) {
+    pub fn put_block(&mut self, id: BlockId, block: Block<Op, Ty>) {
         self.blocks.insert(id, block);
     }
 
@@ -347,18 +343,18 @@ impl Function {
             .is_some()
     }
 
-    pub fn next_virtual_block(&mut self) -> (BlockId, Block) {
+    pub fn next_virtual_block(&mut self) -> (BlockId, Block<Op, Ty>) {
         let new_id = BlockId(self.next_block);
         self.next_block += 1;
         let block = Block::empty();
         (new_id, block)
     }
 
-    pub fn add_return_type(&mut self, typ: Type) {
+    pub fn add_return_type(&mut self, typ: Ty) {
         self.returns.push(typ);
     }
 
-    pub fn get_param_types(&self) -> Vec<Type> {
+    pub fn get_param_types(&self) -> Vec<Ty> {
         self.get_entry()
             .parameters
             .iter()
@@ -366,27 +362,19 @@ impl Function {
             .collect()
     }
 
-    pub fn iter_consts(&self) -> impl Iterator<Item = (&ValueId, &Const)> {
-        self.consts.iter()
-    }
-
-    pub fn iter_consts_mut(&mut self) -> impl Iterator<Item = (&ValueId, &mut Const)> {
-        self.consts.iter_mut()
-    }
-
-    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Type> {
+    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
         self.returns.iter_mut()
     }
 
-    pub fn get_returns(&self) -> &[Type] {
+    pub fn get_returns(&self) -> &[Ty] {
         &self.returns
     }
 
-    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block)> {
+    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block<Op, Ty>)> {
         self.blocks.iter()
     }
 
-    pub fn add_parameter(&mut self, block_id: BlockId, typ: Type) -> ValueId {
+    pub fn add_parameter(&mut self, block_id: BlockId, typ: Ty) -> ValueId {
         let value_id = ValueId(self.next_value);
         self.next_value += 1;
         self.blocks
@@ -397,29 +385,42 @@ impl Function {
         value_id
     }
 
-    fn push_const(&mut self, value: Const) -> ValueId {
-        if let Some(existing_id) = self.consts_to_val.get(&value) {
-            return *existing_id;
-        }
-        let value_id: ValueId = ValueId(self.next_value);
+    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block<Op, Ty>)> {
+        self.blocks.iter_mut()
+    }
+
+    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block<Op, Ty>> {
+        std::mem::take(&mut self.blocks)
+    }
+
+    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block<Op, Ty>>) {
+        self.blocks = blocks;
+    }
+
+    pub fn fresh_value(&mut self) -> ValueId {
+        let value_id = ValueId(self.next_value);
         self.next_value += 1;
-        self.consts.insert(value_id, value.clone());
-        self.consts_to_val.insert(value.clone(), value_id);
         value_id
     }
 
-    pub fn push_u_const(&mut self, size: usize, value: u128) -> ValueId {
-        self.push_const(Const::U(size, value))
+    pub fn take_returns(&mut self) -> Vec<Ty> {
+        std::mem::take(&mut self.returns)
     }
 
-    pub fn push_field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
-        self.push_const(Const::Field(value))
+    pub fn code_size(&self) -> usize {
+        self.blocks
+            .values()
+            .map(|b| {
+                b.instructions
+                    .iter()
+                    .map(|i| i.get_inputs().count() + 1)
+                    .sum::<usize>()
+            })
+            .sum()
     }
+}
 
-    pub fn push_fn_ptr_const(&mut self, fn_id: FunctionId) -> ValueId {
-        self.push_const(Const::FnPtr(fn_id))
-    }
-
+impl HLFunction {
     pub fn push_cmp(
         &mut self,
         block_id: BlockId,
@@ -1012,66 +1013,19 @@ impl Function {
             .unwrap()
             .set_terminator(Terminator::Jmp(destination, arguments));
     }
-
-    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block)> {
-        self.blocks.iter_mut()
-    }
-
-    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block> {
-        std::mem::take(&mut self.blocks)
-    }
-
-    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block>) {
-        self.blocks = blocks;
-    }
-
-    pub fn fresh_value(&mut self) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        value_id
-    }
-
-    pub fn remove_const(&mut self, value_id: ValueId) {
-        let v = self.consts.remove(&value_id);
-        self.consts_to_val.remove(&v.unwrap());
-    }
-
-    pub fn replace_const(&mut self, value_id: ValueId, new_const: Const) {
-        if let Some(old_const) = self.consts.remove(&value_id) {
-            self.consts_to_val.remove(&old_const);
-        }
-        self.consts.insert(value_id, new_const.clone());
-        self.consts_to_val.insert(new_const, value_id);
-    }
-
-    pub fn take_returns(&mut self) -> Vec<Type> {
-        std::mem::take(&mut self.returns)
-    }
-
-    pub fn code_size(&self) -> usize {
-        self.blocks
-            .values()
-            .map(|b| {
-                b.instructions
-                    .iter()
-                    .map(|i| i.get_inputs().count() + 1)
-                    .sum::<usize>()
-            })
-            .sum()
-    }
 }
 
 #[derive(Clone)]
-pub struct Block {
-    parameters: Vec<(ValueId, Type)>,
-    instructions: Vec<OpCode>,
+pub struct Block<Op: Instruction, Ty: SSAType> {
+    parameters: Vec<(ValueId, Ty)>,
+    instructions: Vec<Op>,
     terminator: Option<Terminator>,
 }
 
-impl Block {
+impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     pub fn to_string(
         &self,
-        ssa: &SSA,
+        func_name: &dyn Fn(FunctionId) -> String,
         func_id: FunctionId,
         id: BlockId,
         value_annotator: &dyn SsaAnnotator,
@@ -1089,11 +1043,18 @@ impl Block {
                 format!("v{} : {}{}", v.0.0, v.1.to_string(), annotation)
             })
             .join(", ");
-        let local_annotator = LocalFunctionAnnotator::new(func_id, value_annotator);
+        let annotate_value = |value: ValueId| -> String {
+            let annotation = value_annotator.annotate_value(func_id, value);
+            if annotation.is_empty() {
+                "".to_string()
+            } else {
+                format!("[{}]", annotation)
+            }
+        };
         let instructions = self
             .instructions
             .iter()
-            .map(|i| format!("    {}", i.to_string(ssa, &local_annotator)))
+            .map(|i| format!("    {}", i.display_instruction(func_name, &annotate_value)))
             .join("\n");
         let terminator = match &self.terminator {
             Some(t) => format!("    {}", t.to_string()),
@@ -1112,7 +1073,7 @@ impl Block {
     }
 }
 
-impl Block {
+impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     pub fn empty() -> Self {
         Block {
             parameters: Vec::new(),
@@ -1121,15 +1082,15 @@ impl Block {
         }
     }
 
-    pub fn take_instructions(&mut self) -> Vec<OpCode> {
+    pub fn take_instructions(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.instructions)
     }
 
-    pub fn put_instructions(&mut self, instructions: Vec<OpCode>) {
+    pub fn put_instructions(&mut self, instructions: Vec<Op>) {
         self.instructions = instructions;
     }
 
-    pub fn push_instruction(&mut self, instruction: OpCode) {
+    pub fn push_instruction(&mut self, instruction: Op) {
         self.instructions.push(instruction);
     }
 
@@ -1137,19 +1098,19 @@ impl Block {
         self.terminator = Some(terminator);
     }
 
-    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Type)> {
+    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Ty)> {
         self.parameters.iter()
     }
 
-    pub fn get_parameters_mut(&mut self) -> impl Iterator<Item = &mut (ValueId, Type)> {
+    pub fn get_parameters_mut(&mut self) -> impl Iterator<Item = &mut (ValueId, Ty)> {
         self.parameters.iter_mut()
     }
 
-    pub fn take_parameters(&mut self) -> Vec<(ValueId, Type)> {
+    pub fn take_parameters(&mut self) -> Vec<(ValueId, Ty)> {
         std::mem::take(&mut self.parameters)
     }
 
-    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Type)>) {
+    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Ty)>) {
         self.parameters = parameters;
     }
 
@@ -1157,15 +1118,15 @@ impl Block {
         self.parameters.iter().map(|(id, _)| id)
     }
 
-    pub fn get_instruction(&self, i: usize) -> &OpCode {
+    pub fn get_instruction(&self, i: usize) -> &Op {
         &self.instructions[i]
     }
 
-    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &OpCode> {
+    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &Op> {
         self.instructions.iter()
     }
 
-    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut OpCode> {
+    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut Op> {
         self.instructions.iter_mut()
     }
 
@@ -1408,6 +1369,7 @@ pub enum OpCode {
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
+        pinned: bool,
     },
     FreshWitness {
         result: ValueId,
@@ -1472,18 +1434,35 @@ pub enum OpCode {
     DropGlobal {
         global: usize,
     },
+    Const {
+        result: ValueId,
+        value: ConstValue,
+    },
 }
 
-impl OpCode {
-    fn to_string(&self, ssa: &SSA, value_annotator: &LocalFunctionAnnotator) -> String {
-        fn annotate(value_annotator: &LocalFunctionAnnotator, value: ValueId) -> String {
-            let annotation = value_annotator.annotate_value(value);
-            if annotation.is_empty() {
-                "".to_string()
-            } else {
-                format!("[{}]", annotation)
-            }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConstValue {
+    U(usize, u128),
+    Field(ark_bn254::Fr),
+    FnPtr(FunctionId),
+}
+
+impl Instruction for OpCode {
+    fn get_static_call_targets(&self) -> Vec<FunctionId> {
+        match self {
+            OpCode::Call {
+                function: CallTarget::Static(id),
+                ..
+            } => vec![*id],
+            _ => vec![],
         }
+    }
+
+    fn display_instruction(
+        &self,
+        func_name: &dyn Fn(FunctionId) -> String,
+        annotate_value: &dyn Fn(ValueId) -> String,
+    ) -> String {
         match self {
             OpCode::Cmp {
                 kind,
@@ -1498,7 +1477,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{} {} v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     lhs.0,
                     op_str,
                     rhs.0
@@ -1520,7 +1499,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{} {} v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     lhs.0,
                     op_str,
                     rhs.0
@@ -1529,25 +1508,12 @@ impl OpCode {
             OpCode::Alloc {
                 result,
                 elem_type: typ,
-            } => format!(
-                "v{}{} = alloc({})",
-                result.0,
-                annotate(value_annotator, *result),
-                typ
-            ),
-            OpCode::Store { ptr, value } => format!(
-                "*v{}{} = v{}",
-                ptr.0,
-                annotate(value_annotator, *ptr),
-                value.0
-            ),
+            } => format!("v{}{} = alloc({})", result.0, annotate_value(*result), typ),
+            OpCode::Store { ptr, value } => {
+                format!("*v{}{} = v{}", ptr.0, annotate_value(*ptr), value.0)
+            }
             OpCode::Load { result, ptr } => {
-                format!(
-                    "v{}{} = *v{}",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    ptr.0
-                )
+                format!("v{}{} = *v{}", result.0, annotate_value(*result), ptr.0)
             }
             OpCode::AssertEq { lhs, rhs } => format!("assert v{} == v{}", lhs.0, rhs.0),
             OpCode::AssertR1C {
@@ -1565,14 +1531,14 @@ impl OpCode {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
                     .iter()
-                    .map(|v| format!("v{}{}", v.0, annotate(value_annotator, *v)))
+                    .map(|v| format!("v{}{}", v.0, annotate_value(*v)))
                     .join(", ");
                 match function {
                     CallTarget::Static(fn_id) => {
                         format!(
                             "{} = call {}@{}({})",
                             result_str,
-                            ssa.get_function(*fn_id).get_name(),
+                            func_name(*fn_id),
                             fn_id.0,
                             args_str
                         )
@@ -1590,7 +1556,7 @@ impl OpCode {
                 format!(
                     "v{}{} = v{}[v{}]",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     array.0,
                     index.0
                 )
@@ -1604,7 +1570,7 @@ impl OpCode {
                 format!(
                     "v{}{} = (v{}[v{}] = v{})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     array.0,
                     index.0,
                     element.0
@@ -1624,7 +1590,7 @@ impl OpCode {
                 format!(
                     "v{}{} = slice_push_{}(v{}, [{}])",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     dir_str,
                     slice.0,
                     values_str
@@ -1634,7 +1600,7 @@ impl OpCode {
                 format!(
                     "v{}{} = slice_len(v{})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     slice.0
                 )
             }
@@ -1647,19 +1613,24 @@ impl OpCode {
                 format!(
                     "v{}{} = v{} ? v{} : v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     cond.0,
                     then.0,
                     otherwise.0
                 )
             }
-            OpCode::WriteWitness { result, value } => {
+            OpCode::WriteWitness {
+                result,
+                value,
+                pinned,
+            } => {
                 let r_str = if let Some(result) = result {
-                    format!("v{}{} = ", result.0, annotate(value_annotator, *result))
+                    format!("v{}{} = ", result.0, annotate_value(*result))
                 } else {
                     "".to_string()
                 };
-                format!("{}write_witness(v{})", r_str, value.0)
+                let pinned_str = if *pinned { " [pinned]" } else { "" };
+                format!("{}write_witness(v{}){}", r_str, value.0, pinned_str)
             }
             OpCode::FreshWitness {
                 result,
@@ -1668,7 +1639,7 @@ impl OpCode {
                 format!(
                     "v{}{} = fresh_witness(): {}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     typ
                 )
             }
@@ -1693,11 +1664,7 @@ impl OpCode {
                 )
             }
             OpCode::NextDCoeff { result } => {
-                format!(
-                    "v{}{} = next_d_coeff()",
-                    result.0,
-                    annotate(value_annotator, *result)
-                )
+                format!("v{}{} = next_d_coeff()", result.0, annotate_value(*result))
             }
             OpCode::BumpD {
                 matrix,
@@ -1738,7 +1705,7 @@ impl OpCode {
                 format!(
                     "v{}{} = [{}] : {} of {}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     values_str,
                     seq_type,
                     typ
@@ -1752,7 +1719,7 @@ impl OpCode {
                 format!(
                     "v{}{} = cast v{} to {}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     target
                 )
@@ -1766,25 +1733,20 @@ impl OpCode {
                 format!(
                     "v{}{} = truncate v{} from {} bits to {} bits",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     in_bits,
                     out_bits
                 )
             }
             OpCode::Not { result, value } => {
-                format!(
-                    "v{}{} = ~v{}",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    value.0
-                )
+                format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
             OpCode::ValueOf { result, value } => {
                 format!(
                     "v{}{} = value_of v{}",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0
                 )
             }
@@ -1797,7 +1759,7 @@ impl OpCode {
                 format!(
                     "v{}{} = to_bits v{} (endianness: {}, size: {})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     endianness,
                     output_size
@@ -1817,7 +1779,7 @@ impl OpCode {
                 format!(
                     "v{}{} = to_radix v{} {} (endianness: {}, size: {})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     value.0,
                     radix_str,
                     endianness,
@@ -1839,7 +1801,7 @@ impl OpCode {
                 format!(
                     "v{}{} = mul_const(v{}, v{})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     constant.0,
                     var.0
                 )
@@ -1858,7 +1820,7 @@ impl OpCode {
                 format!(
                     "v{}{} = read_global(g{}, {})",
                     result.0,
-                    annotate(value_annotator, *result),
+                    annotate_value(*result),
                     index,
                     typ
                 )
@@ -1868,7 +1830,7 @@ impl OpCode {
                     format!(
                         "v{}{} = v{}.v{}",
                         result.0,
-                        annotate(value_annotator, *result),
+                        annotate_value(*result),
                         tuple.0,
                         idx.0
                     )
@@ -1877,7 +1839,7 @@ impl OpCode {
                     format!(
                         "v{}{} = v{}.{}",
                         result.0,
-                        annotate(value_annotator, *result),
+                        annotate_value(*result),
                         tuple.0,
                         val
                     )
@@ -1889,12 +1851,7 @@ impl OpCode {
                 element_types: _,
             } => {
                 let elems_str = elems.iter().map(|v| format!("v{}", v.0)).join(", ");
-                format!(
-                    "v{}{} = ({})",
-                    result.0,
-                    annotate(value_annotator, *result),
-                    elems_str
-                )
+                format!("v{}{} = ({})", result.0, annotate_value(*result), elems_str)
             }
             OpCode::Todo {
                 payload,
@@ -1914,213 +1871,38 @@ impl OpCode {
             OpCode::DropGlobal { global } => {
                 format!("drop_global({})", global)
             }
-        }
-    }
-}
-
-impl OpCode {
-    pub fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
-        match self {
-            Self::Alloc {
-                result: r,
-                elem_type: _,
-            }
-            | Self::MemOp { kind: _, value: r }
-            | Self::FreshWitness {
-                result: r,
-                result_type: _,
-            }
-            | Self::NextDCoeff { result: r } => vec![r].into_iter(),
-            Self::Cmp {
-                kind: _,
-                result: a,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::BinaryArithOp {
-                kind: _,
-                result: a,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::ArrayGet {
-                result: a,
-                array: b,
-                index: c,
-            }
-            | Self::MulConst {
-                result: a,
-                const_val: b,
-                var: c,
-            } => vec![a, b, c].into_iter(),
-            Self::Cast {
-                result: a,
-                value: b,
-                target: _,
-            } => vec![a, b].into_iter(),
-            Self::Truncate {
-                result: a,
-                value: b,
-                to_bits: _,
-                from_bits: _,
-            } => vec![a, b].into_iter(),
-            Self::ArraySet {
-                result: a,
-                array: b,
-                index: c,
-                value: d,
-            } => vec![a, b, c, d].into_iter(),
-            Self::SlicePush {
-                dir: _,
-                result: a,
-                slice: b,
-                values: c,
-            } => {
-                let mut ret_vec = vec![a, b];
-                let values_vec = c.iter_mut().collect::<Vec<_>>();
-                ret_vec.extend(values_vec);
-                ret_vec.into_iter()
-            }
-            Self::SliceLen {
-                result: a,
-                slice: b,
-            } => vec![a, b].into_iter(),
-            Self::AssertR1C { a, b, c } | Self::Constrain { a, b, c } => vec![a, b, c].into_iter(),
-            Self::Store { ptr: a, value: b }
-            | Self::Load { result: a, ptr: b }
-            | Self::AssertEq { lhs: a, rhs: b }
-            | Self::BumpD {
-                matrix: _,
-                variable: a,
-                sensitivity: b,
-            } => vec![a, b].into_iter(),
-            Self::WriteWitness {
-                result: a,
-                value: b,
-            } => {
-                let mut ret_vec = a.iter_mut().collect::<Vec<_>>();
-                ret_vec.push(b);
-                ret_vec.into_iter()
-            }
-            Self::Call {
-                results: r,
-                function,
-                args: a,
-            } => {
-                let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
-                if let CallTarget::Dynamic(fn_ptr) = function {
-                    ret_vec.push(fn_ptr);
+            OpCode::Const { result, value } => match value {
+                ConstValue::U(size, val) => {
+                    format!(
+                        "v{}{} = u_const({}, {})",
+                        result.0,
+                        annotate_value(*result),
+                        size,
+                        val
+                    )
                 }
-                let args_vec = a.iter_mut().collect::<Vec<_>>();
-                ret_vec.extend(args_vec);
-                ret_vec.into_iter()
-            }
-            Self::Lookup {
-                target,
-                keys,
-                results,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-            } => {
-                let mut ret_vec = vec![];
-                match target {
-                    LookupTarget::Rangecheck(_) => {}
-                    LookupTarget::DynRangecheck(v) => {
-                        ret_vec.push(v);
-                    }
-                    LookupTarget::Array(arr) => {
-                        ret_vec.push(arr);
-                    }
+                ConstValue::Field(val) => {
+                    format!(
+                        "v{}{} = field_const({})",
+                        result.0,
+                        annotate_value(*result),
+                        val
+                    )
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
-                ret_vec.into_iter()
-            }
-            Self::MkSeq {
-                result: r,
-                elems: inputs,
-                seq_type: _,
-                elem_type: _,
-            } => {
-                let mut ret_vec = vec![r];
-                ret_vec.extend(inputs);
-                ret_vec.into_iter()
-            }
-            Self::Select {
-                result: a,
-                cond: b,
-                if_t: c,
-                if_f: d,
-            } => vec![a, b, c, d].into_iter(),
-            Self::Not {
-                result: r,
-                value: v,
-            }
-            | Self::ValueOf {
-                result: r,
-                value: v,
-            } => vec![r, v].into_iter(),
-            Self::ToBits {
-                result: r,
-                value: v,
-                endianness: _,
-                count: _,
-            } => vec![r, v].into_iter(),
-            Self::ToRadix {
-                result: r,
-                value: v,
-                radix,
-                endianness: _,
-                count: _,
-            } => {
-                let mut ret_vec = vec![r, v];
-                match radix {
-                    Radix::Bytes => {}
-                    Radix::Dyn(radix) => {
-                        ret_vec.push(radix);
-                    }
+                ConstValue::FnPtr(fn_id) => {
+                    format!(
+                        "v{}{} = fn_ptr_const({}@{})",
+                        result.0,
+                        annotate_value(*result),
+                        func_name(*fn_id),
+                        fn_id.0
+                    )
                 }
-                ret_vec.into_iter()
-            }
-            Self::Rangecheck {
-                value: val,
-                max_bits: _,
-            } => vec![val].into_iter(),
-            Self::ReadGlobal {
-                result: r,
-                offset: _,
-                result_type: _,
-            } => vec![r].into_iter(),
-            Self::TupleProj {
-                result: r,
-                tuple: t,
-                idx: _,
-            } => vec![r, t].into_iter(),
-            OpCode::MkTuple {
-                result: r,
-                elems: e,
-                element_types: _,
-            } => {
-                let mut ret_vec = vec![r];
-                ret_vec.extend(e);
-                ret_vec.into_iter()
-            }
-            Self::Todo { results, .. } => {
-                let ret_vec: Vec<&mut ValueId> = results.iter_mut().collect();
-                ret_vec.into_iter()
-            }
-            Self::InitGlobal {
-                global: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::DropGlobal { global: _ } => vec![].into_iter(),
+            },
         }
     }
 
-    pub fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+    fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             Self::Alloc {
                 result: _,
@@ -2130,193 +1912,8 @@ impl OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
-            Self::Cmp {
-                kind: _,
-                result: _,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::BinaryArithOp {
-                kind: _,
-                result: _,
-                lhs: b,
-                rhs: c,
-            }
-            | Self::ArrayGet {
-                result: _,
-                array: b,
-                index: c,
-            }
-            | Self::MulConst {
-                result: _,
-                const_val: b,
-                var: c,
-            } => vec![b, c].into_iter(),
-            Self::ArraySet {
-                result: _,
-                array: b,
-                index: c,
-                value: d,
-            } => vec![b, c, d].into_iter(),
-            Self::SlicePush {
-                dir: _,
-                result: _,
-                slice: b,
-                values: c,
-            } => {
-                let mut ret_vec = vec![b];
-                let values_vec: Vec<&mut ValueId> = c.iter_mut().collect();
-                ret_vec.extend(values_vec);
-                ret_vec.into_iter()
-            }
-            Self::SliceLen {
-                result: _,
-                slice: b,
-            } => vec![b].into_iter(),
-            Self::AssertEq { lhs: b, rhs: c }
-            | Self::Store { ptr: b, value: c }
-            | Self::BumpD {
-                matrix: _,
-                variable: b,
-                sensitivity: c,
-            } => vec![b, c].into_iter(),
-            Self::Load { result: _, ptr: c }
-            | Self::WriteWitness {
-                result: _,
-                value: c,
-            }
-            | Self::Cast {
-                result: _,
-                value: c,
-                target: _,
-            }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            } => vec![c].into_iter(),
-            Self::Call {
-                results: _,
-                function,
-                args: a,
-            } => {
-                let mut ret_vec = Vec::new();
-                if let CallTarget::Dynamic(fn_ptr) = function {
-                    ret_vec.push(fn_ptr);
-                }
-                ret_vec.extend(a.iter_mut());
-                ret_vec.into_iter()
-            }
-            Self::MkSeq {
-                result: _,
-                elems: inputs,
-                seq_type: _,
-                elem_type: _,
-            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
-            Self::MkTuple {
-                result: _,
-                elems: inputs,
-                element_types: _,
-            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
-            Self::Select {
-                result: _,
-                cond: b,
-                if_t: c,
-                if_f: d,
-            }
-            | Self::AssertR1C { a: b, b: c, c: d }
-            | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
-            Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
-                result: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::ToBits {
-                result: _,
-                value: v,
-                endianness: _,
-                count: _,
-            } => vec![v].into_iter(),
-            Self::ToRadix {
-                result: _,
-                value: v,
-                radix,
-                endianness: _,
-                count: _,
-            } => {
-                let mut ret_vec = vec![v];
-                match radix {
-                    Radix::Bytes => {}
-                    Radix::Dyn(radix) => {
-                        ret_vec.push(radix);
-                    }
-                }
-                ret_vec.into_iter()
-            }
-            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
-            Self::Rangecheck {
-                value: val,
-                max_bits: _,
-            } => vec![val].into_iter(),
-            Self::ReadGlobal {
-                result: _,
-                offset: _,
-                result_type: _,
-            } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                keys,
-                results,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-            } => {
-                let mut ret_vec = vec![];
-                match target {
-                    LookupTarget::Rangecheck(_) => {}
-                    LookupTarget::DynRangecheck(v) => {
-                        ret_vec.push(v);
-                    }
-                    LookupTarget::Array(arr) => {
-                        ret_vec.push(arr);
-                    }
-                }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
-                ret_vec.into_iter()
-            }
-            Self::TupleProj {
-                result: _,
-                tuple,
-                idx: _,
-            } => vec![tuple].into_iter(),
-            Self::Todo { .. } => vec![].into_iter(),
-            Self::InitGlobal {
-                global: _,
-                value: v,
-            } => vec![v].into_iter(),
-            Self::DropGlobal { global: _ } => vec![].into_iter(),
-        }
-    }
-
-    pub fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
-        match self {
-            Self::Alloc {
-                result: _,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
-                result: _,
-                result_type: _,
-            }
-            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ }
+            | Self::Const { .. } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -2370,6 +1967,7 @@ impl OpCode {
             | Self::WriteWitness {
                 result: _,
                 value: c,
+                pinned: _,
             }
             | Self::Cast {
                 result: _,
@@ -2494,7 +2092,7 @@ impl OpCode {
         }
     }
 
-    pub fn get_results(&self) -> impl Iterator<Item = &ValueId> {
+    fn get_results(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             Self::Alloc {
                 result: r,
@@ -2504,6 +2102,7 @@ impl OpCode {
                 result: r,
                 result_type: _,
             }
+            | Self::Const { result: r, .. }
             | Self::Cmp {
                 kind: _,
                 result: r,
@@ -2580,6 +2179,7 @@ impl OpCode {
             Self::WriteWitness {
                 result: r,
                 value: _,
+                pinned: _,
             } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
                 ret_vec.into_iter()
@@ -2641,7 +2241,399 @@ impl OpCode {
             Self::DropGlobal { global: _ } => vec![].into_iter(),
         }
     }
+
+    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        match self {
+            Self::Alloc {
+                result: _,
+                elem_type: _,
+            }
+            | Self::FreshWitness {
+                result: _,
+                result_type: _,
+            }
+            | Self::NextDCoeff { result: _ }
+            | Self::Const { .. } => vec![].into_iter(),
+            Self::Cmp {
+                kind: _,
+                result: _,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::BinaryArithOp {
+                kind: _,
+                result: _,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::ArrayGet {
+                result: _,
+                array: b,
+                index: c,
+            }
+            | Self::MulConst {
+                result: _,
+                const_val: b,
+                var: c,
+            } => vec![b, c].into_iter(),
+            Self::ArraySet {
+                result: _,
+                array: b,
+                index: c,
+                value: d,
+            } => vec![b, c, d].into_iter(),
+            Self::SlicePush {
+                dir: _,
+                result: _,
+                slice: b,
+                values: c,
+            } => {
+                let mut ret_vec = vec![b];
+                let values_vec: Vec<&mut ValueId> = c.iter_mut().collect();
+                ret_vec.extend(values_vec);
+                ret_vec.into_iter()
+            }
+            Self::SliceLen {
+                result: _,
+                slice: b,
+            } => vec![b].into_iter(),
+            Self::AssertEq { lhs: b, rhs: c }
+            | Self::Store { ptr: b, value: c }
+            | Self::BumpD {
+                matrix: _,
+                variable: b,
+                sensitivity: c,
+            } => vec![b, c].into_iter(),
+            Self::Load { result: _, ptr: c }
+            | Self::WriteWitness {
+                result: _,
+                value: c,
+                pinned: _,
+            }
+            | Self::Cast {
+                result: _,
+                value: c,
+                target: _,
+            }
+            | Self::Truncate {
+                result: _,
+                value: c,
+                to_bits: _,
+                from_bits: _,
+            } => vec![c].into_iter(),
+            Self::Call {
+                results: _,
+                function,
+                args: a,
+            } => {
+                let mut ret_vec = Vec::new();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                ret_vec.extend(a.iter_mut());
+                ret_vec.into_iter()
+            }
+            Self::MkSeq {
+                result: _,
+                elems: inputs,
+                seq_type: _,
+                elem_type: _,
+            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::MkTuple {
+                result: _,
+                elems: inputs,
+                element_types: _,
+            } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::Select {
+                result: _,
+                cond: b,
+                if_t: c,
+                if_f: d,
+            }
+            | Self::AssertR1C { a: b, b: c, c: d }
+            | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
+            Self::Not {
+                result: _,
+                value: v,
+            }
+            | Self::ValueOf {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::ToBits {
+                result: _,
+                value: v,
+                endianness: _,
+                count: _,
+            } => vec![v].into_iter(),
+            Self::ToRadix {
+                result: _,
+                value: v,
+                radix,
+                endianness: _,
+                count: _,
+            } => {
+                let mut ret_vec = vec![v];
+                match radix {
+                    Radix::Bytes => {}
+                    Radix::Dyn(radix) => {
+                        ret_vec.push(radix);
+                    }
+                }
+                ret_vec.into_iter()
+            }
+            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
+            Self::Rangecheck {
+                value: val,
+                max_bits: _,
+            } => vec![val].into_iter(),
+            Self::ReadGlobal {
+                result: _,
+                offset: _,
+                result_type: _,
+            } => vec![].into_iter(),
+            Self::Lookup {
+                target,
+                keys,
+                results,
+            }
+            | Self::DLookup {
+                target,
+                keys,
+                results,
+            } => {
+                let mut ret_vec = vec![];
+                match target {
+                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::DynRangecheck(v) => {
+                        ret_vec.push(v);
+                    }
+                    LookupTarget::Array(arr) => {
+                        ret_vec.push(arr);
+                    }
+                }
+                ret_vec.extend(keys);
+                ret_vec.extend(results);
+                ret_vec.into_iter()
+            }
+            Self::TupleProj {
+                result: _,
+                tuple,
+                idx: _,
+            } => vec![tuple].into_iter(),
+            Self::Todo { .. } => vec![].into_iter(),
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
+        }
+    }
+
+    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        match self {
+            Self::Alloc {
+                result: r,
+                elem_type: _,
+            }
+            | Self::MemOp { kind: _, value: r }
+            | Self::FreshWitness {
+                result: r,
+                result_type: _,
+            }
+            | Self::NextDCoeff { result: r }
+            | Self::Const { result: r, .. } => vec![r].into_iter(),
+            Self::Cmp {
+                kind: _,
+                result: a,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::BinaryArithOp {
+                kind: _,
+                result: a,
+                lhs: b,
+                rhs: c,
+            }
+            | Self::ArrayGet {
+                result: a,
+                array: b,
+                index: c,
+            }
+            | Self::MulConst {
+                result: a,
+                const_val: b,
+                var: c,
+            } => vec![a, b, c].into_iter(),
+            Self::Cast {
+                result: a,
+                value: b,
+                target: _,
+            } => vec![a, b].into_iter(),
+            Self::Truncate {
+                result: a,
+                value: b,
+                to_bits: _,
+                from_bits: _,
+            } => vec![a, b].into_iter(),
+            Self::ArraySet {
+                result: a,
+                array: b,
+                index: c,
+                value: d,
+            } => vec![a, b, c, d].into_iter(),
+            Self::SlicePush {
+                dir: _,
+                result: a,
+                slice: b,
+                values: c,
+            } => {
+                let mut ret_vec = vec![a, b];
+                let values_vec = c.iter_mut().collect::<Vec<_>>();
+                ret_vec.extend(values_vec);
+                ret_vec.into_iter()
+            }
+            Self::SliceLen {
+                result: a,
+                slice: b,
+            } => vec![a, b].into_iter(),
+            Self::AssertR1C { a, b, c } | Self::Constrain { a, b, c } => vec![a, b, c].into_iter(),
+            Self::Store { ptr: a, value: b }
+            | Self::Load { result: a, ptr: b }
+            | Self::AssertEq { lhs: a, rhs: b }
+            | Self::BumpD {
+                matrix: _,
+                variable: a,
+                sensitivity: b,
+            } => vec![a, b].into_iter(),
+            Self::WriteWitness {
+                result: a,
+                value: b,
+                pinned: _,
+            } => {
+                let mut ret_vec = a.iter_mut().collect::<Vec<_>>();
+                ret_vec.push(b);
+                ret_vec.into_iter()
+            }
+            Self::Call {
+                results: r,
+                function,
+                args: a,
+            } => {
+                let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
+                if let CallTarget::Dynamic(fn_ptr) = function {
+                    ret_vec.push(fn_ptr);
+                }
+                let args_vec = a.iter_mut().collect::<Vec<_>>();
+                ret_vec.extend(args_vec);
+                ret_vec.into_iter()
+            }
+            Self::Lookup {
+                target,
+                keys,
+                results,
+            }
+            | Self::DLookup {
+                target,
+                keys,
+                results,
+            } => {
+                let mut ret_vec = vec![];
+                match target {
+                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::DynRangecheck(v) => {
+                        ret_vec.push(v);
+                    }
+                    LookupTarget::Array(arr) => {
+                        ret_vec.push(arr);
+                    }
+                }
+                ret_vec.extend(keys);
+                ret_vec.extend(results);
+                ret_vec.into_iter()
+            }
+            Self::MkSeq {
+                result: r,
+                elems: inputs,
+                seq_type: _,
+                elem_type: _,
+            } => {
+                let mut ret_vec = vec![r];
+                ret_vec.extend(inputs);
+                ret_vec.into_iter()
+            }
+            Self::Select {
+                result: a,
+                cond: b,
+                if_t: c,
+                if_f: d,
+            } => vec![a, b, c, d].into_iter(),
+            Self::Not {
+                result: r,
+                value: v,
+            }
+            | Self::ValueOf {
+                result: r,
+                value: v,
+            } => vec![r, v].into_iter(),
+            Self::ToBits {
+                result: r,
+                value: v,
+                endianness: _,
+                count: _,
+            } => vec![r, v].into_iter(),
+            Self::ToRadix {
+                result: r,
+                value: v,
+                radix,
+                endianness: _,
+                count: _,
+            } => {
+                let mut ret_vec = vec![r, v];
+                match radix {
+                    Radix::Bytes => {}
+                    Radix::Dyn(radix) => {
+                        ret_vec.push(radix);
+                    }
+                }
+                ret_vec.into_iter()
+            }
+            Self::Rangecheck {
+                value: val,
+                max_bits: _,
+            } => vec![val].into_iter(),
+            Self::ReadGlobal {
+                result: r,
+                offset: _,
+                result_type: _,
+            } => vec![r].into_iter(),
+            Self::TupleProj {
+                result: r,
+                tuple: t,
+                idx: _,
+            } => vec![r, t].into_iter(),
+            OpCode::MkTuple {
+                result: r,
+                elems: e,
+                element_types: _,
+            } => {
+                let mut ret_vec = vec![r];
+                ret_vec.extend(e);
+                ret_vec.into_iter()
+            }
+            Self::Todo { results, .. } => {
+                let ret_vec: Vec<&mut ValueId> = results.iter_mut().collect();
+                ret_vec.into_iter()
+            }
+            Self::InitGlobal {
+                global: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
+        }
+    }
 }
+
 #[derive(Debug, Clone)]
 pub enum Terminator {
     Jmp(BlockId, Vec<ValueId>),
@@ -2691,6 +2683,15 @@ impl OpCode {
         OpCode::WriteWitness {
             result: Some(result),
             value: value_id,
+            pinned: false,
+        }
+    }
+
+    pub fn mk_pinned_write_witness(result: ValueId, value_id: ValueId) -> OpCode {
+        OpCode::WriteWitness {
+            result: Some(result),
+            value: value_id,
+            pinned: true,
         }
     }
 
@@ -2794,6 +2795,27 @@ impl OpCode {
             result,
             lhs,
             rhs,
+        }
+    }
+
+    pub fn mk_u_const(result: ValueId, size: usize, value: u128) -> OpCode {
+        OpCode::Const {
+            result,
+            value: ConstValue::U(size, value),
+        }
+    }
+
+    pub fn mk_field_const(result: ValueId, value: ark_bn254::Fr) -> OpCode {
+        OpCode::Const {
+            result,
+            value: ConstValue::Field(value),
+        }
+    }
+
+    pub fn mk_fn_ptr_const(result: ValueId, fn_id: FunctionId) -> OpCode {
+        OpCode::Const {
+            result,
+            value: ConstValue::FnPtr(fn_id),
         }
     }
 }

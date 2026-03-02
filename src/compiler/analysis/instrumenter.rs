@@ -12,8 +12,8 @@ use crate::compiler::{
     },
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, MemOp, Radix, SSA, SeqType,
-        SliceOpDir,
+        BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA, MemOp, Radix,
+        SeqType, SliceOpDir,
     },
 };
 
@@ -1033,7 +1033,7 @@ pub struct FunctionSignature {
 }
 
 impl FunctionSignature {
-    pub fn pretty_print(&self, ssa: &SSA, all_params: bool) -> String {
+    pub fn pretty_print(&self, ssa: &HLSSA, all_params: bool) -> String {
         let fn_body = ssa.get_function(self.id);
         let name = fn_body.get_name();
         let params = self
@@ -1290,7 +1290,7 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn pretty_print(&self, ssa: &SSA) -> String {
+    pub fn pretty_print(&self, ssa: &HLSSA) -> String {
         let mut r = String::new();
         r += &format!("Total constraints: {}\n", self.total_constraints);
         r += &format!(
@@ -1375,7 +1375,7 @@ impl CostAnalysis {
         self.functions
     }
 
-    pub fn pretty_print(&self, ssa: &SSA) -> String {
+    pub fn pretty_print(&self, ssa: &HLSSA) -> String {
         let mut r = String::new();
         for (sig, cost) in self.functions.iter() {
             r += &format!("Function {}\n", sig.pretty_print(ssa, false));
@@ -1438,7 +1438,7 @@ impl CostEstimator {
     }
 
     #[instrument(skip_all, name = "CostEstimator::run")]
-    pub fn run(&self, ssa: &SSA, type_info: &TypeInfo) -> CostAnalysis {
+    pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
             functions: HashMap::new(),
@@ -1454,7 +1454,7 @@ impl CostEstimator {
 
     fn run_fn_from_signature(
         &self,
-        ssa: &SSA,
+        ssa: &HLSSA,
         type_info: &TypeInfo,
         sig: FunctionSignature,
         costs: &mut CostAnalysis,
@@ -1496,7 +1496,7 @@ impl CostEstimator {
         }
     }
 
-    fn make_main_sig(&self, ssa: &SSA) -> FunctionSignature {
+    fn make_main_sig(&self, ssa: &HLSSA) -> FunctionSignature {
         let id = ssa.get_main_id();
         let main_fn = ssa.get_function(id);
         let params = main_fn.get_param_types();
@@ -1505,5 +1505,20 @@ impl CostEstimator {
             .map(|param| self.type_to_unknown_sig(param))
             .collect();
         FunctionSignature { id, params }
+    }
+}
+
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
+
+impl Analysis for Summary {
+    fn dependencies() -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
+    }
+
+    fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
+        let type_info = store.get::<TypeInfo>();
+        let cost_estimator = CostEstimator::new();
+        let cost_analysis = cost_estimator.run(ssa, type_info);
+        cost_analysis.summarize()
     }
 }

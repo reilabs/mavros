@@ -6,7 +6,10 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
-    ssa::{CallTarget, CastTarget, Const, Function, FunctionId, OpCode, SSA, TupleIdx, ValueId},
+    ssa::{
+        CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx,
+        ValueId,
+    },
 };
 
 pub struct TypeInfo {
@@ -40,7 +43,7 @@ impl Types {
         Types {}
     }
 
-    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis) -> TypeInfo {
+    pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis) -> TypeInfo {
         let mut type_info = TypeInfo {
             functions: HashMap::new(),
         };
@@ -61,32 +64,13 @@ impl Types {
     #[instrument(skip_all, level = Level::DEBUG, name = "Types::run_function", fields(function = function.get_name()))]
     fn run_function(
         &self,
-        function: &Function,
+        function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
         cfg: &CFG,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
             values: HashMap::new(),
         };
-
-        for (value_id, const_) in function.iter_consts() {
-            match const_ {
-                Const::U(size, _) => {
-                    function_info.values.insert(*value_id, Type::u(*size));
-                }
-                Const::Field(_) => {
-                    function_info.values.insert(*value_id, Type::field());
-                }
-                Const::Witness(_) => {
-                    function_info
-                        .values
-                        .insert(*value_id, Type::witness_of(Type::field()));
-                }
-                Const::FnPtr(_) => {
-                    function_info.values.insert(*value_id, Type::function());
-                }
-            }
-        }
 
         for block_id in cfg.get_domination_pre_order() {
             let block = function.get_block(block_id);
@@ -308,7 +292,7 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::WriteWitness { result, value } => {
+            OpCode::WriteWitness { result, value, .. } => {
                 let Some(result) = result else {
                     return Ok(());
                 };
@@ -543,6 +527,28 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
+            OpCode::Const { result, value } => {
+                let ty = match value {
+                    ConstValue::U(size, _) => Type::u(*size),
+                    ConstValue::Field(_) => Type::field(),
+                    ConstValue::FnPtr(_) => Type::function(),
+                };
+                function_info.values.insert(*result, ty);
+                Ok(())
+            }
         }
+    }
+}
+
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
+
+impl Analysis for TypeInfo {
+    fn dependencies() -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
+        let cfg = store.get::<FlowAnalysis>();
+        Types::new().run(ssa, cfg)
     }
 }

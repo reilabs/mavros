@@ -1,26 +1,27 @@
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::Pass,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BlockId, SSA, Terminator, ValueId},
+    ssa::{BlockId, HLSSA, OpCode, Terminator, ValueId},
 };
 
 pub struct ConditionPropagation {}
 
 impl Pass for ConditionPropagation {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg());
+    fn name(&self) -> &'static str {
+        "condition_propagation"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "condition_propagation",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
+    }
+
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
@@ -29,7 +30,7 @@ impl ConditionPropagation {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let mut replaces: Vec<(BlockId, ValueId, bool)> = vec![];
 
@@ -51,15 +52,21 @@ impl ConditionPropagation {
                     .iter()
                     .filter(|(cond_block, _, _)| cfg.dominates(*cond_block, block_id));
 
+                let mut const_opcodes = Vec::new();
                 for (_, vid, value) in replaces {
-                    let const_id = function.push_u_const(1, if *value { 1 } else { 0 });
+                    let const_id = function.fresh_value();
+                    const_opcodes.push(OpCode::mk_u_const(const_id, 1, if *value { 1 } else { 0 }));
                     replacements.insert(*vid, const_id);
                 }
 
                 let block = function.get_block_mut(block_id);
-                for instruction in block.get_instructions_mut() {
+                let mut instructions = block.take_instructions();
+                let mut new_instructions = const_opcodes;
+                new_instructions.extend(instructions.iter().cloned());
+                for instruction in new_instructions.iter_mut() {
                     replacements.replace_inputs(instruction);
                 }
+                block.put_instructions(new_instructions);
                 replacements.replace_terminator(block.get_terminator_mut());
             }
         }

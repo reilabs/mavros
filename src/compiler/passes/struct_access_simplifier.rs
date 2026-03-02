@@ -2,31 +2,29 @@ use core::panic;
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::value_definitions::ValueDefinition,
-    pass_manager::{DataPoint, Pass},
-    ssa::{BinaryArithOpKind, Const, OpCode, TupleIdx},
+    analysis::value_definitions::{ValueDefinition, ValueDefinitions},
+    flow_analysis::FlowAnalysis,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    ssa::{BinaryArithOpKind, ConstValue, OpCode, TupleIdx},
 };
 
 pub struct MakeStructAccessStatic {}
 
 impl Pass for MakeStructAccessStatic {
-    fn run(
-        &self,
-        ssa: &mut crate::compiler::ssa::SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
-        self.do_run(ssa, pass_manager.get_value_definitions());
+    fn name(&self) -> &'static str {
+        "make_struct_access_static"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "make_struct_access_static",
-            needs: vec![DataPoint::ValueDefinitions],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![ValueDefinitions::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<ValueDefinitions>());
+    }
+
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
@@ -37,7 +35,7 @@ impl MakeStructAccessStatic {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA,
+        ssa: &mut crate::compiler::ssa::HLSSA,
         value_definitions: &crate::compiler::analysis::value_definitions::ValueDefinitions,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
@@ -100,9 +98,23 @@ impl MakeStructAccessStatic {
                                             let strides_match =
                                                 match (mul_stride_def, div_stride_def) {
                                                     (
-                                                        ValueDefinition::Const(mul_const),
-                                                        ValueDefinition::Const(div_const),
-                                                    ) => mul_const == div_const,
+                                                        ValueDefinition::Instruction(
+                                                            _,
+                                                            _,
+                                                            OpCode::Const {
+                                                                value: ConstValue::U(s1, v1),
+                                                                ..
+                                                            },
+                                                        ),
+                                                        ValueDefinition::Instruction(
+                                                            _,
+                                                            _,
+                                                            OpCode::Const {
+                                                                value: ConstValue::U(s2, v2),
+                                                                ..
+                                                            },
+                                                        ),
+                                                    ) => v1 == v2 && s1 == s2,
                                                     _ => false,
                                                 };
                                             if !strides_match {
@@ -136,7 +148,7 @@ impl MakeStructAccessStatic {
                                                             let tuple_field_index_val_id_og_definition =
                                                                 value_definitions
                                                                     .get_definition(*rhs);
-                                                            if let ValueDefinition::Const(Const::U(_sz, val)) = tuple_field_index_val_id_og_definition {
+                                                            if let ValueDefinition::Instruction(_, _, OpCode::Const { value: ConstValue::U(_, val), .. }) = tuple_field_index_val_id_og_definition {
                                                                 new_instructions.push(
                                                                 OpCode::TupleProj {
                                                                     result: item_val_id,
@@ -151,7 +163,14 @@ impl MakeStructAccessStatic {
                                                         ),
                                                     }
                                                 }
-                                                ValueDefinition::Const(Const::U(_, val)) => {
+                                                ValueDefinition::Instruction(
+                                                    _,
+                                                    _,
+                                                    OpCode::Const {
+                                                        value: ConstValue::U(_, val),
+                                                        ..
+                                                    },
+                                                ) => {
                                                     new_instructions.push(OpCode::TupleProj {
                                                         result: item_val_id,
                                                         tuple,

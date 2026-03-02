@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
-    ssa::{BlockId, OpCode, SSA, Terminator, ValueId},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    ssa::{BlockId, HLSSA, Instruction, OpCode, Terminator, ValueId},
 };
 
 pub struct ValueReplacements {
@@ -62,16 +62,16 @@ impl ValueReplacements {
 pub struct FixDoubleJumps {}
 
 impl Pass for FixDoubleJumps {
-    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
-        let flow_analysis = pass_manager.get_cfg();
-        self.do_run(ssa, flow_analysis);
+    fn name(&self) -> &'static str {
+        "fix_double_jumps"
     }
 
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "fix_double_jumps",
-            needs: vec![DataPoint::CFG],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 }
 
@@ -80,7 +80,7 @@ impl FixDoubleJumps {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, flow_analysis: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = flow_analysis.get_function_cfg(*function_id);
             let jumps = cfg.find_redundant_jumps();

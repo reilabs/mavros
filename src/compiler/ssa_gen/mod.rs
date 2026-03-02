@@ -12,7 +12,7 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::ssa::{Function, FunctionId, SSA};
+use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
 
 use expression_converter::ExpressionConverter;
 pub use expression_converter::LowLevelReplacement;
@@ -46,8 +46,8 @@ impl SsaConverter {
     }
 
     /// Convert an entire program to SSA.
-    pub fn convert_program(&mut self, program: &Program) -> SSA {
-        let mut ssa = SSA::new();
+    pub fn convert_program(&mut self, program: &Program) -> HLSSA {
+        let mut ssa = HLSSA::new();
 
         // Phase 1: Register all functions to handle mutual recursion.
         // For each constrained function, also register an unconstrained variant
@@ -171,7 +171,7 @@ impl SsaConverter {
     }
 
     /// Convert globals: assign slot indices, build init/deinit functions.
-    fn convert_globals(&mut self, program: &Program, ssa: &mut SSA) {
+    fn convert_globals(&mut self, program: &Program, ssa: &mut HLSSA) {
         // Assign slot indices
         let mut global_types = Vec::new();
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
@@ -273,13 +273,13 @@ impl SsaConverter {
         ast_func: &AstFunction,
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
-    ) -> Function {
+    ) -> HLFunction {
         let name = if in_unconstrained && !ast_func.unconstrained {
             format!("{}_unconstrained", ast_func.name)
         } else {
             ast_func.name.clone()
         };
-        let mut function = Function::empty(name);
+        let mut function = HLFunction::empty(name);
         let entry_block = function.get_entry_id();
 
         // Add return types
@@ -325,12 +325,12 @@ impl SsaConverter {
     }
 }
 
-impl SSA {
+impl HLSSA {
     /// Create SSA directly from a monomorphized program.
     pub fn from_program(
         program: &Program,
         lowlevel_replacements: HashMap<String, LowLevelReplacement>,
-    ) -> SSA {
+    ) -> HLSSA {
         let mut converter = SsaConverter::new(lowlevel_replacements);
         converter.convert_program(program)
     }

@@ -6,8 +6,8 @@ use crate::{
         flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
-            self, BinaryArithOpKind, Block, BlockId, CmpKind, Const, DMatrix, Endianness, Function,
-            FunctionId, LookupTarget, MemOp, Radix, SSA, Terminator, TupleIdx, ValueId,
+            self, BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId, HLBlock,
+            HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, TupleIdx, ValueId,
         },
     },
     vm::{self, bytecode},
@@ -120,7 +120,7 @@ struct GlobalFrameLayouter {
 }
 
 impl GlobalFrameLayouter {
-    fn new(ssa: &SSA) -> Self {
+    fn new(ssa: &HLSSA) -> Self {
         let global_types = ssa.get_global_types();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
@@ -167,7 +167,7 @@ impl CodeGen {
         Self {}
     }
 
-    pub fn run(&self, ssa: &SSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
+    pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
 
         let function = ssa.get_main();
@@ -228,7 +228,7 @@ impl CodeGen {
 
     fn run_function(
         &self,
-        function: &Function,
+        function: &HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
@@ -240,33 +240,6 @@ impl CodeGen {
         // Entry block params need to be allocated at the beginning of the frame (after return address and return data pointer)
         for (param, tp) in entry.get_parameters() {
             layouter.alloc_value(*param, tp);
-        }
-
-        // Consts get dumped in the first block
-        for (val, constant) in function.iter_consts() {
-            match constant {
-                Const::U(u, v) => emitter.push_op(bytecode::OpCode::MovConst {
-                    res: layouter.alloc_u64(*val, *u),
-                    val: *v as u64,
-                }),
-                Const::Field(v) => {
-                    let start = layouter.alloc_field(*val);
-                    for i in 0..bytecode::LIMBS {
-                        // pushing in montgomery form
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res: start.offset(i as isize),
-                            val: v.0.0[i],
-                        })
-                    }
-                }
-                Const::Witness(v) => {
-                    emitter.push_op(bytecode::OpCode::WitnessRefAlloc {
-                        res: layouter.alloc_ptr(*val),
-                        data: *v,
-                    });
-                }
-                Const::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
-            }
         }
 
         self.run_block_body(
@@ -343,9 +316,9 @@ impl CodeGen {
 
     fn run_block_body(
         &self,
-        _function: &Function,
+        _function: &HLFunction,
         block_id: BlockId,
-        block: &Block,
+        block: &HLBlock,
         type_info: &FunctionTypeInfo,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
@@ -616,6 +589,7 @@ impl CodeGen {
                 ssa::OpCode::WriteWitness {
                     result: None,
                     value: v,
+                    ..
                 } => {
                     emitter.push_op(bytecode::OpCode::WriteWitness {
                         val: layouter.get_value(*v),
@@ -941,6 +915,26 @@ impl CodeGen {
                         size: global_layouter.get_size(global_idx),
                     });
                 }
+                ssa::OpCode::Const { result, value } => match value {
+                    ssa::ConstValue::U(size, val) => {
+                        emitter.push_op(bytecode::OpCode::MovConst {
+                            res: layouter.alloc_u64(*result, *size),
+                            val: *val as u64,
+                        });
+                    }
+                    ssa::ConstValue::Field(val) => {
+                        let start = layouter.alloc_field(*result);
+                        for i in 0..bytecode::LIMBS {
+                            emitter.push_op(bytecode::OpCode::MovConst {
+                                res: start.offset(i as isize),
+                                val: val.0.0[i],
+                            })
+                        }
+                    }
+                    ssa::ConstValue::FnPtr(_) => {
+                        panic!("FnPtr constants not supported in codegen");
+                    }
+                },
                 other => panic!("Unsupported instruction: {:?}", other),
             }
         }

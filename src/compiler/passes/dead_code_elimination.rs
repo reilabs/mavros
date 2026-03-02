@@ -2,8 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    pass_manager::Pass,
-    ssa::{BlockId, Function, OpCode, SSA, Terminator, ValueId},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    ssa::{
+        BlockId, CallTarget, FunctionId, HLFunction, HLSSA, Instruction, OpCode, Terminator,
+        ValueId,
+    },
 };
 
 pub struct DCE {
@@ -12,15 +15,15 @@ pub struct DCE {
 
 #[derive(Debug)]
 enum WorkItem {
-    LiveBlock(BlockId),
-    LiveValue(ValueId),
-    LiveInstruction(BlockId, usize),
+    LiveBlock(FunctionId, BlockId),
+    LiveValue(FunctionId, ValueId),
+    LiveInstruction(FunctionId, BlockId, usize),
+    LiveReturnSlot(FunctionId, usize),
 }
 
 enum ValueDefinition {
     Param(BlockId, usize),
     Instruction(BlockId, usize),
-    Const(ValueId),
 }
 
 pub struct Config {
@@ -55,15 +58,16 @@ impl Config {
 }
 
 impl Pass for DCE {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg());
+    fn name(&self) -> &'static str {
+        "dce"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "dce",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 }
 
@@ -72,108 +76,111 @@ impl DCE {
         Self { config }
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let cfg = cfg.get_function_cfg(*function_id);
-            let definitions = self.generate_definitions(function);
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+        let main_id = ssa.get_main_id();
+        let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
-            let mut live_values: HashSet<ValueId> = HashSet::new();
-            let mut live_blocks: HashSet<BlockId> = HashSet::new();
-            let mut live_instructions: HashMap<BlockId, HashSet<usize>> = HashMap::new();
-            let mut live_params: HashMap<BlockId, HashSet<usize>> = HashMap::new();
-            let mut live_branches: HashSet<BlockId> = HashSet::new();
-            let mut live_consts: HashSet<ValueId> = HashSet::new();
+        let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
+            HashMap::new();
+        let mut static_calls_by_callee: HashMap<FunctionId, Vec<(FunctionId, BlockId, usize)>> =
+            HashMap::new();
 
-            let mut worklist: Vec<WorkItem> = vec![];
+        for function_id in &function_ids {
+            let function = ssa.get_function(*function_id);
+            definitions_by_function.insert(*function_id, self.generate_definitions(function));
 
-            for (parameter, _) in function.get_entry().get_parameters() {
-                // All function parameters are live
-                worklist.push(WorkItem::LiveValue(*parameter));
+            for (block_id, block) in function.get_blocks() {
+                for (i, instruction) in block.get_instructions().enumerate() {
+                    if let OpCode::Call {
+                        function: CallTarget::Static(callee),
+                        ..
+                    } = instruction
+                    {
+                        static_calls_by_callee.entry(*callee).or_default().push((
+                            *function_id,
+                            *block_id,
+                            i,
+                        ));
+                    }
+                }
             }
+        }
 
-            // Workaround: mark all blocks as live to preserve empty intermediate blocks.
-            // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
+        let mut live_values: HashMap<FunctionId, HashSet<ValueId>> = HashMap::new();
+        let mut live_blocks: HashMap<FunctionId, HashSet<BlockId>> = HashMap::new();
+        let mut live_instructions: HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>> =
+            HashMap::new();
+        let mut live_params: HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>> = HashMap::new();
+        let mut live_entry_params: HashMap<FunctionId, HashSet<usize>> = HashMap::new();
+        let mut live_branches: HashMap<FunctionId, HashSet<BlockId>> = HashMap::new();
+        let mut live_return_slots: HashMap<FunctionId, HashSet<usize>> = HashMap::new();
+
+        let mut worklist: Vec<WorkItem> = vec![];
+
+        for function_id in &function_ids {
+            let function = ssa.get_function(*function_id);
+            worklist.push(WorkItem::LiveBlock(*function_id, function.get_entry_id()));
+
             if self.config.preserve_all_blocks {
                 for (block_id, _) in function.get_blocks() {
-                    worklist.push(WorkItem::LiveBlock(*block_id));
+                    worklist.push(WorkItem::LiveBlock(*function_id, *block_id));
                 }
             }
 
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
                     match instruction {
-                        // calls, stores, constraints and witness stores are critical side-effects
                         OpCode::Call { .. } | OpCode::Store { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                            worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                         }
-                        // assert_eq is critical if it's not definitionally true
                         OpCode::AssertEq { lhs, rhs } => {
                             if lhs != rhs {
-                                worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
                         }
-                        OpCode::AssertR1C { a: _, b: _, c: _ } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                        OpCode::AssertR1C { .. }
+                        | OpCode::Constrain { .. }
+                        | OpCode::Lookup { .. }
+                        | OpCode::DLookup { .. }
+                        | OpCode::NextDCoeff { .. }
+                        | OpCode::BumpD { .. }
+                        | OpCode::MemOp { .. }
+                        | OpCode::Rangecheck { .. }
+                        | OpCode::Todo { .. }
+                        | OpCode::InitGlobal { .. }
+                        | OpCode::DropGlobal { .. } => {
+                            worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                         }
-                        OpCode::Constrain { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                        OpCode::WriteWitness { pinned, .. } => {
+                            if self.config.witness_shape_frozen || *pinned {
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
+                            }
                         }
-                        OpCode::Lookup { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                        }
-                        OpCode::DLookup { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                        }
-                        OpCode::NextDCoeff { result: _ } => {
-                            // This also has the side-effect of bumping the counter, so we need to keep it live.
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                        }
-                        OpCode::BumpD {
-                            matrix: _,
-                            variable: _,
-                            sensitivity: _,
-                        } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                        }
-                        OpCode::WriteWitness { .. } => {
-                            // Witness stores are critical after the constraint system is generated.
-                            // Previously, they only matter if the result is used.
+                        OpCode::FreshWitness { .. } => {
                             if self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
-                        }
-                        OpCode::FreshWitness {
-                            result: _,
-                            result_type: _,
-                        } => {
-                            if self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                            }
-                        }
-                        OpCode::MemOp { kind: _, value: _ } => {
-                            // TODO: this is over-conservative - accidentally alives the value
-                            // even if it's not used otherwise. Should be fixed in the future,
-                            // but we're inserting these late in the pipeline, so main passes
-                            // we'll be fine.
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                        }
-                        OpCode::Rangecheck {
-                            value: _,
-                            max_bits: _,
-                        } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
                         OpCode::ToBits { .. } | OpCode::ToRadix { .. } => {
-                            // These are live while we still have witgen and R1CS in the same program
-                            // because they can be used as range checks.
-                            // After the witness shape is frozen, they can be removed, because the
-                            // rangechecks are made explicit by `ExplicitWitness`.
                             if !self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(*block_id, i));
+                                worklist.push(WorkItem::LiveInstruction(
+                                    *function_id,
+                                    *block_id,
+                                    i,
+                                ));
                             }
-                        }
-                        OpCode::Todo { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
                         }
                         OpCode::Load { .. }
                         | OpCode::BinaryArithOp { .. }
@@ -189,207 +196,308 @@ impl DCE {
                         | OpCode::Cast { .. }
                         | OpCode::Truncate { .. }
                         | OpCode::Not { .. }
-                        | OpCode::MulConst {
-                            result: _,
-                            const_val: _,
-                            var: _,
-                        }
-                        | OpCode::ReadGlobal {
-                            result: _,
-                            offset: _,
-                            result_type: _,
-                        }
+                        | OpCode::MulConst { .. }
+                        | OpCode::ReadGlobal { .. }
                         | OpCode::MkTuple { .. }
-                        | OpCode::ValueOf { .. } => {}
-                        OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*block_id, i));
-                        }
+                        | OpCode::ValueOf { .. }
+                        | OpCode::Const { .. } => {}
                     }
                 }
 
-                if let Some(terminator) = block.get_terminator() {
-                    match terminator {
-                        Terminator::Return(values) => {
-                            worklist.push(WorkItem::LiveBlock(*block_id));
-                            for value in values {
-                                worklist.push(WorkItem::LiveValue(*value));
-                            }
+                if let Some(Terminator::Return(values)) = block.get_terminator() {
+                    worklist.push(WorkItem::LiveBlock(*function_id, *block_id));
+
+                    if *function_id == main_id {
+                        for (i, value) in values.iter().enumerate() {
+                            worklist.push(WorkItem::LiveReturnSlot(*function_id, i));
+                            worklist.push(WorkItem::LiveValue(*function_id, *value));
                         }
-                        _ => {}
                     }
                 }
             }
+        }
 
-            while let Some(item) = worklist.pop() {
-                match item {
-                    WorkItem::LiveBlock(block_id) => {
-                        if live_blocks.contains(&block_id) {
-                            continue;
-                        }
-                        live_blocks.insert(block_id);
+        while let Some(item) = worklist.pop() {
+            match item {
+                WorkItem::LiveBlock(function_id, block_id) => {
+                    if self.block_live(&live_blocks, function_id, block_id) {
+                        continue;
+                    }
+                    live_blocks.entry(function_id).or_default().insert(block_id);
 
-                        // All blocks in the post-domination frontier are live,
-                        // because they decide whether or not this block is entered.
-                        // Also, the condition on which they enter is live.
-                        for pd in cfg.get_post_dominance_frontier(block_id) {
-                            worklist.push(WorkItem::LiveBlock(pd));
-                            live_branches.insert(pd);
+                    let function_cfg = cfg.get_function_cfg(function_id);
+                    let function = ssa.get_function(function_id);
 
-                            match function.get_block(pd).get_terminator() {
-                                Some(Terminator::JmpIf(condition, _, _)) => {
-                                    worklist.push(WorkItem::LiveValue(*condition));
-                                }
-                                _ => panic!("ICE: It's a frontier, must end with a conditional"),
+                    if let Some(Terminator::JmpIf(condition, _, _)) =
+                        function.get_block(block_id).get_terminator()
+                    {
+                        worklist.push(WorkItem::LiveValue(function_id, *condition));
+                    }
+
+                    for pd in function_cfg.get_post_dominance_frontier(block_id) {
+                        worklist.push(WorkItem::LiveBlock(function_id, pd));
+                        live_branches.entry(function_id).or_default().insert(pd);
+
+                        match function.get_block(pd).get_terminator() {
+                            Some(Terminator::JmpIf(condition, _, _)) => {
+                                worklist.push(WorkItem::LiveValue(function_id, *condition));
                             }
-                        }
-
-                        // If the block has parameters, all predecessor become
-                        // live, as they define the phi inputs.
-                        if function.get_block(block_id).has_parameters() {
-                            for predecessor in cfg.get_jumps_into(block_id) {
-                                worklist.push(WorkItem::LiveBlock(predecessor));
-                            }
+                            _ => panic!("ICE: It's a frontier, must end with a conditional"),
                         }
                     }
-                    WorkItem::LiveValue(value_id) => {
-                        if live_values.contains(&value_id) {
-                            continue;
+
+                    if function.get_block(block_id).has_parameters() {
+                        for predecessor in function_cfg.get_jumps_into(block_id) {
+                            worklist.push(WorkItem::LiveBlock(function_id, predecessor));
                         }
-                        live_values.insert(value_id);
+                    }
+                }
+                WorkItem::LiveValue(function_id, value_id) => {
+                    if live_values
+                        .entry(function_id)
+                        .or_default()
+                        .contains(&value_id)
+                    {
+                        continue;
+                    }
+                    live_values.entry(function_id).or_default().insert(value_id);
 
-                        let definition = definitions.get(&value_id).unwrap();
-                        match definition {
-                            ValueDefinition::Param(block_id, i) => {
-                                if live_params
-                                    .get(block_id)
-                                    .unwrap_or(&HashSet::new())
-                                    .contains(i)
-                                {
-                                    continue;
-                                }
-                                live_params
-                                    .entry(*block_id)
-                                    .or_insert(HashSet::new())
-                                    .insert(*i);
+                    let definitions = definitions_by_function
+                        .get(&function_id)
+                        .expect("function definitions missing");
+                    let Some(definition) = definitions.get(&value_id) else {
+                        continue;
+                    };
 
-                                // The defining block is live
-                                worklist.push(WorkItem::LiveBlock(*block_id));
-                                // For all jumps into it, the respective argument is live
-                                for block_id in cfg.get_jumps_into(*block_id) {
-                                    let jumpin_block = function.get_block(block_id);
-                                    match jumpin_block.get_terminator() {
-                                        Some(Terminator::Jmp(_, params)) => {
-                                            worklist.push(WorkItem::LiveValue(params[*i]));
+                    match definition {
+                        ValueDefinition::Param(block_id, i) => {
+                            if self.param_live(&live_params, function_id, *block_id, *i) {
+                                continue;
+                            }
+
+                            live_params
+                                .entry(function_id)
+                                .or_default()
+                                .entry(*block_id)
+                                .or_default()
+                                .insert(*i);
+
+                            let function = ssa.get_function(function_id);
+                            if *block_id == function.get_entry_id() {
+                                if live_entry_params.entry(function_id).or_default().insert(*i) {
+                                    if let Some(callsites) =
+                                        static_calls_by_callee.get(&function_id)
+                                    {
+                                        for (caller_fn, caller_block, caller_i) in callsites {
+                                            let caller = ssa.get_function(*caller_fn);
+                                            if let OpCode::Call { args, .. } = caller
+                                                .get_block(*caller_block)
+                                                .get_instruction(*caller_i)
+                                            {
+                                                assert!(
+                                                    *i < args.len(),
+                                                    "ICE: live callee entry param index out of bounds at callsite"
+                                                );
+                                                worklist.push(WorkItem::LiveValue(
+                                                    *caller_fn, args[*i],
+                                                ));
+                                            }
                                         }
-                                        _ => panic!(
-                                            "ICE: the block has phis, so jumps into it must be Jmps"
-                                        ),
                                     }
                                 }
                             }
-                            ValueDefinition::Instruction(block_id, i) => {
-                                // The instruction is live
-                                worklist.push(WorkItem::LiveInstruction(*block_id, *i));
+
+                            worklist.push(WorkItem::LiveBlock(function_id, *block_id));
+
+                            let function_cfg = cfg.get_function_cfg(function_id);
+                            for pred in function_cfg.get_jumps_into(*block_id) {
+                                let jumpin_block = function.get_block(pred);
+                                match jumpin_block.get_terminator() {
+                                    Some(Terminator::Jmp(_, params)) => {
+                                        assert!(
+                                            *i < params.len(),
+                                            "ICE: phi param index out of bounds in predecessor jump"
+                                        );
+                                        worklist.push(WorkItem::LiveValue(function_id, params[*i]));
+                                    }
+                                    _ => panic!(
+                                        "ICE: the block has phis, so jumps into it must be Jmps"
+                                    ),
+                                }
                             }
-                            ValueDefinition::Const(value_id) => {
-                                live_consts.insert(*value_id);
+                        }
+                        ValueDefinition::Instruction(block_id, i) => {
+                            let function = ssa.get_function(function_id);
+                            let instruction = function.get_block(*block_id).get_instruction(*i);
+
+                            if let OpCode::Call {
+                                results,
+                                function: CallTarget::Static(callee),
+                                ..
+                            } = instruction
+                            {
+                                if let Some(result_idx) =
+                                    results.iter().position(|result| *result == value_id)
+                                {
+                                    worklist.push(WorkItem::LiveReturnSlot(*callee, result_idx));
+                                }
                             }
+
+                            worklist.push(WorkItem::LiveInstruction(function_id, *block_id, *i));
                         }
                     }
-                    WorkItem::LiveInstruction(block_id, i) => {
-                        if live_instructions
-                            .get(&block_id)
-                            .unwrap_or(&HashSet::new())
-                            .contains(&i)
-                        {
-                            continue;
-                        }
-                        live_instructions
-                            .entry(block_id)
-                            .or_insert(HashSet::new())
-                            .insert(i);
+                }
+                WorkItem::LiveInstruction(function_id, block_id, i) => {
+                    if self.instruction_live(&live_instructions, function_id, block_id, i) {
+                        continue;
+                    }
 
-                        // The containing block is live
-                        worklist.push(WorkItem::LiveBlock(block_id));
+                    live_instructions
+                        .entry(function_id)
+                        .or_default()
+                        .entry(block_id)
+                        .or_default()
+                        .insert(i);
 
-                        let instruction = function.get_block(block_id).get_instruction(i);
-                        for input in instruction.get_inputs() {
-                            worklist.push(WorkItem::LiveValue(*input));
+                    worklist.push(WorkItem::LiveBlock(function_id, block_id));
+
+                    let function = ssa.get_function(function_id);
+                    let instruction = function.get_block(block_id).get_instruction(i);
+                    for input in instruction.get_inputs() {
+                        worklist.push(WorkItem::LiveValue(function_id, *input));
+                    }
+                }
+                WorkItem::LiveReturnSlot(function_id, slot) => {
+                    if !live_return_slots
+                        .entry(function_id)
+                        .or_default()
+                        .insert(slot)
+                    {
+                        continue;
+                    }
+
+                    let function = ssa.get_function(function_id);
+                    for (block_id, block) in function.get_blocks() {
+                        if let Some(Terminator::Return(values)) = block.get_terminator() {
+                            assert!(
+                                slot < values.len(),
+                                "ICE: return slot index out of bounds for return terminator"
+                            );
+                            worklist.push(WorkItem::LiveBlock(function_id, *block_id));
+                            worklist.push(WorkItem::LiveValue(function_id, values[slot]));
                         }
                     }
                 }
             }
+        }
 
-            for value_id in function.iter_consts().map(|(v, _)| *v).collect::<Vec<_>>() {
-                if !live_consts.contains(&value_id) {
-                    function.remove_const(value_id);
-                }
-            }
+        for function_id in function_ids {
+            let function_cfg = cfg.get_function_cfg(function_id);
+            let mut function = ssa.take_function(function_id);
+            let entry_id = function.get_entry_id();
 
-            for block_id in cfg.get_domination_pre_order() {
+            for block_id in function_cfg.get_domination_pre_order() {
                 let mut block = function.take_block(block_id);
-                if !live_blocks.contains(&block_id) {
+                if !self.block_live(&live_blocks, function_id, block_id) {
                     continue;
                 }
 
                 let instructions = block.take_instructions();
                 let mut new_instructions = vec![];
 
-                for (i, instruction) in instructions.into_iter().enumerate() {
-                    if live_instructions
-                        .get(&block_id)
-                        .unwrap_or(&HashSet::new())
-                        .contains(&i)
-                    {
-                        new_instructions.push(instruction);
+                for (i, mut instruction) in instructions.into_iter().enumerate() {
+                    if !self.instruction_live(&live_instructions, function_id, block_id, i) {
+                        continue;
                     }
+
+                    if let OpCode::Call {
+                        results,
+                        function: CallTarget::Static(callee),
+                        args,
+                    } = &mut instruction
+                    {
+                        let mut new_args = vec![];
+                        for (arg_i, arg) in args.iter().enumerate() {
+                            if self.entry_param_live(&live_entry_params, *callee, arg_i) {
+                                new_args.push(*arg);
+                            }
+                        }
+                        *args = new_args;
+
+                        let mut new_results = vec![];
+                        for (ret_i, result) in results.iter().enumerate() {
+                            if self.return_slot_live(&live_return_slots, *callee, ret_i) {
+                                new_results.push(*result);
+                            }
+                        }
+                        *results = new_results;
+                    }
+
+                    new_instructions.push(instruction);
                 }
 
                 block.put_instructions(new_instructions);
 
                 let new_terminator = match block.take_terminator() {
                     Some(Terminator::Jmp(target, params)) => {
-                        if live_blocks.contains(&target) {
+                        if self.block_live(&live_blocks, function_id, target) {
                             let mut new_params = vec![];
                             for (i, param) in params.into_iter().enumerate() {
-                                if live_params
-                                    .get(&target)
-                                    .unwrap_or(&HashSet::new())
-                                    .contains(&i)
-                                {
+                                if self.block_param_live(
+                                    &live_params,
+                                    &live_entry_params,
+                                    function_id,
+                                    entry_id,
+                                    target,
+                                    i,
+                                ) {
                                     new_params.push(param);
                                 }
                             }
                             Terminator::Jmp(target, new_params)
                         } else {
-                            let new_target =
-                                self.closest_live_post_dominator(cfg, block_id, &live_blocks);
-                            // we can safely jump without params – blocks with params are post-dominated
-                            // by their phi-setting blocks, so we wouldn't find one here.
+                            let new_target = self.closest_live_post_dominator(
+                                function_cfg,
+                                block_id,
+                                live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                            );
                             Terminator::Jmp(new_target, vec![])
                         }
                     }
                     Some(Terminator::JmpIf(condition, then, otherwise)) => {
-                        if live_branches.contains(&block_id) {
+                        if live_branches
+                            .get(&function_id)
+                            .unwrap_or(&HashSet::new())
+                            .contains(&block_id)
+                        {
                             Terminator::JmpIf(
                                 condition,
-                                self.closest_live_block(cfg, then, &live_blocks),
-                                self.closest_live_block(cfg, otherwise, &live_blocks),
+                                self.closest_live_block(
+                                    function_cfg,
+                                    then,
+                                    live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                ),
+                                self.closest_live_block(
+                                    function_cfg,
+                                    otherwise,
+                                    live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                ),
                             )
                         } else {
                             Terminator::Jmp(
-                                self.closest_live_post_dominator(cfg, block_id, &live_blocks),
-                                // Again, the jump is parameterless – live blocks with params are
-                                // post-dominated by the phi-setting blocks which are all live, but this
-                                // block ended with a conditional jump, so it wasn't setting phis.
+                                self.closest_live_post_dominator(
+                                    function_cfg,
+                                    block_id,
+                                    live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                ),
                                 vec![],
                             )
                         }
                     }
                     Some(Terminator::Return(values)) => {
                         let mut new_values = vec![];
-                        for value in values.into_iter() {
-                            if live_values.contains(&value) {
+                        for (i, value) in values.into_iter().enumerate() {
+                            if self.return_slot_live(&live_return_slots, function_id, i) {
                                 new_values.push(value);
                             }
                         }
@@ -403,11 +511,14 @@ impl DCE {
                 let params = block.take_parameters();
                 let mut new_params = vec![];
                 for (i, param) in params.into_iter().enumerate() {
-                    if live_params
-                        .get(&block_id)
-                        .unwrap_or(&HashSet::new())
-                        .contains(&i)
-                    {
+                    if self.block_param_live(
+                        &live_params,
+                        &live_entry_params,
+                        function_id,
+                        entry_id,
+                        block_id,
+                        i,
+                    ) {
                         new_params.push(param);
                     }
                 }
@@ -415,17 +526,22 @@ impl DCE {
 
                 function.put_block(block_id, block);
             }
+
+            let old_returns = function.take_returns();
+            for (i, return_type) in old_returns.into_iter().enumerate() {
+                if self.return_slot_live(&live_return_slots, function_id, i) {
+                    function.add_return_type(return_type);
+                }
+            }
+
+            ssa.put_function(function_id, function);
         }
     }
 
-    fn generate_definitions(&self, ssa: &Function) -> HashMap<ValueId, ValueDefinition> {
+    fn generate_definitions(&self, function: &HLFunction) -> HashMap<ValueId, ValueDefinition> {
         let mut definitions = HashMap::new();
 
-        for (value_id, _) in ssa.iter_consts() {
-            definitions.insert(*value_id, ValueDefinition::Const(*value_id));
-        }
-
-        for (block_id, block) in ssa.get_blocks() {
+        for (block_id, block) in function.get_blocks() {
             for (i, (val, _)) in block.get_parameters().enumerate() {
                 definitions.insert(*val, ValueDefinition::Param(*block_id, i));
             }
@@ -440,6 +556,85 @@ impl DCE {
         definitions
     }
 
+    fn block_live(
+        &self,
+        live_blocks: &HashMap<FunctionId, HashSet<BlockId>>,
+        function_id: FunctionId,
+        block_id: BlockId,
+    ) -> bool {
+        live_blocks
+            .get(&function_id)
+            .unwrap_or(&HashSet::new())
+            .contains(&block_id)
+    }
+
+    fn instruction_live(
+        &self,
+        live_instructions: &HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>>,
+        function_id: FunctionId,
+        block_id: BlockId,
+        i: usize,
+    ) -> bool {
+        live_instructions
+            .get(&function_id)
+            .and_then(|blocks| blocks.get(&block_id))
+            .unwrap_or(&HashSet::new())
+            .contains(&i)
+    }
+
+    fn param_live(
+        &self,
+        live_params: &HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>>,
+        function_id: FunctionId,
+        block_id: BlockId,
+        i: usize,
+    ) -> bool {
+        live_params
+            .get(&function_id)
+            .and_then(|blocks| blocks.get(&block_id))
+            .unwrap_or(&HashSet::new())
+            .contains(&i)
+    }
+
+    fn entry_param_live(
+        &self,
+        live_entry_params: &HashMap<FunctionId, HashSet<usize>>,
+        function_id: FunctionId,
+        i: usize,
+    ) -> bool {
+        live_entry_params
+            .get(&function_id)
+            .unwrap_or(&HashSet::new())
+            .contains(&i)
+    }
+
+    fn return_slot_live(
+        &self,
+        live_return_slots: &HashMap<FunctionId, HashSet<usize>>,
+        function_id: FunctionId,
+        i: usize,
+    ) -> bool {
+        live_return_slots
+            .get(&function_id)
+            .unwrap_or(&HashSet::new())
+            .contains(&i)
+    }
+
+    fn block_param_live(
+        &self,
+        live_params: &HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>>,
+        live_entry_params: &HashMap<FunctionId, HashSet<usize>>,
+        function_id: FunctionId,
+        entry_id: BlockId,
+        block_id: BlockId,
+        i: usize,
+    ) -> bool {
+        if block_id == entry_id {
+            return self.entry_param_live(live_entry_params, function_id, i);
+        }
+        self.param_live(live_params, function_id, block_id, i)
+    }
+
     fn closest_live_block(
         &self,
         cfg: &CFG,
@@ -449,7 +644,7 @@ impl DCE {
         if live_blocks.contains(&block_id) {
             return block_id;
         }
-        return self.closest_live_post_dominator(cfg, block_id, live_blocks);
+        self.closest_live_post_dominator(cfg, block_id, live_blocks)
     }
 
     fn closest_live_post_dominator(

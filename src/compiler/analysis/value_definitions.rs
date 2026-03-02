@@ -2,11 +2,10 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     ir::r#type::Type,
-    ssa::{BlockId, Const, Function, FunctionId, OpCode, SSA, ValueId},
+    ssa::{BlockId, FunctionId, HLFunction, HLSSA, Instruction, OpCode, ValueId},
 };
 
 pub enum ValueDefinition {
-    Const(Const),
     Param(BlockId, usize, Type),
     Instruction(BlockId, usize, OpCode),
 }
@@ -30,12 +29,8 @@ impl FunctionValueDefinitions {
         self.definitions.insert(value_id, definition);
     }
 
-    pub fn from_ssa(ssa: &Function) -> Self {
+    pub fn from_ssa(ssa: &HLFunction) -> Self {
         let mut definitions = Self::new();
-
-        for (value_id, definition) in ssa.iter_consts() {
-            definitions.insert(*value_id, ValueDefinition::Const(definition.clone()));
-        }
 
         for (block_id, block) in ssa.get_blocks() {
             for (i, (val, typ)) in block.get_parameters().enumerate() {
@@ -67,7 +62,7 @@ impl ValueDefinitions {
         }
     }
 
-    pub fn from_ssa(ssa: &SSA) -> Self {
+    pub fn from_ssa(ssa: &HLSSA) -> Self {
         let mut definitions = Self::new();
 
         for (function_id, function) in ssa.iter_functions() {
@@ -81,5 +76,13 @@ impl ValueDefinitions {
 
     pub fn get_function(&self, function_id: FunctionId) -> &FunctionValueDefinitions {
         self.functions.get(&function_id).unwrap()
+    }
+}
+
+use crate::compiler::pass_manager::{Analysis, AnalysisStore};
+
+impl Analysis for ValueDefinitions {
+    fn compute(ssa: &HLSSA, _store: &AnalysisStore) -> Self {
+        ValueDefinitions::from_ssa(ssa)
     }
 }

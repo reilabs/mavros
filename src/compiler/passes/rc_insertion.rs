@@ -6,33 +6,34 @@ use tracing::{Level, debug, instrument, trace};
 use crate::compiler::{
     analysis::{
         liveness::{FunctionLiveness, LivenessAnalysis},
-        types::FunctionTypeInfo,
+        types::{FunctionTypeInfo, TypeInfo},
     },
-    flow_analysis::CFG,
+    flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
-    ssa::{CastTarget, Function, MemOp, OpCode, SSA, Terminator, ValueId},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    ssa::{CastTarget, HLFunction, HLSSA, Instruction, MemOp, OpCode, Terminator, ValueId},
 };
 
 pub struct RCInsertion {}
 
 impl Pass for RCInsertion {
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "rc_insertion",
-            needs: vec![DataPoint::CFG, DataPoint::Types],
-        }
+    fn name(&self) -> &'static str {
+        "rc_insertion"
     }
 
-    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
-        let cfg = pass_manager.get_cfg();
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id(), TypeInfo::id()]
+    }
+
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        let cfg = store.get::<FlowAnalysis>();
 
         let liveness = LivenessAnalysis::new().run(ssa, cfg);
 
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let liveness = &liveness.function_liveness[function_id];
-            let type_info = pass_manager.get_type_info().get_function(*function_id);
+            let type_info = store.get::<TypeInfo>().get_function(*function_id);
             self.run_function(function, cfg, type_info, &liveness);
         }
     }
@@ -46,7 +47,7 @@ impl RCInsertion {
     #[instrument(skip_all, level = Level::DEBUG, name = "RCInsertion::run_function", fields(function = function.get_name()))]
     fn run_function(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         liveness: &FunctionLiveness,
@@ -240,6 +241,7 @@ impl RCInsertion {
                     | OpCode::WriteWitness {
                         result: _,
                         value: _,
+                        pinned: _,
                     }
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::Lookup {
@@ -623,6 +625,9 @@ impl RCInsertion {
                     }
                     OpCode::ValueOf { .. } => {
                         panic!("ICE: ValueOf should not appear at this stage");
+                    }
+                    OpCode::Const { .. } => {
+                        new_instructions.push(instruction);
                     }
                     OpCode::MkTuple {
                         result,

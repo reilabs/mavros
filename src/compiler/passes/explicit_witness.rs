@@ -6,30 +6,32 @@ use ssa_builder::ssa_append;
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
+    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Endianness, Function, LookupTarget,
-        OpCode, Radix, SSA, SeqType, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLFunction, HLSSA,
+        LookupTarget, OpCode, Radix, SeqType, ValueId,
     },
 };
 
 pub struct ExplicitWitness {}
 
 impl Pass for ExplicitWitness {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_type_info());
+    fn name(&self) -> &'static str {
+        "explicit_witness"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "explicit_witness",
-            needs: vec![DataPoint::Types],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
+    }
+
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
@@ -38,10 +40,10 @@ impl ExplicitWitness {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, type_info: &TypeInfo) {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
-            let mut new_blocks = HashMap::<BlockId, Block>::new();
+            let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
@@ -197,6 +199,7 @@ impl ExplicitWitness {
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
                                 value: mul_plain,
+                                pinned: false,
                             });
                             new_instructions.push(OpCode::Constrain { a: l, b: r, c: res });
                         }
@@ -267,7 +270,8 @@ impl ExplicitWitness {
                                 new_instructions.push(instruction);
                                 continue;
                             }
-                            let one = function.push_field_const(ark_ff::Fp::from(1));
+                            let one = function.fresh_value();
+                            new_instructions.push(OpCode::mk_field_const(one, ark_ff::Fp::from(1)));
                             let l = if l_type.strip_witness().is_field() {
                                 l
                             } else {
@@ -423,7 +427,9 @@ impl ExplicitWitness {
                             // If both branches are pure, result is a linear combination
                             // of cond and constants: cond * (l - r) + r. No constraint needed.
                             if !l_taint && !r_taint {
-                                let neg_one = function.push_field_const(ark_ff::Fp::from(-1));
+                                let neg_one = function.fresh_value();
+                                new_instructions
+                                    .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
                                 let neg_r = function.fresh_value();
                                 new_instructions.push(OpCode::BinaryArithOp {
                                     kind: BinaryArithOpKind::Mul,
@@ -471,10 +477,13 @@ impl ExplicitWitness {
                             new_instructions.push(OpCode::WriteWitness {
                                 result: Some(res),
                                 value: select_plain,
+                                pinned: false,
                             });
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
-                            let neg_one = function.push_field_const(ark_ff::Fp::from(-1));
+                            let neg_one = function.fresh_value();
+                            new_instructions
+                                .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
                             let neg_r = function.fresh_value();
                             new_instructions.push(OpCode::BinaryArithOp {
                                 kind: BinaryArithOpKind::Mul,
@@ -537,7 +546,9 @@ impl ExplicitWitness {
                                 TypeExpr::U(s) => *s,
                                 e => todo!("Unsupported type for negation: {:?}", e),
                             };
-                            let ones = function.push_field_const(Field::from((1u128 << s) - 1));
+                            let ones = function.fresh_value();
+                            new_instructions
+                                .push(OpCode::mk_field_const(ones, Field::from((1u128 << s) - 1)));
                             let casted = function.fresh_value();
                             new_instructions.push(OpCode::Cast {
                                 result: casted,
@@ -594,9 +605,16 @@ impl ExplicitWitness {
                                     count,
                                 });
                                 let mut witnesses = vec![ValueId(0); count];
-                                let mut current_sum = function.push_field_const(Field::ZERO);
+                                let mut current_sum = function.fresh_value();
+                                new_instructions
+                                    .push(OpCode::mk_field_const(current_sum, Field::ZERO));
                                 let radix_val = match radix {
-                                    Radix::Bytes => function.push_field_const(Field::from(256)),
+                                    Radix::Bytes => {
+                                        let v = function.fresh_value();
+                                        new_instructions
+                                            .push(OpCode::mk_field_const(v, Field::from(256)));
+                                        v
+                                    }
                                     Radix::Dyn(radix) => {
                                         let casted = function.fresh_value();
                                         new_instructions.push(OpCode::Cast {
@@ -625,9 +643,12 @@ impl ExplicitWitness {
                                     witnesses[i] = r.byte_wit;
                                 }
 
+                                let constrain_one = function.fresh_value();
+                                new_instructions
+                                    .push(OpCode::mk_field_const(constrain_one, Field::from(1)));
                                 new_instructions.push(OpCode::Constrain {
                                     a: current_sum,
-                                    b: function.push_field_const(Field::from(1)),
+                                    b: constrain_one,
                                     c: value,
                                 });
 
@@ -703,7 +724,8 @@ impl ExplicitWitness {
                         }
                         OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
-                        | OpCode::ValueOf { .. } => {
+                        | OpCode::ValueOf { .. }
+                        | OpCode::Const { .. } => {
                             new_instructions.push(instruction);
                         }
                     }
@@ -717,7 +739,7 @@ impl ExplicitWitness {
 
     fn gen_witness_rangecheck(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         new_instructions: &mut Vec<OpCode>,
         value: ValueId,
         max_bits: usize,
@@ -737,9 +759,12 @@ impl ExplicitWitness {
             count: max_bits / 8,
         });
         let chunks = max_bits / 8;
-        let mut result = function.push_field_const(Field::ZERO);
-        let two_to_8 = function.push_field_const(Field::from(256));
-        let one = function.push_field_const(Field::from(1));
+        let mut result = function.fresh_value();
+        new_instructions.push(OpCode::mk_field_const(result, Field::ZERO));
+        let two_to_8 = function.fresh_value();
+        new_instructions.push(OpCode::mk_field_const(two_to_8, Field::from(256)));
+        let one = function.fresh_value();
+        new_instructions.push(OpCode::mk_field_const(one, Field::from(1)));
         for i in 0..chunks {
             result = ssa_append!(function, new_instructions, {
                 byte := array_get(bytes_val, ! i as u128 : u32);

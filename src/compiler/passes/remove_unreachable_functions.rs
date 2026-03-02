@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
 use crate::compiler::{
-    pass_manager::{DataPoint, Pass, PassInfo, PassManager},
-    ssa::SSA,
+    flow_analysis::FlowAnalysis,
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    ssa::HLSSA,
 };
 
 /// Removes functions that are not reachable from main via the call graph.
@@ -16,8 +17,16 @@ impl RemoveUnreachableFunctions {
 }
 
 impl Pass for RemoveUnreachableFunctions {
-    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager) {
-        let cfg = pass_manager.get_cfg();
+    fn name(&self) -> &'static str {
+        "remove_unreachable_functions"
+    }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        let cfg = store.get::<FlowAnalysis>();
         let call_graph = cfg.get_call_graph();
 
         let main_id = ssa.get_main_id();
@@ -29,16 +38,5 @@ impl Pass for RemoveUnreachableFunctions {
                 ssa.take_function(function_id);
             }
         }
-    }
-
-    fn pass_info(&self) -> PassInfo {
-        PassInfo {
-            name: "remove_unreachable_functions",
-            needs: vec![DataPoint::CFG],
-        }
-    }
-
-    fn invalidates_cfg(&self) -> bool {
-        true
     }
 }

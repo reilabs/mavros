@@ -7,8 +7,8 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Function, OpCode, SSA, SeqType,
-        Terminator, TupleIdx,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLBlock, HLFunction, HLSSA, OpCode,
+        SeqType, Terminator, TupleIdx,
     },
     witness_info::{FunctionWitnessType, WitnessType},
     witness_type_inference::WitnessTypeInference,
@@ -22,7 +22,7 @@ impl WitnessCastInsertion {
     }
 
     #[instrument(skip_all, name = "WitnessCastInsertion::run")]
-    pub fn run(&mut self, ssa: SSA, witness_inference: &WitnessTypeInference) -> SSA {
+    pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
         // Sub-pass 1: Bake WitnessOf into SSA types (prepare_rebuild pattern)
         let ssa = self.apply_types(ssa, witness_inference);
 
@@ -38,7 +38,7 @@ impl WitnessCastInsertion {
     // Sub-pass 1: Type Application
     // -----------------------------------------------------------------------
 
-    fn apply_types(&self, ssa: SSA, witness_inference: &WitnessTypeInference) -> SSA {
+    fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
 
         // Global types: identity (pure types stay as-is)
@@ -55,13 +55,13 @@ impl WitnessCastInsertion {
 
     fn apply_types_to_function(
         &self,
-        function: Function,
+        function: HLFunction,
         function_wt: &FunctionWitnessType,
-    ) -> Function {
+    ) -> HLFunction {
         let (mut function, blocks, returns) = function.prepare_rebuild();
 
         for (block_id, mut block) in blocks.into_iter() {
-            let mut new_block = Block::empty();
+            let mut new_block = HLBlock::empty();
 
             let mut new_parameters = Vec::new();
             for (value_id, typ) in block.take_parameters() {
@@ -234,9 +234,9 @@ impl WitnessCastInsertion {
 
     fn insert_casts(
         &self,
-        mut ssa: SSA,
+        mut ssa: HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
-    ) -> SSA {
+    ) -> HLSSA {
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
             let func_type_info = type_info.get_function(function_id);
@@ -250,7 +250,7 @@ impl WitnessCastInsertion {
     #[instrument(skip_all, name = "WitnessCastInsertion::insert_casts_in_function", level = Level::DEBUG, fields(function = function.get_name()))]
     fn insert_casts_in_function(
         &self,
-        function: &mut Function,
+        function: &mut HLFunction,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
         // Collect block param types for Jmp boundary comparison
@@ -450,7 +450,8 @@ impl WitnessCastInsertion {
                     | OpCode::MkTuple { .. }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. }) => {
+                    | OpCode::DropGlobal { .. }
+                    | OpCode::Const { .. }) => {
                         new_instructions.push(op);
                     }
                 }
@@ -527,10 +528,10 @@ impl WitnessCastInsertion {
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> crate::compiler::ssa::ValueId {
         let value_type = type_info.get_value_type(value);
         if *value_type == *target_type {
@@ -554,10 +555,10 @@ impl WitnessCastInsertion {
         source_type: &Type,
         target_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> crate::compiler::ssa::ValueId {
         match (&source_type.expr, &target_type.expr) {
             // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
@@ -642,10 +643,10 @@ impl WitnessCastInsertion {
         array_len: usize,
         target_array_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> crate::compiler::ssa::ValueId {
         // Create a properly-typed initial target array filled with dummy elements
         let initial_dst = self.create_dummy_array(
@@ -662,9 +663,12 @@ impl WitnessCastInsertion {
         let (continuation_id, continuation) = function.next_virtual_block();
 
         // Constants (u32 for array indexing)
-        let const_0 = function.push_u_const(32, 0);
-        let const_1 = function.push_u_const(32, 1);
-        let const_len = function.push_u_const(32, array_len as u128);
+        let const_0 = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_0, 32, 0));
+        let const_1 = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_1, 32, 1));
+        let const_len = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_len, 32, array_len as u128));
 
         // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
         current_block.put_instructions(std::mem::take(new_instructions));
@@ -750,7 +754,7 @@ impl WitnessCastInsertion {
         array_len: usize,
         _array_type: &Type,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> crate::compiler::ssa::ValueId {
         let dummy_elem = self.create_dummy_value(elem_type, new_instructions, function);
         let elems = vec![dummy_elem; array_len];
@@ -768,11 +772,15 @@ impl WitnessCastInsertion {
         &self,
         target_type: &Type,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut Function,
+        function: &mut HLFunction,
     ) -> crate::compiler::ssa::ValueId {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
-                let dummy_field = function.push_field_const(ark_bn254::Fr::from(0u64));
+                let dummy_field = function.fresh_value();
+                new_instructions.push(OpCode::mk_field_const(
+                    dummy_field,
+                    ark_bn254::Fr::from(0u64),
+                ));
                 let refed = function.fresh_value();
                 new_instructions.push(OpCode::Cast {
                     result: refed,
@@ -803,7 +811,9 @@ impl WitnessCastInsertion {
             }
             TypeExpr::Field | TypeExpr::U(_) => {
                 // Pure scalar types — use a zero constant
-                function.push_field_const(ark_bn254::Fr::from(0u64))
+                let dummy = function.fresh_value();
+                new_instructions.push(OpCode::mk_field_const(dummy, ark_bn254::Fr::from(0u64)));
+                dummy
             }
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }

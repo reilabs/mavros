@@ -426,6 +426,9 @@ impl Type {
     }
 }
 
+pub trait SSAType: Clone + std::fmt::Debug + std::fmt::Display + PartialEq + Eq + 'static {}
+impl SSAType for Type {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

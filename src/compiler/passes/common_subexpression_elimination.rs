@@ -5,9 +5,15 @@ use std::{
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, Const, Function, OpCode, SSA, TupleIdx, ValueId},
+    ssa::{
+        BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, TupleIdx,
+        ValueId,
+    },
 };
-use crate::compiler::{pass_manager::Pass, passes::fix_double_jumps::ValueReplacements};
+use crate::compiler::{
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    passes::fix_double_jumps::ValueReplacements,
+};
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Expr {
@@ -173,19 +179,20 @@ impl Debug for Expr {
 pub struct CSE {}
 
 impl Pass for CSE {
-    fn run(&self, ssa: &mut SSA, pass_manager: &crate::compiler::pass_manager::PassManager) {
-        self.do_run(ssa, pass_manager.get_cfg());
+    fn name(&self) -> &'static str {
+        "cse"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "cse",
-            needs: vec![crate::compiler::pass_manager::DataPoint::CFG],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        false
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<FlowAnalysis>());
+    }
+
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
     }
 }
 
@@ -194,7 +201,7 @@ impl CSE {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut SSA, cfg: &FlowAnalysis) {
+    pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
             let exprs = self.gather_expressions(function, cfg);
@@ -273,20 +280,11 @@ impl CSE {
 
     fn gather_expressions(
         &self,
-        ssa: &Function,
+        ssa: &HLFunction,
         cfg: &CFG,
     ) -> HashMap<Expr, Vec<(BlockId, usize, ValueId)>> {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
-
-        for (value_id, const_) in ssa.iter_consts() {
-            match const_ {
-                Const::U(size, value) => exprs.insert(*value_id, Expr::UConst(*size, *value)),
-                Const::Field(value) => exprs.insert(*value_id, Expr::fconst(*value)),
-                Const::Witness(_) => todo!(),
-                Const::FnPtr(_) => None,
-            };
-        }
 
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
             exprs
@@ -436,8 +434,8 @@ impl CSE {
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::ValueOf { .. } => {}
-                    | OpCode::MulConst { result: _, const_val: _, var: _ } => { todo!() }
+                    | OpCode::ValueOf { .. }
+                    | OpCode::MulConst { .. } => {}
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.not();
@@ -466,6 +464,28 @@ impl CSE {
                             *r,
                         ));
                     },
+                    OpCode::Const {
+                        result: r,
+                        value: cv,
+                    } => match cv {
+                        ConstValue::U(size, val) => {
+                            let expr = Expr::UConst(*size, *val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
+                        }
+                        ConstValue::Field(val) => {
+                            let expr = Expr::fconst(*val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
+                        }
+                        ConstValue::FnPtr(_) => {}
+                    }
                 }
             }
         }

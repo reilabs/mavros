@@ -1,68 +1,226 @@
-use std::{fs, path::PathBuf};
-
-use crate::compiler::{
-    analysis::{
-        instrumenter::{self, CostEstimator},
-        types::{TypeInfo, Types},
-        value_definitions::ValueDefinitions,
-    },
-    flow_analysis::FlowAnalysis,
-    ssa::{DefaultSsaAnnotator, SSA},
+use std::{
+    any::{Any, TypeId},
+    collections::HashMap,
+    fs,
+    path::PathBuf,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DataPoint {
-    CFG,
-    Types,
-    ConstraintInstrumentation,
-    ValueDefinitions,
+use crate::compiler::ir::r#type::{SSAType, Type};
+use crate::compiler::ssa::{DefaultSsaAnnotator, Instruction, OpCode, SSA};
+
+// ---------------------------------------------------------------------------
+// AnalysisId — a Copy handle carrying function pointers
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct AnalysisId {
+    type_id: TypeId,
+    type_name: &'static str,
+    dependencies: fn() -> Vec<AnalysisId>,
+    compute_and_store: fn(&dyn Any, &mut AnalysisStore),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PassInfo {
-    pub name: &'static str,
-    pub needs: Vec<DataPoint>,
+impl AnalysisId {
+    pub fn of<A: Analysis<Op, Ty>, Op: Instruction, Ty: SSAType>() -> Self {
+        Self {
+            type_id: TypeId::of::<A>(),
+            type_name: std::any::type_name::<A>(),
+            dependencies: <A as Analysis<Op, Ty>>::dependencies,
+            compute_and_store: |ssa_any, store| {
+                if !store.contains_type(TypeId::of::<A>()) {
+                    let ssa: &SSA<Op, Ty> = ssa_any
+                        .downcast_ref::<SSA<Op, Ty>>()
+                        .expect("AnalysisId::compute_and_store: SSA downcast failed");
+                    let val = <A as Analysis<Op, Ty>>::compute(ssa, store);
+                    let dep_ids = <A as Analysis<Op, Ty>>::dependencies()
+                        .iter()
+                        .map(|d| d.type_id)
+                        .collect();
+                    store.insert_with_deps::<A>(val, dep_ids);
+                }
+            },
+        }
+    }
 }
 
-pub trait Pass {
-    fn run(&self, ssa: &mut SSA, pass_manager: &PassManager);
-    fn pass_info(&self) -> PassInfo;
-    fn invalidates_cfg(&self) -> bool {
-        true
+impl PartialEq for AnalysisId {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
     }
-    fn invalidates_types(&self) -> bool {
-        true
-    }
-    fn invalidates_constraint_instrumentation(&self) -> bool {
-        true
-    }
-    fn invalidates_value_definitions(&self) -> bool {
-        true
+}
+impl Eq for AnalysisId {}
+
+impl std::hash::Hash for AnalysisId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.type_id.hash(state);
     }
 }
 
-pub struct PassManager {
-    passes: Vec<Box<dyn Pass>>,
-    current_pass_info: Option<PassInfo>,
-    cfg: Option<FlowAnalysis>,
+impl std::fmt::Debug for AnalysisId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AnalysisId({})", self.type_name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Analysis trait
+// ---------------------------------------------------------------------------
+
+pub trait Analysis<Op: Instruction = OpCode, Ty: SSAType = Type>: Any + 'static {
+    fn id() -> AnalysisId
+    where
+        Self: Sized,
+    {
+        AnalysisId::of::<Self, Op, Ty>()
+    }
+
+    fn dependencies() -> Vec<AnalysisId>
+    where
+        Self: Sized,
+    {
+        vec![]
+    }
+
+    fn compute(ssa: &SSA<Op, Ty>, store: &AnalysisStore) -> Self
+    where
+        Self: Sized;
+}
+
+// ---------------------------------------------------------------------------
+// AnalysisStore — type-erased cache
+// ---------------------------------------------------------------------------
+
+pub struct AnalysisStore {
+    data: HashMap<TypeId, Box<dyn Any>>,
+    deps: HashMap<TypeId, Vec<TypeId>>,
+}
+
+impl AnalysisStore {
+    pub fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+            deps: HashMap::new(),
+        }
+    }
+
+    pub fn get<A: 'static>(&self) -> &A {
+        self.data
+            .get(&TypeId::of::<A>())
+            .unwrap_or_else(|| panic!("Analysis {} not found in store", std::any::type_name::<A>()))
+            .downcast_ref::<A>()
+            .unwrap()
+    }
+
+    pub fn try_get<A: 'static>(&self) -> Option<&A> {
+        self.data
+            .get(&TypeId::of::<A>())
+            .and_then(|b| b.downcast_ref::<A>())
+    }
+
+    fn insert_with_deps<A: 'static>(&mut self, val: A, dep_ids: Vec<TypeId>) {
+        let tid = TypeId::of::<A>();
+        self.data.insert(tid, Box::new(val));
+        if !dep_ids.is_empty() {
+            self.deps.insert(tid, dep_ids);
+        }
+    }
+
+    fn contains_type(&self, type_id: TypeId) -> bool {
+        self.data.contains_key(&type_id)
+    }
+
+    /// Remove everything not preserved, plus transitively invalidate
+    /// anything whose dependency was removed.
+    pub fn apply_preserved(&mut self, preserved: &[AnalysisId]) {
+        let preserved_ids: Vec<TypeId> = preserved.iter().map(|a| a.type_id).collect();
+        loop {
+            let to_remove: Vec<TypeId> = self
+                .data
+                .keys()
+                .filter(|tid| {
+                    if !preserved_ids.contains(tid) {
+                        return true;
+                    }
+                    self.deps
+                        .get(tid)
+                        .map(|deps| deps.iter().any(|d| !self.data.contains_key(d)))
+                        .unwrap_or(false)
+                })
+                .copied()
+                .collect();
+            if to_remove.is_empty() {
+                break;
+            }
+            for id in &to_remove {
+                self.data.remove(id);
+                self.deps.remove(id);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass trait — parametric
+// ---------------------------------------------------------------------------
+
+pub trait Pass<Op: Instruction = OpCode, Ty: SSAType = Type> {
+    fn name(&self) -> &'static str;
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![]
+    }
+    fn run(&self, ssa: &mut SSA<Op, Ty>, store: &AnalysisStore);
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// topo_sort — DFS over AnalysisId::dependencies(), skipping what's in store
+// ---------------------------------------------------------------------------
+
+fn topo_sort(roots: Vec<AnalysisId>, store: &AnalysisStore) -> Vec<AnalysisId> {
+    let mut result = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+
+    fn visit(
+        id: AnalysisId,
+        store: &AnalysisStore,
+        visited: &mut std::collections::HashSet<TypeId>,
+        result: &mut Vec<AnalysisId>,
+    ) {
+        if store.contains_type(id.type_id) || !visited.insert(id.type_id) {
+            return;
+        }
+        for dep in (id.dependencies)() {
+            visit(dep, store, visited, result);
+        }
+        result.push(id);
+    }
+
+    for root in roots {
+        visit(root, store, &mut visited, &mut result);
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// PassManager — parametric
+// ---------------------------------------------------------------------------
+
+pub struct PassManager<Op: Instruction = OpCode, Ty: SSAType = Type> {
+    passes: Vec<Box<dyn Pass<Op, Ty>>>,
+    analyses: AnalysisStore,
     draw_cfg: bool,
-    type_info: Option<TypeInfo>,
-    constraint_instrumentation: Option<instrumenter::Summary>,
-    value_definitions: Option<ValueDefinitions>,
     debug_output_dir: Option<PathBuf>,
     phase_label: String,
 }
 
-impl PassManager {
-    pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass>>) -> Self {
+impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
+    pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass<Op, Ty>>>) -> Self {
         Self {
             passes,
-            current_pass_info: None,
-            cfg: None,
+            analyses: AnalysisStore::new(),
             draw_cfg,
-            type_info: None,
-            constraint_instrumentation: None,
-            value_definitions: None,
             debug_output_dir: None,
             phase_label,
         }
@@ -77,7 +235,7 @@ impl PassManager {
     }
 
     #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
-    pub fn run(&mut self, ssa: &mut SSA) {
+    pub fn run(&mut self, ssa: &mut SSA<Op, Ty>) {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
                 fs::remove_dir_all(&debug_output_dir).unwrap();
@@ -93,29 +251,35 @@ impl PassManager {
         self.output_final_debug_info(ssa);
     }
 
-    #[tracing::instrument(skip_all, fields(pass = %pass.pass_info().name))]
-    fn run_pass(&mut self, ssa: &mut SSA, pass: &dyn Pass, pass_index: usize) {
-        self.initialize_pass_data(ssa, &pass.pass_info());
-        self.output_debug_info(ssa, pass_index, &pass.pass_info());
-        self.current_pass_info = Some(pass.pass_info());
-        pass.run(ssa, self);
-        self.tear_down_pass_data(pass);
+    #[tracing::instrument(skip_all, fields(pass = %pass.name()))]
+    fn run_pass(&mut self, ssa: &mut SSA<Op, Ty>, pass: &dyn Pass<Op, Ty>, pass_index: usize) {
+        // Ensure all needed analyses are computed (in dependency order)
+        let ordered = topo_sort(pass.needs(), &self.analyses);
+        for id in ordered {
+            (id.compute_and_store)(ssa as &dyn Any, &mut self.analyses);
+        }
+
+        self.output_debug_info(ssa, pass_index, pass.name());
+        pass.run(ssa, &self.analyses);
+        self.analyses.apply_preserved(&pass.preserves());
     }
 
-    fn output_debug_info(&mut self, ssa: &SSA, pass_index: usize, pass_info: &PassInfo) {
+    fn output_debug_info(&mut self, ssa: &SSA<Op, Ty>, pass_index: usize, pass_name: &str) {
+        use crate::compiler::flow_analysis::FlowAnalysis;
+
         let Some(debug_output_dir) = &self.debug_output_dir else {
             return;
         };
-        if pass_info.needs.contains(&DataPoint::CFG) && self.draw_cfg {
-            if let Some(cfg) = &self.cfg {
+        if self.draw_cfg {
+            if let Some(cfg) = self.analyses.try_get::<FlowAnalysis>() {
                 cfg.generate_images(
-                    debug_output_dir.join(format!("before_pass_{}_{}", pass_index, pass_info.name)),
+                    debug_output_dir.join(format!("before_pass_{}_{}", pass_index, pass_name)),
                     ssa,
-                    format!("before {}: {}", pass_index, pass_info.name),
+                    format!("before {}: {}", pass_index, pass_name),
                 );
                 fs::write(
                     debug_output_dir
-                        .join(format!("before_pass_{}_{}", pass_index, pass_info.name))
+                        .join(format!("before_pass_{}_{}", pass_index, pass_name))
                         .join("code.txt"),
                     format!("{}", ssa.to_string(&DefaultSsaAnnotator)),
                 )
@@ -124,15 +288,18 @@ impl PassManager {
         }
     }
 
-    fn output_final_debug_info(&mut self, ssa: &mut SSA) {
-        if self.cfg.is_none() {
-            self.cfg = Some(FlowAnalysis::run(ssa));
+    fn output_final_debug_info(&mut self, ssa: &mut SSA<Op, Ty>) {
+        use crate::compiler::flow_analysis::FlowAnalysis;
+
+        if self.analyses.try_get::<FlowAnalysis>().is_none() {
+            let cfg = FlowAnalysis::run(ssa);
+            self.analyses.insert_with_deps::<FlowAnalysis>(cfg, vec![]);
         }
         let Some(debug_output_dir) = &self.debug_output_dir else {
             return;
         };
         if self.draw_cfg {
-            if let Some(cfg) = &self.cfg {
+            if let Some(cfg) = self.analyses.try_get::<FlowAnalysis>() {
                 cfg.generate_images(
                     debug_output_dir.join("final_result"),
                     ssa,
@@ -145,115 +312,5 @@ impl PassManager {
             )
             .unwrap();
         }
-    }
-
-    fn initialize_pass_data(&mut self, ssa: &mut SSA, pass_info: &PassInfo) {
-        if (pass_info.needs.contains(&DataPoint::CFG)
-            || pass_info.needs.contains(&DataPoint::Types)
-            || pass_info
-                .needs
-                .contains(&DataPoint::ConstraintInstrumentation))
-            && self.cfg.is_none()
-        {
-            self.cfg = Some(FlowAnalysis::run(ssa));
-        }
-        if (pass_info.needs.contains(&DataPoint::Types)
-            || pass_info
-                .needs
-                .contains(&DataPoint::ConstraintInstrumentation))
-            && self.type_info.is_none()
-        {
-            self.type_info = Some(Types::new().run(ssa, self.cfg.as_ref().unwrap()));
-        }
-        if pass_info
-            .needs
-            .contains(&DataPoint::ConstraintInstrumentation)
-        {
-            let cost_estimator = CostEstimator::new();
-            let cost_analysis = cost_estimator.run(ssa, self.type_info.as_ref().unwrap());
-            let summary = cost_analysis.summarize();
-            self.constraint_instrumentation = Some(summary);
-        }
-        if pass_info.needs.contains(&DataPoint::ValueDefinitions) {
-            self.value_definitions = Some(ValueDefinitions::from_ssa(ssa));
-        }
-    }
-
-    fn tear_down_pass_data(&mut self, pass: &dyn Pass) {
-        if pass.invalidates_cfg() {
-            self.cfg = None;
-        }
-        if pass.invalidates_types() {
-            self.type_info = None;
-        }
-        if pass.invalidates_constraint_instrumentation() {
-            self.constraint_instrumentation = None;
-        }
-        if pass.invalidates_value_definitions() {
-            self.value_definitions = None;
-        }
-    }
-
-    pub fn get_cfg(&self) -> &FlowAnalysis {
-        match &self.current_pass_info {
-            Some(pass_info) => {
-                if !pass_info.needs.contains(&DataPoint::CFG) {
-                    panic!(
-                        "Pass {} does not need CFG but tries to access it",
-                        pass_info.name
-                    );
-                }
-            }
-            None => {}
-        }
-        self.cfg.as_ref().unwrap()
-    }
-
-    pub fn get_constraint_instrumentation(&self) -> &instrumenter::Summary {
-        match &self.current_pass_info {
-            Some(pass_info) => {
-                if !pass_info
-                    .needs
-                    .contains(&DataPoint::ConstraintInstrumentation)
-                {
-                    panic!(
-                        "Pass {} does not need constraint instrumentation but tries to access it",
-                        pass_info.name
-                    );
-                }
-            }
-            None => {}
-        }
-        self.constraint_instrumentation.as_ref().unwrap()
-    }
-
-    pub fn get_type_info(&self) -> &TypeInfo {
-        match &self.current_pass_info {
-            Some(pass_info) => {
-                if !pass_info.needs.contains(&DataPoint::Types) {
-                    panic!(
-                        "Pass {} does not need type information but tries to access it",
-                        pass_info.name
-                    );
-                }
-            }
-            None => {}
-        }
-        self.type_info.as_ref().unwrap()
-    }
-
-    pub fn get_value_definitions(&self) -> &ValueDefinitions {
-        match &self.current_pass_info {
-            Some(pass_info) => {
-                if !pass_info.needs.contains(&DataPoint::ValueDefinitions) {
-                    panic!(
-                        "Pass {} does not need value definitions but tries to access it",
-                        pass_info.name
-                    );
-                }
-            }
-            None => {}
-        }
-        self.value_definitions.as_ref().unwrap()
     }
 }

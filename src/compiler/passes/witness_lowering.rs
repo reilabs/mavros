@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
+    analysis::types::TypeInfo,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{DataPoint, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, DMatrix, OpCode, SeqType,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, DMatrix, HLBlock, OpCode, SeqType,
         Terminator, TupleIdx, ValueId,
     },
 };
@@ -13,23 +14,16 @@ use crate::compiler::{
 pub struct WitnessLowering {}
 
 impl Pass for WitnessLowering {
-    fn run(
-        &self,
-        ssa: &mut crate::compiler::ssa::SSA,
-        pass_manager: &crate::compiler::pass_manager::PassManager,
-    ) {
-        self.do_run(ssa, pass_manager.get_type_info());
+    fn name(&self) -> &'static str {
+        "witness_lowering"
     }
 
-    fn pass_info(&self) -> crate::compiler::pass_manager::PassInfo {
-        crate::compiler::pass_manager::PassInfo {
-            name: "witness_lowering",
-            needs: vec![DataPoint::Types],
-        }
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
     }
 
-    fn invalidates_cfg(&self) -> bool {
-        true
+    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
     }
 }
 
@@ -40,7 +34,7 @@ impl WitnessLowering {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::SSA,
+        ssa: &mut crate::compiler::ssa::HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
@@ -237,8 +231,11 @@ impl WitnessLowering {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
                                         // Lower Sub(wit, wit) to Add(a, MulConst(-1, b))
-                                        let neg_one =
-                                            function.push_field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_one = function.fresh_value();
+                                        new_instructions.push(OpCode::mk_field_const(
+                                            neg_one,
+                                            ark_bn254::Fr::from(-1i64),
+                                        ));
                                         let neg_b = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_b,
@@ -295,8 +292,11 @@ impl WitnessLowering {
                                         });
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
-                                        let neg_one =
-                                            function.push_field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_one = function.fresh_value();
+                                        new_instructions.push(OpCode::mk_field_const(
+                                            neg_one,
+                                            ark_bn254::Fr::from(-1i64),
+                                        ));
                                         let neg_rhs = function.fresh_value();
                                         new_instructions.push(OpCode::MulConst {
                                             result: neg_rhs,
@@ -456,7 +456,8 @@ impl WitnessLowering {
                         | OpCode::DropGlobal { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. }
-                        | OpCode::ValueOf { .. } => {
+                        | OpCode::ValueOf { .. }
+                        | OpCode::Const { .. } => {
                             new_instructions.push(instruction);
                         }
                         OpCode::MkTuple {
@@ -520,10 +521,10 @@ impl WitnessLowering {
         source_type: &Type,
         target_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut crate::compiler::ssa::HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> ValueId {
         let converted_source = self.witness_lowering_in_type(source_type);
         if converted_source == *target_type {
@@ -621,10 +622,10 @@ impl WitnessLowering {
         _source_array_type: &Type,
         target_array_type: &Type,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut crate::compiler::ssa::HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> ValueId {
         // Create a properly-typed initial target array filled with dummy elements.
         // This ensures the dst array has the correct memory layout from the start.
@@ -642,9 +643,12 @@ impl WitnessLowering {
         let (continuation_id, continuation) = function.next_virtual_block();
 
         // Constants (u32 for array indexing)
-        let const_0 = function.push_u_const(32, 0);
-        let const_1 = function.push_u_const(32, 1);
-        let const_len = function.push_u_const(32, array_len as u128);
+        let const_0 = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_0, 32, 0));
+        let const_1 = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_1, 32, 1));
+        let const_len = function.fresh_value();
+        new_instructions.push(OpCode::mk_u_const(const_len, 32, array_len as u128));
 
         // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
         // source_array is accessed directly from the dominating block, not as a loop param.
@@ -733,7 +737,7 @@ impl WitnessLowering {
         array_len: usize,
         _array_type: &Type,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
+        function: &mut crate::compiler::ssa::HLFunction,
     ) -> ValueId {
         let dummy_elem = self.create_dummy_value(elem_type, new_instructions, function);
         let elems = vec![dummy_elem; array_len];
@@ -754,11 +758,15 @@ impl WitnessLowering {
         &self,
         target_type: &Type,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
+        function: &mut crate::compiler::ssa::HLFunction,
     ) -> ValueId {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
-                let dummy_field = function.push_field_const(ark_bn254::Fr::from(0u64));
+                let dummy_field = function.fresh_value();
+                new_instructions.push(OpCode::mk_field_const(
+                    dummy_field,
+                    ark_bn254::Fr::from(0u64),
+                ));
                 let refed = function.fresh_value();
                 new_instructions.push(OpCode::Cast {
                     result: refed,
@@ -789,7 +797,9 @@ impl WitnessLowering {
             }
             TypeExpr::Field | TypeExpr::U(_) => {
                 // Pure scalar types that don't need conversion — use a zero constant
-                function.push_field_const(ark_bn254::Fr::from(0u64))
+                let dummy = function.fresh_value();
+                new_instructions.push(OpCode::mk_field_const(dummy, ark_bn254::Fr::from(0u64)));
+                dummy
             }
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
@@ -802,10 +812,10 @@ impl WitnessLowering {
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
         current_block_id: &mut BlockId,
-        current_block: &mut Block,
+        current_block: &mut HLBlock,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
-        new_blocks: &mut HashMap<BlockId, Block>,
+        function: &mut crate::compiler::ssa::HLFunction,
+        new_blocks: &mut HashMap<BlockId, HLBlock>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_lowering_in_type(&value_type);
@@ -830,7 +840,7 @@ impl WitnessLowering {
         val: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
         new_instructions: &mut Vec<OpCode>,
-        function: &mut crate::compiler::ssa::Function,
+        function: &mut crate::compiler::ssa::HLFunction,
     ) -> ValueId {
         let val_type = type_info.get_value_type(val);
         if val_type.is_witness_of() {

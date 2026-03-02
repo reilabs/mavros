@@ -173,6 +173,7 @@ pub fn ssa_snippet(input: TokenStream) -> TokenStream {
     };
 
     let func_expr = snippet.func_expr.to_token_stream();
+    let mut const_counter: usize = 0;
 
     for instruction in snippet.instructions {
         let mut operands = vec![];
@@ -188,10 +189,22 @@ pub fn ssa_snippet(input: TokenStream) -> TokenStream {
                     operands.push(quote! { #ident });
                 }
                 Operand::UConst(size, expr) => {
-                    operands.push(quote! { #func_expr.push_u_const(#size, #expr) });
+                    let ident = format_ident!("__ssa_const_{}", const_counter);
+                    const_counter += 1;
+                    instructions.extend(quote! {
+                        let #ident = #func_expr.fresh_value();
+                        __ssa_builder_result.push(OpCode::mk_u_const(#ident, #size, #expr));
+                    });
+                    operands.push(quote! { #ident });
                 }
                 Operand::FieldConst(expr) => {
-                    operands.push(quote! { #func_expr.push_field_const(#expr) });
+                    let ident = format_ident!("__ssa_const_{}", const_counter);
+                    const_counter += 1;
+                    instructions.extend(quote! {
+                        let #ident = #func_expr.fresh_value();
+                        __ssa_builder_result.push(OpCode::mk_field_const(#ident, #expr));
+                    });
+                    operands.push(quote! { #ident });
                 }
             }
         }
@@ -225,6 +238,7 @@ pub fn ssa_append(input: TokenStream) -> TokenStream {
     };
 
     let func_expr = snippet.func_expr.to_token_stream();
+    let mut const_counter: usize = 0;
 
     for instruction in snippet.instructions {
         let mut operands = vec![];
@@ -240,10 +254,22 @@ pub fn ssa_append(input: TokenStream) -> TokenStream {
                     operands.push(quote! { #ident });
                 }
                 Operand::UConst(size, expr) => {
-                    operands.push(quote! { #func_expr.push_u_const(#size, #expr) });
+                    let ident = format_ident!("__ssa_const_{}", const_counter);
+                    const_counter += 1;
+                    instructions.extend(quote! {
+                        let #ident = #func_expr.fresh_value();
+                        #accumulator.push(OpCode::mk_u_const(#ident, #size, #expr));
+                    });
+                    operands.push(quote! { #ident });
                 }
                 Operand::FieldConst(expr) => {
-                    operands.push(quote! { #func_expr.push_field_const(#expr) });
+                    let ident = format_ident!("__ssa_const_{}", const_counter);
+                    const_counter += 1;
+                    instructions.extend(quote! {
+                        let #ident = #func_expr.fresh_value();
+                        #accumulator.push(OpCode::mk_field_const(#ident, #expr));
+                    });
+                    operands.push(quote! { #ident });
                 }
             }
         }
