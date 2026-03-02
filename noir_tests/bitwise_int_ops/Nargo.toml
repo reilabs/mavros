@@ -1,0 +1,5 @@
+[package]
+name = "bitwise_int_ops"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"

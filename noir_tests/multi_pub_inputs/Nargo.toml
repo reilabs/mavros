@@ -1,5 +1,0 @@
-[package]
-name = "multi_pub_inputs"
-type = "bin"
-
-[dependencies]

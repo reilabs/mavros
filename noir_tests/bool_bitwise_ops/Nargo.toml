@@ -1,5 +1,0 @@
-[package]
-name = "bool_bitwise_ops"
-type = "bin"
-
-[dependencies]

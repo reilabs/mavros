@@ -1,0 +1,5 @@
+[package]
+name = "mut_struct_field"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"

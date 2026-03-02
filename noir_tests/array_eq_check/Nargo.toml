@@ -1,5 +1,0 @@
-[package]
-name = "array_eq_check"
-type = "bin"
-
-[dependencies]
