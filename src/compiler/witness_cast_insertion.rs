@@ -4,6 +4,7 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::types::Types,
+    block_builder::BlockCursor,
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
@@ -269,9 +270,7 @@ impl WitnessCastInsertion {
             let terminator = block.take_terminator();
             let instructions = block.take_instructions();
 
-            let mut current_block_id = bid;
-            let mut current_block = block;
-            let mut new_instructions = vec![];
+            let mut cursor = BlockCursor::new(function, bid, block);
 
             for instruction in instructions.into_iter() {
                 match instruction {
@@ -285,19 +284,20 @@ impl WitnessCastInsertion {
                         let new_vs = vs
                             .iter()
                             .map(|v| {
+                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *v,
                                     &target_elem_type,
                                     type_info,
-                                    &mut current_block_id,
-                                    &mut current_block,
-                                    &mut new_instructions,
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
                                     function,
-                                    &mut new_blocks,
+                                    new_blocks,
                                 )
                             })
                             .collect();
-                        new_instructions.push(OpCode::MkSeq {
+                        cursor.instr().push(OpCode::MkSeq {
                             result: r,
                             elems: new_vs,
                             seq_type: s,
@@ -316,17 +316,18 @@ impl WitnessCastInsertion {
                             TypeExpr::Slice(inner) => inner.as_ref().clone(),
                             _ => panic!("ArraySet on non-array type"),
                         };
+                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                         let converted = self.convert_if_needed(
                             value,
                             &expected_elem_type,
                             type_info,
-                            &mut current_block_id,
-                            &mut current_block,
-                            &mut new_instructions,
+                            current_block_id,
+                            current_block,
+                            new_instructions,
                             function,
-                            &mut new_blocks,
+                            new_blocks,
                         );
-                        new_instructions.push(OpCode::ArraySet {
+                        cursor.instr().push(OpCode::ArraySet {
                             result,
                             array,
                             index,
@@ -347,19 +348,20 @@ impl WitnessCastInsertion {
                         let new_values = values
                             .iter()
                             .map(|v| {
+                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *v,
                                     &expected_elem_type,
                                     type_info,
-                                    &mut current_block_id,
-                                    &mut current_block,
-                                    &mut new_instructions,
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
                                     function,
-                                    &mut new_blocks,
+                                    new_blocks,
                                 )
                             })
                             .collect();
-                        new_instructions.push(OpCode::SlicePush {
+                        cursor.instr().push(OpCode::SlicePush {
                             dir,
                             result,
                             slice,
@@ -369,17 +371,18 @@ impl WitnessCastInsertion {
                     OpCode::Store { ptr, value } => {
                         let ptr_type = type_info.get_value_type(ptr);
                         let target_type = ptr_type.get_pointed();
+                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                         let converted = self.convert_if_needed(
                             value,
                             &target_type,
                             type_info,
-                            &mut current_block_id,
-                            &mut current_block,
-                            &mut new_instructions,
+                            current_block_id,
+                            current_block,
+                            new_instructions,
                             function,
-                            &mut new_blocks,
+                            new_blocks,
                         );
-                        new_instructions.push(OpCode::Store {
+                        cursor.instr().push(OpCode::Store {
                             ptr,
                             value: converted,
                         });
@@ -393,27 +396,29 @@ impl WitnessCastInsertion {
                         let if_t_type = type_info.get_value_type(if_t);
                         let if_f_type = type_info.get_value_type(if_f);
                         let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
+                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                         let if_t = self.convert_if_needed(
                             if_t,
                             &target_type,
                             type_info,
-                            &mut current_block_id,
-                            &mut current_block,
-                            &mut new_instructions,
+                            current_block_id,
+                            current_block,
+                            new_instructions,
                             function,
-                            &mut new_blocks,
+                            new_blocks,
                         );
+                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                         let if_f = self.convert_if_needed(
                             if_f,
                             &target_type,
                             type_info,
-                            &mut current_block_id,
-                            &mut current_block,
-                            &mut new_instructions,
+                            current_block_id,
+                            current_block,
+                            new_instructions,
                             function,
-                            &mut new_blocks,
+                            new_blocks,
                         );
-                        new_instructions.push(OpCode::Select {
+                        cursor.instr().push(OpCode::Select {
                             result: r,
                             cond,
                             if_t,
@@ -452,7 +457,7 @@ impl WitnessCastInsertion {
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
                     | OpCode::Const { .. }) => {
-                        new_instructions.push(op);
+                        cursor.instr().push(op);
                     }
                 }
             }
@@ -466,23 +471,22 @@ impl WitnessCastInsertion {
                                 .iter()
                                 .zip(param_types.iter())
                                 .map(|(arg, expected_type)| {
+                                    let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                     self.convert_if_needed(
                                         *arg,
                                         expected_type,
                                         type_info,
-                                        &mut current_block_id,
-                                        &mut current_block,
-                                        &mut new_instructions,
+                                        current_block_id,
+                                        current_block,
+                                        new_instructions,
                                         function,
-                                        &mut new_blocks,
+                                        new_blocks,
                                     )
                                 })
                                 .collect();
-                            current_block.put_instructions(new_instructions);
-                            current_block.set_terminator(Terminator::Jmp(target, new_args));
+                            new_blocks.extend(cursor.finish_with_terminator(Terminator::Jmp(target, new_args)));
                         } else {
-                            current_block.put_instructions(new_instructions);
-                            current_block.set_terminator(Terminator::Jmp(target, args));
+                            new_blocks.extend(cursor.finish_with_terminator(Terminator::Jmp(target, args)));
                         }
                     }
                     Terminator::Return(values) => {
@@ -490,30 +494,28 @@ impl WitnessCastInsertion {
                             .iter()
                             .zip(return_types.iter())
                             .map(|(val, expected_type)| {
+                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *val,
                                     expected_type,
                                     type_info,
-                                    &mut current_block_id,
-                                    &mut current_block,
-                                    &mut new_instructions,
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
                                     function,
-                                    &mut new_blocks,
+                                    new_blocks,
                                 )
                             })
                             .collect();
-                        current_block.put_instructions(new_instructions);
-                        current_block.set_terminator(Terminator::Return(new_values));
+                        new_blocks.extend(cursor.finish_with_terminator(Terminator::Return(new_values)));
                     }
                     Terminator::JmpIf(cond, if_true, if_false) => {
-                        current_block.put_instructions(new_instructions);
-                        current_block.set_terminator(Terminator::JmpIf(cond, if_true, if_false));
+                        new_blocks.extend(cursor.finish_with_terminator(Terminator::JmpIf(cond, if_true, if_false)));
                     }
                 }
             } else {
-                current_block.put_instructions(new_instructions);
+                new_blocks.extend(cursor.finish());
             }
-            new_blocks.insert(current_block_id, current_block);
         }
         function.put_blocks(new_blocks);
     }

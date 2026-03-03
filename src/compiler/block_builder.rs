@@ -1,0 +1,366 @@
+use std::collections::HashMap;
+
+use crate::compiler::{
+    ir::r#type::{SSAType, Type},
+    ssa::{
+        Block, BlockId, BinaryArithOpKind, CastTarget, CmpKind, Function, Instruction, LookupTarget,
+        OpCode, SeqType, Terminator, TupleIdx, ValueId,
+    },
+};
+
+// ---------------------------------------------------------------------------
+// InstrBuilder — lightweight instruction emitter
+// ---------------------------------------------------------------------------
+
+pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType> {
+    pub function: &'a mut Function<Op, Ty>,
+    pub instructions: &'a mut Vec<Op>,
+}
+
+impl<'a, Op: Instruction, Ty: SSAType> InstrBuilder<'a, Op, Ty> {
+    pub fn new(function: &'a mut Function<Op, Ty>, instructions: &'a mut Vec<Op>) -> Self {
+        Self {
+            function,
+            instructions,
+        }
+    }
+
+    /// Push a pre-built instruction (passthrough or pre-allocated result).
+    pub fn push(&mut self, op: Op) {
+        self.instructions.push(op);
+    }
+
+    /// Allocate a fresh ValueId.
+    pub fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
+    }
+}
+
+// HL-specific convenience methods
+impl InstrBuilder<'_, OpCode, Type> {
+    // -- Arithmetic --
+
+    pub fn add(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_add(r, lhs, rhs));
+        r
+    }
+
+    pub fn sub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_sub(r, lhs, rhs));
+        r
+    }
+
+    pub fn mul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_mul(r, lhs, rhs));
+        r
+    }
+
+    pub fn div(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_div(r, lhs, rhs));
+        r
+    }
+
+    pub fn and(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_and(r, lhs, rhs));
+        r
+    }
+
+    // -- Comparison --
+
+    pub fn eq(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_eq(r, lhs, rhs));
+        r
+    }
+
+    pub fn lt(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_lt(r, lhs, rhs));
+        r
+    }
+
+    // -- Casts --
+
+    pub fn cast_to_field(&mut self, value: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_cast_to_field(r, value));
+        r
+    }
+
+    pub fn cast_to(&mut self, target: CastTarget, value: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_cast_to(r, target, value));
+        r
+    }
+
+    pub fn cast_to_witness_of(&mut self, value: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_cast_to(r, CastTarget::WitnessOf, value));
+        r
+    }
+
+    // -- Constants --
+
+    pub fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_field_const(r, value));
+        r
+    }
+
+    pub fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_u_const(r, bits, value));
+        r
+    }
+
+    // -- Witness --
+
+    pub fn value_of(&mut self, value: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_value_of(r, value));
+        r
+    }
+
+    pub fn write_witness(&mut self, value: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::mk_write_witness(r, value));
+        r
+    }
+
+    pub fn pinned_write_witness(&mut self, value: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions
+            .push(OpCode::mk_pinned_write_witness(r, value));
+        r
+    }
+
+    // -- Memory / aggregates --
+
+    pub fn array_get(&mut self, array: ValueId, index: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions
+            .push(OpCode::mk_array_get(r, array, index));
+        r
+    }
+
+    pub fn array_set(
+        &mut self,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
+    ) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::ArraySet {
+            result: r,
+            array,
+            index,
+            value,
+        });
+        r
+    }
+
+    pub fn tuple_proj(&mut self, tuple: ValueId, idx: TupleIdx) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::TupleProj {
+            result: r,
+            tuple,
+            idx,
+        });
+        r
+    }
+
+    pub fn mk_tuple(&mut self, elems: Vec<ValueId>, element_types: Vec<Type>) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::MkTuple {
+            result: r,
+            elems,
+            element_types,
+        });
+        r
+    }
+
+    pub fn mk_seq(
+        &mut self,
+        elems: Vec<ValueId>,
+        seq_type: SeqType,
+        elem_type: Type,
+    ) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::MkSeq {
+            result: r,
+            elems,
+            seq_type,
+            elem_type,
+        });
+        r
+    }
+
+    pub fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::Select {
+            result: r,
+            cond,
+            if_t,
+            if_f,
+        });
+        r
+    }
+
+    pub fn load(&mut self, ptr: ValueId) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::Load { result: r, ptr });
+        r
+    }
+
+    pub fn alloc(&mut self, elem_type: Type) -> ValueId {
+        let r = self.function.fresh_value();
+        self.instructions.push(OpCode::Alloc {
+            result: r,
+            elem_type,
+        });
+        r
+    }
+
+    // -- No-result instructions --
+
+    pub fn constrain(&mut self, a: ValueId, b: ValueId, c: ValueId) {
+        self.instructions.push(OpCode::mk_constrain(a, b, c));
+    }
+
+    pub fn store(&mut self, ptr: ValueId, value: ValueId) {
+        self.instructions.push(OpCode::Store { ptr, value });
+    }
+
+    pub fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId) {
+        self.instructions
+            .push(OpCode::mk_lookup_rngchk(target, value));
+    }
+
+    pub fn lookup_rngchk_8(&mut self, value: ValueId) {
+        self.instructions.push(OpCode::mk_lookup_rngchk_8(value));
+    }
+
+    pub fn lookup_arr(&mut self, array: ValueId, index: ValueId, result: ValueId) {
+        self.instructions
+            .push(OpCode::mk_lookup_arr(array, index, result));
+    }
+
+    pub fn assert_eq(&mut self, lhs: ValueId, rhs: ValueId) {
+        self.instructions.push(OpCode::AssertEq { lhs, rhs });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BlockCursor — block-splitting state machine
+// ---------------------------------------------------------------------------
+
+pub struct BlockCursor<'a, Op: Instruction, Ty: SSAType> {
+    pub function: &'a mut Function<Op, Ty>,
+    current_block_id: BlockId,
+    current_block: Block<Op, Ty>,
+    instructions: Vec<Op>,
+    new_blocks: HashMap<BlockId, Block<Op, Ty>>,
+}
+
+impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
+    /// Start a cursor for the given block. The block should already have had
+    /// its instructions and terminator taken out for processing.
+    pub fn new(
+        function: &'a mut Function<Op, Ty>,
+        block_id: BlockId,
+        block: Block<Op, Ty>,
+    ) -> Self {
+        Self {
+            function,
+            current_block_id: block_id,
+            current_block: block,
+            instructions: vec![],
+            new_blocks: HashMap::new(),
+        }
+    }
+
+    /// Get an InstrBuilder for emitting instructions into the current block.
+    pub fn instr(&mut self) -> InstrBuilder<'_, Op, Ty> {
+        InstrBuilder {
+            function: self.function,
+            instructions: &mut self.instructions,
+        }
+    }
+
+    /// Create a new block without switching to it.
+    pub fn new_block(&mut self) -> (BlockId, Block<Op, Ty>) {
+        self.function.next_virtual_block()
+    }
+
+    /// Finalize the current block with the given terminator, then switch the
+    /// cursor to `next_id` / `next_block`.
+    pub fn seal_and_switch(
+        &mut self,
+        terminator: Terminator,
+        next_id: BlockId,
+        next_block: Block<Op, Ty>,
+    ) {
+        self.current_block
+            .put_instructions(std::mem::take(&mut self.instructions));
+        self.current_block.set_terminator(terminator);
+        let old_block = std::mem::replace(&mut self.current_block, next_block);
+        self.new_blocks.insert(self.current_block_id, old_block);
+        self.current_block_id = next_id;
+    }
+
+    /// Store a separately-built block (e.g. loop headers, loop bodies).
+    pub fn insert_block(&mut self, id: BlockId, block: Block<Op, Ty>) {
+        self.new_blocks.insert(id, block);
+    }
+
+    /// Seal the final block with the given terminator and return all blocks.
+    pub fn finish_with_terminator(
+        mut self,
+        terminator: Terminator,
+    ) -> HashMap<BlockId, Block<Op, Ty>> {
+        self.current_block
+            .put_instructions(std::mem::take(&mut self.instructions));
+        self.current_block.set_terminator(terminator);
+        self.new_blocks
+            .insert(self.current_block_id, self.current_block);
+        self.new_blocks
+    }
+
+    /// Seal the final block (keeping its existing terminator) and return all blocks.
+    pub fn finish(mut self) -> HashMap<BlockId, Block<Op, Ty>> {
+        self.current_block
+            .put_instructions(std::mem::take(&mut self.instructions));
+        self.new_blocks
+            .insert(self.current_block_id, self.current_block);
+        self.new_blocks
+    }
+
+    /// Compatibility bridge: expose the five mutable references that existing
+    /// helper functions expect. Use during incremental migration.
+    pub fn as_parts(
+        &mut self,
+    ) -> (
+        &mut BlockId,
+        &mut Block<Op, Ty>,
+        &mut Vec<Op>,
+        &mut Function<Op, Ty>,
+        &mut HashMap<BlockId, Block<Op, Ty>>,
+    ) {
+        (
+            &mut self.current_block_id,
+            &mut self.current_block,
+            &mut self.instructions,
+            self.function,
+            &mut self.new_blocks,
+        )
+    }
+
+    pub fn current_block_id(&self) -> BlockId {
+        self.current_block_id
+    }
+}

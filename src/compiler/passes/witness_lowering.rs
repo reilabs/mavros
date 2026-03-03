@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     analysis::types::TypeInfo,
+    block_builder::BlockCursor,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -67,9 +68,7 @@ impl WitnessLowering {
                 let terminator = block.take_terminator();
                 let instructions = block.take_instructions();
 
-                let mut current_block_id = bid;
-                let mut current_block = block;
-                let mut new_instructions = vec![];
+                let mut cursor = BlockCursor::new(function, bid, block);
 
                 for mut instruction in instructions.into_iter() {
                     replacements.replace_instruction(&mut instruction);
@@ -81,17 +80,13 @@ impl WitnessLowering {
                         } => {
                             let v_type = type_info.get_value_type(v);
                             if v_type.is_witness_of() {
-                                // The value is already WitnessOf — the cast strips it to Field.
-                                // Instead of emitting a Nop, alias the result to the original
-                                // value so ensure_witness_ref sees the WitnessOf type and
-                                // doesn't double-wrap.
                                 replacements.insert(r, v);
                             } else {
-                                new_instructions.push(instruction);
+                                cursor.instr().push(instruction);
                             }
                         }
                         OpCode::FreshWitness { .. } => {
-                            new_instructions.push(instruction);
+                            cursor.instr().push(instruction);
                         }
                         OpCode::MkSeq {
                             result: r,
@@ -103,68 +98,71 @@ impl WitnessLowering {
                             let new_vs = vs
                                 .iter()
                                 .map(|v| {
+                                    let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                     self.convert_if_needed(
                                         *v,
                                         &new_elem_type,
                                         type_info,
-                                        &mut current_block_id,
-                                        &mut current_block,
-                                        &mut new_instructions,
+                                        current_block_id,
+                                        current_block,
+                                        new_instructions,
                                         function,
-                                        &mut new_blocks,
+                                        new_blocks,
                                     )
                                 })
                                 .collect();
-                            let i = OpCode::MkSeq {
+                            cursor.instr().push(OpCode::MkSeq {
                                 result: r,
                                 elems: new_vs,
                                 seq_type: s,
                                 elem_type: new_elem_type,
-                            };
-                            new_instructions.push(i);
+                            });
                         }
                         OpCode::Alloc {
                             result: r,
                             elem_type: tp,
                         } => {
-                            let i = OpCode::Alloc {
+                            cursor.instr().push(OpCode::Alloc {
                                 result: r,
                                 elem_type: self.witness_lowering_in_type(&tp),
-                            };
-                            new_instructions.push(i);
+                            });
                         }
                         OpCode::Constrain { a, b, c } => {
+                            let (_, _, new_instructions, function, _) = cursor.as_parts();
                             let a = self.ensure_witness_ref(
                                 a,
                                 type_info,
-                                &mut new_instructions,
+                                new_instructions,
                                 function,
                             );
+                            let (_, _, new_instructions, function, _) = cursor.as_parts();
                             let b = self.ensure_witness_ref(
                                 b,
                                 type_info,
-                                &mut new_instructions,
+                                new_instructions,
                                 function,
                             );
+                            let (_, _, new_instructions, function, _) = cursor.as_parts();
                             let c = self.ensure_witness_ref(
                                 c,
                                 type_info,
-                                &mut new_instructions,
+                                new_instructions,
                                 function,
                             );
-                            let new_val = function.fresh_value();
-                            new_instructions.push(OpCode::NextDCoeff { result: new_val });
-                            new_instructions.push(OpCode::BumpD {
+                            let b_instr = &mut cursor.instr();
+                            let new_val = b_instr.fresh_value();
+                            b_instr.push(OpCode::NextDCoeff { result: new_val });
+                            b_instr.push(OpCode::BumpD {
                                 matrix: DMatrix::A,
                                 variable: a,
                                 sensitivity: new_val,
                             });
-                            new_instructions.push(OpCode::BumpD {
+                            b_instr.push(OpCode::BumpD {
                                 matrix: DMatrix::B,
                                 variable: b,
                                 sensitivity: new_val,
                             });
-                            new_instructions.push(OpCode::BumpD {
+                            b_instr.push(OpCode::BumpD {
                                 matrix: DMatrix::C,
                                 variable: c,
                                 sensitivity: new_val,
@@ -175,6 +173,7 @@ impl WitnessLowering {
                             keys,
                             results,
                         } => {
+                            let b = &mut cursor.instr();
                             let mut new_keys = vec![];
                             for key in keys.iter() {
                                 let key_type = type_info.get_value_type(*key);
@@ -183,13 +182,7 @@ impl WitnessLowering {
                                     "Keys of lookup must be fields"
                                 );
                                 if !key_type.is_witness_of() {
-                                    let refed = function.fresh_value();
-                                    new_instructions.push(OpCode::Cast {
-                                        result: refed,
-                                        value: *key,
-                                        target: CastTarget::WitnessOf,
-                                    });
-                                    new_keys.push(refed);
+                                    new_keys.push(b.cast_to_witness_of(*key));
                                 } else {
                                     new_keys.push(*key);
                                 }
@@ -202,18 +195,12 @@ impl WitnessLowering {
                                     "Results of lookup must be fields"
                                 );
                                 if !result_type.is_witness_of() {
-                                    let refed = function.fresh_value();
-                                    new_instructions.push(OpCode::Cast {
-                                        result: refed,
-                                        value: *result,
-                                        target: CastTarget::WitnessOf,
-                                    });
-                                    new_results.push(refed);
+                                    new_results.push(b.cast_to_witness_of(*result));
                                 } else {
                                     new_results.push(*result);
                                 }
                             }
-                            new_instructions.push(OpCode::DLookup {
+                            b.push(OpCode::DLookup {
                                 target,
                                 keys: new_keys,
                                 results: new_results,
@@ -230,19 +217,15 @@ impl WitnessLowering {
                             match (a, a_type.is_witness_of(), b, b_type.is_witness_of()) {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
-                                        // Lower Sub(wit, wit) to Add(a, MulConst(-1, b))
-                                        let neg_one = function.fresh_value();
-                                        new_instructions.push(OpCode::mk_field_const(
-                                            neg_one,
-                                            ark_bn254::Fr::from(-1i64),
-                                        ));
-                                        let neg_b = function.fresh_value();
-                                        new_instructions.push(OpCode::MulConst {
+                                        let bi = &mut cursor.instr();
+                                        let neg_one = bi.field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_b = bi.fresh_value();
+                                        bi.push(OpCode::MulConst {
                                             result: neg_b,
                                             const_val: neg_one,
                                             var: b,
                                         });
-                                        new_instructions.push(OpCode::BinaryArithOp {
+                                        bi.push(OpCode::BinaryArithOp {
                                             kind: BinaryArithOpKind::Add,
                                             result: r,
                                             lhs: a,
@@ -250,21 +233,17 @@ impl WitnessLowering {
                                         });
                                     }
                                     _ => {
-                                        new_instructions.push(instruction);
+                                        cursor.instr().push(instruction);
                                     }
                                 },
                                 (_, false, _, false) => {
-                                    new_instructions.push(instruction);
+                                    cursor.instr().push(instruction);
                                 }
                                 (wit, true, pure, false) | (pure, false, wit, true) => match kind {
                                     BinaryArithOpKind::Add => {
-                                        let pure_refed = function.fresh_value();
-                                        new_instructions.push(OpCode::Cast {
-                                            result: pure_refed,
-                                            value: pure,
-                                            target: CastTarget::WitnessOf,
-                                        });
-                                        new_instructions.push(OpCode::BinaryArithOp {
+                                        let bi = &mut cursor.instr();
+                                        let pure_refed = bi.cast_to_witness_of(pure);
+                                        bi.push(OpCode::BinaryArithOp {
                                             kind,
                                             result: r,
                                             lhs: pure_refed,
@@ -272,7 +251,7 @@ impl WitnessLowering {
                                         });
                                     }
                                     BinaryArithOpKind::Mul => {
-                                        new_instructions.push(OpCode::MulConst {
+                                        cursor.instr().push(OpCode::MulConst {
                                             result: r,
                                             const_val: pure,
                                             var: wit,
@@ -282,28 +261,18 @@ impl WitnessLowering {
                                         panic!("Div is not supported for witness-pure arithmetic")
                                     }
                                     BinaryArithOpKind::Sub => {
-                                        // Lower Sub(a, b) where one is pure/one is witness
-                                        // to Add(a_ref, MulConst(-1, b_ref))
-                                        let pure_refed = function.fresh_value();
-                                        new_instructions.push(OpCode::Cast {
-                                            result: pure_refed,
-                                            value: pure,
-                                            target: CastTarget::WitnessOf,
-                                        });
+                                        let bi = &mut cursor.instr();
+                                        let pure_refed = bi.cast_to_witness_of(pure);
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
-                                        let neg_one = function.fresh_value();
-                                        new_instructions.push(OpCode::mk_field_const(
-                                            neg_one,
-                                            ark_bn254::Fr::from(-1i64),
-                                        ));
-                                        let neg_rhs = function.fresh_value();
-                                        new_instructions.push(OpCode::MulConst {
+                                        let neg_one = bi.field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_rhs = bi.fresh_value();
+                                        bi.push(OpCode::MulConst {
                                             result: neg_rhs,
                                             const_val: neg_one,
                                             var: rhs_ref,
                                         });
-                                        new_instructions.push(OpCode::BinaryArithOp {
+                                        bi.push(OpCode::BinaryArithOp {
                                             kind: BinaryArithOpKind::Add,
                                             result: r,
                                             lhs: lhs_ref,
@@ -319,17 +288,18 @@ impl WitnessLowering {
                         OpCode::Store { ptr, value } => {
                             let ptr_type = type_info.get_value_type(ptr);
                             let new_ptr_type = self.witness_lowering_in_type(&ptr_type);
+                            let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                             let converted = self.convert_if_needed(
                                 value,
                                 &new_ptr_type,
                                 type_info,
-                                &mut current_block_id,
-                                &mut current_block,
-                                &mut new_instructions,
+                                current_block_id,
+                                current_block,
+                                new_instructions,
                                 function,
-                                &mut new_blocks,
+                                new_blocks,
                             );
-                            new_instructions.push(OpCode::Store {
+                            cursor.instr().push(OpCode::Store {
                                 ptr,
                                 value: converted,
                             });
@@ -347,17 +317,18 @@ impl WitnessLowering {
                                 TypeExpr::Slice(inner) => inner.as_ref().clone(),
                                 _ => panic!("ArraySet on non-array type"),
                             };
+                            let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                             let converted = self.convert_if_needed(
                                 value,
                                 &expected_elem_type,
                                 type_info,
-                                &mut current_block_id,
-                                &mut current_block,
-                                &mut new_instructions,
+                                current_block_id,
+                                current_block,
+                                new_instructions,
                                 function,
-                                &mut new_blocks,
+                                new_blocks,
                             );
-                            new_instructions.push(OpCode::ArraySet {
+                            cursor.instr().push(OpCode::ArraySet {
                                 result,
                                 array,
                                 index,
@@ -379,19 +350,20 @@ impl WitnessLowering {
                             let new_values = values
                                 .iter()
                                 .map(|v| {
+                                    let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                     self.convert_if_needed(
                                         *v,
                                         &expected_elem_type,
                                         type_info,
-                                        &mut current_block_id,
-                                        &mut current_block,
-                                        &mut new_instructions,
+                                        current_block_id,
+                                        current_block,
+                                        new_instructions,
                                         function,
-                                        &mut new_blocks,
+                                        new_blocks,
                                     )
                                 })
                                 .collect();
-                            new_instructions.push(OpCode::SlicePush {
+                            cursor.instr().push(OpCode::SlicePush {
                                 dir,
                                 result,
                                 slice,
@@ -406,27 +378,29 @@ impl WitnessLowering {
                         } => {
                             let result_type = type_info.get_value_type(r);
                             let target_type = self.witness_lowering_in_type(result_type);
+                            let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                             let if_t = self.convert_if_needed(
                                 if_t,
                                 &target_type,
                                 type_info,
-                                &mut current_block_id,
-                                &mut current_block,
-                                &mut new_instructions,
+                                current_block_id,
+                                current_block,
+                                new_instructions,
                                 function,
-                                &mut new_blocks,
+                                new_blocks,
                             );
+                            let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                             let if_f = self.convert_if_needed(
                                 if_f,
                                 &target_type,
                                 type_info,
-                                &mut current_block_id,
-                                &mut current_block,
-                                &mut new_instructions,
+                                current_block_id,
+                                current_block,
+                                new_instructions,
                                 function,
-                                &mut new_blocks,
+                                new_blocks,
                             );
-                            new_instructions.push(OpCode::Select {
+                            cursor.instr().push(OpCode::Select {
                                 result: r,
                                 cond,
                                 if_t,
@@ -458,7 +432,7 @@ impl WitnessLowering {
                         | OpCode::Todo { .. }
                         | OpCode::ValueOf { .. }
                         | OpCode::Const { .. } => {
-                            new_instructions.push(instruction);
+                            cursor.instr().push(instruction);
                         }
                         OpCode::MkTuple {
                             result,
@@ -469,7 +443,7 @@ impl WitnessLowering {
                                 .iter()
                                 .map(|tp| self.witness_lowering_in_type(tp))
                                 .collect();
-                            new_instructions.push(OpCode::MkTuple {
+                            cursor.instr().push(OpCode::MkTuple {
                                 result,
                                 elems,
                                 element_types: new_element_types,
@@ -485,27 +459,26 @@ impl WitnessLowering {
                         Terminator::Jmp(target, args) => {
                             let param_types = &block_param_types[target];
                             for (arg, expected_type) in args.iter_mut().zip(param_types.iter()) {
+                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
                                 *arg = self.convert_if_needed(
                                     *arg,
                                     expected_type,
                                     type_info,
-                                    &mut current_block_id,
-                                    &mut current_block,
-                                    &mut new_instructions,
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
                                     function,
-                                    &mut new_blocks,
+                                    new_blocks,
                                 );
                             }
                         }
                         Terminator::JmpIf(_, _, _) => {}
                         Terminator::Return(_) => {}
                     }
-                    current_block.put_instructions(new_instructions);
-                    current_block.set_terminator(terminator);
+                    new_blocks.extend(cursor.finish_with_terminator(terminator));
                 } else {
-                    current_block.put_instructions(new_instructions);
+                    new_blocks.extend(cursor.finish());
                 }
-                new_blocks.insert(current_block_id, current_block);
             }
             function.put_blocks(new_blocks);
         }

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use ark_ff::{AdditiveGroup, Field as _};
-use ssa_builder::ssa_append;
 
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
+    block_builder::InstrBuilder,
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -107,27 +107,26 @@ impl ExplicitWitness {
                                             new_instructions.push(OpCode::mk_cast_to_field(v, rhs));
                                             v
                                         };
-                                        ssa_append!(function, new_instructions, {
-                                            lr_diff := sub(l_field, r_field);
+                                        let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                        let lr_diff = b.sub(l_field, r_field);
 
-                                            div_hint := div(lr_diff, lr_diff);
-                                            div_hint_plain := value_of(div_hint);
-                                            div_hint_witness := write_witness(div_hint_plain);
+                                        let div_hint = b.div(lr_diff, lr_diff);
+                                        let div_hint_plain = b.value_of(div_hint);
+                                        let div_hint_witness = b.write_witness(div_hint_plain);
 
-                                            out_hint := eq(lhs, rhs);
-                                            out_hint_field := cast_to_field(out_hint);
-                                            out_hint_plain := value_of(out_hint_field);
-                                            out_hint_witness := write_witness(out_hint_plain);
-                                            #result := cast_to(u1, out_hint_witness);
+                                        let out_hint = b.eq(lhs, rhs);
+                                        let out_hint_field = b.cast_to_field(out_hint);
+                                        let out_hint_plain = b.value_of(out_hint_field);
+                                        let out_hint_witness = b.write_witness(out_hint_plain);
+                                        b.push(OpCode::mk_cast_to(result, u1, out_hint_witness));
 
-                                            result_field := cast_to_field(result);
-                                            not_res := sub(! Field::ONE : Field, result_field);
+                                        let result_field = b.cast_to_field(result);
+                                        let field_one = b.field_const(Field::ONE);
+                                        let not_res = b.sub(field_one, result_field);
 
-                                            constrain(lr_diff, div_hint_witness, not_res);
-                                            constrain(lr_diff, result_field, ! Field::ZERO : Field);
-
-
-                                        } ->);
+                                        b.constrain(lr_diff, div_hint_witness, not_res);
+                                        let field_zero = b.field_const(Field::ZERO);
+                                        b.constrain(lr_diff, result_field, field_zero);
                                     }
                                     CmpKind::Lt => {
                                         let TypeExpr::U(s) = function_type_info
@@ -138,29 +137,31 @@ impl ExplicitWitness {
                                             panic!("ICE: rhs is not a U type");
                                         };
                                         let u1 = CastTarget::U(1);
-                                        let r = ssa_append!(function, new_instructions, {
-                                            res_hint := lt(lhs, rhs);
-                                            res_hint_field := cast_to_field(res_hint);
-                                            res_hint_plain := value_of(res_hint_field);
-                                            res_witness := write_witness(res_hint_plain);
-                                            #result := cast_to(u1, res_witness);
+                                        let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                        let res_hint = b.lt(lhs, rhs);
+                                        let res_hint_field = b.cast_to_field(res_hint);
+                                        let res_hint_plain = b.value_of(res_hint_field);
+                                        let res_witness = b.write_witness(res_hint_plain);
+                                        b.push(OpCode::mk_cast_to(result, u1, res_witness));
 
-                                            l_field := cast_to_field(lhs);
-                                            r_field := cast_to_field(rhs);
-                                            lr_diff := sub(l_field, r_field);
+                                        let l_field = b.cast_to_field(lhs);
+                                        let r_field = b.cast_to_field(rhs);
+                                        let lr_diff = b.sub(l_field, r_field);
 
-                                            two_res := mul(result, ! Field::from(2) : Field);
-                                            adjustment := sub(! Field::ONE : Field, two_res);
+                                        let two = b.field_const(Field::from(2));
+                                        let two_res = b.mul(result, two);
+                                        let one = b.field_const(Field::ONE);
+                                        let adjustment = b.sub(one, two_res);
 
-                                            adjusted_diff := mul(lr_diff, adjustment);
-                                            adjusted_diff_plain := value_of(adjusted_diff);
-                                            adjusted_diff_wit := write_witness(adjusted_diff_plain);
-                                            constrain(lr_diff, adjustment, adjusted_diff_wit);
-                                        } -> adjusted_diff_wit);
+                                        let adjusted_diff = b.mul(lr_diff, adjustment);
+                                        let adjusted_diff_plain = b.value_of(adjusted_diff);
+                                        let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
+                                        b.constrain(lr_diff, adjustment, adjusted_diff_wit);
+
                                         self.gen_witness_rangecheck(
                                             function,
                                             &mut new_instructions,
-                                            r.adjusted_diff_wit,
+                                            adjusted_diff_wit,
                                             s,
                                         );
                                     }
@@ -184,24 +185,15 @@ impl ExplicitWitness {
                             }
 
                             // witness-witness mul
-                            let mul_witness = function.fresh_value();
-                            new_instructions.push(OpCode::BinaryArithOp {
-                                kind: BinaryArithOpKind::Mul,
-                                result: mul_witness,
-                                lhs: l,
-                                rhs: r,
-                            });
-                            let mul_plain = function.fresh_value();
-                            new_instructions.push(OpCode::ValueOf {
-                                result: mul_plain,
-                                value: mul_witness,
-                            });
-                            new_instructions.push(OpCode::WriteWitness {
+                            let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                            let mul_witness = b.mul(l, r);
+                            let mul_plain = b.value_of(mul_witness);
+                            b.push(OpCode::WriteWitness {
                                 result: Some(res),
                                 value: mul_plain,
                                 pinned: false,
                             });
-                            new_instructions.push(OpCode::Constrain { a: l, b: r, c: res });
+                            b.constrain(l, r, res);
                         }
                         OpCode::BinaryArithOp {
                             kind: BinaryArithOpKind::Div,
@@ -229,16 +221,15 @@ impl ExplicitWitness {
                                 }
                                 (true, true) => {
                                     let u1 = CastTarget::U(1);
-                                    ssa_append!(function, new_instructions, {
-                                        l_field := cast_to_field(l);
-                                        r_field := cast_to_field(r);
-                                        res_hint := and(l, r);
-                                        res_hint_field := cast_to_field(res_hint);
-                                        res_hint_plain := value_of(res_hint_field);
-                                        res_witness := write_witness(res_hint_plain);
-                                        constrain(l_field, r_field, res_witness);
-                                        #result := cast_to(u1, res_witness);
-                                    } ->);
+                                    let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                    let l_field = b.cast_to_field(l);
+                                    let r_field = b.cast_to_field(r);
+                                    let res_hint = b.and(l, r);
+                                    let res_hint_field = b.cast_to_field(res_hint);
+                                    let res_hint_plain = b.value_of(res_hint_field);
+                                    let res_witness = b.write_witness(res_hint_plain);
+                                    b.constrain(l_field, r_field, res_witness);
+                                    b.push(OpCode::mk_cast_to(result, u1, res_witness));
                                 }
                                 _ => {
                                     new_instructions.push(OpCode::Todo {
@@ -351,30 +342,23 @@ impl ExplicitWitness {
                                         ),
                                     };
 
-                                    let r = ssa_append!(function, new_instructions, {
-                                        pure_idx := value_of(idx);
-                                        r_hint_val := array_get(arr, pure_idx);
-                                    } -> r_hint_val);
-                                    let mut r_pure_val = r.r_hint_val;
+                                    let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                    let pure_idx = b.value_of(idx);
+                                    let mut r_pure_val = b.array_get(arr, pure_idx);
 
                                     let elem_is_witness = function_type_info
                                         .get_value_type(arr)
                                         .get_array_element()
                                         .is_witness_of();
                                     if elem_is_witness {
-                                        r_pure_val = ssa_append!(function, new_instructions, {
-                                            v := value_of(r_pure_val);
-                                        } -> v)
-                                        .v;
+                                        r_pure_val = b.value_of(r_pure_val);
                                     }
 
-                                    ssa_append!(function, new_instructions, {
-                                        idx_field := cast_to_field(idx);
-                                        r_wit_field := cast_to_field(r_pure_val);
-                                        r_wit := write_witness(r_wit_field);
-                                        #result := cast_to(back_cast_target, r_wit);
-                                        lookup_arr(arr, idx_field, r_wit);
-                                    } ->);
+                                    let idx_field = b.cast_to_field(idx);
+                                    let r_wit_field = b.cast_to_field(r_pure_val);
+                                    let r_wit = b.write_witness(r_wit_field);
+                                    b.push(OpCode::mk_cast_to(result, back_cast_target, r_wit));
+                                    b.lookup_arr(arr, idx_field, r_wit);
                                 }
                             }
                         }
@@ -427,33 +411,14 @@ impl ExplicitWitness {
                             // If both branches are pure, result is a linear combination
                             // of cond and constants: cond * (l - r) + r. No constraint needed.
                             if !l_taint && !r_taint {
-                                let neg_one = function.fresh_value();
-                                new_instructions
-                                    .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
-                                let neg_r = function.fresh_value();
-                                new_instructions.push(OpCode::BinaryArithOp {
-                                    kind: BinaryArithOpKind::Mul,
-                                    result: neg_r,
-                                    lhs: r,
-                                    rhs: neg_one,
-                                });
-                                let l_sub_r = function.fresh_value();
-                                new_instructions.push(OpCode::BinaryArithOp {
-                                    kind: BinaryArithOpKind::Add,
-                                    result: l_sub_r,
-                                    lhs: l,
-                                    rhs: neg_r,
-                                });
+                                let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                let neg_one = b.field_const(ark_ff::Fp::from(-1));
+                                let neg_r = b.mul(r, neg_one);
+                                let l_sub_r = b.add(l, neg_r);
                                 // cond * (l - r): l_sub_r is a constant, cond is witness
-                                let cond_times_diff = function.fresh_value();
-                                new_instructions.push(OpCode::BinaryArithOp {
-                                    kind: BinaryArithOpKind::Mul,
-                                    result: cond_times_diff,
-                                    lhs: l_sub_r,
-                                    rhs: cond,
-                                });
+                                let cond_times_diff = b.mul(l_sub_r, cond);
                                 // result = cond * (l - r) + r
-                                new_instructions.push(OpCode::BinaryArithOp {
+                                b.push(OpCode::BinaryArithOp {
                                     kind: BinaryArithOpKind::Add,
                                     result: res,
                                     lhs: cond_times_diff,
@@ -462,54 +427,21 @@ impl ExplicitWitness {
                                 continue;
                             }
                             // At least one branch is witness: full lowering with constraint
-                            let select_witness = function.fresh_value();
-                            new_instructions.push(OpCode::Select {
-                                result: select_witness,
-                                cond,
-                                if_t: l,
-                                if_f: r,
-                            });
-                            let select_plain = function.fresh_value();
-                            new_instructions.push(OpCode::ValueOf {
-                                result: select_plain,
-                                value: select_witness,
-                            });
-                            new_instructions.push(OpCode::WriteWitness {
+                            let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                            let select_witness = b.select(cond, l, r);
+                            let select_plain = b.value_of(select_witness);
+                            b.push(OpCode::WriteWitness {
                                 result: Some(res),
                                 value: select_plain,
                                 pinned: false,
                             });
                             // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                             // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
-                            let neg_one = function.fresh_value();
-                            new_instructions
-                                .push(OpCode::mk_field_const(neg_one, ark_ff::Fp::from(-1)));
-                            let neg_r = function.fresh_value();
-                            new_instructions.push(OpCode::BinaryArithOp {
-                                kind: BinaryArithOpKind::Mul,
-                                result: neg_r,
-                                lhs: r,
-                                rhs: neg_one,
-                            });
-                            let l_sub_r = function.fresh_value();
-                            new_instructions.push(OpCode::BinaryArithOp {
-                                kind: BinaryArithOpKind::Add,
-                                result: l_sub_r,
-                                lhs: l,
-                                rhs: neg_r,
-                            });
-                            let res_sub_r = function.fresh_value();
-                            new_instructions.push(OpCode::BinaryArithOp {
-                                kind: BinaryArithOpKind::Add,
-                                result: res_sub_r,
-                                lhs: res,
-                                rhs: neg_r,
-                            });
-                            new_instructions.push(OpCode::Constrain {
-                                a: cond,
-                                b: l_sub_r,
-                                c: res_sub_r,
-                            });
+                            let neg_one = b.field_const(ark_ff::Fp::from(-1));
+                            let neg_r = b.mul(r, neg_one);
+                            let l_sub_r = b.add(l, neg_r);
+                            let res_sub_r = b.add(res, neg_r);
+                            b.constrain(cond, l_sub_r, res_sub_r);
                         }
 
                         OpCode::MkSeq {
@@ -546,27 +478,11 @@ impl ExplicitWitness {
                                 TypeExpr::U(s) => *s,
                                 e => todo!("Unsupported type for negation: {:?}", e),
                             };
-                            let ones = function.fresh_value();
-                            new_instructions
-                                .push(OpCode::mk_field_const(ones, Field::from((1u128 << s) - 1)));
-                            let casted = function.fresh_value();
-                            new_instructions.push(OpCode::Cast {
-                                result: casted,
-                                value,
-                                target: CastTarget::Field,
-                            });
-                            let subbed = function.fresh_value();
-                            new_instructions.push(OpCode::BinaryArithOp {
-                                kind: BinaryArithOpKind::Sub,
-                                result: subbed,
-                                lhs: ones,
-                                rhs: casted,
-                            });
-                            new_instructions.push(OpCode::Cast {
-                                result,
-                                value: subbed,
-                                target: CastTarget::U(s),
-                            });
+                            let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                            let ones = b.field_const(Field::from((1u128 << s) - 1));
+                            let casted = b.cast_to(CastTarget::Field, value);
+                            let subbed = b.sub(ones, casted);
+                            b.push(OpCode::mk_cast_to(result, CastTarget::U(s), subbed));
                         }
                         OpCode::ToBits {
                             result: _,
@@ -591,13 +507,10 @@ impl ExplicitWitness {
                                 new_instructions.push(instruction);
                             } else {
                                 assert!(endianness == Endianness::Little);
-                                let pure_value = function.fresh_value();
-                                new_instructions.push(OpCode::ValueOf {
-                                    result: pure_value,
-                                    value,
-                                });
-                                let hint = function.fresh_value();
-                                new_instructions.push(OpCode::ToRadix {
+                                let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                let pure_value = b.value_of(value);
+                                let hint = b.fresh_value();
+                                b.push(OpCode::ToRadix {
                                     result: hint,
                                     value: pure_value,
                                     radix,
@@ -605,25 +518,10 @@ impl ExplicitWitness {
                                     count,
                                 });
                                 let mut witnesses = vec![ValueId(0); count];
-                                let mut current_sum = function.fresh_value();
-                                new_instructions
-                                    .push(OpCode::mk_field_const(current_sum, Field::ZERO));
+                                let mut current_sum = b.field_const(Field::ZERO);
                                 let radix_val = match radix {
-                                    Radix::Bytes => {
-                                        let v = function.fresh_value();
-                                        new_instructions
-                                            .push(OpCode::mk_field_const(v, Field::from(256)));
-                                        v
-                                    }
-                                    Radix::Dyn(radix) => {
-                                        let casted = function.fresh_value();
-                                        new_instructions.push(OpCode::Cast {
-                                            result: casted,
-                                            value: radix,
-                                            target: CastTarget::Field,
-                                        });
-                                        casted
-                                    }
+                                    Radix::Bytes => b.field_const(Field::from(256)),
+                                    Radix::Dyn(radix) => b.cast_to(CastTarget::Field, radix),
                                 };
                                 let rangecheck_type = match radix {
                                     Radix::Bytes => LookupTarget::Rangecheck(8),
@@ -631,28 +529,18 @@ impl ExplicitWitness {
                                 };
                                 // TODO this should probably be an SSA loop for codesize reasons.
                                 for i in (0..count).rev() {
-                                    let r = ssa_append!(function, new_instructions, {
-                                        byte := array_get(hint, ! i as u128 : u32);
-                                        byte_field := cast_to_field(byte);
-                                        byte_wit := write_witness(byte_field);
-                                        lookup_rngchk(rangecheck_type, byte_wit);
-                                        shift_prev_res := mul(current_sum, radix_val);
-                                        new_result := add(shift_prev_res, byte_wit);
-                                    } -> new_result, byte_wit);
-                                    current_sum = r.new_result;
-                                    witnesses[i] = r.byte_wit;
+                                    let idx = b.u_const(32, i as u128);
+                                    let byte = b.array_get(hint, idx);
+                                    let byte_field = b.cast_to_field(byte);
+                                    let byte_wit = b.write_witness(byte_field);
+                                    b.lookup_rngchk(rangecheck_type, byte_wit);
+                                    let shift_prev_res = b.mul(current_sum, radix_val);
+                                    current_sum = b.add(shift_prev_res, byte_wit);
+                                    witnesses[i] = byte_wit;
                                 }
-
-                                let constrain_one = function.fresh_value();
-                                new_instructions
-                                    .push(OpCode::mk_field_const(constrain_one, Field::from(1)));
-                                new_instructions.push(OpCode::Constrain {
-                                    a: current_sum,
-                                    b: constrain_one,
-                                    c: value,
-                                });
-
-                                new_instructions.push(OpCode::MkSeq {
+                                let constrain_one = b.field_const(Field::from(1));
+                                b.constrain(current_sum, constrain_one, value);
+                                b.push(OpCode::MkSeq {
                                     result,
                                     elems: witnesses,
                                     seq_type: SeqType::Array(count),
@@ -745,41 +633,29 @@ impl ExplicitWitness {
         max_bits: usize,
     ) {
         assert!(max_bits % 8 == 0); // TODO
-        let pure_value = function.fresh_value();
-        new_instructions.push(OpCode::ValueOf {
-            result: pure_value,
-            value,
-        });
-        let bytes_val = function.fresh_value();
-        new_instructions.push(OpCode::ToRadix {
+        let chunks = max_bits / 8;
+        let b = &mut InstrBuilder::new(function, new_instructions);
+        let pure_value = b.value_of(value);
+        let bytes_val = b.fresh_value();
+        b.push(OpCode::ToRadix {
             result: bytes_val,
             value: pure_value,
             radix: Radix::Bytes,
             endianness: Endianness::Big,
-            count: max_bits / 8,
+            count: chunks,
         });
-        let chunks = max_bits / 8;
-        let mut result = function.fresh_value();
-        new_instructions.push(OpCode::mk_field_const(result, Field::ZERO));
-        let two_to_8 = function.fresh_value();
-        new_instructions.push(OpCode::mk_field_const(two_to_8, Field::from(256)));
-        let one = function.fresh_value();
-        new_instructions.push(OpCode::mk_field_const(one, Field::from(1)));
+        let mut result = b.field_const(Field::ZERO);
+        let two_to_8 = b.field_const(Field::from(256));
+        let one = b.field_const(Field::from(1));
         for i in 0..chunks {
-            result = ssa_append!(function, new_instructions, {
-                byte := array_get(bytes_val, ! i as u128 : u32);
-                byte_field := cast_to_field(byte);
-                byte_wit := write_witness(byte_field);
-                lookup_rngchk_8(byte_wit);
-                shift_prev_res := mul(result, two_to_8);
-                new_result := add(shift_prev_res, byte_wit);
-            } -> new_result)
-            .new_result;
+            let idx = b.u_const(32, i as u128);
+            let byte = b.array_get(bytes_val, idx);
+            let byte_field = b.cast_to_field(byte);
+            let byte_wit = b.write_witness(byte_field);
+            b.lookup_rngchk_8(byte_wit);
+            let shift_prev_res = b.mul(result, two_to_8);
+            result = b.add(shift_prev_res, byte_wit);
         }
-        new_instructions.push(OpCode::Constrain {
-            a: result,
-            b: one,
-            c: value,
-        });
+        b.constrain(result, one, value);
     }
 }
