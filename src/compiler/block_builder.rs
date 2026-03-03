@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
     ssa::{
-        Block, BlockId, BinaryArithOpKind, CastTarget, CmpKind, Function, Instruction, LookupTarget,
-        OpCode, SeqType, Terminator, TupleIdx, ValueId,
+        BinaryArithOpKind, Block, BlockId, CastTarget, CmpKind, Function, Instruction,
+        LookupTarget, OpCode, SeqType, Terminator, TupleIdx, ValueId,
     },
 };
 
@@ -100,7 +100,8 @@ impl InstrBuilder<'_, OpCode, Type> {
 
     pub fn cast_to_witness_of(&mut self, value: ValueId) -> ValueId {
         let r = self.function.fresh_value();
-        self.instructions.push(OpCode::mk_cast_to(r, CastTarget::WitnessOf, value));
+        self.instructions
+            .push(OpCode::mk_cast_to(r, CastTarget::WitnessOf, value));
         r
     }
 
@@ -148,12 +149,7 @@ impl InstrBuilder<'_, OpCode, Type> {
         r
     }
 
-    pub fn array_set(
-        &mut self,
-        array: ValueId,
-        index: ValueId,
-        value: ValueId,
-    ) -> ValueId {
+    pub fn array_set(&mut self, array: ValueId, index: ValueId, value: ValueId) -> ValueId {
         let r = self.function.fresh_value();
         self.instructions.push(OpCode::ArraySet {
             result: r,
@@ -184,12 +180,7 @@ impl InstrBuilder<'_, OpCode, Type> {
         r
     }
 
-    pub fn mk_seq(
-        &mut self,
-        elems: Vec<ValueId>,
-        seq_type: SeqType,
-        elem_type: Type,
-    ) -> ValueId {
+    pub fn mk_seq(&mut self, elems: Vec<ValueId>, seq_type: SeqType, elem_type: Type) -> ValueId {
         let r = self.function.fresh_value();
         self.instructions.push(OpCode::MkSeq {
             result: r,

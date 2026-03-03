@@ -107,7 +107,8 @@ impl ExplicitWitness {
                                             new_instructions.push(OpCode::mk_cast_to_field(v, rhs));
                                             v
                                         };
-                                        let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                        let b =
+                                            &mut InstrBuilder::new(function, &mut new_instructions);
                                         let lr_diff = b.sub(l_field, r_field);
 
                                         let div_hint = b.div(lr_diff, lr_diff);
@@ -137,7 +138,8 @@ impl ExplicitWitness {
                                             panic!("ICE: rhs is not a U type");
                                         };
                                         let u1 = CastTarget::U(1);
-                                        let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                                        let b =
+                                            &mut InstrBuilder::new(function, &mut new_instructions);
                                         let res_hint = b.lt(lhs, rhs);
                                         let res_hint_field = b.cast_to_field(res_hint);
                                         let res_hint_plain = b.value_of(res_hint_field);
@@ -155,7 +157,8 @@ impl ExplicitWitness {
 
                                         let adjusted_diff = b.mul(lr_diff, adjustment);
                                         let adjusted_diff_plain = b.value_of(adjusted_diff);
-                                        let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
+                                        let adjusted_diff_wit =
+                                            b.write_witness(adjusted_diff_plain);
                                         b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
                                         self.gen_witness_rangecheck(

@@ -284,7 +284,13 @@ impl WitnessCastInsertion {
                         let new_vs = vs
                             .iter()
                             .map(|v| {
-                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                                let (
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
+                                    function,
+                                    new_blocks,
+                                ) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *v,
                                     &target_elem_type,
@@ -316,7 +322,13 @@ impl WitnessCastInsertion {
                             TypeExpr::Slice(inner) => inner.as_ref().clone(),
                             _ => panic!("ArraySet on non-array type"),
                         };
-                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                        let (
+                            current_block_id,
+                            current_block,
+                            new_instructions,
+                            function,
+                            new_blocks,
+                        ) = cursor.as_parts();
                         let converted = self.convert_if_needed(
                             value,
                             &expected_elem_type,
@@ -348,7 +360,13 @@ impl WitnessCastInsertion {
                         let new_values = values
                             .iter()
                             .map(|v| {
-                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                                let (
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
+                                    function,
+                                    new_blocks,
+                                ) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *v,
                                     &expected_elem_type,
@@ -371,7 +389,13 @@ impl WitnessCastInsertion {
                     OpCode::Store { ptr, value } => {
                         let ptr_type = type_info.get_value_type(ptr);
                         let target_type = ptr_type.get_pointed();
-                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                        let (
+                            current_block_id,
+                            current_block,
+                            new_instructions,
+                            function,
+                            new_blocks,
+                        ) = cursor.as_parts();
                         let converted = self.convert_if_needed(
                             value,
                             &target_type,
@@ -396,7 +420,13 @@ impl WitnessCastInsertion {
                         let if_t_type = type_info.get_value_type(if_t);
                         let if_f_type = type_info.get_value_type(if_f);
                         let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
-                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                        let (
+                            current_block_id,
+                            current_block,
+                            new_instructions,
+                            function,
+                            new_blocks,
+                        ) = cursor.as_parts();
                         let if_t = self.convert_if_needed(
                             if_t,
                             &target_type,
@@ -407,7 +437,13 @@ impl WitnessCastInsertion {
                             function,
                             new_blocks,
                         );
-                        let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                        let (
+                            current_block_id,
+                            current_block,
+                            new_instructions,
+                            function,
+                            new_blocks,
+                        ) = cursor.as_parts();
                         let if_f = self.convert_if_needed(
                             if_f,
                             &target_type,
@@ -471,7 +507,13 @@ impl WitnessCastInsertion {
                                 .iter()
                                 .zip(param_types.iter())
                                 .map(|(arg, expected_type)| {
-                                    let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                                    let (
+                                        current_block_id,
+                                        current_block,
+                                        new_instructions,
+                                        function,
+                                        new_blocks,
+                                    ) = cursor.as_parts();
                                     self.convert_if_needed(
                                         *arg,
                                         expected_type,
@@ -484,9 +526,13 @@ impl WitnessCastInsertion {
                                     )
                                 })
                                 .collect();
-                            new_blocks.extend(cursor.finish_with_terminator(Terminator::Jmp(target, new_args)));
+                            new_blocks.extend(
+                                cursor.finish_with_terminator(Terminator::Jmp(target, new_args)),
+                            );
                         } else {
-                            new_blocks.extend(cursor.finish_with_terminator(Terminator::Jmp(target, args)));
+                            new_blocks.extend(
+                                cursor.finish_with_terminator(Terminator::Jmp(target, args)),
+                            );
                         }
                     }
                     Terminator::Return(values) => {
@@ -494,7 +540,13 @@ impl WitnessCastInsertion {
                             .iter()
                             .zip(return_types.iter())
                             .map(|(val, expected_type)| {
-                                let (current_block_id, current_block, new_instructions, function, new_blocks) = cursor.as_parts();
+                                let (
+                                    current_block_id,
+                                    current_block,
+                                    new_instructions,
+                                    function,
+                                    new_blocks,
+                                ) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *val,
                                     expected_type,
@@ -507,10 +559,14 @@ impl WitnessCastInsertion {
                                 )
                             })
                             .collect();
-                        new_blocks.extend(cursor.finish_with_terminator(Terminator::Return(new_values)));
+                        new_blocks
+                            .extend(cursor.finish_with_terminator(Terminator::Return(new_values)));
                     }
                     Terminator::JmpIf(cond, if_true, if_false) => {
-                        new_blocks.extend(cursor.finish_with_terminator(Terminator::JmpIf(cond, if_true, if_false)));
+                        new_blocks
+                            .extend(cursor.finish_with_terminator(Terminator::JmpIf(
+                                cond, if_true, if_false,
+                            )));
                     }
                 }
             } else {
