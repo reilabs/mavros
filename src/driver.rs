@@ -242,6 +242,7 @@ impl Driver {
                 Box::new(ExplicitWitness::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
         );
@@ -380,7 +381,7 @@ impl Driver {
             vec![
                 Box::new(WitnessWriteToVoid::new()),
                 Box::new(StripWitnessOf::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(DCE::new(dead_code_elimination::Config::witgen())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],

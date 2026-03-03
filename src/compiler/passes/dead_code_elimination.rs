@@ -32,6 +32,10 @@ pub struct Config {
     /// This is a workaround for untaint_control_flow not handling multiple merge predecessors.
     /// TODO: Remove this option once untaint_control_flow properly handles multiple jumps into merge blocks.
     pub preserve_all_blocks: bool,
+    /// When true, the main function's entry block params are always kept alive.
+    /// Used in the witgen pipeline where the runtime writes inputs to the frame
+    /// based on the ABI, so the frame must always have room for all declared inputs.
+    pub preserve_main_entry_params: bool,
 }
 
 impl Config {
@@ -39,6 +43,7 @@ impl Config {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: false,
+            preserve_main_entry_params: true,
         }
     }
 
@@ -46,6 +51,15 @@ impl Config {
         Self {
             witness_shape_frozen: true,
             preserve_all_blocks: false,
+            preserve_main_entry_params: false,
+        }
+    }
+
+    pub fn witgen() -> Self {
+        Self {
+            witness_shape_frozen: true,
+            preserve_all_blocks: false,
+            preserve_main_entry_params: true,
         }
     }
 
@@ -53,6 +67,7 @@ impl Config {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: true,
+            preserve_main_entry_params: true,
         }
     }
 }
@@ -120,6 +135,15 @@ impl DCE {
         for function_id in &function_ids {
             let function = ssa.get_function(*function_id);
             worklist.push(WorkItem::LiveBlock(*function_id, function.get_entry_id()));
+
+            // In the witgen pipeline, the main function's entry params are externally
+            // provided by the runtime and must always be considered live.
+            if self.config.preserve_main_entry_params && *function_id == main_id {
+                let entry_block = function.get_block(function.get_entry_id());
+                for (_i, (val, _ty)) in entry_block.get_parameters().enumerate() {
+                    worklist.push(WorkItem::LiveValue(*function_id, *val));
+                }
+            }
 
             if self.config.preserve_all_blocks {
                 for (block_id, _) in function.get_blocks() {
