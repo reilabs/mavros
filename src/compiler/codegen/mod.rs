@@ -948,64 +948,6 @@ impl CodeGen {
                         panic!("FnPtr constants not supported in codegen");
                     }
                 },
-                ssa::OpCode::Select {
-                    result,
-                    cond,
-                    if_t,
-                    if_f,
-                } => {
-                    // Select: result = cond ? if_t : if_f
-                    // Lowered as: result = cond * (if_t - if_f) + if_f
-                    let result_type = type_info.get_value_type(*result);
-                    match &result_type.expr {
-                        TypeExpr::Field => {
-                            let res_pos = layouter.alloc_field(*result).0;
-                            let cond_f = layouter.alloc_temp_field().0;
-                            let diff = layouter.alloc_temp_field().0;
-                            let scaled = layouter.alloc_temp_field().0;
-                            emitter.push_op(bytecode::OpCode::CastU64ToField {
-                                res: bytecode::FramePosition(cond_f),
-                                a: layouter.get_value(*cond),
-                            });
-                            emitter.push_op(bytecode::OpCode::SubField {
-                                res: bytecode::FramePosition(diff),
-                                a: layouter.get_value(*if_t),
-                                b: layouter.get_value(*if_f),
-                            });
-                            emitter.push_op(bytecode::OpCode::MulField {
-                                res: bytecode::FramePosition(scaled),
-                                a: bytecode::FramePosition(cond_f),
-                                b: bytecode::FramePosition(diff),
-                            });
-                            emitter.push_op(bytecode::OpCode::AddField {
-                                res: bytecode::FramePosition(res_pos),
-                                a: bytecode::FramePosition(scaled),
-                                b: layouter.get_value(*if_f),
-                            });
-                        }
-                        TypeExpr::U(bits) => {
-                            let res_pos = layouter.alloc_u64(*result, *bits).0;
-                            let diff = layouter.alloc_temp_u64().0;
-                            let scaled = layouter.alloc_temp_u64().0;
-                            emitter.push_op(bytecode::OpCode::SubU64 {
-                                res: bytecode::FramePosition(diff),
-                                a: layouter.get_value(*if_t),
-                                b: layouter.get_value(*if_f),
-                            });
-                            emitter.push_op(bytecode::OpCode::MulU64 {
-                                res: bytecode::FramePosition(scaled),
-                                a: layouter.get_value(*cond),
-                                b: bytecode::FramePosition(diff),
-                            });
-                            emitter.push_op(bytecode::OpCode::AddU64 {
-                                res: bytecode::FramePosition(res_pos),
-                                a: bytecode::FramePosition(scaled),
-                                b: layouter.get_value(*if_f),
-                            });
-                        }
-                        t => panic!("Unsupported type for select: {:?}", t),
-                    }
-                }
                 other => panic!("Unsupported instruction: {:?}", other),
             }
         }
