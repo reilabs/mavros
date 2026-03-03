@@ -381,7 +381,7 @@ impl Driver {
             vec![
                 Box::new(WitnessWriteToVoid::new()),
                 Box::new(StripWitnessOf::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::witgen())),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],

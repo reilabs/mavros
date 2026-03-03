@@ -141,12 +141,13 @@ impl PrepareEntryPoint {
             OpCode::mk_pinned_write_witness(witness_one_value, one_const_value),
         ];
 
-        // Create WriteWitness for each param and build replacements.
-        // These writes are naturally live because their results replace the params in the entry body.
+        // Create pinned WriteWitness for each param and build replacements.
+        // These must be pinned so they survive DCE even when their results become unused
+        // (e.g. when inter-procedural DCE prunes call args to original_main).
         let mut replacements = ValueReplacements::new();
         for param_id in &params {
             let witness_val = main.fresh_value();
-            write_witness_instructions.push(OpCode::mk_write_witness(witness_val, *param_id));
+            write_witness_instructions.push(OpCode::mk_pinned_write_witness(witness_val, *param_id));
             replacements.insert(*param_id, witness_val);
         }
 
