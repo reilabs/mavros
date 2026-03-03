@@ -498,14 +498,6 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
         }
     }
 
-    /// Get an InstrBuilder for emitting instructions into the current block.
-    pub fn instr(&mut self) -> InstrBuilder<'_, Op, Ty> {
-        InstrBuilder {
-            function: self.function,
-            instructions: &mut self.instructions,
-        }
-    }
-
     /// Create a new block without switching to it.
     pub fn new_block(&mut self) -> (BlockId, Block<Op, Ty>) {
         self.function.next_virtual_block()
@@ -616,6 +608,16 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
     }
 }
 
+impl HLEmitter for BlockCursor<'_, OpCode, Type> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
+    }
+
+    fn emit(&mut self, op: OpCode) {
+        self.instructions.push(op);
+    }
+}
+
 // HL-specific BlockCursor methods
 impl BlockCursor<'_, OpCode, Type> {
     /// Build a counted loop: `for i in 0..len { body(i, accumulators) → updated_accumulators }`
@@ -629,9 +631,9 @@ impl BlockCursor<'_, OpCode, Type> {
         body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Emit constants into current block (before the loop)
-        let const_0 = self.instr().u_const(32, 0);
-        let const_1 = self.instr().u_const(32, 1);
-        let const_len = self.instr().u_const(32, len as u128);
+        let const_0 = self.u_const(32, 0);
+        let const_1 = self.u_const(32, 1);
+        let const_len = self.u_const(32, len as u128);
 
         // Loop params: [index, ...accumulators]
         let mut params = vec![(const_0, Type::u(32))];
@@ -644,7 +646,7 @@ impl BlockCursor<'_, OpCode, Type> {
                 let i_val = loop_params[0];
                 let acc_params = &loop_params[1..];
                 let updated_accs = body(cursor, i_val, acc_params);
-                let next_i = cursor.instr().add(i_val, const_1);
+                let next_i = cursor.add(i_val, const_1);
                 let mut result = vec![next_i];
                 result.extend(updated_accs);
                 result

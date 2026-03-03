@@ -4,7 +4,7 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::types::Types,
-    block_builder::{BlockCursor, HLEmitter, InstrBuilder},
+    block_builder::{BlockCursor, HLEmitter},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{BlockId, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx, ValueId},
@@ -289,7 +289,7 @@ impl WitnessCastInsertion {
                                 )
                             })
                             .collect();
-                        cursor.instr().push(OpCode::MkSeq {
+                        cursor.emit(OpCode::MkSeq {
                             result: r,
                             elems: new_vs,
                             seq_type: s,
@@ -314,7 +314,7 @@ impl WitnessCastInsertion {
                             type_info,
                             &mut cursor,
                         );
-                        cursor.instr().push(OpCode::ArraySet {
+                        cursor.emit(OpCode::ArraySet {
                             result,
                             array,
                             index,
@@ -343,7 +343,7 @@ impl WitnessCastInsertion {
                                 )
                             })
                             .collect();
-                        cursor.instr().push(OpCode::SlicePush {
+                        cursor.emit(OpCode::SlicePush {
                             dir,
                             result,
                             slice,
@@ -355,7 +355,7 @@ impl WitnessCastInsertion {
                         let target_type = ptr_type.get_pointed();
                         let converted =
                             self.convert_if_needed(value, &target_type, type_info, &mut cursor);
-                        cursor.instr().push(OpCode::Store {
+                        cursor.emit(OpCode::Store {
                             ptr,
                             value: converted,
                         });
@@ -373,7 +373,7 @@ impl WitnessCastInsertion {
                             self.convert_if_needed(if_t, &target_type, type_info, &mut cursor);
                         let if_f =
                             self.convert_if_needed(if_f, &target_type, type_info, &mut cursor);
-                        cursor.instr().push(OpCode::Select {
+                        cursor.emit(OpCode::Select {
                             result: r,
                             cond,
                             if_t,
@@ -412,7 +412,7 @@ impl WitnessCastInsertion {
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
                     | OpCode::Const { .. }) => {
-                        cursor.instr().push(op);
+                        cursor.emit(op);
                     }
                 }
             }
@@ -496,7 +496,7 @@ impl WitnessCastInsertion {
         match (&source_type.expr, &target_type.expr) {
             // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
             (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => cursor.instr().cast_to_witness_of(value),
+            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => cursor.cast_to_witness_of(value),
             // Array element conversion
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
                 assert_eq!(
@@ -521,11 +521,11 @@ impl WitnessCastInsertion {
                 );
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = cursor.instr().tuple_proj(value, TupleIdx::Static(i));
+                    let proj = cursor.tuple_proj(value, TupleIdx::Static(i));
                     let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, cursor);
                     converted_elems.push(converted);
                 }
-                cursor.instr().mk_tuple(converted_elems, tgt_fields.clone())
+                cursor.mk_tuple(converted_elems, tgt_fields.clone())
             }
             // WitnessOf→WitnessOf: identity (same runtime repr)
             (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => value,
@@ -545,22 +545,18 @@ impl WitnessCastInsertion {
         target_array_type: &Type,
         cursor: &mut BlockCursor<'_, OpCode, Type>,
     ) -> ValueId {
-        let initial_dst = self.create_dummy_array(
-            tgt_elem_type,
-            array_len,
-            target_array_type,
-            &mut cursor.instr(),
-        );
+        let initial_dst =
+            self.create_dummy_array(tgt_elem_type, array_len, target_array_type, cursor);
 
         let results = cursor.build_counted_loop(
             array_len,
             vec![(initial_dst, target_array_type.clone())],
             |cursor, i_val, accs| {
                 let dst_val = accs[0];
-                let elem = cursor.instr().array_get(source_array, i_val);
+                let elem = cursor.array_get(source_array, i_val);
                 let converted =
                     self.emit_value_conversion(elem, src_elem_type, tgt_elem_type, cursor);
-                let new_dst = cursor.instr().array_set(dst_val, i_val, converted);
+                let new_dst = cursor.array_set(dst_val, i_val, converted);
                 vec![new_dst]
             },
         );
@@ -574,7 +570,7 @@ impl WitnessCastInsertion {
         elem_type: &Type,
         array_len: usize,
         _array_type: &Type,
-        b: &mut InstrBuilder<'_, OpCode, Type>,
+        b: &mut impl HLEmitter,
     ) -> ValueId {
         let dummy_elem = self.create_dummy_value(elem_type, b);
         let elems = vec![dummy_elem; array_len];
@@ -582,11 +578,7 @@ impl WitnessCastInsertion {
     }
 
     /// Create a single dummy value of the given target type.
-    fn create_dummy_value(
-        &self,
-        target_type: &Type,
-        b: &mut InstrBuilder<'_, OpCode, Type>,
-    ) -> ValueId {
+    fn create_dummy_value(&self, target_type: &Type, b: &mut impl HLEmitter) -> ValueId {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
                 let dummy_field = b.field_const(ark_bn254::Fr::from(0u64));
