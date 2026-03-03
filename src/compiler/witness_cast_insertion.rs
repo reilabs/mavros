@@ -4,7 +4,7 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::types::Types,
-    block_builder::{BlockCursor, InstrBuilder},
+    block_builder::{BlockCursor, HLEmitter, InstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{BlockId, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx, ValueId},

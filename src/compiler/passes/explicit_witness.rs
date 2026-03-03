@@ -5,7 +5,7 @@ use ark_ff::{AdditiveGroup, Field as _};
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
-    block_builder::InstrBuilder,
+    block_builder::{HLEmitter, InstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},

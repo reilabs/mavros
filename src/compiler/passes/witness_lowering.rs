@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     analysis::types::TypeInfo,
-    block_builder::{BlockCursor, InstrBuilder},
+    block_builder::{BlockCursor, HLEmitter, InstrBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,

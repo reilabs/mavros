@@ -10,6 +10,7 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
+    block_builder::{FunctionBuilder, HLEmitter},
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
@@ -39,23 +40,14 @@ struct SpecializationState {
     const_vals: HashMap<ValueId, ConstVal>,
 }
 
-impl SpecializationState {
-    fn push_u_const(&mut self, size: usize, value: u128) -> ValueId {
-        let vid = self.function.fresh_value();
-        let entry = self.function.get_entry_id();
-        self.function
-            .get_block_mut(entry)
-            .push_instruction(OpCode::mk_u_const(vid, size, value));
-        vid
+impl HLEmitter for SpecializationState {
+    fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
     }
 
-    fn push_field_const(&mut self, value: Field) -> ValueId {
-        let vid = self.function.fresh_value();
+    fn emit(&mut self, op: OpCode) {
         let entry = self.function.get_entry_id();
-        self.function
-            .get_block_mut(entry)
-            .push_instruction(OpCode::mk_field_const(vid, value));
-        vid
+        self.function.get_block_mut(entry).push_instruction(op);
     }
 }
 
@@ -73,21 +65,19 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => match cmp_kind {
                 crate::compiler::ssa::CmpKind::Lt => {
                     let res_u = if l_val < r_val { 1 } else { 0 };
-                    let res = ctx.push_u_const(1, res_u);
+                    let res = ctx.u_const(1, res_u);
                     ctx.const_vals.insert(res, ConstVal::U(1, res_u));
                     Self(res)
                 }
                 crate::compiler::ssa::CmpKind::Eq => {
                     let res_u = if l_val == r_val { 1 } else { 0 };
-                    let res = ctx.push_u_const(1, res_u);
+                    let res = ctx.u_const(1, res_u);
                     ctx.const_vals.insert(res, ConstVal::U(1, res_u));
                     Self(res)
                 }
             },
             (None, _) | (_, None) => {
-                let res = ctx
-                    .function
-                    .push_cmp(ctx.function.get_entry_id(), self.0, b.0, cmp_kind);
+                let res = ctx.cmp(self.0, b.0, cmp_kind);
                 Self(res)
             }
             _ => todo!(),
@@ -106,13 +96,13 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         match (binary_arith_op_kind, a_const, b_const) {
             (BinaryArithOpKind::Add, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val + b_val;
-                let res_v = ctx.push_u_const(s, res);
+                let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
             (BinaryArithOpKind::Sub, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val - b_val;
-                let res_v = ctx.push_u_const(s, res);
+                let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
@@ -122,19 +112,19 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Some(ConstVal::Field(r_val)),
             ) => {
                 let res = l_val * r_val;
-                let res_v = ctx.push_field_const(res);
+                let res_v = ctx.field_const(res);
                 ctx.const_vals.insert(res_v, ConstVal::Field(res));
                 Self(res_v)
             }
             (BinaryArithOpKind::Sub, Some(ConstVal::Field(f)), Some(ConstVal::Field(f2))) => {
                 let res = f - f2;
-                let res_v = ctx.push_field_const(res);
+                let res_v = ctx.field_const(res);
                 ctx.const_vals.insert(res_v, ConstVal::Field(res));
                 Self(res_v)
             }
             (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), Some(ConstVal::Field(f2))) => {
                 let res = f + f2;
-                let res_v = ctx.push_field_const(res);
+                let res_v = ctx.field_const(res);
                 ctx.const_vals.insert(res_v, ConstVal::Field(res));
                 Self(res_v)
             }
@@ -147,9 +137,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *b,
 
             (BinaryArithOpKind::Mul, None, None) => {
-                let res = ctx
-                    .function
-                    .push_mul(ctx.function.get_entry_id(), self.0, b.0);
+                let res = ctx.mul(self.0, b.0);
                 Self(res)
             }
 
@@ -158,15 +146,13 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 
             (BinaryArithOpKind::And, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val & b_val;
-                let res_v = ctx.push_u_const(s, res);
+                let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
 
             (BinaryArithOpKind::And, _, None) | (BinaryArithOpKind::And, None, _) => {
-                let res = ctx
-                    .function
-                    .push_and(ctx.function.get_entry_id(), self.0, b.0);
+                let res = ctx.and(self.0, b.0);
                 Self(res)
             }
 
@@ -182,8 +168,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 assert_eq!(l_val, r_val);
             }
             (None, _) | (_, None) => {
-                ctx.function
-                    .push_assert_eq(ctx.function.get_entry_id(), self.0, other.0);
+                HLEmitter::assert_eq(ctx, self.0, other.0);
             }
             _ => panic!("Not yet implemented {:?}", (l_const, r_const)),
         }
@@ -216,7 +201,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                             Endianness::Big => size - index as usize - 1,
                         };
                         let res = if r[ix] { 1 } else { 0 };
-                        let res_v = ctx.push_u_const(1, res);
+                        let res_v = ctx.u_const(1, res);
                         ctx.const_vals.insert(res_v, ConstVal::U(1, res));
                         Self(res_v)
                     }
@@ -224,9 +209,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 }
             }
             (None, _) | (_, None) => {
-                let res = ctx
-                    .function
-                    .push_array_get(ctx.function.get_entry_id(), self.0, index.0);
+                let res = HLEmitter::array_get(ctx, self.0, index.0);
                 Self(res)
             }
             (a, i) => panic!("Not yet implemented {:?}", (a, i)),
@@ -270,21 +253,19 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         match self_const {
             Some(ConstVal::U(_, v)) => {
                 let res = v & ((1 << to) - 1);
-                let res_v = ctx.push_u_const(to, res);
+                let res_v = ctx.u_const(to, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(to, res));
                 Self(res_v)
             }
             Some(ConstVal::Field(f)) => {
                 let v: u128 = f.into_bigint().as_ref()[0] as u128;
                 let res = v & ((1 << to) - 1);
-                let res_v = ctx.push_u_const(to, res);
+                let res_v = ctx.u_const(to, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(to, res));
                 Self(res_v)
             }
             _ => {
-                let res = ctx
-                    .function
-                    .push_truncate(ctx.function.get_entry_id(), self.0, to, from);
+                let res = ctx.truncate(self.0, to, from);
                 Self(res)
             }
         }
@@ -301,13 +282,13 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(ConstVal::U(_, v)) => match cast_target {
                 CastTarget::U(s) => {
                     let res = v & ((1 << *s) - 1);
-                    let res_v = ctx.push_u_const(*s, res);
+                    let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
                 }
                 CastTarget::Field => {
                     let res = Field::from(v);
-                    let res_v = ctx.push_field_const(res);
+                    let res_v = ctx.field_const(res);
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
@@ -317,7 +298,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 CastTarget::U(s) => {
                     let v: u128 = f.into_bigint().as_ref()[0] as u128;
                     let res = v & ((1 << *s) - 1);
-                    let res_v = ctx.push_u_const(*s, res);
+                    let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
                 }
@@ -327,15 +308,11 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 | CastTarget::WitnessOf => self.clone(),
             },
             None => {
-                let res = ctx
-                    .function
-                    .push_cast(ctx.function.get_entry_id(), self.0, *cast_target);
+                let res = ctx.cast_to(*cast_target, self.0);
                 Self(res)
             }
             _ => {
-                let res = ctx
-                    .function
-                    .push_cast(ctx.function.get_entry_id(), self.0, *cast_target);
+                let res = ctx.cast_to(*cast_target, self.0);
                 Self(res)
             }
         }
@@ -352,9 +329,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let val = ctx
-            .function
-            .push_to_bits(ctx.function.get_entry_id(), self.0, endianness, size);
+        let val = ctx.to_bits(self.0, endianness, size);
         ctx.const_vals
             .insert(val, ConstVal::BitsOf(Box::new(self.0), size, endianness));
         Self(val)
@@ -369,12 +344,12 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         match const_val {
             Some(ConstVal::U(s, v)) => {
                 let res = !v & ((1 << s) - 1);
-                let res_v = ctx.push_u_const(s, res);
+                let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
             None => {
-                let res = ctx.function.push_not(ctx.function.get_entry_id(), self.0);
+                let res = HLEmitter::not(ctx, self.0);
                 Self(res)
             }
             _ => todo!(),
@@ -382,13 +357,13 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     }
 
     fn of_u(s: usize, v: u128, ctx: &mut SpecializationState) -> Self {
-        let val = ctx.push_u_const(s, v);
+        let val = ctx.u_const(s, v);
         ctx.const_vals.insert(val, ConstVal::U(s, v));
         Self(val)
     }
 
     fn of_field(f: Field, ctx: &mut SpecializationState) -> Self {
-        let val = ctx.push_field_const(f);
+        let val = ctx.field_const(f);
         ctx.const_vals.insert(val, ConstVal::Field(f));
         Self(val)
     }
@@ -400,35 +375,25 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         elem_type: &Type,
     ) -> Self {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.function.push_mk_array(
-            ctx.function.get_entry_id(),
-            a.clone(),
-            seq_type,
-            elem_type.clone(),
-        );
+        let val = ctx.mk_seq(a.clone(), seq_type, elem_type.clone());
         ctx.const_vals.insert(val, ConstVal::Array(a));
         Self(val)
     }
 
     fn mk_tuple(elems: Vec<Self>, ctx: &mut SpecializationState, elem_types: &[Type]) -> Self {
         let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val =
-            ctx.function
-                .push_mk_tuple(ctx.function.get_entry_id(), a.clone(), elem_types.to_vec());
+        let val = ctx.mk_tuple(a.clone(), elem_types.to_vec());
         ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
 
     fn alloc(elem_type: &Type, ctx: &mut SpecializationState) -> Self {
-        let val = ctx
-            .function
-            .push_alloc(ctx.function.get_entry_id(), elem_type.clone());
+        let val = ctx.alloc(elem_type.clone());
         Self(val)
     }
 
     fn ptr_write(&self, val: &Self, ctx: &mut SpecializationState) {
-        ctx.function
-            .push_store(ctx.function.get_entry_id(), self.0, val.0);
+        ctx.store(self.0, val.0);
     }
 
     fn ptr_read(
@@ -436,7 +401,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         _out_type: &crate::compiler::ir::r#type::Type,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let val = ctx.function.push_load(ctx.function.get_entry_id(), self.0);
+        let val = ctx.load(self.0);
         Self(val)
     }
 
@@ -463,9 +428,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             None => {
-                let res =
-                    ctx.function
-                        .push_select(ctx.function.get_entry_id(), self.0, if_t.0, if_f.0);
+                let res = HLEmitter::select(ctx, self.0, if_t.0, if_f.0);
                 Self(res)
             }
             _ => todo!(),
@@ -488,13 +451,11 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     }
 
     fn mem_op(&self, kind: MemOp, ctx: &mut SpecializationState) {
-        ctx.function
-            .push_mem_op(ctx.function.get_entry_id(), self.0, kind);
+        HLEmitter::mem_op(ctx, self.0, kind);
     }
 
     fn rangecheck(&self, max_bits: usize, ctx: &mut SpecializationState) {
-        ctx.function
-            .push_rangecheck(ctx.function.get_entry_id(), self.0, max_bits);
+        HLEmitter::rangecheck(ctx, self.0, max_bits);
     }
 
     fn to_radix(
@@ -512,13 +473,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     Radix::Dyn(v) => Radix::Dyn(v.0),
                     Radix::Bytes => Radix::Bytes,
                 };
-                let res = ctx.function.push_to_radix(
-                    ctx.function.get_entry_id(),
-                    self.0,
-                    radix,
-                    endianness,
-                    size,
-                );
+                let res = HLEmitter::to_radix(ctx, self.0, radix, endianness, size);
                 Self(res)
             }
             Some(_) => todo!(),
@@ -566,13 +521,11 @@ impl symbolic_executor::Context<Val> for SpecializationState {
     fn slice_len(&mut self, slice: &Val) -> Val {
         if let Some(ConstVal::Array(elements)) = self.const_vals.get(&slice.0) {
             let len = elements.len() as u128;
-            let val = self.push_u_const(32, len);
+            let val = self.u_const(32, len);
             self.const_vals.insert(val, ConstVal::U(32, len));
             Val(val)
         } else {
-            let val = self
-                .function
-                .push_slice_len(self.function.get_entry_id(), slice.0);
+            let val = HLEmitter::slice_len(self, slice.0);
             Val(val)
         }
     }
@@ -653,12 +606,12 @@ impl Specializer {
                         .add_parameter(state.function.get_entry_id(), param.clone())));
                 }
                 ValueSignature::Field(f) => {
-                    let val = state.push_field_const(*f);
+                    let val = state.field_const(*f);
                     call_params.push(Val(val));
                     state.const_vals.insert(val, ConstVal::Field(*f));
                 }
                 ValueSignature::U(size, v) => {
-                    let val = state.push_u_const(*size, *v);
+                    let val = state.u_const(*size, *v);
                     call_params.push(Val(val));
                     state.const_vals.insert(val, ConstVal::U(*size, *v));
                 }
@@ -720,22 +673,22 @@ impl Specializer {
         unspecialized_id: FunctionId,
     ) -> HLFunction {
         let mut dispatcher = HLFunction::empty(fn_name);
+        let entry_block = dispatcher.get_entry_id();
+
+        let mut b = FunctionBuilder::new(&mut dispatcher, entry_block);
+
         let mut dispatcher_params = vec![];
         for param in params {
-            dispatcher_params.push(dispatcher.add_parameter(dispatcher.get_entry_id(), param));
+            dispatcher_params.push(b.add_parameter(entry_block, param));
         }
 
         for return_type in returns.iter() {
-            dispatcher.add_return_type(return_type.clone());
+            b.function().add_return_type(return_type.clone());
         }
 
         let mut specialized_params = vec![];
 
-        let entry_block = dispatcher.get_entry_id();
-        let mut should_call_spec = dispatcher.fresh_value();
-        dispatcher
-            .get_block_mut(entry_block)
-            .push_instruction(OpCode::mk_u_const(should_call_spec, 1, 1));
+        let mut should_call_spec = b.u_const(1, 1);
 
         for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
             match psig {
@@ -749,20 +702,14 @@ impl Specializer {
                     specialized_params.push(*pval);
                 }
                 ValueSignature::Field(v) => {
-                    let cst = dispatcher.fresh_value();
-                    dispatcher
-                        .get_block_mut(entry_block)
-                        .push_instruction(OpCode::mk_field_const(cst, *v));
-                    let is_eq = dispatcher.push_eq(entry_block, *pval, cst);
-                    should_call_spec = dispatcher.push_and(entry_block, should_call_spec, is_eq);
+                    let cst = b.field_const(*v);
+                    let is_eq = b.eq(*pval, cst);
+                    should_call_spec = b.and(should_call_spec, is_eq);
                 }
                 ValueSignature::U(s, v) => {
-                    let cst = dispatcher.fresh_value();
-                    dispatcher
-                        .get_block_mut(entry_block)
-                        .push_instruction(OpCode::mk_u_const(cst, *s, *v));
-                    let is_eq = dispatcher.push_eq(entry_block, *pval, cst);
-                    should_call_spec = dispatcher.push_and(entry_block, should_call_spec, is_eq);
+                    let cst = b.u_const(*s, *v);
+                    let is_eq = b.eq(*pval, cst);
+                    should_call_spec = b.and(should_call_spec, is_eq);
                 }
                 ValueSignature::Tuple(_) => {
                     todo!();
@@ -770,44 +717,28 @@ impl Specializer {
             }
         }
 
-        let specialized_caller = dispatcher.add_block();
-        let unspecialized_caller = dispatcher.add_block();
-        let return_block = dispatcher.add_block();
+        let specialized_caller = b.add_block();
+        let unspecialized_caller = b.add_block();
+        let return_block = b.add_block();
 
         let mut return_values = vec![];
         for ret in returns {
-            return_values.push(dispatcher.add_parameter(return_block, ret));
+            return_values.push(b.add_parameter(return_block, ret));
         }
-        dispatcher.terminate_block_with_return(return_block, return_values.clone());
+        b.function()
+            .terminate_block_with_return(return_block, return_values.clone());
 
-        let unspecialized_returns = dispatcher.push_call(
-            unspecialized_caller,
-            unspecialized_id,
-            dispatcher_params,
-            return_values.len(),
-        );
-        dispatcher.terminate_block_with_jmp(
-            unspecialized_caller,
-            return_block,
-            unspecialized_returns,
-        );
+        b.switch_to(unspecialized_caller);
+        let unspecialized_returns =
+            b.call(unspecialized_id, dispatcher_params, return_values.len());
+        b.terminate_jmp(return_block, unspecialized_returns);
 
-        let specialized_returns = dispatcher.push_call(
-            specialized_caller,
-            specialized_id,
-            specialized_params,
-            return_values.len(),
-        );
-        dispatcher.terminate_block_with_jmp(specialized_caller, return_block, specialized_returns);
+        b.switch_to(specialized_caller);
+        let specialized_returns = b.call(specialized_id, specialized_params, return_values.len());
+        b.terminate_jmp(return_block, specialized_returns);
 
-        dispatcher.terminate_block_with_jmp_if(
-            entry_block,
-            should_call_spec,
-            specialized_caller,
-            unspecialized_caller,
-        );
-
-        // dispatcher.terminate_block_with_return(dispatcher.get_entry_id(), vec![Val(unspecialized_id)]);
+        b.switch_to(entry_block);
+        b.terminate_jmp_if(should_call_spec, specialized_caller, unspecialized_caller);
 
         dispatcher
     }
