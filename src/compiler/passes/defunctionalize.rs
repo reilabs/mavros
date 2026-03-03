@@ -523,54 +523,55 @@ fn build_dispatch_function(
     }
 
     let entry_block = func.get_entry_id();
-    let mut b = FunctionBuilder::new(func, entry_block);
+    let mut b = FunctionBuilder::new(func);
 
-    let fn_id_param = b.add_parameter(entry_block, Type::u32());
+    let fn_id_param = b.block(entry_block).add_parameter(Type::u32());
 
     let mut forwarded_params: Vec<ValueId> = Vec::new();
     for param_type in param_types {
-        let p = b.add_parameter(entry_block, param_type.clone());
+        let p = b.block(entry_block).add_parameter(param_type.clone());
         forwarded_params.push(p);
     }
 
     let merge_block = b.add_block();
     let mut merge_results: Vec<ValueId> = Vec::new();
     for ret_type in return_types {
-        let r = b.add_parameter(merge_block, ret_type.clone());
+        let r = b.block(merge_block).add_parameter(ret_type.clone());
         merge_results.push(r);
     }
     b.function()
         .terminate_block_with_return(merge_block, merge_results.clone());
 
+    let mut current_block = entry_block;
+
     if variants.len() == 1 {
         let variant_id = variants[0];
-        let const_val = b.u_const(32, variant_id.0 as u128);
-        b.assert_eq(fn_id_param, const_val);
-        let call_results = b.call(variant_id, forwarded_params.clone(), return_types.len());
-        b.terminate_jmp(merge_block, call_results);
+        let const_val = b.block(current_block).u_const(32, variant_id.0 as u128);
+        b.block(current_block).assert_eq(fn_id_param, const_val);
+        let call_results = b.block(current_block).call(variant_id, forwarded_params.clone(), return_types.len());
+        b.block(current_block).terminate_jmp(merge_block, call_results);
     } else {
         for (i, &variant_id) in variants.iter().enumerate() {
             let is_last = i == variants.len() - 1;
 
             if is_last {
-                let const_val = b.u_const(32, variant_id.0 as u128);
-                b.assert_eq(fn_id_param, const_val);
-                let call_results = b.call(variant_id, forwarded_params.clone(), return_types.len());
-                b.terminate_jmp(merge_block, call_results);
+                let const_val = b.block(current_block).u_const(32, variant_id.0 as u128);
+                b.block(current_block).assert_eq(fn_id_param, const_val);
+                let call_results = b.block(current_block).call(variant_id, forwarded_params.clone(), return_types.len());
+                b.block(current_block).terminate_jmp(merge_block, call_results);
             } else {
-                let const_val = b.u_const(32, variant_id.0 as u128);
-                let eq_result = b.eq(fn_id_param, const_val);
+                let const_val = b.block(current_block).u_const(32, variant_id.0 as u128);
+                let eq_result = b.block(current_block).eq(fn_id_param, const_val);
 
                 let call_block = b.add_block();
                 let next_check_block = b.add_block();
 
-                b.terminate_jmp_if(eq_result, call_block, next_check_block);
+                b.block(current_block).terminate_jmp_if(eq_result, call_block, next_check_block);
 
-                b.switch_to(call_block);
-                let call_results = b.call(variant_id, forwarded_params.clone(), return_types.len());
-                b.terminate_jmp(merge_block, call_results);
+                let call_results = b.block(call_block).call(variant_id, forwarded_params.clone(), return_types.len());
+                b.block(call_block).terminate_jmp(merge_block, call_results);
 
-                b.switch_to(next_check_block);
+                current_block = next_check_block;
             }
         }
     }

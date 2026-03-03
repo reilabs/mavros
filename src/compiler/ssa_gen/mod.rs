@@ -225,13 +225,14 @@ impl SsaConverter {
             let init_fn = ssa.get_function_mut(init_fn_id);
             let entry = init_fn.get_entry_id();
 
-            let mut b = FunctionBuilder::new(init_fn, entry);
+            let mut b = FunctionBuilder::new(init_fn);
 
             // We need an ExpressionConverter to evaluate initializer expressions
             let mut expr_converter = ExpressionConverter::new_with_globals(
                 &self.constrained_mapper,
                 false,
                 &self.global_slots,
+                entry,
             );
 
             for gid in &ordered_ids {
@@ -240,10 +241,10 @@ impl SsaConverter {
                     .convert_expression(init_expr, &mut b)
                     .unwrap();
                 let idx = self.global_slots[gid];
-                b.init_global(idx, value);
+                b.block(expr_converter.current_block()).init_global(idx, value);
             }
 
-            b.terminate_return(vec![]);
+            b.block(expr_converter.current_block()).terminate_return(vec![]);
         }
 
         // Build deinit function
@@ -251,13 +252,13 @@ impl SsaConverter {
         {
             let deinit_fn = ssa.get_function_mut(deinit_fn_id);
             let entry = deinit_fn.get_entry_id();
-            let mut b = FunctionBuilder::new(deinit_fn, entry);
+            let mut b = FunctionBuilder::new(deinit_fn);
             for (i, typ) in global_types.iter().enumerate() {
                 if typ.is_heap_allocated() {
-                    b.drop_global(i);
+                    b.block(entry).drop_global(i);
                 }
             }
-            b.terminate_return(vec![]);
+            b.block(entry).terminate_return(vec![]);
         }
 
         ssa.set_global_types(global_types);
@@ -289,19 +290,20 @@ impl SsaConverter {
             function.add_return_type(return_type);
         }
 
-        let mut b = FunctionBuilder::new(&mut function, entry_block);
+        let mut b = FunctionBuilder::new(&mut function);
 
         // Create expression converter
         let mut expr_converter = ExpressionConverter::new_with_globals(
             function_mapper,
             in_unconstrained,
             &self.global_slots,
+            entry_block,
         );
 
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
             let converted_type = self.type_converter.convert_type(param_type);
-            let value_id = b.add_parameter(entry_block, converted_type.clone());
+            let value_id = b.block(entry_block).add_parameter(converted_type.clone());
 
             if *mutable {
                 // For mutable parameters, allocate a pointer and store the value
@@ -316,7 +318,7 @@ impl SsaConverter {
 
         // Add return terminator
         let return_values = result.into_iter().collect();
-        b.terminate_return(return_values);
+        b.block(expr_converter.current_block()).terminate_return(return_values);
 
         function
     }

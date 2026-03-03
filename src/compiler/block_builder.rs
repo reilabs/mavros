@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
     ssa::{
-        Block, BlockId, CallTarget, CastTarget, CmpKind, Endianness, Function, FunctionId,
+        BlockId, CallTarget, CastTarget, CmpKind, Endianness, Function, FunctionId,
         HLFunction, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
         Terminator, TupleIdx, ValueId,
     },
@@ -398,40 +396,24 @@ impl HLEmitter for InstrBuilder<'_, OpCode, Type> {
 }
 
 // ---------------------------------------------------------------------------
-// FunctionBuilder — emits into a function's current block
+// FunctionBuilder — function-level coordinator (no current_block)
 // ---------------------------------------------------------------------------
 
 pub struct FunctionBuilder<'a> {
     pub function: &'a mut HLFunction,
-    current_block: BlockId,
 }
 
 impl<'a> FunctionBuilder<'a> {
-    pub fn new(function: &'a mut HLFunction, current_block: BlockId) -> Self {
-        Self {
-            function,
-            current_block,
-        }
-    }
-
-    pub fn current_block(&self) -> BlockId {
-        self.current_block
-    }
-
-    pub fn switch_to(&mut self, block: BlockId) {
-        self.current_block = block;
+    pub fn new(function: &'a mut HLFunction) -> Self {
+        Self { function }
     }
 
     pub fn add_block(&mut self) -> BlockId {
         self.function.add_block()
     }
 
-    pub fn add_parameter(&mut self, block: BlockId, typ: Type) -> ValueId {
-        self.function.add_parameter(block, typ)
-    }
-
-    pub fn block_is_terminated(&self) -> bool {
-        self.function.block_is_terminated(self.current_block)
+    pub fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
     }
 
     /// Escape hatch for direct function access.
@@ -439,153 +421,128 @@ impl<'a> FunctionBuilder<'a> {
         self.function
     }
 
-    // -- Terminators (target current_block) --
-
-    pub fn terminate_jmp(&mut self, dest: BlockId, args: Vec<ValueId>) {
-        self.function
-            .terminate_block_with_jmp(self.current_block, dest, args);
-    }
-
-    pub fn terminate_jmp_if(&mut self, cond: ValueId, then_dest: BlockId, else_dest: BlockId) {
-        self.function
-            .terminate_block_with_jmp_if(self.current_block, cond, then_dest, else_dest);
-    }
-
-    pub fn terminate_return(&mut self, vals: Vec<ValueId>) {
-        self.function
-            .terminate_block_with_return(self.current_block, vals);
+    /// Get a BlockEmitter for a specific block.
+    pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_> {
+        BlockEmitter {
+            function: self.function,
+            block_id: id,
+        }
     }
 }
 
-impl HLEmitter for FunctionBuilder<'_> {
+// ---------------------------------------------------------------------------
+// BlockEmitter — emits instructions into a specific block, with block-splitting
+// ---------------------------------------------------------------------------
+
+pub struct BlockEmitter<'a> {
+    pub function: &'a mut HLFunction,
+    block_id: BlockId,
+}
+
+impl HLEmitter for BlockEmitter<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.function.fresh_value()
     }
 
     fn emit(&mut self, op: OpCode) {
         self.function
-            .get_block_mut(self.current_block)
+            .get_block_mut(self.block_id)
             .push_instruction(op);
     }
 }
 
-// ---------------------------------------------------------------------------
-// BlockCursor — block-splitting state machine
-// ---------------------------------------------------------------------------
-
-pub struct BlockCursor<'a, Op: Instruction, Ty: SSAType> {
-    pub function: &'a mut Function<Op, Ty>,
-    current_block_id: BlockId,
-    current_block: Block<Op, Ty>,
-    instructions: Vec<Op>,
-    new_blocks: HashMap<BlockId, Block<Op, Ty>>,
-}
-
-impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
-    /// Start a cursor for the given block. The block should already have had
-    /// its instructions and terminator taken out for processing.
-    pub fn new(
-        function: &'a mut Function<Op, Ty>,
-        block_id: BlockId,
-        block: Block<Op, Ty>,
-    ) -> Self {
-        Self {
-            function,
-            current_block_id: block_id,
-            current_block: block,
-            instructions: vec![],
-            new_blocks: HashMap::new(),
-        }
+impl<'a> BlockEmitter<'a> {
+    pub fn new(function: &'a mut HLFunction, block_id: BlockId) -> Self {
+        Self { function, block_id }
     }
 
-    /// Create a new block without switching to it.
-    pub fn new_block(&mut self) -> (BlockId, Block<Op, Ty>) {
-        self.function.next_virtual_block()
+    pub fn block_id(&self) -> BlockId {
+        self.block_id
     }
 
-    /// Finalize the current block with the given terminator, then switch the
-    /// cursor to `next_id` / `next_block`.
-    pub fn seal_and_switch(
-        &mut self,
-        terminator: Terminator,
-        next_id: BlockId,
-        next_block: Block<Op, Ty>,
-    ) {
-        self.current_block
-            .put_instructions(std::mem::take(&mut self.instructions));
-        self.current_block.set_terminator(terminator);
-        let old_block = std::mem::replace(&mut self.current_block, next_block);
-        self.new_blocks.insert(self.current_block_id, old_block);
-        self.current_block_id = next_id;
+    pub fn add_block(&mut self) -> BlockId {
+        self.function.add_block()
     }
 
-    /// Store a separately-built block (e.g. loop headers, loop bodies).
-    pub fn insert_block(&mut self, id: BlockId, block: Block<Op, Ty>) {
-        self.new_blocks.insert(id, block);
+    pub fn add_parameter(&mut self, typ: Type) -> ValueId {
+        self.function.add_parameter(self.block_id, typ)
     }
 
-    /// Seal the final block with the given terminator and return all blocks.
-    pub fn finish_with_terminator(
-        mut self,
-        terminator: Terminator,
-    ) -> HashMap<BlockId, Block<Op, Ty>> {
-        self.current_block
-            .put_instructions(std::mem::take(&mut self.instructions));
-        self.current_block.set_terminator(terminator);
-        self.new_blocks
-            .insert(self.current_block_id, self.current_block);
-        self.new_blocks
+    /// Set the terminator on the current block.
+    pub fn set_terminator(&mut self, terminator: Terminator) {
+        self.function
+            .get_block_mut(self.block_id)
+            .set_terminator(terminator);
     }
 
-    /// Seal the final block (keeping its existing terminator) and return all blocks.
-    pub fn finish(mut self) -> HashMap<BlockId, Block<Op, Ty>> {
-        self.current_block
-            .put_instructions(std::mem::take(&mut self.instructions));
-        self.new_blocks
-            .insert(self.current_block_id, self.current_block);
-        self.new_blocks
+    /// Set terminator on the current block and switch to `next_id`.
+    pub fn seal_and_switch(&mut self, terminator: Terminator, next_id: BlockId) {
+        self.function
+            .get_block_mut(self.block_id)
+            .set_terminator(terminator);
+        self.block_id = next_id;
     }
 
-    pub fn current_block_id(&self) -> BlockId {
-        self.current_block_id
+    pub fn terminate_jmp(&mut self, dest: BlockId, args: Vec<ValueId>) {
+        self.function
+            .terminate_block_with_jmp(self.block_id, dest, args);
+    }
+
+    pub fn terminate_jmp_if(&mut self, cond: ValueId, then_dest: BlockId, else_dest: BlockId) {
+        self.function
+            .terminate_block_with_jmp_if(self.block_id, cond, then_dest, else_dest);
+    }
+
+    pub fn terminate_return(&mut self, vals: Vec<ValueId>) {
+        self.function
+            .terminate_block_with_return(self.block_id, vals);
+    }
+
+    pub fn is_terminated(&self) -> bool {
+        self.function.block_is_terminated(self.block_id)
     }
 
     /// Build a loop with the three-block structure: header → body → back-edge.
     ///
-    /// This is fully generic over `Op`/`Ty`. The caller provides:
+    /// The caller provides:
     /// - `params`: `(initial_value, type)` for all loop-carried state
     /// - `header`: receives an `InstrBuilder` targeting the header block and the
     ///   loop parameter `ValueId`s; emits the condition check and returns the
     ///   condition `ValueId`
-    /// - `body`: receives the cursor (at the body block) and the loop parameter
+    /// - `body`: receives the emitter (at the body block) and the loop parameter
     ///   `ValueId`s; emits the body and returns the updated parameter values
     ///   (fed back to the header via the back-edge Jmp)
     ///
     /// Returns the loop parameter `ValueId`s as seen from the continuation block.
     pub fn build_loop(
         &mut self,
-        params: Vec<(ValueId, Ty)>,
-        header: impl FnOnce(&mut InstrBuilder<'_, Op, Ty>, &[ValueId]) -> ValueId,
+        params: Vec<(ValueId, Type)>,
+        header: impl FnOnce(&mut InstrBuilder<'_, OpCode, Type>, &[ValueId]) -> ValueId,
         body: impl FnOnce(&mut Self, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Create blocks
-        let (header_id, mut header_block) = self.new_block();
-        let (body_id, body_block) = self.new_block();
-        let (cont_id, cont_block) = self.new_block();
+        let header_id = self.add_block();
+        let body_id = self.add_block();
+        let cont_id = self.add_block();
 
         // Seal current block → Jmp(header, initial values)
         let init_values: Vec<ValueId> = params.iter().map(|(v, _)| *v).collect();
-        self.seal_and_switch(Terminator::Jmp(header_id, init_values), body_id, body_block);
+        self.seal_and_switch(Terminator::Jmp(header_id, init_values), body_id);
 
         // Build header parameters
         let mut param_ids = vec![];
-        let mut header_params = vec![];
-        for (_, tp) in &params {
+        for _ in 0..params.len() {
             let v = self.function.fresh_value();
             param_ids.push(v);
-            header_params.push((v, tp.clone()));
         }
-        header_block.put_parameters(header_params);
+        let header_params: Vec<_> = param_ids
+            .iter()
+            .zip(params.iter())
+            .map(|(v, (_, tp))| (*v, tp.clone()))
+            .collect();
+        self.function
+            .get_block_mut(header_id)
+            .put_parameters(header_params);
 
         // Call header closure to emit condition into a temporary instruction buffer
         let mut header_instructions = vec![];
@@ -593,33 +550,23 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
             let mut b = InstrBuilder::new(self.function, &mut header_instructions);
             header(&mut b, &param_ids)
         };
-        header_block.put_instructions(header_instructions);
-        header_block.set_terminator(Terminator::JmpIf(cond, body_id, cont_id));
-        self.insert_block(header_id, header_block);
+        self.function
+            .get_block_mut(header_id)
+            .put_instructions(header_instructions);
+        self.function
+            .get_block_mut(header_id)
+            .set_terminator(Terminator::JmpIf(cond, body_id, cont_id));
 
-        // Call body closure (cursor is at body block, may split it further)
+        // Call body closure (emitter is at body block, may split it further)
         let updated = body(self, &param_ids);
 
         // Seal body → Jmp(header, updated values)
-        self.seal_and_switch(Terminator::Jmp(header_id, updated), cont_id, cont_block);
+        self.seal_and_switch(Terminator::Jmp(header_id, updated), cont_id);
 
-        // Cursor is now at continuation; return param ids
+        // Emitter is now at continuation; return param ids
         param_ids
     }
-}
 
-impl HLEmitter for BlockCursor<'_, OpCode, Type> {
-    fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
-    }
-
-    fn emit(&mut self, op: OpCode) {
-        self.instructions.push(op);
-    }
-}
-
-// HL-specific BlockCursor methods
-impl BlockCursor<'_, OpCode, Type> {
     /// Build a counted loop: `for i in 0..len { body(i, accumulators) → updated_accumulators }`
     ///
     /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`),
@@ -642,11 +589,11 @@ impl BlockCursor<'_, OpCode, Type> {
         let results = self.build_loop(
             params,
             |b, loop_params| b.lt(loop_params[0], const_len),
-            |cursor, loop_params| {
+            |emitter, loop_params| {
                 let i_val = loop_params[0];
                 let acc_params = &loop_params[1..];
-                let updated_accs = body(cursor, i_val, acc_params);
-                let next_i = cursor.add(i_val, const_1);
+                let updated_accs = body(emitter, i_val, acc_params);
+                let next_i = emitter.add(i_val, const_1);
                 let mut result = vec![next_i];
                 result.extend(updated_accs);
                 result

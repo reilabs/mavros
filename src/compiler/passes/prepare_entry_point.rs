@@ -1,5 +1,5 @@
 use crate::compiler::{
-    block_builder::{FunctionBuilder, HLEmitter},
+    block_builder::{BlockEmitter, FunctionBuilder, HLEmitter},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -40,45 +40,45 @@ impl PrepareEntryPoint {
         let wrapper = ssa.get_function_mut(wrapper_id);
 
         let entry_block = wrapper.get_entry_id();
-        let mut b = FunctionBuilder::new(wrapper, entry_block);
+        let mut b = FunctionBuilder::new(wrapper);
 
         let mut arg_values = Vec::new();
         for typ in &param_types {
-            let val = b.add_parameter(entry_block, typ.clone());
+            let val = b.block(entry_block).add_parameter(typ.clone());
             arg_values.push(val);
         }
 
         let mut return_input_values = Vec::new();
         for typ in &return_types {
-            let val = b.add_parameter(entry_block, typ.clone());
+            let val = b.block(entry_block).add_parameter(typ.clone());
             return_input_values.push(val);
         }
 
         // Call globals init function if present
         if let Some(init_fn) = globals_init_fn {
-            b.call(init_fn, vec![], 0);
+            b.block(entry_block).call(init_fn, vec![], 0);
         }
 
-        let results = b.call(original_main_id, arg_values, return_types.len());
+        let results = b.block(entry_block).call(original_main_id, arg_values, return_types.len());
         for ((result, public_input), return_type) in results
             .iter()
             .zip(return_input_values.iter())
             .zip(return_types.iter())
         {
-            Self::assert_eq_deep(&mut b, *result, *public_input, return_type);
+            Self::assert_eq_deep(&mut b.block(entry_block), *result, *public_input, return_type);
         }
 
         // Call globals deinit function if present
         if let Some(deinit_fn) = globals_deinit_fn {
-            b.call(deinit_fn, vec![], 0);
+            b.block(entry_block).call(deinit_fn, vec![], 0);
         }
 
-        b.terminate_return(vec![]);
+        b.block(entry_block).terminate_return(vec![]);
 
         ssa.set_entry_point(wrapper_id);
     }
 
-    fn assert_eq_deep(b: &mut FunctionBuilder, result: ValueId, public_input: ValueId, typ: &Type) {
+    fn assert_eq_deep(b: &mut BlockEmitter, result: ValueId, public_input: ValueId, typ: &Type) {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
                 b.assert_eq(result, public_input);

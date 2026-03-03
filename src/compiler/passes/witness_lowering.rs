@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     analysis::types::TypeInfo,
-    block_builder::{BlockCursor, HLEmitter},
+    block_builder::{BlockEmitter, HLEmitter},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -53,19 +53,20 @@ impl WitnessLowering {
                 .collect();
 
             let mut replacements = ValueReplacements::new();
-            let mut new_blocks = HashMap::new();
-            for (bid, mut block) in function.take_blocks().into_iter() {
-                let old_params = block.take_parameters();
+            let block_ids: Vec<BlockId> = function.get_blocks().map(|(bid, _)| *bid).collect();
+            for bid in block_ids {
+                // Convert block parameters in-place
+                let old_params = function.get_block_mut(bid).take_parameters();
                 let new_params = old_params
                     .into_iter()
                     .map(|(r, tp)| (r, self.witness_lowering_in_type(&tp)))
                     .collect();
-                block.put_parameters(new_params);
+                function.get_block_mut(bid).put_parameters(new_params);
 
-                let terminator = block.take_terminator();
-                let instructions = block.take_instructions();
+                let terminator = function.get_block_mut(bid).take_terminator();
+                let instructions = function.get_block_mut(bid).take_instructions();
 
-                let mut cursor = BlockCursor::new(function, bid, block);
+                let mut emitter = BlockEmitter::new(function, bid);
 
                 for mut instruction in instructions.into_iter() {
                     replacements.replace_instruction(&mut instruction);
@@ -79,11 +80,11 @@ impl WitnessLowering {
                             if v_type.is_witness_of() {
                                 replacements.insert(r, v);
                             } else {
-                                cursor.emit(instruction);
+                                emitter.emit(instruction);
                             }
                         }
                         OpCode::FreshWitness { .. } => {
-                            cursor.emit(instruction);
+                            emitter.emit(instruction);
                         }
                         OpCode::MkSeq {
                             result: r,
@@ -99,11 +100,11 @@ impl WitnessLowering {
                                         *v,
                                         &new_elem_type,
                                         type_info,
-                                        &mut cursor,
+                                        &mut emitter,
                                     )
                                 })
                                 .collect();
-                            cursor.emit(OpCode::MkSeq {
+                            emitter.emit(OpCode::MkSeq {
                                 result: r,
                                 elems: new_vs,
                                 seq_type: s,
@@ -114,28 +115,28 @@ impl WitnessLowering {
                             result: r,
                             elem_type: tp,
                         } => {
-                            cursor.emit(OpCode::Alloc {
+                            emitter.emit(OpCode::Alloc {
                                 result: r,
                                 elem_type: self.witness_lowering_in_type(&tp),
                             });
                         }
                         OpCode::Constrain { a, b, c } => {
-                            let a = self.ensure_witness_ref(a, type_info, &mut cursor);
-                            let b = self.ensure_witness_ref(b, type_info, &mut cursor);
-                            let c = self.ensure_witness_ref(c, type_info, &mut cursor);
-                            let new_val = cursor.fresh_value();
-                            cursor.emit(OpCode::NextDCoeff { result: new_val });
-                            cursor.emit(OpCode::BumpD {
+                            let a = self.ensure_witness_ref(a, type_info, &mut emitter);
+                            let b = self.ensure_witness_ref(b, type_info, &mut emitter);
+                            let c = self.ensure_witness_ref(c, type_info, &mut emitter);
+                            let new_val = emitter.fresh_value();
+                            emitter.emit(OpCode::NextDCoeff { result: new_val });
+                            emitter.emit(OpCode::BumpD {
                                 matrix: DMatrix::A,
                                 variable: a,
                                 sensitivity: new_val,
                             });
-                            cursor.emit(OpCode::BumpD {
+                            emitter.emit(OpCode::BumpD {
                                 matrix: DMatrix::B,
                                 variable: b,
                                 sensitivity: new_val,
                             });
-                            cursor.emit(OpCode::BumpD {
+                            emitter.emit(OpCode::BumpD {
                                 matrix: DMatrix::C,
                                 variable: c,
                                 sensitivity: new_val,
@@ -154,7 +155,7 @@ impl WitnessLowering {
                                     "Keys of lookup must be fields"
                                 );
                                 if !key_type.is_witness_of() {
-                                    new_keys.push(cursor.cast_to_witness_of(*key));
+                                    new_keys.push(emitter.cast_to_witness_of(*key));
                                 } else {
                                     new_keys.push(*key);
                                 }
@@ -167,12 +168,12 @@ impl WitnessLowering {
                                     "Results of lookup must be fields"
                                 );
                                 if !result_type.is_witness_of() {
-                                    new_results.push(cursor.cast_to_witness_of(*result));
+                                    new_results.push(emitter.cast_to_witness_of(*result));
                                 } else {
                                     new_results.push(*result);
                                 }
                             }
-                            cursor.emit(OpCode::DLookup {
+                            emitter.emit(OpCode::DLookup {
                                 target,
                                 keys: new_keys,
                                 results: new_results,
@@ -190,14 +191,14 @@ impl WitnessLowering {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
                                         let neg_one =
-                                            cursor.field_const(ark_bn254::Fr::from(-1i64));
-                                        let neg_b = cursor.fresh_value();
-                                        cursor.emit(OpCode::MulConst {
+                                            emitter.field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_b = emitter.fresh_value();
+                                        emitter.emit(OpCode::MulConst {
                                             result: neg_b,
                                             const_val: neg_one,
                                             var: b,
                                         });
-                                        cursor.emit(OpCode::BinaryArithOp {
+                                        emitter.emit(OpCode::BinaryArithOp {
                                             kind: BinaryArithOpKind::Add,
                                             result: r,
                                             lhs: a,
@@ -205,16 +206,16 @@ impl WitnessLowering {
                                         });
                                     }
                                     _ => {
-                                        cursor.emit(instruction);
+                                        emitter.emit(instruction);
                                     }
                                 },
                                 (_, false, _, false) => {
-                                    cursor.emit(instruction);
+                                    emitter.emit(instruction);
                                 }
                                 (wit, true, pure, false) | (pure, false, wit, true) => match kind {
                                     BinaryArithOpKind::Add => {
-                                        let pure_refed = cursor.cast_to_witness_of(pure);
-                                        cursor.emit(OpCode::BinaryArithOp {
+                                        let pure_refed = emitter.cast_to_witness_of(pure);
+                                        emitter.emit(OpCode::BinaryArithOp {
                                             kind,
                                             result: r,
                                             lhs: pure_refed,
@@ -222,7 +223,7 @@ impl WitnessLowering {
                                         });
                                     }
                                     BinaryArithOpKind::Mul => {
-                                        cursor.emit(OpCode::MulConst {
+                                        emitter.emit(OpCode::MulConst {
                                             result: r,
                                             const_val: pure,
                                             var: wit,
@@ -232,18 +233,18 @@ impl WitnessLowering {
                                         panic!("Div is not supported for witness-pure arithmetic")
                                     }
                                     BinaryArithOpKind::Sub => {
-                                        let pure_refed = cursor.cast_to_witness_of(pure);
+                                        let pure_refed = emitter.cast_to_witness_of(pure);
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
                                         let neg_one =
-                                            cursor.field_const(ark_bn254::Fr::from(-1i64));
-                                        let neg_rhs = cursor.fresh_value();
-                                        cursor.emit(OpCode::MulConst {
+                                            emitter.field_const(ark_bn254::Fr::from(-1i64));
+                                        let neg_rhs = emitter.fresh_value();
+                                        emitter.emit(OpCode::MulConst {
                                             result: neg_rhs,
                                             const_val: neg_one,
                                             var: rhs_ref,
                                         });
-                                        cursor.emit(OpCode::BinaryArithOp {
+                                        emitter.emit(OpCode::BinaryArithOp {
                                             kind: BinaryArithOpKind::Add,
                                             result: r,
                                             lhs: lhs_ref,
@@ -263,9 +264,9 @@ impl WitnessLowering {
                                 value,
                                 &new_ptr_type,
                                 type_info,
-                                &mut cursor,
+                                &mut emitter,
                             );
-                            cursor.emit(OpCode::Store {
+                            emitter.emit(OpCode::Store {
                                 ptr,
                                 value: converted,
                             });
@@ -287,9 +288,9 @@ impl WitnessLowering {
                                 value,
                                 &expected_elem_type,
                                 type_info,
-                                &mut cursor,
+                                &mut emitter,
                             );
-                            cursor.emit(OpCode::ArraySet {
+                            emitter.emit(OpCode::ArraySet {
                                 result,
                                 array,
                                 index,
@@ -315,11 +316,11 @@ impl WitnessLowering {
                                         *v,
                                         &expected_elem_type,
                                         type_info,
-                                        &mut cursor,
+                                        &mut emitter,
                                     )
                                 })
                                 .collect();
-                            cursor.emit(OpCode::SlicePush {
+                            emitter.emit(OpCode::SlicePush {
                                 dir,
                                 result,
                                 slice,
@@ -335,10 +336,10 @@ impl WitnessLowering {
                             let result_type = type_info.get_value_type(r);
                             let target_type = self.witness_lowering_in_type(result_type);
                             let if_t =
-                                self.convert_if_needed(if_t, &target_type, type_info, &mut cursor);
+                                self.convert_if_needed(if_t, &target_type, type_info, &mut emitter);
                             let if_f =
-                                self.convert_if_needed(if_f, &target_type, type_info, &mut cursor);
-                            cursor.emit(OpCode::Select {
+                                self.convert_if_needed(if_f, &target_type, type_info, &mut emitter);
+                            emitter.emit(OpCode::Select {
                                 result: r,
                                 cond,
                                 if_t,
@@ -370,7 +371,7 @@ impl WitnessLowering {
                         | OpCode::Todo { .. }
                         | OpCode::ValueOf { .. }
                         | OpCode::Const { .. } => {
-                            cursor.emit(instruction);
+                            emitter.emit(instruction);
                         }
                         OpCode::MkTuple {
                             result,
@@ -381,7 +382,7 @@ impl WitnessLowering {
                                 .iter()
                                 .map(|tp| self.witness_lowering_in_type(tp))
                                 .collect();
-                            cursor.emit(OpCode::MkTuple {
+                            emitter.emit(OpCode::MkTuple {
                                 result,
                                 elems,
                                 element_types: new_element_types,
@@ -401,19 +402,16 @@ impl WitnessLowering {
                                     *arg,
                                     expected_type,
                                     type_info,
-                                    &mut cursor,
+                                    &mut emitter,
                                 );
                             }
                         }
                         Terminator::JmpIf(_, _, _) => {}
                         Terminator::Return(_) => {}
                     }
-                    new_blocks.extend(cursor.finish_with_terminator(terminator));
-                } else {
-                    new_blocks.extend(cursor.finish());
+                    emitter.set_terminator(terminator);
                 }
             }
-            function.put_blocks(new_blocks);
         }
     }
 
@@ -426,7 +424,7 @@ impl WitnessLowering {
         value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        cursor: &mut BlockCursor<'_, OpCode, Type>,
+        emitter: &mut BlockEmitter<'_>,
     ) -> ValueId {
         let converted_source = self.witness_lowering_in_type(source_type);
         if converted_source == *target_type {
@@ -435,7 +433,7 @@ impl WitnessLowering {
 
         match (&source_type.expr, &target_type.expr) {
             (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => cursor.cast_to_witness_of(value),
+            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
                 assert_eq!(
                     src_size, tgt_size,
@@ -448,7 +446,7 @@ impl WitnessLowering {
                     *src_size,
                     source_type,
                     target_type,
-                    cursor,
+                    emitter,
                 )
             }
             (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
@@ -459,11 +457,11 @@ impl WitnessLowering {
                 );
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = cursor.tuple_proj(value, TupleIdx::Static(i));
-                    let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, cursor);
+                    let proj = emitter.tuple_proj(value, TupleIdx::Static(i));
+                    let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, emitter);
                     converted_elems.push(converted);
                 }
-                cursor.mk_tuple(converted_elems, tgt_fields.clone())
+                emitter.mk_tuple(converted_elems, tgt_fields.clone())
             }
             (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => {
                 // Both source and target are WitnessOf — same runtime representation.
@@ -484,20 +482,20 @@ impl WitnessLowering {
         array_len: usize,
         _source_array_type: &Type,
         target_array_type: &Type,
-        cursor: &mut BlockCursor<'_, OpCode, Type>,
+        emitter: &mut BlockEmitter<'_>,
     ) -> ValueId {
         let initial_dst =
-            self.create_dummy_array(tgt_elem_type, array_len, target_array_type, cursor);
+            self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);
 
-        let results = cursor.build_counted_loop(
+        let results = emitter.build_counted_loop(
             array_len,
             vec![(initial_dst, target_array_type.clone())],
-            |cursor, i_val, accs| {
+            |emitter, i_val, accs| {
                 let dst_val = accs[0];
-                let elem = cursor.array_get(source_array, i_val);
+                let elem = emitter.array_get(source_array, i_val);
                 let converted =
-                    self.emit_value_conversion(elem, src_elem_type, tgt_elem_type, cursor);
-                let new_dst = cursor.array_set(dst_val, i_val, converted);
+                    self.emit_value_conversion(elem, src_elem_type, tgt_elem_type, emitter);
+                let new_dst = emitter.array_set(dst_val, i_val, converted);
                 vec![new_dst]
             },
         );
@@ -544,14 +542,14 @@ impl WitnessLowering {
         value: ValueId,
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-        cursor: &mut BlockCursor<'_, OpCode, Type>,
+        emitter: &mut BlockEmitter<'_>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_lowering_in_type(&value_type);
         if converted_type == *target_type {
             value
         } else {
-            self.emit_value_conversion(value, &value_type, target_type, cursor)
+            self.emit_value_conversion(value, &value_type, target_type, emitter)
         }
     }
 

@@ -675,11 +675,11 @@ impl Specializer {
         let mut dispatcher = HLFunction::empty(fn_name);
         let entry_block = dispatcher.get_entry_id();
 
-        let mut b = FunctionBuilder::new(&mut dispatcher, entry_block);
+        let mut b = FunctionBuilder::new(&mut dispatcher);
 
         let mut dispatcher_params = vec![];
         for param in params {
-            dispatcher_params.push(b.add_parameter(entry_block, param));
+            dispatcher_params.push(b.block(entry_block).add_parameter(param));
         }
 
         for return_type in returns.iter() {
@@ -688,7 +688,7 @@ impl Specializer {
 
         let mut specialized_params = vec![];
 
-        let mut should_call_spec = b.u_const(1, 1);
+        let mut should_call_spec = b.block(entry_block).u_const(1, 1);
 
         for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
             match psig {
@@ -702,14 +702,14 @@ impl Specializer {
                     specialized_params.push(*pval);
                 }
                 ValueSignature::Field(v) => {
-                    let cst = b.field_const(*v);
-                    let is_eq = b.eq(*pval, cst);
-                    should_call_spec = b.and(should_call_spec, is_eq);
+                    let cst = b.block(entry_block).field_const(*v);
+                    let is_eq = b.block(entry_block).eq(*pval, cst);
+                    should_call_spec = b.block(entry_block).and(should_call_spec, is_eq);
                 }
                 ValueSignature::U(s, v) => {
-                    let cst = b.u_const(*s, *v);
-                    let is_eq = b.eq(*pval, cst);
-                    should_call_spec = b.and(should_call_spec, is_eq);
+                    let cst = b.block(entry_block).u_const(*s, *v);
+                    let is_eq = b.block(entry_block).eq(*pval, cst);
+                    should_call_spec = b.block(entry_block).and(should_call_spec, is_eq);
                 }
                 ValueSignature::Tuple(_) => {
                     todo!();
@@ -723,22 +723,19 @@ impl Specializer {
 
         let mut return_values = vec![];
         for ret in returns {
-            return_values.push(b.add_parameter(return_block, ret));
+            return_values.push(b.block(return_block).add_parameter(ret));
         }
         b.function()
             .terminate_block_with_return(return_block, return_values.clone());
 
-        b.switch_to(unspecialized_caller);
         let unspecialized_returns =
-            b.call(unspecialized_id, dispatcher_params, return_values.len());
-        b.terminate_jmp(return_block, unspecialized_returns);
+            b.block(unspecialized_caller).call(unspecialized_id, dispatcher_params, return_values.len());
+        b.block(unspecialized_caller).terminate_jmp(return_block, unspecialized_returns);
 
-        b.switch_to(specialized_caller);
-        let specialized_returns = b.call(specialized_id, specialized_params, return_values.len());
-        b.terminate_jmp(return_block, specialized_returns);
+        let specialized_returns = b.block(specialized_caller).call(specialized_id, specialized_params, return_values.len());
+        b.block(specialized_caller).terminate_jmp(return_block, specialized_returns);
 
-        b.switch_to(entry_block);
-        b.terminate_jmp_if(should_call_spec, specialized_caller, unspecialized_caller);
+        b.block(entry_block).terminate_jmp_if(should_call_spec, specialized_caller, unspecialized_caller);
 
         dispatcher
     }
