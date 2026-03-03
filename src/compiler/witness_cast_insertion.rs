@@ -4,12 +4,12 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::types::Types,
-    block_builder::BlockCursor,
+    block_builder::{BlockCursor, InstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLBlock, HLFunction, HLSSA, OpCode,
-        SeqType, Terminator, TupleIdx,
+        BlockId, CmpKind, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx,
+        ValueId,
     },
     witness_info::{FunctionWitnessType, WitnessType},
     witness_type_inference::WitnessTypeInference,
@@ -284,22 +284,11 @@ impl WitnessCastInsertion {
                         let new_vs = vs
                             .iter()
                             .map(|v| {
-                                let (
-                                    current_block_id,
-                                    current_block,
-                                    new_instructions,
-                                    function,
-                                    new_blocks,
-                                ) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *v,
                                     &target_elem_type,
                                     type_info,
-                                    current_block_id,
-                                    current_block,
-                                    new_instructions,
-                                    function,
-                                    new_blocks,
+                                    &mut cursor,
                                 )
                             })
                             .collect();
@@ -322,22 +311,11 @@ impl WitnessCastInsertion {
                             TypeExpr::Slice(inner) => inner.as_ref().clone(),
                             _ => panic!("ArraySet on non-array type"),
                         };
-                        let (
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        ) = cursor.as_parts();
                         let converted = self.convert_if_needed(
                             value,
                             &expected_elem_type,
                             type_info,
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
+                            &mut cursor,
                         );
                         cursor.instr().push(OpCode::ArraySet {
                             result,
@@ -360,22 +338,11 @@ impl WitnessCastInsertion {
                         let new_values = values
                             .iter()
                             .map(|v| {
-                                let (
-                                    current_block_id,
-                                    current_block,
-                                    new_instructions,
-                                    function,
-                                    new_blocks,
-                                ) = cursor.as_parts();
                                 self.convert_if_needed(
                                     *v,
                                     &expected_elem_type,
                                     type_info,
-                                    current_block_id,
-                                    current_block,
-                                    new_instructions,
-                                    function,
-                                    new_blocks,
+                                    &mut cursor,
                                 )
                             })
                             .collect();
@@ -389,23 +356,8 @@ impl WitnessCastInsertion {
                     OpCode::Store { ptr, value } => {
                         let ptr_type = type_info.get_value_type(ptr);
                         let target_type = ptr_type.get_pointed();
-                        let (
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        ) = cursor.as_parts();
-                        let converted = self.convert_if_needed(
-                            value,
-                            &target_type,
-                            type_info,
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        );
+                        let converted =
+                            self.convert_if_needed(value, &target_type, type_info, &mut cursor);
                         cursor.instr().push(OpCode::Store {
                             ptr,
                             value: converted,
@@ -420,40 +372,10 @@ impl WitnessCastInsertion {
                         let if_t_type = type_info.get_value_type(if_t);
                         let if_f_type = type_info.get_value_type(if_f);
                         let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
-                        let (
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        ) = cursor.as_parts();
-                        let if_t = self.convert_if_needed(
-                            if_t,
-                            &target_type,
-                            type_info,
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        );
-                        let (
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        ) = cursor.as_parts();
-                        let if_f = self.convert_if_needed(
-                            if_f,
-                            &target_type,
-                            type_info,
-                            current_block_id,
-                            current_block,
-                            new_instructions,
-                            function,
-                            new_blocks,
-                        );
+                        let if_t =
+                            self.convert_if_needed(if_t, &target_type, type_info, &mut cursor);
+                        let if_f =
+                            self.convert_if_needed(if_f, &target_type, type_info, &mut cursor);
                         cursor.instr().push(OpCode::Select {
                             result: r,
                             cond,
@@ -507,22 +429,11 @@ impl WitnessCastInsertion {
                                 .iter()
                                 .zip(param_types.iter())
                                 .map(|(arg, expected_type)| {
-                                    let (
-                                        current_block_id,
-                                        current_block,
-                                        new_instructions,
-                                        function,
-                                        new_blocks,
-                                    ) = cursor.as_parts();
                                     self.convert_if_needed(
                                         *arg,
                                         expected_type,
                                         type_info,
-                                        current_block_id,
-                                        current_block,
-                                        new_instructions,
-                                        function,
-                                        new_blocks,
+                                        &mut cursor,
                                     )
                                 })
                                 .collect();
@@ -540,23 +451,7 @@ impl WitnessCastInsertion {
                             .iter()
                             .zip(return_types.iter())
                             .map(|(val, expected_type)| {
-                                let (
-                                    current_block_id,
-                                    current_block,
-                                    new_instructions,
-                                    function,
-                                    new_blocks,
-                                ) = cursor.as_parts();
-                                self.convert_if_needed(
-                                    *val,
-                                    expected_type,
-                                    type_info,
-                                    current_block_id,
-                                    current_block,
-                                    new_instructions,
-                                    function,
-                                    new_blocks,
-                                )
+                                self.convert_if_needed(*val, expected_type, type_info, &mut cursor)
                             })
                             .collect();
                         new_blocks
@@ -582,54 +477,29 @@ impl WitnessCastInsertion {
 
     fn convert_if_needed(
         &self,
-        value: crate::compiler::ssa::ValueId,
+        value: ValueId,
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-        current_block_id: &mut BlockId,
-        current_block: &mut HLBlock,
-        new_instructions: &mut Vec<OpCode>,
-        function: &mut HLFunction,
-        new_blocks: &mut HashMap<BlockId, HLBlock>,
-    ) -> crate::compiler::ssa::ValueId {
+        cursor: &mut BlockCursor<'_, OpCode, Type>,
+    ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         if *value_type == *target_type {
             return value;
         }
-        self.emit_value_conversion(
-            value,
-            value_type,
-            target_type,
-            current_block_id,
-            current_block,
-            new_instructions,
-            function,
-            new_blocks,
-        )
+        self.emit_value_conversion(value, value_type, target_type, cursor)
     }
 
     fn emit_value_conversion(
         &self,
-        value: crate::compiler::ssa::ValueId,
+        value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        current_block_id: &mut BlockId,
-        current_block: &mut HLBlock,
-        new_instructions: &mut Vec<OpCode>,
-        function: &mut HLFunction,
-        new_blocks: &mut HashMap<BlockId, HLBlock>,
-    ) -> crate::compiler::ssa::ValueId {
+        cursor: &mut BlockCursor<'_, OpCode, Type>,
+    ) -> ValueId {
         match (&source_type.expr, &target_type.expr) {
             // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
             (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => {
-                let result = function.fresh_value();
-                new_instructions.push(OpCode::Cast {
-                    result,
-                    value,
-                    target: CastTarget::WitnessOf,
-                });
-                result
-            }
+            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => cursor.instr().cast_to_witness_of(value),
             // Array element conversion
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
                 assert_eq!(
@@ -642,11 +512,7 @@ impl WitnessCastInsertion {
                     tgt_inner,
                     *src_size,
                     target_type,
-                    current_block_id,
-                    current_block,
-                    new_instructions,
-                    function,
-                    new_blocks,
+                    cursor,
                 )
             }
             // Tuple: decompose, per-field recursive, recompose
@@ -658,31 +524,11 @@ impl WitnessCastInsertion {
                 );
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = function.fresh_value();
-                    new_instructions.push(OpCode::TupleProj {
-                        result: proj,
-                        tuple: value,
-                        idx: TupleIdx::Static(i),
-                    });
-                    let converted = self.emit_value_conversion(
-                        proj,
-                        src_ft,
-                        tgt_ft,
-                        current_block_id,
-                        current_block,
-                        new_instructions,
-                        function,
-                        new_blocks,
-                    );
+                    let proj = cursor.instr().tuple_proj(value, TupleIdx::Static(i));
+                    let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, cursor);
                     converted_elems.push(converted);
                 }
-                let result = function.fresh_value();
-                new_instructions.push(OpCode::MkTuple {
-                    result,
-                    elems: converted_elems,
-                    element_types: tgt_fields.clone(),
-                });
-                result
+                cursor.instr().mk_tuple(converted_elems, tgt_fields.clone())
             }
             // WitnessOf→WitnessOf: identity (same runtime repr)
             (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => value,
@@ -695,56 +541,48 @@ impl WitnessCastInsertion {
 
     fn emit_array_conversion_loop(
         &self,
-        source_array: crate::compiler::ssa::ValueId,
+        source_array: ValueId,
         src_elem_type: &Type,
         tgt_elem_type: &Type,
         array_len: usize,
         target_array_type: &Type,
-        current_block_id: &mut BlockId,
-        current_block: &mut HLBlock,
-        new_instructions: &mut Vec<OpCode>,
-        function: &mut HLFunction,
-        new_blocks: &mut HashMap<BlockId, HLBlock>,
-    ) -> crate::compiler::ssa::ValueId {
+        cursor: &mut BlockCursor<'_, OpCode, Type>,
+    ) -> ValueId {
         // Create a properly-typed initial target array filled with dummy elements
         let initial_dst = self.create_dummy_array(
             tgt_elem_type,
             array_len,
             target_array_type,
-            new_instructions,
-            function,
+            &mut cursor.instr(),
         );
 
         // Create loop blocks
-        let (loop_header_id, mut loop_header) = function.next_virtual_block();
-        let (loop_body_id, loop_body) = function.next_virtual_block();
-        let (continuation_id, continuation) = function.next_virtual_block();
+        let (loop_header_id, mut loop_header) = cursor.new_block();
+        let (loop_body_id, loop_body) = cursor.new_block();
+        let (continuation_id, continuation) = cursor.new_block();
 
         // Constants (u32 for array indexing)
-        let const_0 = function.fresh_value();
-        new_instructions.push(OpCode::mk_u_const(const_0, 32, 0));
-        let const_1 = function.fresh_value();
-        new_instructions.push(OpCode::mk_u_const(const_1, 32, 1));
-        let const_len = function.fresh_value();
-        new_instructions.push(OpCode::mk_u_const(const_len, 32, array_len as u128));
+        let const_0 = cursor.instr().u_const(32, 0);
+        let const_1 = cursor.instr().u_const(32, 1);
+        let const_len = cursor.instr().u_const(32, array_len as u128);
 
-        // Finalize current block: Jmp to loop_header with (i=0, dst=initial_dst)
-        current_block.put_instructions(std::mem::take(new_instructions));
-        current_block.set_terminator(Terminator::Jmp(loop_header_id, vec![const_0, initial_dst]));
-        let old_block = std::mem::replace(current_block, continuation);
-        new_blocks.insert(*current_block_id, old_block);
-        *current_block_id = continuation_id;
+        // Seal current block with Jmp to loop_header, switch cursor to loop body
+        cursor.seal_and_switch(
+            Terminator::Jmp(loop_header_id, vec![const_0, initial_dst]),
+            loop_body_id,
+            loop_body,
+        );
 
         // Loop header parameters: (i: U32, dst: target_array_type)
-        let i_val = function.fresh_value();
-        let dst_val = function.fresh_value();
+        let i_val = cursor.function.fresh_value();
+        let dst_val = cursor.function.fresh_value();
         loop_header.put_parameters(vec![
             (i_val, Type::u(32)),
             (dst_val, target_array_type.clone()),
         ]);
 
         // Loop header: cond = i < len, jmpif cond body continuation
-        let cond_val = function.fresh_value();
+        let cond_val = cursor.function.fresh_value();
         loop_header.push_instruction(OpCode::Cmp {
             kind: CmpKind::Lt,
             result: cond_val,
@@ -752,127 +590,66 @@ impl WitnessCastInsertion {
             rhs: const_len,
         });
         loop_header.set_terminator(Terminator::JmpIf(cond_val, loop_body_id, continuation_id));
-        new_blocks.insert(loop_header_id, loop_header);
+        cursor.insert_block(loop_header_id, loop_header);
 
-        // Loop body: get element from source_array, convert, set into dst
-        let mut body_block_id = loop_body_id;
-        let mut body_block = loop_body;
-        let mut body_instructions = vec![];
-
-        // ArrayGet from source_array (dominates loop, correct source element type)
-        let elem_val = function.fresh_value();
-        body_instructions.push(OpCode::ArrayGet {
-            result: elem_val,
-            array: source_array,
-            index: i_val,
-        });
+        // Loop body (cursor is now at loop_body):
+        // Get element from source_array (dominates loop, correct source element type)
+        let elem_val = cursor.instr().array_get(source_array, i_val);
 
         // Convert element (may recursively split body block for nested arrays)
-        let converted_elem = self.emit_value_conversion(
-            elem_val,
-            src_elem_type,
-            tgt_elem_type,
-            &mut body_block_id,
-            &mut body_block,
-            &mut body_instructions,
-            function,
-            new_blocks,
-        );
+        let converted_elem =
+            self.emit_value_conversion(elem_val, src_elem_type, tgt_elem_type, cursor);
 
         // ArraySet converted element into dst
-        let new_dst = function.fresh_value();
-        body_instructions.push(OpCode::ArraySet {
-            result: new_dst,
-            array: dst_val,
-            index: i_val,
-            value: converted_elem,
-        });
+        let new_dst = cursor.instr().array_set(dst_val, i_val, converted_elem);
 
         // Increment index
-        let next_i = function.fresh_value();
-        body_instructions.push(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: next_i,
-            lhs: i_val,
-            rhs: const_1,
-        });
+        let next_i = cursor.instr().add(i_val, const_1);
 
-        // Jump back to loop header
-        body_block.put_instructions(body_instructions);
-        body_block.set_terminator(Terminator::Jmp(loop_header_id, vec![next_i, new_dst]));
-        new_blocks.insert(body_block_id, body_block);
+        // Seal body block, switch cursor to continuation
+        cursor.seal_and_switch(
+            Terminator::Jmp(loop_header_id, vec![next_i, new_dst]),
+            continuation_id,
+            continuation,
+        );
 
         // At loop exit, dst holds the fully converted array
         dst_val
     }
 
+    /// Create a dummy array of the given target type, properly laid out in memory.
     fn create_dummy_array(
         &self,
         elem_type: &Type,
         array_len: usize,
         _array_type: &Type,
-        new_instructions: &mut Vec<OpCode>,
-        function: &mut HLFunction,
-    ) -> crate::compiler::ssa::ValueId {
-        let dummy_elem = self.create_dummy_value(elem_type, new_instructions, function);
+        b: &mut InstrBuilder<'_, OpCode, Type>,
+    ) -> ValueId {
+        let dummy_elem = self.create_dummy_value(elem_type, b);
         let elems = vec![dummy_elem; array_len];
-        let result = function.fresh_value();
-        new_instructions.push(OpCode::MkSeq {
-            result,
-            elems,
-            seq_type: SeqType::Array(array_len),
-            elem_type: elem_type.clone(),
-        });
-        result
+        b.mk_seq(elems, SeqType::Array(array_len), elem_type.clone())
     }
 
+    /// Create a single dummy value of the given target type.
     fn create_dummy_value(
         &self,
         target_type: &Type,
-        new_instructions: &mut Vec<OpCode>,
-        function: &mut HLFunction,
-    ) -> crate::compiler::ssa::ValueId {
+        b: &mut InstrBuilder<'_, OpCode, Type>,
+    ) -> ValueId {
         match &target_type.expr {
             TypeExpr::WitnessOf(_) => {
-                let dummy_field = function.fresh_value();
-                new_instructions.push(OpCode::mk_field_const(
-                    dummy_field,
-                    ark_bn254::Fr::from(0u64),
-                ));
-                let refed = function.fresh_value();
-                new_instructions.push(OpCode::Cast {
-                    result: refed,
-                    value: dummy_field,
-                    target: CastTarget::WitnessOf,
-                });
-                refed
+                let dummy_field = b.field_const(ark_bn254::Fr::from(0u64));
+                b.cast_to_witness_of(dummy_field)
             }
-            TypeExpr::Array(inner, size) => {
-                self.create_dummy_array(inner, *size, target_type, new_instructions, function)
-            }
+            TypeExpr::Array(inner, size) => self.create_dummy_array(inner, *size, target_type, b),
             TypeExpr::Tuple(fields) => {
                 let mut dummy_elems = vec![];
                 for field_type in fields.iter() {
-                    dummy_elems.push(self.create_dummy_value(
-                        field_type,
-                        new_instructions,
-                        function,
-                    ));
+                    dummy_elems.push(self.create_dummy_value(field_type, b));
                 }
-                let result = function.fresh_value();
-                new_instructions.push(OpCode::MkTuple {
-                    result,
-                    elems: dummy_elems,
-                    element_types: fields.clone(),
-                });
-                result
+                b.mk_tuple(dummy_elems, fields.clone())
             }
-            TypeExpr::Field | TypeExpr::U(_) => {
-                // Pure scalar types — use a zero constant
-                let dummy = function.fresh_value();
-                new_instructions.push(OpCode::mk_field_const(dummy, ark_bn254::Fr::from(0u64)));
-                dummy
-            }
+            TypeExpr::Field | TypeExpr::U(_) => b.field_const(ark_bn254::Fr::from(0u64)),
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
     }

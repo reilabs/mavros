@@ -331,26 +331,6 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
         self.new_blocks
     }
 
-    /// Compatibility bridge: expose the five mutable references that existing
-    /// helper functions expect. Use during incremental migration.
-    pub fn as_parts(
-        &mut self,
-    ) -> (
-        &mut BlockId,
-        &mut Block<Op, Ty>,
-        &mut Vec<Op>,
-        &mut Function<Op, Ty>,
-        &mut HashMap<BlockId, Block<Op, Ty>>,
-    ) {
-        (
-            &mut self.current_block_id,
-            &mut self.current_block,
-            &mut self.instructions,
-            self.function,
-            &mut self.new_blocks,
-        )
-    }
-
     pub fn current_block_id(&self) -> BlockId {
         self.current_block_id
     }
