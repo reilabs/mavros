@@ -57,6 +57,7 @@ where
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
+    fn value_of(&self, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
     fn make_unknown(ty: &Type, ctx: &mut Context) -> Self;
@@ -529,8 +530,8 @@ impl SymbolicExecutor {
                         }
                     }
                     crate::compiler::ssa::OpCode::ValueOf { result, value } => {
-                        // ValueOf strips WitnessOf wrapper — symbolically same value
-                        scope[result.0 as usize] = scope[value.0 as usize].clone();
+                        let val = scope[value.0 as usize].clone().unwrap();
+                        scope[result.0 as usize] = Some(val.value_of(ctx));
                     }
                     crate::compiler::ssa::OpCode::Const { result, value } => match value {
                         crate::compiler::ssa::ConstValue::U(size, val) => {

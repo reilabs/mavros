@@ -1023,6 +1023,13 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
+    fn value_of(&self, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: self.unspecialized.unwrap_witness().clone(),
+            specialized: self.specialized.unwrap_witness().clone(),
+        }
+    }
+
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
 
     fn make_unknown(ty: &Type, _ctx: &mut CostAnalysis) -> Self {

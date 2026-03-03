@@ -641,6 +641,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
 
+    fn value_of(&self, _ctx: &mut R1CGen) -> Self {
+        panic!("ICE: ValueOf should not reach R1CS gen")
+    }
+
     fn mem_op(&self, _kind: MemOp, _ctx: &mut R1CGen) {}
 
     fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) {

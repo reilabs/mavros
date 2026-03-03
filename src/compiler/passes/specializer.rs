@@ -487,6 +487,13 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
+    fn value_of(&self, ctx: &mut SpecializationState) -> Self {
+        let res = ctx
+            .function
+            .push_value_of(ctx.function.get_entry_id(), self.0);
+        Self(res)
+    }
+
     fn mem_op(&self, kind: MemOp, ctx: &mut SpecializationState) {
         ctx.function
             .push_mem_op(ctx.function.get_entry_id(), self.0, kind);

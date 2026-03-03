@@ -841,6 +841,20 @@ impl HLFunction {
         value_id
     }
 
+    pub fn push_value_of(&mut self, block_id: BlockId, value: ValueId) -> ValueId {
+        let value_id = ValueId(self.next_value);
+        self.next_value += 1;
+        self.blocks
+            .get_mut(&block_id)
+            .unwrap()
+            .instructions
+            .push(OpCode::ValueOf {
+                result: value_id,
+                value,
+            });
+        value_id
+    }
+
     pub fn push_truncate(
         &mut self,
         block_id: BlockId,
