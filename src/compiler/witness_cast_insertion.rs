@@ -7,10 +7,7 @@ use crate::compiler::{
     block_builder::{BlockCursor, InstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    ssa::{
-        BlockId, CmpKind, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx,
-        ValueId,
-    },
+    ssa::{BlockId, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx, ValueId},
     witness_info::{FunctionWitnessType, WitnessType},
     witness_type_inference::WitnessTypeInference,
 };
@@ -548,7 +545,6 @@ impl WitnessCastInsertion {
         target_array_type: &Type,
         cursor: &mut BlockCursor<'_, OpCode, Type>,
     ) -> ValueId {
-        // Create a properly-typed initial target array filled with dummy elements
         let initial_dst = self.create_dummy_array(
             tgt_elem_type,
             array_len,
@@ -556,65 +552,20 @@ impl WitnessCastInsertion {
             &mut cursor.instr(),
         );
 
-        // Create loop blocks
-        let (loop_header_id, mut loop_header) = cursor.new_block();
-        let (loop_body_id, loop_body) = cursor.new_block();
-        let (continuation_id, continuation) = cursor.new_block();
-
-        // Constants (u32 for array indexing)
-        let const_0 = cursor.instr().u_const(32, 0);
-        let const_1 = cursor.instr().u_const(32, 1);
-        let const_len = cursor.instr().u_const(32, array_len as u128);
-
-        // Seal current block with Jmp to loop_header, switch cursor to loop body
-        cursor.seal_and_switch(
-            Terminator::Jmp(loop_header_id, vec![const_0, initial_dst]),
-            loop_body_id,
-            loop_body,
+        let results = cursor.build_counted_loop(
+            array_len,
+            vec![(initial_dst, target_array_type.clone())],
+            |cursor, i_val, accs| {
+                let dst_val = accs[0];
+                let elem = cursor.instr().array_get(source_array, i_val);
+                let converted =
+                    self.emit_value_conversion(elem, src_elem_type, tgt_elem_type, cursor);
+                let new_dst = cursor.instr().array_set(dst_val, i_val, converted);
+                vec![new_dst]
+            },
         );
 
-        // Loop header parameters: (i: U32, dst: target_array_type)
-        let i_val = cursor.function.fresh_value();
-        let dst_val = cursor.function.fresh_value();
-        loop_header.put_parameters(vec![
-            (i_val, Type::u(32)),
-            (dst_val, target_array_type.clone()),
-        ]);
-
-        // Loop header: cond = i < len, jmpif cond body continuation
-        let cond_val = cursor.function.fresh_value();
-        loop_header.push_instruction(OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: cond_val,
-            lhs: i_val,
-            rhs: const_len,
-        });
-        loop_header.set_terminator(Terminator::JmpIf(cond_val, loop_body_id, continuation_id));
-        cursor.insert_block(loop_header_id, loop_header);
-
-        // Loop body (cursor is now at loop_body):
-        // Get element from source_array (dominates loop, correct source element type)
-        let elem_val = cursor.instr().array_get(source_array, i_val);
-
-        // Convert element (may recursively split body block for nested arrays)
-        let converted_elem =
-            self.emit_value_conversion(elem_val, src_elem_type, tgt_elem_type, cursor);
-
-        // ArraySet converted element into dst
-        let new_dst = cursor.instr().array_set(dst_val, i_val, converted_elem);
-
-        // Increment index
-        let next_i = cursor.instr().add(i_val, const_1);
-
-        // Seal body block, switch cursor to continuation
-        cursor.seal_and_switch(
-            Terminator::Jmp(loop_header_id, vec![next_i, new_dst]),
-            continuation_id,
-            continuation,
-        );
-
-        // At loop exit, dst holds the fully converted array
-        dst_val
+        results[0]
     }
 
     /// Create a dummy array of the given target type, properly laid out in memory.

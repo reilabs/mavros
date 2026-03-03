@@ -335,3 +335,70 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockCursor<'a, Op, Ty> {
         self.current_block_id
     }
 }
+
+// HL-specific BlockCursor methods
+impl BlockCursor<'_, OpCode, Type> {
+    /// Build a counted loop: `for i in 0..len { body(i, accumulators) → updated_accumulators }`
+    ///
+    /// Emits the full three-block structure (header/body/continuation), calls `body`
+    /// once to generate the loop body IR, and returns the accumulator values at the
+    /// loop exit (the header's block parameters as seen from the continuation).
+    ///
+    /// - `len`: iteration count (emits u32 constants for 0, 1, len)
+    /// - `accumulators`: `(initial_value, type)` pairs for loop-carried state
+    /// - `body`: receives `(cursor, index, &[accumulator_params])` → updated accumulator values
+    pub fn build_counted_loop(
+        &mut self,
+        len: usize,
+        accumulators: Vec<(ValueId, Type)>,
+        body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
+    ) -> Vec<ValueId> {
+        // Emit constants into current block
+        let const_0 = self.instr().u_const(32, 0);
+        let const_1 = self.instr().u_const(32, 1);
+        let const_len = self.instr().u_const(32, len as u128);
+
+        // Create blocks
+        let (header_id, mut header) = self.new_block();
+        let (body_id, body_block) = self.new_block();
+        let (cont_id, cont_block) = self.new_block();
+
+        // Seal current block → Jmp(header, [0, ...initial_accs])
+        let mut init_args = vec![const_0];
+        init_args.extend(accumulators.iter().map(|(v, _)| *v));
+        self.seal_and_switch(Terminator::Jmp(header_id, init_args), body_id, body_block);
+
+        // Build header: params, condition, JmpIf
+        let i_param = self.function.fresh_value();
+        let mut header_params = vec![(i_param, Type::u(32))];
+        let mut acc_params = vec![];
+        for (_, tp) in &accumulators {
+            let v = self.function.fresh_value();
+            acc_params.push(v);
+            header_params.push((v, tp.clone()));
+        }
+        header.put_parameters(header_params);
+
+        let cond = self.function.fresh_value();
+        header.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: cond,
+            lhs: i_param,
+            rhs: const_len,
+        });
+        header.set_terminator(Terminator::JmpIf(cond, body_id, cont_id));
+        self.insert_block(header_id, header);
+
+        // Call body closure (cursor is at body block, may split it further)
+        let updated_accs = body(self, i_param, &acc_params);
+
+        // Increment index, seal body → Jmp(header, [next_i, ...updated_accs])
+        let next_i = self.instr().add(i_param, const_1);
+        let mut back_args = vec![next_i];
+        back_args.extend(updated_accs);
+        self.seal_and_switch(Terminator::Jmp(header_id, back_args), cont_id, cont_block);
+
+        // Cursor is now at continuation; return acc params
+        acc_params
+    }
+}
