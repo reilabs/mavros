@@ -1,9 +1,9 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
     ssa::{
-        BlockId, CallTarget, CastTarget, CmpKind, Endianness, Function, FunctionId, HLBlock,
-        HLFunction, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
-        Terminator, TupleIdx, ValueId,
+        BinaryArithOpKind, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
+        Function, FunctionId, HLBlock, HLFunction, Instruction, LookupTarget, MemOp, OpCode, Radix,
+        SeqType, SliceOpDir, Terminator, TupleIdx, ValueId,
     },
 };
 
@@ -19,31 +19,31 @@ pub trait HLEmitter {
 
     fn add(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_add(r, lhs, rhs));
+        self.emit(OpCode::BinaryArithOp { kind: BinaryArithOpKind::Add, result: r, lhs, rhs });
         r
     }
 
     fn sub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_sub(r, lhs, rhs));
+        self.emit(OpCode::BinaryArithOp { kind: BinaryArithOpKind::Sub, result: r, lhs, rhs });
         r
     }
 
     fn mul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_mul(r, lhs, rhs));
+        self.emit(OpCode::BinaryArithOp { kind: BinaryArithOpKind::Mul, result: r, lhs, rhs });
         r
     }
 
     fn div(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_div(r, lhs, rhs));
+        self.emit(OpCode::BinaryArithOp { kind: BinaryArithOpKind::Div, result: r, lhs, rhs });
         r
     }
 
     fn and(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_and(r, lhs, rhs));
+        self.emit(OpCode::BinaryArithOp { kind: BinaryArithOpKind::And, result: r, lhs, rhs });
         r
     }
 
@@ -68,13 +68,13 @@ pub trait HLEmitter {
 
     fn eq(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_eq(r, lhs, rhs));
+        self.emit(OpCode::Cmp { kind: CmpKind::Eq, result: r, lhs, rhs });
         r
     }
 
     fn lt(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_lt(r, lhs, rhs));
+        self.emit(OpCode::Cmp { kind: CmpKind::Lt, result: r, lhs, rhs });
         r
     }
 
@@ -82,19 +82,19 @@ pub trait HLEmitter {
 
     fn cast_to_field(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_cast_to_field(r, value));
+        self.emit(OpCode::Cast { result: r, value, target: CastTarget::Field });
         r
     }
 
     fn cast_to(&mut self, target: CastTarget, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_cast_to(r, target, value));
+        self.emit(OpCode::Cast { result: r, value, target });
         r
     }
 
     fn cast_to_witness_of(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_cast_to(r, CastTarget::WitnessOf, value));
+        self.emit(OpCode::Cast { result: r, value, target: CastTarget::WitnessOf });
         r
     }
 
@@ -113,13 +113,13 @@ pub trait HLEmitter {
 
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_field_const(r, value));
+        self.emit(OpCode::Const { result: r, value: ConstValue::Field(value) });
         r
     }
 
     fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_u_const(r, bits, value));
+        self.emit(OpCode::Const { result: r, value: ConstValue::U(bits, value) });
         r
     }
 
@@ -127,19 +127,19 @@ pub trait HLEmitter {
 
     fn value_of(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_value_of(r, value));
+        self.emit(OpCode::ValueOf { result: r, value });
         r
     }
 
     fn write_witness(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_write_witness(r, value));
+        self.emit(OpCode::WriteWitness { result: Some(r), value, pinned: false });
         r
     }
 
     fn pinned_write_witness(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_pinned_write_witness(r, value));
+        self.emit(OpCode::WriteWitness { result: Some(r), value, pinned: true });
         r
     }
 
@@ -147,7 +147,7 @@ pub trait HLEmitter {
 
     fn array_get(&mut self, array: ValueId, index: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::mk_array_get(r, array, index));
+        self.emit(OpCode::ArrayGet { result: r, array, index });
         r
     }
 
@@ -272,7 +272,7 @@ pub trait HLEmitter {
     // -- No-result instructions --
 
     fn constrain(&mut self, a: ValueId, b: ValueId, c: ValueId) {
-        self.emit(OpCode::mk_constrain(a, b, c));
+        self.emit(OpCode::Constrain { a, b, c });
     }
 
     fn store(&mut self, ptr: ValueId, value: ValueId) {
@@ -292,15 +292,15 @@ pub trait HLEmitter {
     }
 
     fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId) {
-        self.emit(OpCode::mk_lookup_rngchk(target, value));
+        self.emit(OpCode::Lookup { target, keys: vec![value], results: vec![] });
     }
 
     fn lookup_rngchk_8(&mut self, value: ValueId) {
-        self.emit(OpCode::mk_lookup_rngchk_8(value));
+        self.emit(OpCode::Lookup { target: LookupTarget::Rangecheck(8), keys: vec![value], results: vec![] });
     }
 
     fn lookup_arr(&mut self, array: ValueId, index: ValueId, result: ValueId) {
-        self.emit(OpCode::mk_lookup_arr(array, index, result));
+        self.emit(OpCode::Lookup { target: LookupTarget::Array(array), keys: vec![index], results: vec![result] });
     }
 
     // -- Globals --

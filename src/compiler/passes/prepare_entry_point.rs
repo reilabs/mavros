@@ -3,7 +3,7 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, CastTarget, HLFunction, HLSSA, OpCode, SeqType, TupleIdx, ValueId},
+    ssa::{BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, SeqType, TupleIdx, ValueId},
 };
 
 pub struct PrepareEntryPoint {}
@@ -121,8 +121,8 @@ impl PrepareEntryPoint {
         let witness_one_value = main.fresh_value();
         let one_const_value = main.fresh_value();
         let mut write_witness_instructions = vec![
-            OpCode::mk_field_const(one_const_value, ark_bn254::Fr::from(1u64)),
-            OpCode::mk_pinned_write_witness(witness_one_value, one_const_value),
+            OpCode::Const { result: one_const_value, value: ConstValue::Field(ark_bn254::Fr::from(1u64)) },
+            OpCode::WriteWitness { result: Some(witness_one_value), value: one_const_value, pinned: true },
         ];
 
         // Create WriteWitness for each param and build replacements.
@@ -130,7 +130,7 @@ impl PrepareEntryPoint {
         let mut replacements = ValueReplacements::new();
         for param_id in &params {
             let witness_val = main.fresh_value();
-            write_witness_instructions.push(OpCode::mk_write_witness(witness_val, *param_id));
+            write_witness_instructions.push(OpCode::WriteWitness { result: Some(witness_val), value: *param_id, pinned: false });
             replacements.insert(*param_id, witness_val);
         }
 
@@ -192,9 +192,9 @@ impl PrepareEntryPoint {
                 if *size == 1 {
                     // Boolean constraint: x * (x - 1) = 0
                     let zero = function.fresh_value();
-                    new_instructions.push(OpCode::mk_field_const(zero, ark_bn254::Fr::from(0)));
+                    new_instructions.push(OpCode::Const { result: zero, value: ConstValue::Field(ark_bn254::Fr::from(0)) });
                     let one = function.fresh_value();
-                    new_instructions.push(OpCode::mk_field_const(one, ark_bn254::Fr::from(1)));
+                    new_instructions.push(OpCode::Const { result: one, value: ConstValue::Field(ark_bn254::Fr::from(1)) });
                     let x_sub_1 = function.fresh_value();
                     let x_times_x_sub_1 = function.fresh_value();
                     new_instructions.push(OpCode::BinaryArithOp {

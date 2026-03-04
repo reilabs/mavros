@@ -114,7 +114,7 @@ impl ExplicitWitness {
                                         let out_hint_field = b.cast_to_field(out_hint);
                                         let out_hint_plain = b.value_of(out_hint_field);
                                         let out_hint_witness = b.write_witness(out_hint_plain);
-                                        b.push(OpCode::mk_cast_to(result, u1, out_hint_witness));
+                                        b.push(OpCode::Cast { result, value: out_hint_witness, target: u1 });
 
                                         let result_field = b.cast_to_field(result);
                                         let field_one = b.field_const(Field::ONE);
@@ -137,7 +137,7 @@ impl ExplicitWitness {
                                         let res_hint_field = b.cast_to_field(res_hint);
                                         let res_hint_plain = b.value_of(res_hint_field);
                                         let res_witness = b.write_witness(res_hint_plain);
-                                        b.push(OpCode::mk_cast_to(result, u1, res_witness));
+                                        b.push(OpCode::Cast { result, value: res_witness, target: u1 });
 
                                         let l_field = b.cast_to_field(lhs);
                                         let r_field = b.cast_to_field(rhs);
@@ -222,7 +222,7 @@ impl ExplicitWitness {
                                     let res_hint_plain = b.value_of(res_hint_field);
                                     let res_witness = b.write_witness(res_hint_plain);
                                     b.constrain(l_field, r_field, res_witness);
-                                    b.push(OpCode::mk_cast_to(result, u1, res_witness));
+                                    b.push(OpCode::Cast { result, value: res_witness, target: u1 });
                                 }
                                 _ => {
                                     b.push(OpCode::Todo {
@@ -336,7 +336,7 @@ impl ExplicitWitness {
                                     let idx_field = b.cast_to_field(idx);
                                     let r_wit_field = b.cast_to_field(r_pure_val);
                                     let r_wit = b.write_witness(r_wit_field);
-                                    b.push(OpCode::mk_cast_to(result, back_cast_target, r_wit));
+                                    b.push(OpCode::Cast { result, value: r_wit, target: back_cast_target });
                                     b.lookup_arr(arr, idx_field, r_wit);
                                 }
                             }
@@ -458,7 +458,7 @@ impl ExplicitWitness {
                             let ones = b.field_const(Field::from((1u128 << s) - 1));
                             let casted = b.cast_to(CastTarget::Field, value);
                             let subbed = b.sub(ones, casted);
-                            b.push(OpCode::mk_cast_to(result, CastTarget::U(s), subbed));
+                            b.push(OpCode::Cast { result, value: subbed, target: CastTarget::U(s) });
                         }
                         OpCode::ToBits {
                             result: _,

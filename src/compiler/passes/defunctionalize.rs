@@ -124,7 +124,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                     value: ConstValue::FnPtr(fn_id),
                 } = instruction
                 {
-                    *instruction = OpCode::mk_u_const(*result, 32, fn_id.0 as u128);
+                    *instruction = OpCode::Const { result: *result, value: ConstValue::U(32, fn_id.0 as u128) };
                 }
             }
         }
