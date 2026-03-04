@@ -40,51 +40,41 @@ impl PrepareEntryPoint {
         ssa.get_main_mut().set_name("original_main".to_string());
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
-        let wrapper = ssa.get_function_mut(wrapper_id);
-
-        let entry_block = wrapper.get_entry_id();
-        let mut b = FunctionBuilder::new(wrapper);
-
-        let mut arg_values = Vec::new();
-        for typ in &param_types {
-            let val = b.block(entry_block).add_parameter(typ.clone());
-            arg_values.push(val);
-        }
-
-        let mut return_input_values = Vec::new();
-        for typ in &return_types {
-            let val = b.block(entry_block).add_parameter(typ.clone());
-            return_input_values.push(val);
-        }
-
-        // Call globals init function if present
-        if let Some(init_fn) = globals_init_fn {
-            b.block(entry_block).call(init_fn, vec![], 0);
-        }
-
-        let results = b
-            .block(entry_block)
-            .call(original_main_id, arg_values, return_types.len());
-        for ((result, public_input), return_type) in results
-            .iter()
-            .zip(return_input_values.iter())
-            .zip(return_types.iter())
         {
-            Self::assert_eq_deep(
-                &mut b.block(entry_block),
-                *result,
-                *public_input,
-                return_type,
-            );
+            let wrapper = ssa.get_function_mut(wrapper_id);
+            let entry_block = wrapper.get_entry_id();
+            let mut b = FunctionBuilder::new(wrapper);
+            let mut e = b.block(entry_block);
+
+            let mut arg_values = Vec::new();
+            for typ in &param_types {
+                arg_values.push(e.add_parameter(typ.clone()));
+            }
+
+            let mut return_input_values = Vec::new();
+            for typ in &return_types {
+                return_input_values.push(e.add_parameter(typ.clone()));
+            }
+
+            if let Some(init_fn) = globals_init_fn {
+                e.call(init_fn, vec![], 0);
+            }
+
+            let results = e.call(original_main_id, arg_values, return_types.len());
+            for ((result, public_input), return_type) in results
+                .iter()
+                .zip(return_input_values.iter())
+                .zip(return_types.iter())
+            {
+                Self::assert_eq_deep(&mut e, *result, *public_input, return_type);
+            }
+
+            if let Some(deinit_fn) = globals_deinit_fn {
+                e.call(deinit_fn, vec![], 0);
+            }
+
+            e.terminate_return(vec![]);
         }
-
-        // Call globals deinit function if present
-        if let Some(deinit_fn) = globals_deinit_fn {
-            b.block(entry_block).call(deinit_fn, vec![], 0);
-        }
-
-        b.block(entry_block).terminate_return(vec![]);
-
         ssa.set_entry_point(wrapper_id);
     }
 
