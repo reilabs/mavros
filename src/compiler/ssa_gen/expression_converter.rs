@@ -175,9 +175,12 @@ impl<'a> ExpressionConverter<'a> {
                 let index_bit_size = ctx.index_bit_size;
                 // Increment index and jump back to header
                 let one = self.get_or_create_const(b, ConstValue::U(index_bit_size, 1));
-                let cb = self.current_block;
-                let next_index = b.block(cb).add(loop_index, one);
-                b.block(cb).terminate_jmp(loop_header, vec![next_index]);
+                {
+                    let cb = self.current_block;
+                    let mut blk = b.block(cb);
+                    let next_index = blk.add(loop_index, one);
+                    blk.terminate_jmp(loop_header, vec![next_index]);
+                }
                 // Create a dead block for any subsequent code
                 let (dead, _) = b.add_block();
                 self.current_block = dead;
@@ -509,16 +512,18 @@ impl<'a> ExpressionConverter<'a> {
         // Convert the index type
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
 
-        // Add the loop index as a parameter to the header block
-        let loop_index = b.block(loop_header).add_parameter(index_type);
+        // Build header: parameter, condition, branch
+        let loop_index = {
+            let mut header = b.block(loop_header);
+            let loop_index = header.add_parameter(index_type);
+            let cond = header.lt(loop_index, end);
+            header.terminate_jmp_if(cond, loop_body, exit_block);
+            loop_index
+        };
 
         // Jump from current block to loop header with start value
         let cb = self.current_block;
         b.block(cb).terminate_jmp(loop_header, vec![start]);
-
-        // In the loop header: check if index < end
-        let cond = b.block(loop_header).lt(loop_index, end);
-        b.block(loop_header).terminate_jmp_if(cond, loop_body, exit_block);
 
         // In the loop body: bind the index variable and execute the block
         self.current_block = loop_body;
@@ -548,8 +553,9 @@ impl<'a> ExpressionConverter<'a> {
         if !b.block(cb).is_terminated() {
             let one = self.get_or_create_const(b, ConstValue::U(index_bit_size, 1));
             let cb = self.current_block;
-            let next_index = b.block(cb).add(loop_index, one);
-            b.block(cb).terminate_jmp(loop_header, vec![next_index]);
+            let mut body_end = b.block(cb);
+            let next_index = body_end.add(loop_index, one);
+            body_end.terminate_jmp(loop_header, vec![next_index]);
         }
 
         // Continue in the exit block

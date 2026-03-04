@@ -47,18 +47,19 @@ impl ExplicitWitness {
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
+                    let b = &mut InstrBuilder::new(function, &mut new_instructions);
                     match instruction {
                         OpCode::BinaryArithOp {
                             kind: BinaryArithOpKind::Add,
                             ..
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::BinaryArithOp {
                             kind: BinaryArithOpKind::Sub,
                             ..
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Alloc { .. }
                         | OpCode::Call { .. }
@@ -68,7 +69,7 @@ impl ExplicitWitness {
                             result: _,
                             result_type: _,
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Cmp {
                             kind,
@@ -92,9 +93,7 @@ impl ExplicitWitness {
                                         {
                                             lhs
                                         } else {
-                                            let v = function.fresh_value();
-                                            new_instructions.push(OpCode::mk_cast_to_field(v, lhs));
-                                            v
+                                            b.cast_to_field(lhs)
                                         };
                                         let r_field = if function_type_info
                                             .get_value_type(rhs)
@@ -103,12 +102,8 @@ impl ExplicitWitness {
                                         {
                                             rhs
                                         } else {
-                                            let v = function.fresh_value();
-                                            new_instructions.push(OpCode::mk_cast_to_field(v, rhs));
-                                            v
+                                            b.cast_to_field(rhs)
                                         };
-                                        let b =
-                                            &mut InstrBuilder::new(function, &mut new_instructions);
                                         let lr_diff = b.sub(l_field, r_field);
 
                                         let div_hint = b.div(lr_diff, lr_diff);
@@ -138,8 +133,6 @@ impl ExplicitWitness {
                                             panic!("ICE: rhs is not a U type");
                                         };
                                         let u1 = CastTarget::U(1);
-                                        let b =
-                                            &mut InstrBuilder::new(function, &mut new_instructions);
                                         let res_hint = b.lt(lhs, rhs);
                                         let res_hint_field = b.cast_to_field(res_hint);
                                         let res_hint_plain = b.value_of(res_hint_field);
@@ -162,15 +155,14 @@ impl ExplicitWitness {
                                         b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
                                         self.gen_witness_rangecheck(
-                                            function,
-                                            &mut new_instructions,
+                                            b,
                                             adjusted_diff_wit,
                                             s,
                                         );
                                     }
                                 }
                             } else {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                             }
                         }
                         OpCode::BinaryArithOp {
@@ -183,12 +175,11 @@ impl ExplicitWitness {
                             let r_taint = function_type_info.get_value_type(r).is_witness_of();
 
                             if !l_taint || !r_taint {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                                 continue;
                             }
 
                             // witness-witness mul
-                            let b = &mut InstrBuilder::new(function, &mut new_instructions);
                             let mul_witness = b.mul(l, r);
                             let mul_plain = b.value_of(mul_witness);
                             b.push(OpCode::WriteWitness {
@@ -208,7 +199,7 @@ impl ExplicitWitness {
                             let r_taint = function_type_info.get_value_type(r).is_witness_of();
                             assert!(!l_taint);
                             assert!(!r_taint);
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::BinaryArithOp {
                             kind: BinaryArithOpKind::And,
@@ -220,11 +211,10 @@ impl ExplicitWitness {
                             let r_taint = function_type_info.get_value_type(r).is_witness_of();
                             match (l_taint, r_taint) {
                                 (false, false) => {
-                                    new_instructions.push(instruction);
+                                    b.push(instruction);
                                 }
                                 (true, true) => {
                                     let u1 = CastTarget::U(1);
-                                    let b = &mut InstrBuilder::new(function, &mut new_instructions);
                                     let l_field = b.cast_to_field(l);
                                     let r_field = b.cast_to_field(r);
                                     let res_hint = b.and(l, r);
@@ -235,7 +225,7 @@ impl ExplicitWitness {
                                     b.push(OpCode::mk_cast_to(result, u1, res_witness));
                                 }
                                 _ => {
-                                    new_instructions.push(OpCode::Todo {
+                                    b.push(OpCode::Todo {
                                         payload: format!("witness AND {} {}", l_taint, r_taint),
                                         results: vec![result],
                                         result_types: vec![
@@ -248,12 +238,12 @@ impl ExplicitWitness {
                         OpCode::Store { ptr, value: _ } => {
                             let ptr_taint = function_type_info.get_value_type(ptr).is_witness_of();
                             assert!(!ptr_taint);
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Load { result: _, ptr } => {
                             let ptr_taint = function_type_info.get_value_type(ptr).is_witness_of();
                             assert!(!ptr_taint);
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::AssertEq { lhs: l, rhs: r } => {
                             let l_type = function_type_info.get_value_type(l);
@@ -261,44 +251,31 @@ impl ExplicitWitness {
                             let l_taint = l_type.is_witness_of();
                             let r_taint = r_type.is_witness_of();
                             if !l_taint && !r_taint {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                                 continue;
                             }
-                            let one = function.fresh_value();
-                            new_instructions.push(OpCode::mk_field_const(one, ark_ff::Fp::from(1)));
+                            let one = b.field_const(Field::ONE);
                             let l = if l_type.strip_witness().is_field() {
                                 l
                             } else {
-                                let casted = function.fresh_value();
-                                new_instructions.push(OpCode::Cast {
-                                    result: casted,
-                                    value: l,
-                                    target: CastTarget::Field,
-                                });
-                                casted
+                                b.cast_to(CastTarget::Field, l)
                             };
                             let r = if r_type.strip_witness().is_field() {
                                 r
                             } else {
-                                let casted = function.fresh_value();
-                                new_instructions.push(OpCode::Cast {
-                                    result: casted,
-                                    value: r,
-                                    target: CastTarget::Field,
-                                });
-                                casted
+                                b.cast_to(CastTarget::Field, r)
                             };
-                            new_instructions.push(OpCode::Constrain { a: l, b: one, c: r });
+                            b.constrain(l, one, r);
                         }
-                        OpCode::AssertR1C { a, b, c } => {
+                        OpCode::AssertR1C { a, b: r1c_b, c } => {
                             let a_taint = function_type_info.get_value_type(a).is_witness_of();
-                            let b_taint = function_type_info.get_value_type(b).is_witness_of();
+                            let b_taint = function_type_info.get_value_type(r1c_b).is_witness_of();
                             let c_taint = function_type_info.get_value_type(c).is_witness_of();
                             if !a_taint && !b_taint && !c_taint {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                                 continue;
                             }
-                            new_instructions.push(OpCode::Constrain { a, b, c });
+                            b.constrain(a, r1c_b, c);
                         }
                         OpCode::NextDCoeff { result: _ } => {
                             panic!("ICE: should not be present at this stage");
@@ -321,7 +298,7 @@ impl ExplicitWitness {
                             assert!(!arr_taint);
                             match idx_taint {
                                 false => {
-                                    new_instructions.push(instruction);
+                                    b.push(instruction);
                                 }
                                 true => {
                                     let back_cast_target = match &idx_type.expr {
@@ -345,7 +322,6 @@ impl ExplicitWitness {
                                         ),
                                     };
 
-                                    let b = &mut InstrBuilder::new(function, &mut new_instructions);
                                     let pure_idx = b.value_of(idx);
                                     let mut r_pure_val = b.array_get(arr, pure_idx);
 
@@ -375,7 +351,7 @@ impl ExplicitWitness {
                             let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
                             assert!(!arr_taint);
                             assert!(!idx_taint);
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::SlicePush {
                             dir: _,
@@ -385,7 +361,7 @@ impl ExplicitWitness {
                         } => {
                             let slice_taint = function_type_info.get_value_type(sl).is_witness_of();
                             assert!(!slice_taint);
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::SliceLen {
                             result: _,
@@ -393,7 +369,7 @@ impl ExplicitWitness {
                         } => {
                             let slice_taint = function_type_info.get_value_type(sl).is_witness_of();
                             assert!(!slice_taint);
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Select {
                             result: res,
@@ -408,13 +384,12 @@ impl ExplicitWitness {
                             // The result is cond * l + (1 - cond) * r = cond * (l - r) + r
                             // If cond is pure, this is just a conditional move
                             if !cond_taint {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                                 continue;
                             }
                             // If both branches are pure, result is a linear combination
                             // of cond and constants: cond * (l - r) + r. No constraint needed.
                             if !l_taint && !r_taint {
-                                let b = &mut InstrBuilder::new(function, &mut new_instructions);
                                 let neg_one = b.field_const(ark_ff::Fp::from(-1));
                                 let neg_r = b.mul(r, neg_one);
                                 let l_sub_r = b.add(l, neg_r);
@@ -430,7 +405,6 @@ impl ExplicitWitness {
                                 continue;
                             }
                             // At least one branch is witness: full lowering with constraint
-                            let b = &mut InstrBuilder::new(function, &mut new_instructions);
                             let select_witness = b.select(cond, l, r);
                             let select_plain = b.value_of(select_witness);
                             b.push(OpCode::WriteWitness {
@@ -453,17 +427,17 @@ impl ExplicitWitness {
                             seq_type: _,
                             elem_type: _,
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::MkTuple { .. } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Cast {
                             result: _,
                             value: _,
                             target: _,
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Truncate {
                             result: _,
@@ -473,7 +447,7 @@ impl ExplicitWitness {
                         } => {
                             let i_taint = function_type_info.get_value_type(i).is_witness_of();
                             assert!(!i_taint); // TODO: witness versions
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Not { result, value } => {
                             let value_type = function_type_info.get_value_type(value);
@@ -481,7 +455,6 @@ impl ExplicitWitness {
                                 TypeExpr::U(s) => *s,
                                 e => todo!("Unsupported type for negation: {:?}", e),
                             };
-                            let b = &mut InstrBuilder::new(function, &mut new_instructions);
                             let ones = b.field_const(Field::from((1u128 << s) - 1));
                             let casted = b.cast_to(CastTarget::Field, value);
                             let subbed = b.sub(ones, casted);
@@ -495,7 +468,7 @@ impl ExplicitWitness {
                         } => {
                             let i_taint = function_type_info.get_value_type(i).is_witness_of();
                             assert!(!i_taint); // Only handle pure input case for now
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::ToRadix {
                             result,
@@ -507,10 +480,9 @@ impl ExplicitWitness {
                             let value_taint =
                                 function_type_info.get_value_type(value).is_witness_of();
                             if !value_taint {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                             } else {
                                 assert!(endianness == Endianness::Little);
-                                let b = &mut InstrBuilder::new(function, &mut new_instructions);
                                 let pure_value = b.value_of(value);
                                 let hint = b.fresh_value();
                                 b.push(OpCode::ToRadix {
@@ -553,23 +525,22 @@ impl ExplicitWitness {
                         }
 
                         OpCode::MemOp { kind: _, value: _ } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::MulConst {
                             result: _,
                             const_val: _,
                             var: _,
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Rangecheck { value, max_bits } => {
                             let v_taint = function_type_info.get_value_type(value).is_witness_of();
                             if !v_taint {
-                                new_instructions.push(instruction);
+                                b.push(instruction);
                             } else {
                                 self.gen_witness_rangecheck(
-                                    function,
-                                    &mut new_instructions,
+                                    b,
                                     value,
                                     max_bits,
                                 );
@@ -580,44 +551,28 @@ impl ExplicitWitness {
                             offset: _,
                             result_type: _,
                         } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::Lookup { .. } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                         OpCode::DLookup { .. } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
-                        OpCode::Todo {
-                            payload,
-                            results,
-                            result_types,
-                        } => {
-                            new_instructions.push(OpCode::Todo {
-                                payload,
-                                results,
-                                result_types,
-                            });
+                        OpCode::Todo { .. } => {
+                            b.push(instruction);
                         }
-                        OpCode::TupleProj { result, tuple, idx } => {
-                            if let crate::compiler::ssa::TupleIdx::Static(index) = idx {
-                                let tuple_taint =
-                                    function_type_info.get_value_type(tuple).is_witness_of();
-                                assert!(!tuple_taint);
-                                new_instructions.push(OpCode::TupleProj {
-                                    result,
-                                    tuple,
-                                    idx: crate::compiler::ssa::TupleIdx::Static(index),
-                                });
-                            } else {
-                                panic!("Dynamic tuple indexing should not appear here");
-                            }
+                        OpCode::TupleProj { result: _, tuple, idx: _ } => {
+                            let tuple_taint =
+                                function_type_info.get_value_type(tuple).is_witness_of();
+                            assert!(!tuple_taint);
+                            b.push(instruction);
                         }
                         OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
                         | OpCode::ValueOf { .. }
                         | OpCode::Const { .. } => {
-                            new_instructions.push(instruction);
+                            b.push(instruction);
                         }
                     }
                 }
@@ -630,14 +585,12 @@ impl ExplicitWitness {
 
     fn gen_witness_rangecheck(
         &self,
-        function: &mut HLFunction,
-        new_instructions: &mut Vec<OpCode>,
+        b: &mut InstrBuilder<'_, OpCode, Type>,
         value: ValueId,
         max_bits: usize,
     ) {
         assert!(max_bits % 8 == 0); // TODO
         let chunks = max_bits / 8;
-        let b = &mut InstrBuilder::new(function, new_instructions);
         let pure_value = b.value_of(value);
         let bytes_val = b.fresh_value();
         b.push(OpCode::ToRadix {
