@@ -744,11 +744,16 @@ impl Specializer {
 
         {
             let mut cb = b.block(specialized_caller);
-            let specialized_returns = cb.call(specialized_id, specialized_params, return_values.len());
+            let specialized_returns =
+                cb.call(specialized_id, specialized_params, return_values.len());
             cb.terminate_jmp(return_block, specialized_returns);
         }
 
-        b.block(entry_block).terminate_jmp_if(should_call_spec, specialized_caller, unspecialized_caller);
+        b.block(entry_block).terminate_jmp_if(
+            should_call_spec,
+            specialized_caller,
+            unspecialized_caller,
+        );
 
         dispatcher
     }

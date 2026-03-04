@@ -162,7 +162,8 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Break => {
                 let ctx = self.loop_stack.last().expect("break outside of loop");
                 let exit_block = ctx.exit_block;
-                b.block(self.current_block).terminate_jmp(exit_block, vec![]);
+                b.block(self.current_block)
+                    .terminate_jmp(exit_block, vec![]);
                 // Create a dead block for any subsequent code
                 let dead = b.add_block(|_| {});
                 self.current_block = dead;
@@ -355,13 +356,17 @@ impl<'a> ExpressionConverter<'a> {
                 let parent = *values.last().unwrap();
                 let child = match step {
                     AccessStep::Index(idx) => e.array_get(parent, *idx),
-                    AccessStep::Field(field_idx) => e.tuple_proj(parent, TupleIdx::Static(*field_idx)),
+                    AccessStep::Field(field_idx) => {
+                        e.tuple_proj(parent, TupleIdx::Static(*field_idx))
+                    }
                 };
                 let child_type = match (step, types.last().unwrap()) {
                     (AccessStep::Index(_), AstType::Array(_, elem))
                     | (AccessStep::Index(_), AstType::Vector(elem)) => elem.as_ref().clone(),
                     (AccessStep::Field(idx), AstType::Tuple(fields)) => fields[*idx].clone(),
-                    (step, ty) => panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty),
+                    (step, ty) => {
+                        panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty)
+                    }
                 };
                 values.push(child);
                 types.push(child_type);
@@ -376,7 +381,10 @@ impl<'a> ExpressionConverter<'a> {
             let modified_child = values[k + 1];
             let parent = values[k];
             values[k] = match &steps[k] {
-                AccessStep::Index(idx) => b.block(self.current_block).array_set(parent, *idx, modified_child),
+                AccessStep::Index(idx) => {
+                    b.block(self.current_block)
+                        .array_set(parent, *idx, modified_child)
+                }
                 AccessStep::Field(field_idx) => {
                     self.synthesize_tuple_set(parent, *field_idx, modified_child, &types[k], b)
                 }
@@ -515,7 +523,8 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         // Jump from current block to loop header with start value
-        b.block(self.current_block).terminate_jmp(loop_header, vec![start]);
+        b.block(self.current_block)
+            .terminate_jmp(loop_header, vec![start]);
 
         // In the loop body: bind the index variable and execute the block
         self.current_block = loop_body;
@@ -599,7 +608,8 @@ impl<'a> ExpressionConverter<'a> {
         let else_block = b.add_block(|_| {});
         let merge_block = b.add_block(|_| {});
 
-        b.block(self.current_block).terminate_jmp_if(condition, then_block, else_block);
+        b.block(self.current_block)
+            .terminate_jmp_if(condition, then_block, else_block);
 
         let is_unit = matches!(if_expr.typ, AstType::Unit);
 
@@ -635,8 +645,10 @@ impl<'a> ExpressionConverter<'a> {
         } else {
             let result_type = self.type_converter.convert_type(&if_expr.typ);
             let merge_param = b.block(merge_block).add_parameter(result_type);
-            b.block(then_exit).terminate_jmp(merge_block, vec![then_value.unwrap()]);
-            b.block(else_exit).terminate_jmp(merge_block, vec![else_value.unwrap()]);
+            b.block(then_exit)
+                .terminate_jmp(merge_block, vec![then_value.unwrap()]);
+            b.block(else_exit)
+                .terminate_jmp(merge_block, vec![else_value.unwrap()]);
             self.current_block = merge_block;
             Some(merge_param)
         }
@@ -720,7 +732,9 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         // Expressions always return materialized tuples, so just use projection
         let tuple = self.convert_expression(tuple_expr, b).unwrap();
-        let result = b.block(self.current_block).tuple_proj(tuple, TupleIdx::Static(idx));
+        let result = b
+            .block(self.current_block)
+            .tuple_proj(tuple, TupleIdx::Static(idx));
         Some(result)
     }
 
@@ -851,7 +865,9 @@ impl<'a> ExpressionConverter<'a> {
                     SeqType::Array(*length as usize)
                 };
                 let elem_type = self.type_converter.convert_type(elem_ast_type);
-                let result = b.block(self.current_block).mk_seq(elements, seq_type, elem_type);
+                let result = b
+                    .block(self.current_block)
+                    .mk_seq(elements, seq_type, elem_type);
                 Some(result)
             }
             Literal::Str(s) => {
@@ -862,7 +878,9 @@ impl<'a> ExpressionConverter<'a> {
                     .bytes()
                     .map(|byte| self.get_or_create_const(b, ConstValue::U(8, byte as u128)))
                     .collect();
-                let arr = b.block(self.current_block).mk_seq(elems, SeqType::Array(len), elem_type);
+                let arr = b
+                    .block(self.current_block)
+                    .mk_seq(elems, SeqType::Array(len), elem_type);
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -881,7 +899,11 @@ impl<'a> ExpressionConverter<'a> {
                     }
                 }
                 let cp_len = codepoints.len();
-                let cp_array = b.block(self.current_block).mk_seq(codepoints, SeqType::Array(cp_len), Type::u(32));
+                let cp_array = b.block(self.current_block).mk_seq(
+                    codepoints,
+                    SeqType::Array(cp_len),
+                    Type::u(32),
+                );
 
                 // Convert captures (always a Tuple expression) and flatten
                 let mut tuple_elems = vec![cp_array];
@@ -895,7 +917,9 @@ impl<'a> ExpressionConverter<'a> {
                     }
                 }
 
-                let result = b.block(self.current_block).mk_tuple(tuple_elems, elem_types);
+                let result = b
+                    .block(self.current_block)
+                    .mk_tuple(tuple_elems, elem_types);
                 Some(result)
             }
         }
@@ -932,7 +956,9 @@ impl<'a> ExpressionConverter<'a> {
         };
         let elem_type = self.type_converter.convert_type(elem_ast_type);
 
-        let result = b.block(self.current_block).mk_seq(elements, seq_type, elem_type);
+        let result = b
+            .block(self.current_block)
+            .mk_seq(elements, seq_type, elem_type);
         Some(result)
     }
 
@@ -997,7 +1023,9 @@ impl<'a> ExpressionConverter<'a> {
                         let return_type = &call.return_type;
                         let return_size = self.return_size(return_type);
 
-                        let results = b.block(self.current_block).call(*ssa_func_id, args, return_size);
+                        let results =
+                            b.block(self.current_block)
+                                .call(*ssa_func_id, args, return_size);
 
                         if results.is_empty() {
                             None
@@ -1025,7 +1053,9 @@ impl<'a> ExpressionConverter<'a> {
                 let return_type = &call.return_type;
                 let return_size = self.return_size(return_type);
 
-                let results = b.block(self.current_block).call_indirect(fn_ptr, args, return_size);
+                let results = b
+                    .block(self.current_block)
+                    .call_indirect(fn_ptr, args, return_size);
 
                 if results.is_empty() {
                     None
@@ -1089,7 +1119,12 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result = b.block(self.current_block).to_radix(input, Radix::Dyn(radix), Endianness::Little, output_size);
+                let result = b.block(self.current_block).to_radix(
+                    input,
+                    Radix::Dyn(radix),
+                    Endianness::Little,
+                    output_size,
+                );
                 Some(result)
             }
             "to_be_radix" => {
@@ -1103,7 +1138,12 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result = b.block(self.current_block).to_radix(input, Radix::Dyn(radix), Endianness::Big, output_size);
+                let result = b.block(self.current_block).to_radix(
+                    input,
+                    Radix::Dyn(radix),
+                    Endianness::Big,
+                    output_size,
+                );
                 Some(result)
             }
             "apply_range_constraint" => {
@@ -1141,7 +1181,9 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result = b.block(self.current_block).to_bits(input, Endianness::Little, output_size);
+                let result =
+                    b.block(self.current_block)
+                        .to_bits(input, Endianness::Little, output_size);
                 Some(result)
             }
             "to_be_bits" => {
@@ -1153,12 +1195,17 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result = b.block(self.current_block).to_bits(input, Endianness::Big, output_size);
+                let result =
+                    b.block(self.current_block)
+                        .to_bits(input, Endianness::Big, output_size);
                 Some(result)
             }
             "as_vector" => {
                 let array = self.convert_expression(&call.arguments[0], b).unwrap();
-                Some(b.block(self.current_block).cast_to(CastTarget::ArrayToSlice, array))
+                Some(
+                    b.block(self.current_block)
+                        .cast_to(CastTarget::ArrayToSlice, array),
+                )
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }

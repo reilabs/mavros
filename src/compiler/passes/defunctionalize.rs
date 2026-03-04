@@ -124,7 +124,10 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                     value: ConstValue::FnPtr(fn_id),
                 } = instruction
                 {
-                    *instruction = OpCode::Const { result: *result, value: ConstValue::U(32, fn_id.0 as u128) };
+                    *instruction = OpCode::Const {
+                        result: *result,
+                        value: ConstValue::U(32, fn_id.0 as u128),
+                    };
                 }
             }
         }
@@ -560,7 +563,8 @@ fn build_dispatch_function(
                 let mut cb = b.block(current_block);
                 let const_val = cb.u_const(32, variant_id.0 as u128);
                 cb.assert_eq(fn_id_param, const_val);
-                let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
+                let call_results =
+                    cb.call(variant_id, forwarded_params.clone(), return_types.len());
                 cb.terminate_jmp(merge_block, call_results);
             } else {
                 let call_block = b.add_block(|_| {});
@@ -575,7 +579,8 @@ fn build_dispatch_function(
 
                 {
                     let mut cb = b.block(call_block);
-                    let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
+                    let call_results =
+                        cb.call(variant_id, forwarded_params.clone(), return_types.len());
                     cb.terminate_jmp(merge_block, call_results);
                 }
 

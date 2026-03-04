@@ -3,7 +3,10 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, SeqType, TupleIdx, ValueId},
+    ssa::{
+        BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, SeqType, TupleIdx,
+        ValueId,
+    },
 };
 
 pub struct PrepareEntryPoint {}
@@ -59,13 +62,20 @@ impl PrepareEntryPoint {
             b.block(entry_block).call(init_fn, vec![], 0);
         }
 
-        let results = b.block(entry_block).call(original_main_id, arg_values, return_types.len());
+        let results = b
+            .block(entry_block)
+            .call(original_main_id, arg_values, return_types.len());
         for ((result, public_input), return_type) in results
             .iter()
             .zip(return_input_values.iter())
             .zip(return_types.iter())
         {
-            Self::assert_eq_deep(&mut b.block(entry_block), *result, *public_input, return_type);
+            Self::assert_eq_deep(
+                &mut b.block(entry_block),
+                *result,
+                *public_input,
+                return_type,
+            );
         }
 
         // Call globals deinit function if present
@@ -121,8 +131,15 @@ impl PrepareEntryPoint {
         let witness_one_value = main.fresh_value();
         let one_const_value = main.fresh_value();
         let mut write_witness_instructions = vec![
-            OpCode::Const { result: one_const_value, value: ConstValue::Field(ark_bn254::Fr::from(1u64)) },
-            OpCode::WriteWitness { result: Some(witness_one_value), value: one_const_value, pinned: true },
+            OpCode::Const {
+                result: one_const_value,
+                value: ConstValue::Field(ark_bn254::Fr::from(1u64)),
+            },
+            OpCode::WriteWitness {
+                result: Some(witness_one_value),
+                value: one_const_value,
+                pinned: true,
+            },
         ];
 
         // Create WriteWitness for each param and build replacements.
@@ -130,7 +147,11 @@ impl PrepareEntryPoint {
         let mut replacements = ValueReplacements::new();
         for param_id in &params {
             let witness_val = main.fresh_value();
-            write_witness_instructions.push(OpCode::WriteWitness { result: Some(witness_val), value: *param_id, pinned: false });
+            write_witness_instructions.push(OpCode::WriteWitness {
+                result: Some(witness_val),
+                value: *param_id,
+                pinned: false,
+            });
             replacements.insert(*param_id, witness_val);
         }
 
@@ -192,9 +213,15 @@ impl PrepareEntryPoint {
                 if *size == 1 {
                     // Boolean constraint: x * (x - 1) = 0
                     let zero = function.fresh_value();
-                    new_instructions.push(OpCode::Const { result: zero, value: ConstValue::Field(ark_bn254::Fr::from(0)) });
+                    new_instructions.push(OpCode::Const {
+                        result: zero,
+                        value: ConstValue::Field(ark_bn254::Fr::from(0)),
+                    });
                     let one = function.fresh_value();
-                    new_instructions.push(OpCode::Const { result: one, value: ConstValue::Field(ark_bn254::Fr::from(1)) });
+                    new_instructions.push(OpCode::Const {
+                        result: one,
+                        value: ConstValue::Field(ark_bn254::Fr::from(1)),
+                    });
                     let x_sub_1 = function.fresh_value();
                     let x_times_x_sub_1 = function.fresh_value();
                     new_instructions.push(OpCode::BinaryArithOp {

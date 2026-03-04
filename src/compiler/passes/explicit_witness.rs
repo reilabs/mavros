@@ -114,7 +114,11 @@ impl ExplicitWitness {
                                         let out_hint_field = b.cast_to_field(out_hint);
                                         let out_hint_plain = b.value_of(out_hint_field);
                                         let out_hint_witness = b.write_witness(out_hint_plain);
-                                        b.push(OpCode::Cast { result, value: out_hint_witness, target: u1 });
+                                        b.push(OpCode::Cast {
+                                            result,
+                                            value: out_hint_witness,
+                                            target: u1,
+                                        });
 
                                         let result_field = b.cast_to_field(result);
                                         let field_one = b.field_const(Field::ONE);
@@ -137,7 +141,11 @@ impl ExplicitWitness {
                                         let res_hint_field = b.cast_to_field(res_hint);
                                         let res_hint_plain = b.value_of(res_hint_field);
                                         let res_witness = b.write_witness(res_hint_plain);
-                                        b.push(OpCode::Cast { result, value: res_witness, target: u1 });
+                                        b.push(OpCode::Cast {
+                                            result,
+                                            value: res_witness,
+                                            target: u1,
+                                        });
 
                                         let l_field = b.cast_to_field(lhs);
                                         let r_field = b.cast_to_field(rhs);
@@ -154,11 +162,7 @@ impl ExplicitWitness {
                                             b.write_witness(adjusted_diff_plain);
                                         b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
-                                        self.gen_witness_rangecheck(
-                                            b,
-                                            adjusted_diff_wit,
-                                            s,
-                                        );
+                                        self.gen_witness_rangecheck(b, adjusted_diff_wit, s);
                                     }
                                 }
                             } else {
@@ -222,7 +226,11 @@ impl ExplicitWitness {
                                     let res_hint_plain = b.value_of(res_hint_field);
                                     let res_witness = b.write_witness(res_hint_plain);
                                     b.constrain(l_field, r_field, res_witness);
-                                    b.push(OpCode::Cast { result, value: res_witness, target: u1 });
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: res_witness,
+                                        target: u1,
+                                    });
                                 }
                                 _ => {
                                     b.push(OpCode::Todo {
@@ -336,7 +344,11 @@ impl ExplicitWitness {
                                     let idx_field = b.cast_to_field(idx);
                                     let r_wit_field = b.cast_to_field(r_pure_val);
                                     let r_wit = b.write_witness(r_wit_field);
-                                    b.push(OpCode::Cast { result, value: r_wit, target: back_cast_target });
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: r_wit,
+                                        target: back_cast_target,
+                                    });
                                     b.lookup_arr(arr, idx_field, r_wit);
                                 }
                             }
@@ -458,7 +470,11 @@ impl ExplicitWitness {
                             let ones = b.field_const(Field::from((1u128 << s) - 1));
                             let casted = b.cast_to(CastTarget::Field, value);
                             let subbed = b.sub(ones, casted);
-                            b.push(OpCode::Cast { result, value: subbed, target: CastTarget::U(s) });
+                            b.push(OpCode::Cast {
+                                result,
+                                value: subbed,
+                                target: CastTarget::U(s),
+                            });
                         }
                         OpCode::ToBits {
                             result: _,
@@ -539,11 +555,7 @@ impl ExplicitWitness {
                             if !v_taint {
                                 b.push(instruction);
                             } else {
-                                self.gen_witness_rangecheck(
-                                    b,
-                                    value,
-                                    max_bits,
-                                );
+                                self.gen_witness_rangecheck(b, value, max_bits);
                             }
                         }
                         OpCode::ReadGlobal {
@@ -562,7 +574,11 @@ impl ExplicitWitness {
                         OpCode::Todo { .. } => {
                             b.push(instruction);
                         }
-                        OpCode::TupleProj { result: _, tuple, idx: _ } => {
+                        OpCode::TupleProj {
+                            result: _,
+                            tuple,
+                            idx: _,
+                        } => {
                             let tuple_taint =
                                 function_type_info.get_value_type(tuple).is_witness_of();
                             assert!(!tuple_taint);

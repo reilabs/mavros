@@ -241,10 +241,12 @@ impl SsaConverter {
                     .convert_expression(init_expr, &mut b)
                     .unwrap();
                 let idx = self.global_slots[gid];
-                b.block(expr_converter.current_block()).init_global(idx, value);
+                b.block(expr_converter.current_block())
+                    .init_global(idx, value);
             }
 
-            b.block(expr_converter.current_block()).terminate_return(vec![]);
+            b.block(expr_converter.current_block())
+                .terminate_return(vec![]);
         }
 
         // Build deinit function
@@ -318,7 +320,8 @@ impl SsaConverter {
 
         // Add return terminator
         let return_values = result.into_iter().collect();
-        b.block(expr_converter.current_block()).terminate_return(return_values);
+        b.block(expr_converter.current_block())
+            .terminate_return(return_values);
 
         function
     }

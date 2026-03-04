@@ -444,12 +444,7 @@ impl WitnessCastInsertion {
                             .iter()
                             .zip(return_types.iter())
                             .map(|(val, expected_type)| {
-                                self.convert_if_needed(
-                                    *val,
-                                    expected_type,
-                                    type_info,
-                                    &mut emitter,
-                                )
+                                self.convert_if_needed(*val, expected_type, type_info, &mut emitter)
                             })
                             .collect();
                         emitter.set_terminator(Terminator::Return(new_values));

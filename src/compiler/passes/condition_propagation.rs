@@ -55,7 +55,10 @@ impl ConditionPropagation {
                 let mut const_opcodes = Vec::new();
                 for (_, vid, value) in replaces {
                     let const_id = function.fresh_value();
-                    const_opcodes.push(OpCode::Const { result: const_id, value: ConstValue::U(1, if *value { 1 } else { 0 }) });
+                    const_opcodes.push(OpCode::Const {
+                        result: const_id,
+                        value: ConstValue::U(1, if *value { 1 } else { 0 }),
+                    });
                     replacements.insert(*vid, const_id);
                 }
 
