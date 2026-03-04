@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mavros-artifacts", "opcode-gen", "ssa-builder", "vm", "wasm-runtime"]
+members = ["mavros-artifacts", "opcode-gen", "vm", "wasm-runtime"]
 
 [package]
 name = "mavros"
@@ -45,7 +45,6 @@ rand = "0.8"
 mavros-artifacts = { path = "mavros-artifacts" }
 mavros-vm = { path = "vm" }
 opcode-gen = { path = "opcode-gen" }
-ssa-builder = { path = "ssa-builder" }
 cargo_metadata = "0.23.1"
 
 [dev-dependencies]

@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod block_builder;
 pub mod codegen;
 pub mod flow_analysis;
 pub mod hlssa_to_llssa;
