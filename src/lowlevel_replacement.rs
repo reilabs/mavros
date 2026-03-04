@@ -80,15 +80,6 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
             ]),
         }],
     },
-    ReplacementCrate {
-        file_name: "sha256_compression.nr",
-        dep_name: "sha256_compression",
-        source: include_str!("../stdlib_replacements/sha256_compression.nr"),
-        replacements: &[ReplacementSpec {
-            lowlevel_name: "sha256_compression",
-            kind: ReplacementKind::Single("sha256_compression"),
-        }],
-    },
 ];
 
 /// Look up named functions from the root module of a crate, returning their metadata.
