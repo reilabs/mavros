@@ -67,7 +67,7 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
     ReplacementCrate {
         file_name: "poseidon2_permutation.nr",
         dep_name: "poseidon2_permutation",
-        source: include_str!("../stdlib_replacements/poseidon2_permutation.nr"),
+        source: include_str!("../stdlib_replacements/src/poseidon2_permutation.nr"),
         replacements: &[ReplacementSpec {
             lowlevel_name: "poseidon2_permutation",
             kind: ReplacementKind::ByArraySize(&[
