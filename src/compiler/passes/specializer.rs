@@ -717,9 +717,9 @@ impl Specializer {
             }
         }
 
-        let specialized_caller = b.add_block();
-        let unspecialized_caller = b.add_block();
-        let return_block = b.add_block();
+        let (specialized_caller, _) = b.add_block();
+        let (unspecialized_caller, _) = b.add_block();
+        let (return_block, _) = b.add_block();
 
         let mut return_values = vec![];
         for ret in returns {

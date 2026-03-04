@@ -408,8 +408,8 @@ impl<'a> FunctionBuilder<'a> {
         Self { function }
     }
 
-    pub fn add_block(&mut self) -> BlockId {
-        self.function.add_block()
+    pub fn add_block(&mut self) -> (BlockId, BlockEmitter<'_>) {
+        BlockEmitter::from_new_block(self.function)
     }
 
     pub fn fresh_value(&mut self) -> ValueId {
@@ -458,6 +458,7 @@ impl HLEmitter for BlockEmitter<'_> {
 }
 
 impl<'a> BlockEmitter<'a> {
+    /// Create an emitter for an existing block (takes it out of the function).
     pub fn new(function: &'a mut HLFunction, block_id: BlockId) -> Self {
         let block = function.take_block(block_id);
         Self {
@@ -467,12 +468,23 @@ impl<'a> BlockEmitter<'a> {
         }
     }
 
+    /// Create an emitter for a fresh block (not yet in the function).
+    /// The block is inserted into the function on drop.
+    pub(crate) fn from_new_block(function: &'a mut HLFunction) -> (BlockId, Self) {
+        let (block_id, block) = function.next_virtual_block();
+        (block_id, Self {
+            function,
+            block_id,
+            block,
+        })
+    }
+
     pub fn block_id(&self) -> BlockId {
         self.block_id
     }
 
-    pub fn add_block(&mut self) -> BlockId {
-        self.function.add_block()
+    pub fn add_block(&mut self) -> (BlockId, &mut HLBlock) {
+        self.function.add_block_mut()
     }
 
     pub fn add_parameter(&mut self, typ: Type) -> ValueId {
@@ -533,9 +545,9 @@ impl<'a> BlockEmitter<'a> {
         body: impl FnOnce(&mut Self, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Create blocks
-        let header_id = self.add_block();
-        let body_id = self.add_block();
-        let cont_id = self.add_block();
+        let (header_id, _) = self.add_block();
+        let (body_id, _) = self.add_block();
+        let (cont_id, _) = self.add_block();
 
         // Seal current block → Jmp(header, initial values)
         let init_values: Vec<ValueId> = params.iter().map(|(v, _)| *v).collect();

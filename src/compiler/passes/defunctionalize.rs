@@ -533,7 +533,7 @@ fn build_dispatch_function(
         forwarded_params.push(p);
     }
 
-    let merge_block = b.add_block();
+    let (merge_block, _) = b.add_block();
     let mut merge_results: Vec<ValueId> = Vec::new();
     for ret_type in return_types {
         let r = b.block(merge_block).add_parameter(ret_type.clone());
@@ -563,8 +563,8 @@ fn build_dispatch_function(
                 let const_val = b.block(current_block).u_const(32, variant_id.0 as u128);
                 let eq_result = b.block(current_block).eq(fn_id_param, const_val);
 
-                let call_block = b.add_block();
-                let next_check_block = b.add_block();
+                let (call_block, _) = b.add_block();
+                let (next_check_block, _) = b.add_block();
 
                 b.block(current_block).terminate_jmp_if(eq_result, call_block, next_check_block);
 

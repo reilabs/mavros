@@ -328,11 +328,15 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     }
 
     pub fn add_block(&mut self) -> BlockId {
+        let (id, _) = self.add_block_mut();
+        id
+    }
+
+    pub fn add_block_mut(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
         let new_id = BlockId(self.next_block);
         self.next_block += 1;
-        let block = Block::empty();
-        self.blocks.insert(new_id, block);
-        new_id
+        self.blocks.insert(new_id, Block::empty());
+        (new_id, self.blocks.get_mut(&new_id).unwrap())
     }
 
     pub fn block_is_terminated(&self, block_id: BlockId) -> bool {

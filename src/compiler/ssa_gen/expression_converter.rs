@@ -164,7 +164,7 @@ impl<'a> ExpressionConverter<'a> {
                 let cb = self.current_block;
                 b.block(cb).terminate_jmp(exit_block, vec![]);
                 // Create a dead block for any subsequent code
-                let dead = b.add_block();
+                let (dead, _) = b.add_block();
                 self.current_block = dead;
                 None
             }
@@ -179,7 +179,7 @@ impl<'a> ExpressionConverter<'a> {
                 let next_index = b.block(cb).add(loop_index, one);
                 b.block(cb).terminate_jmp(loop_header, vec![next_index]);
                 // Create a dead block for any subsequent code
-                let dead = b.add_block();
+                let (dead, _) = b.add_block();
                 self.current_block = dead;
                 None
             }
@@ -502,9 +502,9 @@ impl<'a> ExpressionConverter<'a> {
         let end = self.convert_expression(&for_expr.end_range, b).unwrap();
 
         // Create blocks for the loop structure
-        let loop_header = b.add_block();
-        let loop_body = b.add_block();
-        let exit_block = b.add_block();
+        let (loop_header, _) = b.add_block();
+        let (loop_body, _) = b.add_block();
+        let (exit_block, _) = b.add_block();
 
         // Convert the index type
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
@@ -599,9 +599,9 @@ impl<'a> ExpressionConverter<'a> {
 
         let condition = self.convert_expression(&if_expr.condition, b).unwrap();
 
-        let then_block = b.add_block();
-        let else_block = b.add_block();
-        let merge_block = b.add_block();
+        let (then_block, _) = b.add_block();
+        let (else_block, _) = b.add_block();
+        let (merge_block, _) = b.add_block();
 
         let cb = self.current_block;
         b.block(cb).terminate_jmp_if(condition, then_block, else_block);
