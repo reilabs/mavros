@@ -557,6 +557,10 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         self.parameters = parameters;
     }
 
+    pub fn push_parameter(&mut self, value_id: ValueId, typ: Ty) {
+        self.parameters.push((value_id, typ));
+    }
+
     pub fn get_parameter_values(&self) -> impl Iterator<Item = &ValueId> {
         self.parameters.iter().map(|(id, _)| id)
     }

@@ -1,7 +1,7 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
     ssa::{
-        BlockId, CallTarget, CastTarget, CmpKind, Endianness, Function, FunctionId,
+        BlockId, CallTarget, CastTarget, CmpKind, Endianness, Function, FunctionId, HLBlock,
         HLFunction, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
         Terminator, TupleIdx, ValueId,
     },
@@ -423,10 +423,7 @@ impl<'a> FunctionBuilder<'a> {
 
     /// Get a BlockEmitter for a specific block.
     pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_> {
-        BlockEmitter {
-            function: self.function,
-            block_id: id,
-        }
+        BlockEmitter::new(self.function, id)
     }
 }
 
@@ -434,9 +431,20 @@ impl<'a> FunctionBuilder<'a> {
 // BlockEmitter — emits instructions into a specific block, with block-splitting
 // ---------------------------------------------------------------------------
 
+/// Holds the current block *taken out* of the function, so `emit()` is a
+/// direct `Vec::push` with no HashMap lookup.  The block is put back into the
+/// function on `seal_and_switch` or `Drop`.
 pub struct BlockEmitter<'a> {
     pub function: &'a mut HLFunction,
     block_id: BlockId,
+    block: HLBlock,
+}
+
+impl Drop for BlockEmitter<'_> {
+    fn drop(&mut self) {
+        let block = std::mem::replace(&mut self.block, HLBlock::empty());
+        self.function.put_block(self.block_id, block);
+    }
 }
 
 impl HLEmitter for BlockEmitter<'_> {
@@ -445,15 +453,18 @@ impl HLEmitter for BlockEmitter<'_> {
     }
 
     fn emit(&mut self, op: OpCode) {
-        self.function
-            .get_block_mut(self.block_id)
-            .push_instruction(op);
+        self.block.push_instruction(op);
     }
 }
 
 impl<'a> BlockEmitter<'a> {
     pub fn new(function: &'a mut HLFunction, block_id: BlockId) -> Self {
-        Self { function, block_id }
+        let block = function.take_block(block_id);
+        Self {
+            function,
+            block_id,
+            block,
+        }
     }
 
     pub fn block_id(&self) -> BlockId {
@@ -465,41 +476,42 @@ impl<'a> BlockEmitter<'a> {
     }
 
     pub fn add_parameter(&mut self, typ: Type) -> ValueId {
-        self.function.add_parameter(self.block_id, typ)
+        let v = self.function.fresh_value();
+        self.block.push_parameter(v, typ);
+        v
     }
 
     /// Set the terminator on the current block.
     pub fn set_terminator(&mut self, terminator: Terminator) {
-        self.function
-            .get_block_mut(self.block_id)
-            .set_terminator(terminator);
+        self.block.set_terminator(terminator);
     }
 
-    /// Set terminator on the current block and switch to `next_id`.
+    /// Set terminator on the current block, put it back, and switch to
+    /// `next_id` (whose block is taken out of the function).
     pub fn seal_and_switch(&mut self, terminator: Terminator, next_id: BlockId) {
-        self.function
-            .get_block_mut(self.block_id)
-            .set_terminator(terminator);
+        self.block.set_terminator(terminator);
+        let old_block = std::mem::replace(&mut self.block, self.function.take_block(next_id));
+        self.function.put_block(self.block_id, old_block);
         self.block_id = next_id;
     }
 
     pub fn terminate_jmp(&mut self, dest: BlockId, args: Vec<ValueId>) {
-        self.function
-            .terminate_block_with_jmp(self.block_id, dest, args);
+        self.block
+            .set_terminator(Terminator::Jmp(dest, args));
     }
 
     pub fn terminate_jmp_if(&mut self, cond: ValueId, then_dest: BlockId, else_dest: BlockId) {
-        self.function
-            .terminate_block_with_jmp_if(self.block_id, cond, then_dest, else_dest);
+        self.block
+            .set_terminator(Terminator::JmpIf(cond, then_dest, else_dest));
     }
 
     pub fn terminate_return(&mut self, vals: Vec<ValueId>) {
-        self.function
-            .terminate_block_with_return(self.block_id, vals);
+        self.block
+            .set_terminator(Terminator::Return(vals));
     }
 
     pub fn is_terminated(&self) -> bool {
-        self.function.block_is_terminated(self.block_id)
+        self.block.get_terminator().is_some()
     }
 
     /// Build a loop with the three-block structure: header → body → back-edge.
