@@ -63,24 +63,22 @@ pub fn find_needed_lowlevels(monomorphizer: &Monomorphizer) -> HashSet<String> {
     needed
 }
 
-pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
-    ReplacementCrate {
-        file_name: "poseidon2_permutation.nr",
-        dep_name: "poseidon2_permutation",
-        source: include_str!("../stdlib_replacements/src/poseidon2_permutation.nr"),
-        replacements: &[ReplacementSpec {
-            lowlevel_name: "poseidon2_permutation",
-            kind: ReplacementKind::ByArraySize(&[
-                ("t2", 2),
-                ("t3", 3),
-                ("t4", 4),
-                ("t8", 8),
-                ("t12", 12),
-                ("t16", 16),
-            ]),
-        }],
-    },
-];
+pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[ReplacementCrate {
+    file_name: "poseidon2_permutation.nr",
+    dep_name: "poseidon2_permutation",
+    source: include_str!("../stdlib_replacements/src/poseidon2_permutation.nr"),
+    replacements: &[ReplacementSpec {
+        lowlevel_name: "poseidon2_permutation",
+        kind: ReplacementKind::ByArraySize(&[
+            ("t2", 2),
+            ("t3", 3),
+            ("t4", 4),
+            ("t8", 8),
+            ("t12", 12),
+            ("t16", 16),
+        ]),
+    }],
+}];
 
 /// Look up named functions from the root module of a crate, returning their metadata.
 fn find_functions_in_crate(
