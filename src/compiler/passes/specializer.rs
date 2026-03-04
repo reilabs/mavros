@@ -724,19 +724,16 @@ impl Specializer {
             should_call_spec = cond;
         }
 
-        let (specialized_caller, _) = b.add_block();
-        let (unspecialized_caller, _) = b.add_block();
+        let specialized_caller = b.add_block(|_| {});
+        let unspecialized_caller = b.add_block(|_| {});
 
-        let return_block;
         let mut return_values = vec![];
-        {
-            let (id, mut ret) = b.add_block();
-            return_block = id;
+        let return_block = b.add_block(|ret| {
             for r in returns {
                 return_values.push(ret.add_parameter(r));
             }
             ret.terminate_return(return_values.clone());
-        }
+        });
 
         {
             let mut cb = b.block(unspecialized_caller);

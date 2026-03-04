@@ -408,8 +408,10 @@ impl<'a> FunctionBuilder<'a> {
         Self { function }
     }
 
-    pub fn add_block(&mut self) -> (BlockId, BlockEmitter<'_>) {
-        BlockEmitter::from_new_block(self.function)
+    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_>)) -> BlockId {
+        let (id, mut emitter) = BlockEmitter::from_new_block(self.function);
+        f(&mut emitter);
+        id
     }
 
     pub fn fresh_value(&mut self) -> ValueId {

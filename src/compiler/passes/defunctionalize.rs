@@ -535,16 +535,13 @@ fn build_dispatch_function(
         }
     }
 
-    let merge_block;
     let mut merge_results: Vec<ValueId> = Vec::new();
-    {
-        let (id, mut merge) = b.add_block();
-        merge_block = id;
+    let merge_block = b.add_block(|merge| {
         for ret_type in return_types {
             merge_results.push(merge.add_parameter(ret_type.clone()));
         }
         merge.terminate_return(merge_results.clone());
-    }
+    });
 
     let mut current_block = entry_block;
 
@@ -566,8 +563,8 @@ fn build_dispatch_function(
                 let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
                 cb.terminate_jmp(merge_block, call_results);
             } else {
-                let (call_block, _) = b.add_block();
-                let (next_check_block, _) = b.add_block();
+                let call_block = b.add_block(|_| {});
+                let next_check_block = b.add_block(|_| {});
 
                 {
                     let mut cb = b.block(current_block);
