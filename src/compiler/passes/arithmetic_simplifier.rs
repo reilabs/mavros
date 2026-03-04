@@ -8,7 +8,7 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::TypeExpr,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{CastTarget, CmpKind, OpCode},
+    ssa::{CastTarget, CmpKind, ConstValue, OpCode},
 };
 
 pub struct ArithmeticSimplifier {}
@@ -76,14 +76,16 @@ impl ArithmeticSimplifier {
                                     match &v_type.expr {
                                         TypeExpr::U(s) => {
                                             let cst = function.fresh_value();
-                                            new_instructions.push(OpCode::mk_u_const(
-                                                cst,
-                                                *s,
-                                                1 << bits,
-                                            ));
+                                            new_instructions.push(OpCode::Const {
+                                                result: cst,
+                                                value: ConstValue::U(*s, 1 << bits),
+                                            });
                                             let r = function.fresh_value();
                                             let t = function.fresh_value();
-                                            new_instructions.push(OpCode::mk_u_const(t, 1, 1));
+                                            new_instructions.push(OpCode::Const {
+                                                result: t,
+                                                value: ConstValue::U(1, 1),
+                                            });
                                             new_instructions.push(OpCode::Cmp {
                                                 kind: CmpKind::Lt,
                                                 result: r,

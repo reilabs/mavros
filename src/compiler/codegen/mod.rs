@@ -75,18 +75,6 @@ impl FrameLayouter {
         }
     }
 
-    fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
-        let r = self.next_free;
-        self.next_free += bytecode::LIMBS;
-        bytecode::FramePosition(r)
-    }
-
-    fn alloc_temp_u64(&mut self) -> bytecode::FramePosition {
-        let r = self.next_free;
-        self.next_free += 1;
-        bytecode::FramePosition(r)
-    }
-
     // This method needs to ensure contiguous storage!
     fn alloc_many_contiguous(&mut self, values: Vec<(ValueId, &Type)>) -> bytecode::FramePosition {
         let r = self.next_free;

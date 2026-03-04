@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
+    block_builder::{FunctionBuilder, HLEmitter},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     ssa::{
@@ -123,7 +124,10 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                     value: ConstValue::FnPtr(fn_id),
                 } = instruction
                 {
-                    *instruction = OpCode::mk_u_const(*result, 32, fn_id.0 as u128);
+                    *instruction = OpCode::Const {
+                        result: *result,
+                        value: ConstValue::U(32, fn_id.0 as u128),
+                    };
                 }
             }
         }
@@ -525,76 +529,63 @@ fn build_dispatch_function(
     }
 
     let entry_block = func.get_entry_id();
-    let fn_id_param = func.add_parameter(entry_block, Type::u32());
+    let mut b = FunctionBuilder::new(func);
 
+    let fn_id_param;
     let mut forwarded_params: Vec<ValueId> = Vec::new();
-    for param_type in param_types {
-        let p = func.add_parameter(entry_block, param_type.clone());
-        forwarded_params.push(p);
+    {
+        let mut entry = b.block(entry_block);
+        fn_id_param = entry.add_parameter(Type::u32());
+        for param_type in param_types {
+            forwarded_params.push(entry.add_parameter(param_type.clone()));
+        }
     }
 
-    let merge_block = func.add_block();
     let mut merge_results: Vec<ValueId> = Vec::new();
-    for ret_type in return_types {
-        let r = func.add_parameter(merge_block, ret_type.clone());
-        merge_results.push(r);
-    }
-    func.terminate_block_with_return(merge_block, merge_results.clone());
+    let merge_block = b.add_block(|merge| {
+        for ret_type in return_types {
+            merge_results.push(merge.add_parameter(ret_type.clone()));
+        }
+        merge.terminate_return(merge_results.clone());
+    });
+
+    let mut current_block = entry_block;
 
     if variants.len() == 1 {
         let variant_id = variants[0];
-        let const_val = func.fresh_value();
-        func.get_block_mut(entry_block)
-            .push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
-        func.push_assert_eq(entry_block, fn_id_param, const_val);
-        let call_results = func.push_call(
-            entry_block,
-            variant_id,
-            forwarded_params.clone(),
-            return_types.len(),
-        );
-        func.terminate_block_with_jmp(entry_block, merge_block, call_results);
+        let mut cb = b.block(current_block);
+        let const_val = cb.u_const(32, variant_id.0 as u128);
+        cb.assert_eq(fn_id_param, const_val);
+        let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
+        cb.terminate_jmp(merge_block, call_results);
     } else {
-        let mut current_block = entry_block;
-
         for (i, &variant_id) in variants.iter().enumerate() {
             let is_last = i == variants.len() - 1;
 
             if is_last {
-                let const_val = func.fresh_value();
-                func.get_block_mut(current_block)
-                    .push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
-                func.push_assert_eq(current_block, fn_id_param, const_val);
-                let call_results = func.push_call(
-                    current_block,
-                    variant_id,
-                    forwarded_params.clone(),
-                    return_types.len(),
-                );
-                func.terminate_block_with_jmp(current_block, merge_block, call_results);
+                let mut cb = b.block(current_block);
+                let const_val = cb.u_const(32, variant_id.0 as u128);
+                cb.assert_eq(fn_id_param, const_val);
+                let call_results =
+                    cb.call(variant_id, forwarded_params.clone(), return_types.len());
+                cb.terminate_jmp(merge_block, call_results);
             } else {
-                let const_val = func.fresh_value();
-                func.get_block_mut(current_block)
-                    .push_instruction(OpCode::mk_u_const(const_val, 32, variant_id.0 as u128));
-                let eq_result = func.push_eq(current_block, fn_id_param, const_val);
+                let call_block = b.add_block(|_| {});
+                let next_check_block = b.add_block(|_| {});
 
-                let call_block = func.add_block();
-                let next_check_block = func.add_block();
+                {
+                    let mut cb = b.block(current_block);
+                    let const_val = cb.u_const(32, variant_id.0 as u128);
+                    let eq_result = cb.eq(fn_id_param, const_val);
+                    cb.terminate_jmp_if(eq_result, call_block, next_check_block);
+                }
 
-                func.terminate_block_with_jmp_if(
-                    current_block,
-                    eq_result,
-                    call_block,
-                    next_check_block,
-                );
-
-                let call_results = func.push_call(
-                    call_block,
-                    variant_id,
-                    forwarded_params.clone(),
-                    return_types.len(),
-                );
-                func.terminate_block_with_jmp(call_block, merge_block, call_results);
+                {
+                    let mut cb = b.block(call_block);
+                    let call_results =
+                        cb.call(variant_id, forwarded_params.clone(), return_types.len());
+                    cb.terminate_jmp(merge_block, call_results);
+                }
 
                 current_block = next_check_block;
             }
