@@ -105,10 +105,6 @@ This runs the full pipeline (compile + VM execution) and additionally emits `mav
 
 > **Note:** WASM output is only available via the default command (no subcommand), not via `mavros compile`.
 
-## Low-Level Replacements
-
-Noir low-level intrinsics (`poseidon2_permutation`, `sha256_compression`) are automatically substituted with pure-Noir implementations from `stdlib_replacements/`.
-
 ## Debugging
 
 Passing `--draw-graphs` generates a `mavros_debug/` folder in the project root with SSA diagrams and CFG graphs at each compiler pass. Requires Graphviz.
