@@ -484,19 +484,24 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(_) => todo!(),
         }
     }
-
-    fn make_unknown(_ty: &Type, _ctx: &mut SpecializationState) -> Self {
-        panic!("ICE: unconstrained calls should not reach specializer")
-    }
 }
 
 impl symbolic_executor::Context<Val> for SpecializationState {
     fn on_call(
         &mut self,
-        _func: crate::compiler::ssa::FunctionId,
-        _params: &mut [Val],
+        func: crate::compiler::ssa::FunctionId,
+        params: &mut [Val],
         _param_types: &[&crate::compiler::ir::r#type::Type],
+        result_types: &[crate::compiler::ir::r#type::Type],
+        unconstrained: bool,
     ) -> Option<Vec<Val>> {
+        if unconstrained {
+            // Emit the unconstrained call as-is into the specialized function
+            let args: Vec<ValueId> = params.iter().map(|v| v.0).collect();
+            let n = result_types.len();
+            let results = self.call_unconstrained(func, args, n);
+            return Some(results.into_iter().map(Val).collect());
+        }
         None
     }
 

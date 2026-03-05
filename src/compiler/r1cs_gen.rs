@@ -272,7 +272,13 @@ impl symbolic_executor::Context<Value> for R1CGen {
         _func: FunctionId,
         _params: &mut [Value],
         _param_types: &[&Type],
+        _result_types: &[Type],
+        unconstrained: bool,
     ) -> Option<Vec<Value>> {
+        assert!(
+            !unconstrained,
+            "ICE: unconstrained calls should be DCE'd before R1CS gen"
+        );
         None
     }
 
@@ -667,10 +673,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
         _ctx: &mut R1CGen,
     ) -> Self {
         todo!("ToRadix R1CS generation not yet implemented")
-    }
-
-    fn make_unknown(_ty: &Type, _ctx: &mut R1CGen) -> Self {
-        panic!("ICE: unconstrained calls should be DCE'd before R1CS gen")
     }
 }
 
