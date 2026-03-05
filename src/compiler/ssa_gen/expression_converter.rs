@@ -1257,7 +1257,9 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         let return_size = self.return_size(&call.return_type);
-        let results = b.block(self.current_block).call(*ssa_func_id, args, return_size);
+        let results = b
+            .block(self.current_block)
+            .call(*ssa_func_id, args, return_size);
 
         if results.is_empty() {
             None
