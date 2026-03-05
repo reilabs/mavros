@@ -76,11 +76,11 @@ impl WitnessTypeInference {
         let main_id = ssa.get_main_id();
         let main_func = ssa.get_function(main_id);
 
-        // 1. Compute main's arg types: scalars=Witness, containers=Pure with Witness elems
+        // 1. Compute main's arg types: all Pure (WriteWitness in PrepareEntryPoint bridges to Witness)
         let main_arg_types: Vec<WitnessType> = main_func
             .get_entry()
             .get_parameters()
-            .map(|(_, tp)| Self::main_arg_witness_type(tp))
+            .map(|(_, tp)| Self::construct_pure_witness_for_type(tp))
             .collect();
 
         let main_return_types: Vec<WitnessType> = main_func
@@ -727,8 +727,16 @@ impl WitnessTypeInference {
                         value_wt
                             .insert(*result, WitnessType::Tuple(ConstantWitness::Pure, children));
                     }
-                    OpCode::WriteWitness { .. }
-                    | OpCode::Constrain { .. }
+                    OpCode::WriteWitness {
+                        result, value: _, ..
+                    } => {
+                        // WriteWitness records a value on the witness tape.
+                        // Its output is always Witness-typed.
+                        if let Some(result) = result {
+                            value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Witness));
+                        }
+                    }
+                    OpCode::Constrain { .. }
                     | OpCode::FreshWitness { .. }
                     | OpCode::BumpD { .. }
                     | OpCode::NextDCoeff { .. }
@@ -840,28 +848,6 @@ impl WitnessTypeInference {
                 .join(then_wt.toplevel_info())
                 .join(otherwise_wt.toplevel_info()),
         )
-    }
-
-    /// Compute witness type for a main function argument.
-    /// Scalars are Witness (private inputs), containers are Pure with Witness elements.
-    fn main_arg_witness_type(tp: &Type) -> WitnessType {
-        match &tp.expr {
-            TypeExpr::U(_) | TypeExpr::Field => WitnessType::Scalar(ConstantWitness::Witness),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => WitnessType::Array(
-                ConstantWitness::Pure,
-                Box::new(Self::main_arg_witness_type(inner)),
-            ),
-            TypeExpr::Tuple(elements) => WitnessType::Tuple(
-                ConstantWitness::Pure,
-                elements
-                    .iter()
-                    .map(|e| Self::main_arg_witness_type(e))
-                    .collect(),
-            ),
-            TypeExpr::Ref(_) => panic!("Ref in main signature"),
-            TypeExpr::WitnessOf(_) => panic!("WitnessOf should not be present at this stage"),
-            TypeExpr::Function => WitnessType::Scalar(ConstantWitness::Pure),
-        }
     }
 
     fn construct_pure_witness_for_type(typ: &Type) -> WitnessType {

@@ -2,7 +2,7 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BlockId, HLSSA, OpCode, Terminator, ValueId},
+    ssa::{BlockId, ConstValue, HLSSA, OpCode, Terminator, ValueId},
 };
 
 pub struct ConditionPropagation {}
@@ -55,7 +55,10 @@ impl ConditionPropagation {
                 let mut const_opcodes = Vec::new();
                 for (_, vid, value) in replaces {
                     let const_id = function.fresh_value();
-                    const_opcodes.push(OpCode::mk_u_const(const_id, 1, if *value { 1 } else { 0 }));
+                    const_opcodes.push(OpCode::Const {
+                        result: const_id,
+                        value: ConstValue::U(1, if *value { 1 } else { 0 }),
+                    });
                     replacements.insert(*vid, const_id);
                 }
 

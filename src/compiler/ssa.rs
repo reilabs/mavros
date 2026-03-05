@@ -328,11 +328,15 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     }
 
     pub fn add_block(&mut self) -> BlockId {
+        let (id, _) = self.add_block_mut();
+        id
+    }
+
+    pub fn add_block_mut(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
         let new_id = BlockId(self.next_block);
         self.next_block += 1;
-        let block = Block::empty();
-        self.blocks.insert(new_id, block);
-        new_id
+        self.blocks.insert(new_id, Block::empty());
+        (new_id, self.blocks.get_mut(&new_id).unwrap())
     }
 
     pub fn block_is_terminated(&self, block_id: BlockId) -> bool {
@@ -421,563 +425,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
 }
 
 impl HLFunction {
-    pub fn push_cmp(
-        &mut self,
-        block_id: BlockId,
-        lhs: ValueId,
-        rhs: ValueId,
-        kind: CmpKind,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Cmp {
-                kind,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-
-    pub fn push_eq(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-    pub fn push_add(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-    pub fn push_mul(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-
-    pub fn push_div(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-    pub fn push_sub(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Sub,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-    pub fn push_lt(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-    pub fn push_alloc(&mut self, block_id: BlockId, typ: Type) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Alloc {
-                result: value_id,
-                elem_type: typ,
-            });
-        value_id
-    }
-    pub fn push_store(&mut self, block_id: BlockId, ptr: ValueId, value: ValueId) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Store { ptr, value });
-    }
-    pub fn push_load(&mut self, block_id: BlockId, ptr: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Load {
-                result: value_id,
-                ptr,
-            });
-        value_id
-    }
-    pub fn push_assert_eq(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::AssertEq { lhs, rhs });
-    }
-
-    pub fn push_and(&mut self, block_id: BlockId, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::And,
-                result: value_id,
-                lhs,
-                rhs,
-            });
-        value_id
-    }
-
-    pub fn push_select(
-        &mut self,
-        block_id: BlockId,
-        cond: ValueId,
-        then: ValueId,
-        otherwise: ValueId,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Select {
-                result: value_id,
-                cond,
-                if_t: then,
-                if_f: otherwise,
-            });
-        value_id
-    }
-
-    pub fn push_call(
-        &mut self,
-        block_id: BlockId,
-        fn_id: FunctionId,
-        args: Vec<ValueId>,
-        return_size: usize,
-    ) -> Vec<ValueId> {
-        let mut return_values = Vec::new();
-        for _ in 0..return_size {
-            let value_id = ValueId(self.next_value);
-            self.next_value += 1;
-            return_values.push(value_id);
-        }
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Call {
-                results: return_values.clone(),
-                function: CallTarget::Static(fn_id),
-                args,
-            });
-        return_values
-    }
-
-    pub fn push_call_indirect(
-        &mut self,
-        block_id: BlockId,
-        fn_ptr: ValueId,
-        args: Vec<ValueId>,
-        return_size: usize,
-    ) -> Vec<ValueId> {
-        let mut return_values = Vec::new();
-        for _ in 0..return_size {
-            let value_id = ValueId(self.next_value);
-            self.next_value += 1;
-            return_values.push(value_id);
-        }
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Call {
-                results: return_values.clone(),
-                function: CallTarget::Dynamic(fn_ptr),
-                args,
-            });
-        return_values
-    }
-
-    pub fn push_array_get(&mut self, block_id: BlockId, array: ValueId, index: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::ArrayGet {
-                result: value_id,
-                array,
-                index,
-            });
-        value_id
-    }
-
-    pub fn push_tuple_proj(
-        &mut self,
-        block_id: BlockId,
-        tuple: ValueId,
-        index: TupleIdx,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::TupleProj {
-                result: value_id,
-                tuple,
-                idx: index,
-            });
-        value_id
-    }
-
-    pub fn push_array_set(
-        &mut self,
-        block_id: BlockId,
-        array: ValueId,
-        index: ValueId,
-        element: ValueId,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::ArraySet {
-                result: value_id,
-                array,
-                index,
-                value: element,
-            });
-        value_id
-    }
-
-    pub fn push_slice_push(
-        &mut self,
-        block_id: BlockId,
-        slice: ValueId,
-        values: Vec<ValueId>,
-        dir: SliceOpDir,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::SlicePush {
-                result: value_id,
-                slice,
-                values,
-                dir,
-            });
-        value_id
-    }
-
-    pub fn push_slice_len(&mut self, block_id: BlockId, slice: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::SliceLen {
-                result: value_id,
-                slice,
-            });
-        value_id
-    }
-
-    pub fn push_mk_array(
-        &mut self,
-        block_id: BlockId,
-        elements: Vec<ValueId>,
-        stp: SeqType,
-        typ: Type,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::MkSeq {
-                result: value_id,
-                elems: elements,
-                seq_type: stp,
-                elem_type: typ,
-            });
-        value_id
-    }
-
-    pub fn push_mk_tuple(
-        &mut self,
-        block_id: BlockId,
-        elements: Vec<ValueId>,
-        types: Vec<Type>,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::MkTuple {
-                result: value_id,
-                elems: elements,
-                element_types: types,
-            });
-        value_id
-    }
-
-    pub fn push_cast(&mut self, block_id: BlockId, value: ValueId, target: CastTarget) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Cast {
-                result: value_id,
-                value,
-                target,
-            });
-        value_id
-    }
-
-    pub fn push_truncate(
-        &mut self,
-        block_id: BlockId,
-        value: ValueId,
-        out_bit_size: usize,
-        in_bit_size: usize,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Truncate {
-                result: value_id,
-                value,
-                to_bits: out_bit_size,
-                from_bits: in_bit_size,
-            });
-        value_id
-    }
-
-    pub fn push_not(&mut self, block_id: BlockId, value: ValueId) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Not {
-                result: value_id,
-                value,
-            });
-        value_id
-    }
-
-    pub fn push_to_bits(
-        &mut self,
-        block_id: BlockId,
-        value: ValueId,
-        endianness: Endianness,
-        output_size: usize,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::ToBits {
-                result: value_id,
-                value,
-                endianness,
-                count: output_size,
-            });
-        value_id
-    }
-
-    pub fn push_to_radix(
-        &mut self,
-        block_id: BlockId,
-        value: ValueId,
-        radix: Radix<ValueId>,
-        endianness: Endianness,
-        output_size: usize,
-    ) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::ToRadix {
-                result: value_id,
-                value,
-                radix,
-                endianness,
-                count: output_size,
-            });
-        value_id
-    }
-
-    pub fn push_rangecheck(&mut self, block_id: BlockId, value: ValueId, max_bits: usize) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Rangecheck { value, max_bits });
-    }
-
-    pub fn push_mem_op(&mut self, block_id: BlockId, value: ValueId, kind: MemOp) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::MemOp { kind, value });
-    }
-
-    pub fn push_read_global(&mut self, block_id: BlockId, index: u64, typ: Type) -> ValueId {
-        let value = self.fresh_value();
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::ReadGlobal {
-                result: value,
-                offset: index,
-                result_type: typ,
-            });
-        value
-    }
-
-    pub fn push_todo(
-        &mut self,
-        block_id: BlockId,
-        payload: String,
-        results: Vec<ValueId>,
-        result_types: Vec<Type>,
-    ) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::Todo {
-                payload,
-                results,
-                result_types,
-            });
-    }
-
-    pub fn push_init_global(&mut self, block_id: BlockId, global: usize, value: ValueId) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::InitGlobal { global, value });
-    }
-
-    pub fn push_drop_global(&mut self, block_id: BlockId, global: usize) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .instructions
-            .push(OpCode::DropGlobal { global });
-    }
-
-    // pub fn push_constrain(&mut self, block_id: BlockId, a: ValueId, b: ValueId, c: ValueId) {
-    //     self.blocks
-    //         .get_mut(&block_id)
-    //         .unwrap()
-    //         .instructions
-    //         .push(OpCode::Constrain(a, b, c));
-    // }
-
-    // pub fn push_witness_write(&mut self, block_id: BlockId, value: ValueId) -> ValueId {
-    //     let value_id = ValueId(self.next_value);
-    //     self.next_value += 1;
-    //     self.blocks
-    //         .get_mut(&block_id)
-    //         .unwrap()
-    //         .instructions
-    //         .push(OpCode::WriteWitness(value_id, value));
-    //     value_id
-    // }
-
     pub fn terminate_block_with_jmp_if(
         &mut self,
         block_id: BlockId,
@@ -1112,6 +559,10 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
 
     pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Ty)>) {
         self.parameters = parameters;
+    }
+
+    pub fn push_parameter(&mut self, value_id: ValueId, typ: Ty) {
+        self.parameters.push((value_id, typ));
     }
 
     pub fn get_parameter_values(&self) -> impl Iterator<Item = &ValueId> {
@@ -1369,6 +820,7 @@ pub enum OpCode {
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
+        pinned: bool,
     },
     FreshWitness {
         result: ValueId,
@@ -1618,13 +1070,18 @@ impl Instruction for OpCode {
                     otherwise.0
                 )
             }
-            OpCode::WriteWitness { result, value } => {
+            OpCode::WriteWitness {
+                result,
+                value,
+                pinned,
+            } => {
                 let r_str = if let Some(result) = result {
                     format!("v{}{} = ", result.0, annotate_value(*result))
                 } else {
                     "".to_string()
                 };
-                format!("{}write_witness(v{})", r_str, value.0)
+                let pinned_str = if *pinned { " [pinned]" } else { "" };
+                format!("{}write_witness(v{}){}", r_str, value.0, pinned_str)
             }
             OpCode::FreshWitness {
                 result,
@@ -1961,6 +1418,7 @@ impl Instruction for OpCode {
             | Self::WriteWitness {
                 result: _,
                 value: c,
+                pinned: _,
             }
             | Self::Cast {
                 result: _,
@@ -2172,6 +1630,7 @@ impl Instruction for OpCode {
             Self::WriteWitness {
                 result: r,
                 value: _,
+                pinned: _,
             } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
                 ret_vec.into_iter()
@@ -2300,6 +1759,7 @@ impl Instruction for OpCode {
             | Self::WriteWitness {
                 result: _,
                 value: c,
+                pinned: _,
             }
             | Self::Cast {
                 result: _,
@@ -2500,6 +1960,7 @@ impl Instruction for OpCode {
             Self::WriteWitness {
                 result: a,
                 value: b,
+                pinned: _,
             } => {
                 let mut ret_vec = a.iter_mut().collect::<Vec<_>>();
                 ret_vec.push(b);
@@ -2648,155 +2109,6 @@ impl Terminator {
                 let values_str = values.iter().map(|v| format!("v{}", v.0)).join(", ");
                 format!("return {}", values_str)
             }
-        }
-    }
-}
-
-impl OpCode {
-    pub fn mk_array_get(result: ValueId, array: ValueId, index: ValueId) -> OpCode {
-        OpCode::ArrayGet {
-            result,
-            array,
-            index,
-        }
-    }
-
-    pub fn mk_cast_to_field(result: ValueId, value: ValueId) -> OpCode {
-        OpCode::Cast {
-            result,
-            value,
-            target: CastTarget::Field,
-        }
-    }
-
-    pub fn mk_write_witness(result: ValueId, value_id: ValueId) -> OpCode {
-        OpCode::WriteWitness {
-            result: Some(result),
-            value: value_id,
-        }
-    }
-
-    pub fn mk_lookup_rngchk_8(value: ValueId) -> OpCode {
-        OpCode::Lookup {
-            target: LookupTarget::Rangecheck(8),
-            keys: vec![value],
-            results: vec![],
-        }
-    }
-
-    pub fn mk_lookup_rngchk(target: LookupTarget<ValueId>, value: ValueId) -> OpCode {
-        OpCode::Lookup {
-            target,
-            keys: vec![value],
-            results: vec![],
-        }
-    }
-
-    pub fn mk_mul(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_add(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_lookup_arr(array: ValueId, index: ValueId, result: ValueId) -> OpCode {
-        OpCode::Lookup {
-            target: LookupTarget::Array(array),
-            keys: vec![index],
-            results: vec![result],
-        }
-    }
-
-    pub fn mk_cast_to(result: ValueId, target: CastTarget, value: ValueId) -> OpCode {
-        OpCode::Cast {
-            result,
-            value,
-            target,
-        }
-    }
-
-    pub fn mk_constrain(a: ValueId, b: ValueId, c: ValueId) -> OpCode {
-        OpCode::Constrain { a, b, c }
-    }
-
-    pub fn mk_sub(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Sub,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_div(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Div,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_eq(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_and(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::And,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_value_of(result: ValueId, value: ValueId) -> OpCode {
-        OpCode::ValueOf { result, value }
-    }
-
-    pub fn mk_lt(result: ValueId, lhs: ValueId, rhs: ValueId) -> OpCode {
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result,
-            lhs,
-            rhs,
-        }
-    }
-
-    pub fn mk_u_const(result: ValueId, size: usize, value: u128) -> OpCode {
-        OpCode::Const {
-            result,
-            value: ConstValue::U(size, value),
-        }
-    }
-
-    pub fn mk_field_const(result: ValueId, value: ark_bn254::Fr) -> OpCode {
-        OpCode::Const {
-            result,
-            value: ConstValue::Field(value),
-        }
-    }
-
-    pub fn mk_fn_ptr_const(result: ValueId, fn_id: FunctionId) -> OpCode {
-        OpCode::Const {
-            result,
-            value: ConstValue::FnPtr(fn_id),
         }
     }
 }

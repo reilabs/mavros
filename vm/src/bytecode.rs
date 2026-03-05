@@ -189,7 +189,7 @@ impl VM {
                     out_db,
                     out_dc,
                     ad_coeffs,
-                    current_wit_off: 1,
+                    current_wit_off: 0,
                     logup_wit_challenge_off: witness_layout.challenges_start(),
                     current_wit_multiplicities_off: witness_layout.multiplicities_start(),
                     current_wit_tables_off: witness_layout.tables_data_start(),

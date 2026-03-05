@@ -12,6 +12,7 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
+use crate::compiler::block_builder::{FunctionBuilder, HLEmitter};
 use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
 
 use expression_converter::ExpressionConverter;
@@ -224,24 +225,28 @@ impl SsaConverter {
             let init_fn = ssa.get_function_mut(init_fn_id);
             let entry = init_fn.get_entry_id();
 
+            let mut b = FunctionBuilder::new(init_fn);
+
             // We need an ExpressionConverter to evaluate initializer expressions
             let mut expr_converter = ExpressionConverter::new_with_globals(
                 &self.constrained_mapper,
-                entry,
                 false,
                 &self.global_slots,
+                entry,
             );
 
             for gid in &ordered_ids {
                 let (_name, _typ, init_expr) = &program.globals[gid];
                 let value = expr_converter
-                    .convert_expression(init_expr, init_fn)
+                    .convert_expression(init_expr, &mut b)
                     .unwrap();
                 let idx = self.global_slots[gid];
-                init_fn.push_init_global(entry, idx, value);
+                b.block(expr_converter.current_block())
+                    .init_global(idx, value);
             }
 
-            init_fn.terminate_block_with_return(entry, vec![]);
+            b.block(expr_converter.current_block())
+                .terminate_return(vec![]);
         }
 
         // Build deinit function
@@ -249,12 +254,13 @@ impl SsaConverter {
         {
             let deinit_fn = ssa.get_function_mut(deinit_fn_id);
             let entry = deinit_fn.get_entry_id();
+            let mut b = FunctionBuilder::new(deinit_fn);
             for (i, typ) in global_types.iter().enumerate() {
                 if typ.is_heap_allocated() {
-                    deinit_fn.push_drop_global(entry, i);
+                    b.block(entry).drop_global(i);
                 }
             }
-            deinit_fn.terminate_block_with_return(entry, vec![]);
+            b.block(entry).terminate_return(vec![]);
         }
 
         ssa.set_global_types(global_types);
@@ -286,34 +292,36 @@ impl SsaConverter {
             function.add_return_type(return_type);
         }
 
+        let mut b = FunctionBuilder::new(&mut function);
+
         // Create expression converter
         let mut expr_converter = ExpressionConverter::new_with_globals(
             function_mapper,
-            entry_block,
             in_unconstrained,
             &self.global_slots,
+            entry_block,
         );
 
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
             let converted_type = self.type_converter.convert_type(param_type);
-            let value_id = function.add_parameter(entry_block, converted_type.clone());
+            let value_id = b.block(entry_block).add_parameter(converted_type.clone());
 
             if *mutable {
                 // For mutable parameters, allocate a pointer and store the value
-                expr_converter.bind_local_mut(*local_id, value_id, converted_type, &mut function);
+                expr_converter.bind_local_mut(*local_id, value_id, converted_type, &mut b);
             } else {
                 expr_converter.bind_local(*local_id, value_id);
             }
         }
 
         // Convert the function body
-        let result = expr_converter.convert_expression(&ast_func.body, &mut function);
+        let result = expr_converter.convert_expression(&ast_func.body, &mut b);
 
         // Add return terminator
-        let current_block = expr_converter.current_block();
         let return_values = result.into_iter().collect();
-        function.terminate_block_with_return(current_block, return_values);
+        b.block(expr_converter.current_block())
+            .terminate_return(return_values);
 
         function
     }
