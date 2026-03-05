@@ -1,0 +1,6 @@
+[package]
+name = "stdlib_replacements"
+type = "lib"
+authors = [""]
+
+[dependencies]
