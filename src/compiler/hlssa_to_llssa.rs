@@ -1,4 +1,4 @@
-//! HLSSA → LLSSA lowering pass
+//! HLSSA -> LLSSA lowering pass
 //!
 //! Translates the high-level SSA (with abstract Field/U types and a separate
 //! constant map) into low-level SSA (explicit integer widths, field-as-struct,
@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
+use crate::compiler::block_builder::{BlockEmitter, FunctionBuilder, LLEmitter};
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
@@ -20,9 +21,9 @@ use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLFunction, Terminator, ValueId, HLSSA,
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Type helpers
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 /// Map an HLSSA type to an LLType.
 fn lower_type(ty: &Type) -> LLType {
@@ -30,7 +31,7 @@ fn lower_type(ty: &Type) -> LLType {
         TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
         TypeExpr::U(bits) => LLType::Int(*bits as u32),
         TypeExpr::Array(..) => LLType::Ptr,
-        _ => panic!("Unsupported type in HLSSA→LLSSA lowering: {}", ty),
+        _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
 
@@ -58,9 +59,9 @@ fn array_info(ty: &Type) -> (&Type, usize) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Drop function tracking
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 struct DropFnEntry {
     hlssa_type: Type,
@@ -96,9 +97,9 @@ fn get_or_create_drop_fn(
     fn_id
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Main entry point
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 /// Lower an entire HLSSA program to LLSSA.
 pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) -> LLSSA {
@@ -144,9 +145,9 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     llssa
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Per-function lowering
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 fn lower_function(
     function: &HLFunction,
@@ -191,14 +192,16 @@ fn lower_function(
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
         let block = function.get_block(block_id);
-        let mut current_block = block_map[&block_id];
+        let ll_block_id = block_map[&block_id];
+
+        // Create a BlockEmitter for this block
+        let mut emitter = BlockEmitter::new(&mut ll_func, ll_block_id);
 
         // Lower instructions
         for instruction in block.get_instructions() {
-            current_block = lower_instruction(
+            lower_instruction(
                 instruction,
-                &mut ll_func,
-                current_block,
+                &mut emitter,
                 &mut val_map,
                 fn_type_info,
                 fn_map,
@@ -207,39 +210,30 @@ fn lower_function(
             );
         }
 
-        // Lower terminator (into current_block, which may have changed due to block splits)
+        // Lower terminator (into current block, which may have changed due to block splits)
         if let Some(terminator) = block.get_terminator() {
-            lower_terminator(
-                terminator,
-                &mut ll_func,
-                current_block,
-                &val_map,
-                &block_map,
-            );
+            lower_terminator(terminator, &mut emitter, &val_map, &block_map);
         }
     }
 
     ll_func
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Instruction lowering
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 /// Lower a single HLSSA instruction to LLSSA ops.
-/// Returns the block ID to use for subsequent instructions (may change if this
-/// instruction creates new blocks, e.g. ArraySet with CoW).
 #[allow(clippy::too_many_arguments)]
 fn lower_instruction(
     instruction: &crate::compiler::ssa::OpCode,
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     fn_map: &HashMap<FunctionId, FunctionId>,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
-) -> BlockId {
+) {
     use crate::compiler::ssa::{CallTarget, ConstValue, MemOp, OpCode, SeqType};
 
     match instruction {
@@ -262,7 +256,7 @@ fn lower_instruction(
                         BinaryArithOpKind::Div => FieldArithOp::Div,
                         _ => panic!("Unsupported field arith op: {:?}", kind),
                     };
-                    ll_func.push_field_arith(block_id, op, ll_lhs, ll_rhs)
+                    e.field_arith(op, ll_lhs, ll_rhs)
                 }
                 TypeExpr::U(_) => {
                     let op = match kind {
@@ -272,7 +266,7 @@ fn lower_instruction(
                         BinaryArithOpKind::And => IntArithOp::And,
                         _ => panic!("Unsupported int arith op: {:?}", kind),
                     };
-                    ll_func.push_int_arith(block_id, op, ll_lhs, ll_rhs)
+                    e.int_arith(op, ll_lhs, ll_rhs)
                 }
                 _ => panic!(
                     "Unsupported type for BinaryArithOp in lowering: {:?}",
@@ -280,7 +274,6 @@ fn lower_instruction(
                 ),
             };
             val_map.insert(*result, ll_result);
-            block_id
         }
 
         OpCode::Cmp {
@@ -299,33 +292,30 @@ fn lower_instruction(
                         CmpKind::Lt => IntCmpOp::ULt,
                         CmpKind::Eq => IntCmpOp::Eq,
                     };
-                    ll_func.push_int_cmp(block_id, op, ll_lhs, ll_rhs)
+                    e.int_cmp(op, ll_lhs, ll_rhs)
                 }
                 TypeExpr::Field => match kind {
-                    CmpKind::Eq => ll_func.push_field_eq(block_id, ll_lhs, ll_rhs),
+                    CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
                     _ => panic!("Unsupported field comparison: {:?}", kind),
                 },
                 _ => panic!("Unsupported type for Cmp in lowering: {:?}", lhs_type),
             };
             val_map.insert(*result, ll_result);
-            block_id
         }
 
         OpCode::Constrain { a, b, c } => {
             let ll_a = val_map[a];
             let ll_b = val_map[b];
             let ll_c = val_map[c];
-            ll_func.push_constrain(block_id, ll_a, ll_b, ll_c);
-            block_id
+            e.constrain(ll_a, ll_b, ll_c);
         }
 
         OpCode::WriteWitness { result, value, .. } => {
             let ll_value = val_map[value];
-            ll_func.push_write_witness(block_id, ll_value);
+            e.write_witness(ll_value);
             if let Some(result_id) = result {
                 val_map.insert(*result_id, ll_value);
             }
-            block_id
         }
 
         OpCode::Call {
@@ -335,18 +325,16 @@ fn lower_instruction(
         } => {
             let ll_callee = fn_map[callee];
             let ll_args: Vec<ValueId> = args.iter().map(|a| val_map[a]).collect();
-            let ll_results = ll_func.push_call(block_id, ll_callee, ll_args, results.len());
+            let ll_results = e.call(ll_callee, ll_args, results.len());
             for (hl_result, ll_result) in results.iter().zip(ll_results.iter()) {
                 val_map.insert(*hl_result, *ll_result);
             }
-            block_id
         }
 
         OpCode::Not { result, value } => {
             let ll_value = val_map[value];
-            let ll_result = ll_func.push_not(block_id, ll_value);
+            let ll_result = e.not(ll_value);
             val_map.insert(*result, ll_result);
-            block_id
         }
 
         OpCode::Select {
@@ -358,35 +346,33 @@ fn lower_instruction(
             let ll_cond = val_map[cond];
             let ll_if_t = val_map[if_t];
             let ll_if_f = val_map[if_f];
-            let ll_result = ll_func.push_select(block_id, ll_cond, ll_if_t, ll_if_f);
+            let ll_result = e.select(ll_cond, ll_if_t, ll_if_f);
             val_map.insert(*result, ll_result);
-            block_id
         }
 
         OpCode::Const { result, value } => {
             match value {
                 ConstValue::U(bits, val) => {
-                    let ll_val = ll_func.push_int_const(block_id, *bits as u32, *val as u64);
+                    let ll_val = e.int_const(*bits as u32, *val as u64);
                     val_map.insert(*result, ll_val);
                 }
                 ConstValue::Field(fr) => {
                     let field_struct = LLStruct::field_elem();
                     let limbs = fr.0.0;
-                    let l0 = ll_func.push_int_const(block_id, 64, limbs[0]);
-                    let l1 = ll_func.push_int_const(block_id, 64, limbs[1]);
-                    let l2 = ll_func.push_int_const(block_id, 64, limbs[2]);
-                    let l3 = ll_func.push_int_const(block_id, 64, limbs[3]);
-                    let mk = ll_func.push_mk_struct(block_id, field_struct, vec![l0, l1, l2, l3]);
+                    let l0 = e.int_const(64, limbs[0]);
+                    let l1 = e.int_const(64, limbs[1]);
+                    let l2 = e.int_const(64, limbs[2]);
+                    let l3 = e.int_const(64, limbs[3]);
+                    let mk = e.mk_struct(field_struct, vec![l0, l1, l2, l3]);
                     val_map.insert(*result, mk);
                 }
                 ConstValue::FnPtr(_) => {
-                    panic!("FnPtr constants not supported in HLSSA→LLSSA lowering");
+                    panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
                 }
             }
-            block_id
         }
 
-        // ── Array operations ────────────────────────────────────────────
+        // -- Array operations --
 
         OpCode::MkSeq {
             result,
@@ -394,10 +380,7 @@ fn lower_instruction(
             seq_type: SeqType::Array(count),
             elem_type,
         } => {
-            lower_mk_array(
-                ll_func, block_id, val_map, *result, elems, elem_type, *count,
-            );
-            block_id
+            lower_mk_array(e, val_map, *result, elems, elem_type, *count);
         }
 
         OpCode::ArrayGet {
@@ -405,10 +388,7 @@ fn lower_instruction(
             array,
             index,
         } => {
-            lower_array_get(
-                ll_func, block_id, val_map, fn_type_info, *result, *array, *index,
-            );
-            block_id
+            lower_array_get(e, val_map, fn_type_info, *result, *array, *index);
         }
 
         OpCode::ArraySet {
@@ -416,45 +396,40 @@ fn lower_instruction(
             array,
             index,
             value,
-        } => lower_array_set(
-            ll_func, block_id, val_map, fn_type_info, *result, *array, *index, *value,
-        ),
+        } => {
+            lower_array_set(e, val_map, fn_type_info, *result, *array, *index, *value);
+        }
 
-        // ── RC operations ───────────────────────────────────────────────
+        // -- RC operations --
 
         OpCode::MemOp {
             kind: MemOp::Bump(n),
             value,
         } => {
-            lower_rc_bump(ll_func, block_id, val_map, fn_type_info, *n, *value);
-            block_id
+            lower_rc_bump(e, val_map, fn_type_info, *n, *value);
         }
 
         OpCode::MemOp {
             kind: MemOp::Drop,
             value,
         } => {
-            lower_rc_drop(
-                ll_func, block_id, val_map, fn_type_info, *value, llssa, drop_fns,
-            );
-            block_id
+            lower_rc_drop(e, val_map, fn_type_info, *value, llssa, drop_fns);
         }
 
         _ => panic!(
-            "Unsupported opcode in HLSSA→LLSSA lowering: {:?}",
+            "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
         ),
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Array lowering helpers
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 /// Lower MkSeq(Array) to heap allocation + element stores.
 fn lower_mk_array(
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     elems: &[ValueId],
@@ -465,21 +440,21 @@ fn lower_mk_array(
     let es = elem_struct(elem_type);
 
     // Allocate
-    let arr = ll_func.push_heap_alloc(block_id, rc_struct.clone(), None);
+    let arr = e.heap_alloc(rc_struct.clone(), None);
 
     // Init RC to 1
-    let rc_hdr = ll_func.push_struct_field_ptr(block_id, arr, rc_struct.clone(), 0);
-    let rc_word = ll_func.push_struct_field_ptr(block_id, rc_hdr, LLStruct::rc_header(), 0);
-    let one = ll_func.push_int_const(block_id, 64, 1);
-    ll_func.push_store(block_id, rc_word, one);
+    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
 
     // Store elements
-    let data = ll_func.push_struct_field_ptr(block_id, arr, rc_struct, 1);
+    let data = e.struct_field_ptr(arr, rc_struct, 1);
     for (i, elem) in elems.iter().enumerate() {
-        let idx = ll_func.push_int_const(block_id, 64, i as u64);
-        let elem_ptr = ll_func.push_array_elem_ptr(block_id, data, es.clone(), idx);
+        let idx = e.int_const(64, i as u64);
+        let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
         let ll_elem = val_map[elem];
-        ll_func.push_store(block_id, elem_ptr, ll_elem);
+        e.ll_store(elem_ptr, ll_elem);
     }
 
     val_map.insert(result, arr);
@@ -487,8 +462,7 @@ fn lower_mk_array(
 
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
 fn lower_array_get(
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     result: ValueId,
@@ -505,28 +479,26 @@ fn lower_array_get(
     let ll_idx = val_map[&index];
 
     // ZExt index from u32 to i64 for pointer arithmetic
-    let idx64 = ll_func.push_zext(block_id, ll_idx, 64);
+    let idx64 = e.zext(ll_idx, 64);
 
-    let data = ll_func.push_struct_field_ptr(block_id, ll_arr, rc_struct, 1);
-    let elem_ptr = ll_func.push_array_elem_ptr(block_id, data, es, idx64);
-    let val = ll_func.push_load(block_id, elem_ptr, ll_elem_type);
+    let data = e.struct_field_ptr(ll_arr, rc_struct, 1);
+    let elem_ptr = e.array_elem_ptr(data, es, idx64);
+    let val = e.ll_load(elem_ptr, ll_elem_type);
 
     val_map.insert(result, val);
 }
 
 /// Lower ArraySet with copy-on-write semantics.
 /// Creates new blocks for the RC check + conditional copy.
-/// Returns the merge block ID (subsequent instructions emit there).
 fn lower_array_set(
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     result: ValueId,
     array: ValueId,
     index: ValueId,
     value: ValueId,
-) -> BlockId {
+) {
     let arr_type = fn_type_info.get_value_type(array);
     let (et, count) = array_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
@@ -537,67 +509,70 @@ fn lower_array_set(
     let ll_val = val_map[&value];
 
     // ZExt index
-    let idx64 = ll_func.push_zext(block_id, ll_idx, 64);
+    let idx64 = e.zext(ll_idx, 64);
 
     // Load RC
-    let hdr = ll_func.push_struct_field_ptr(block_id, ll_arr, rc_struct.clone(), 0);
-    let rc_ptr = ll_func.push_struct_field_ptr(block_id, hdr, LLStruct::rc_header(), 0);
-    let rc = ll_func.push_load(block_id, rc_ptr, LLType::i64());
-    let one = ll_func.push_int_const(block_id, 64, 1);
-    let unique = ll_func.push_int_eq(block_id, rc, one);
+    let hdr = e.struct_field_ptr(ll_arr, rc_struct.clone(), 0);
+    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let one = e.int_const(64, 1);
+    let unique = e.int_eq(rc, one);
 
     // Create blocks
-    let mutate_blk = ll_func.add_block();
-    let copy_blk = ll_func.add_block();
-    let merge_blk = ll_func.add_block();
-    let merge_param = ll_func.add_parameter(merge_blk, LLType::Ptr);
+    let (mutate_blk, _) = e.add_block();
+    let (copy_blk, _) = e.add_block();
+    let (merge_blk, _) = e.add_block();
+    let merge_param = e.function.add_parameter(merge_blk, LLType::Ptr);
 
-    ll_func.terminate_block_with_jmp_if(block_id, unique, mutate_blk, copy_blk);
-
-    // ── Mutate in place ─────────────────────────────────────────────
+    // -- Mutate in place --
     {
-        let data = ll_func.push_struct_field_ptr(mutate_blk, ll_arr, rc_struct.clone(), 1);
-        let slot = ll_func.push_array_elem_ptr(mutate_blk, data, es.clone(), idx64);
-        ll_func.push_store(mutate_blk, slot, ll_val);
-        ll_func.terminate_block_with_jmp(mutate_blk, merge_blk, vec![ll_arr]);
+        let mut me = BlockEmitter::new(e.function, mutate_blk);
+        let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
+        let slot = me.array_elem_ptr(data, es.clone(), idx64);
+        me.ll_store(slot, ll_val);
+        me.terminate_jmp(merge_blk, vec![ll_arr]);
     }
 
-    // ── Copy then mutate ────────────────────────────────────────────
+    // -- Copy then mutate --
     {
+        let mut ce = BlockEmitter::new(e.function, copy_blk);
         // Decrement old RC
-        let new_rc = ll_func.push_int_sub(copy_blk, rc, one);
-        ll_func.push_store(copy_blk, rc_ptr, new_rc);
+        let new_rc = ce.int_sub(rc, one);
+        ce.ll_store(rc_ptr, new_rc);
 
         // Allocate new array
-        let new_arr = ll_func.push_heap_alloc(copy_blk, rc_struct.clone(), None);
+        let new_arr = ce.heap_alloc(rc_struct.clone(), None);
 
         // Init new RC to 1
-        let new_hdr = ll_func.push_struct_field_ptr(copy_blk, new_arr, rc_struct.clone(), 0);
-        let new_rc_ptr =
-            ll_func.push_struct_field_ptr(copy_blk, new_hdr, LLStruct::rc_header(), 0);
-        ll_func.push_store(copy_blk, new_rc_ptr, one);
+        let new_hdr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 0);
+        let new_rc_ptr = ce.struct_field_ptr(new_hdr, LLStruct::rc_header(), 0);
+        ce.ll_store(new_rc_ptr, one);
 
         // Copy all data
-        let old_data = ll_func.push_struct_field_ptr(copy_blk, ll_arr, rc_struct.clone(), 1);
-        let new_data = ll_func.push_struct_field_ptr(copy_blk, new_arr, rc_struct, 1);
-        let count_val = ll_func.push_int_const(copy_blk, 64, count as u64);
-        ll_func.push_memcpy(copy_blk, new_data, old_data, es.clone(), Some(count_val));
+        let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
+        let new_data = ce.struct_field_ptr(new_arr, rc_struct, 1);
+        let count_val = ce.int_const(64, count as u64);
+        ce.memcpy(new_data, old_data, es.clone(), Some(count_val));
 
         // Write new value at index
-        let new_slot = ll_func.push_array_elem_ptr(copy_blk, new_data, es, idx64);
-        ll_func.push_store(copy_blk, new_slot, ll_val);
+        let new_slot = ce.array_elem_ptr(new_data, es, idx64);
+        ce.ll_store(new_slot, ll_val);
 
-        ll_func.terminate_block_with_jmp(copy_blk, merge_blk, vec![new_arr]);
+        ce.terminate_jmp(merge_blk, vec![new_arr]);
     }
 
+    // Seal current block and switch to merge block
+    e.seal_and_switch(
+        Terminator::JmpIf(unique, mutate_blk, copy_blk),
+        merge_blk,
+    );
+
     val_map.insert(result, merge_param);
-    merge_blk
 }
 
-/// Lower MemOp::Bump(n) — increment refcount by n.
+/// Lower MemOp::Bump(n) -- increment refcount by n.
 fn lower_rc_bump(
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     n: usize,
@@ -609,18 +584,17 @@ fn lower_rc_bump(
 
     let ll_arr = val_map[&value];
 
-    let hdr = ll_func.push_struct_field_ptr(block_id, ll_arr, rc_struct, 0);
-    let rc_ptr = ll_func.push_struct_field_ptr(block_id, hdr, LLStruct::rc_header(), 0);
-    let rc = ll_func.push_load(block_id, rc_ptr, LLType::i64());
-    let n_val = ll_func.push_int_const(block_id, 64, n as u64);
-    let new_rc = ll_func.push_int_add(block_id, rc, n_val);
-    ll_func.push_store(block_id, rc_ptr, new_rc);
+    let hdr = e.struct_field_ptr(ll_arr, rc_struct, 0);
+    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let n_val = e.int_const(64, n as u64);
+    let new_rc = e.int_add(rc, n_val);
+    e.ll_store(rc_ptr, new_rc);
 }
 
-/// Lower MemOp::Drop — call the generated drop function.
+/// Lower MemOp::Drop -- call the generated drop function.
 fn lower_rc_drop(
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     value: ValueId,
@@ -630,12 +604,12 @@ fn lower_rc_drop(
     let arr_type = fn_type_info.get_value_type(value);
     let drop_fn_id = get_or_create_drop_fn(arr_type, llssa, drop_fns);
     let ll_arr = val_map[&value];
-    ll_func.push_call(block_id, drop_fn_id, vec![ll_arr], 0);
+    e.call(drop_fn_id, vec![ll_arr], 0);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Drop function generation
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 /// Generate all drop function bodies after user functions are lowered.
 fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
@@ -649,8 +623,8 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
 /// Generate a type-specific drop function.
 ///
 /// Structure:
-///   entry: decrement RC, check if zero → free or done
-///   free_blk: (optionally loop to drop inner elements) → Free → done
+///   entry: decrement RC, check if zero -> free or done
+///   free_blk: (optionally loop to drop inner elements) -> Free -> done
 ///   done: Return
 fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
     let (et, count) = array_info(ty);
@@ -660,65 +634,61 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
 
     let mut func = LLFunction::empty(format!("drop_{}", ty));
     let entry = func.get_entry_id();
+    let (free_blk, _) = func.add_block_mut();
+    let (done_blk, _) = func.add_block_mut();
 
-    // Parameter: ptr
-    let ptr = func.add_parameter(entry, LLType::Ptr);
+    {
+        let mut e = BlockEmitter::new(&mut func, entry);
 
-    // Load RC, decrement, store
-    let hdr = func.push_struct_field_ptr(entry, ptr, rc_struct.clone(), 0);
-    let rc_ptr = func.push_struct_field_ptr(entry, hdr, LLStruct::rc_header(), 0);
-    let rc = func.push_load(entry, rc_ptr, LLType::i64());
-    let one = func.push_int_const(entry, 64, 1);
-    let new_rc = func.push_int_sub(entry, rc, one);
-    func.push_store(entry, rc_ptr, new_rc);
+        // Parameter: ptr
+        let ptr = e.add_parameter(LLType::Ptr);
 
-    // Check if dead (new_rc == 0)
-    let zero = func.push_int_const(entry, 64, 0);
-    let dead = func.push_int_eq(entry, new_rc, zero);
+        // Load RC, decrement, store
+        let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
+        let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+        let rc = e.ll_load(rc_ptr, LLType::i64());
+        let one = e.int_const(64, 1);
+        let new_rc = e.int_sub(rc, one);
+        e.ll_store(rc_ptr, new_rc);
 
-    let free_blk = func.add_block();
-    let done_blk = func.add_block();
+        // Check if dead (new_rc == 0)
+        let zero = e.int_const(64, 0);
+        let dead = e.int_eq(new_rc, zero);
 
-    func.terminate_block_with_jmp_if(entry, dead, free_blk, done_blk);
+        e.terminate_jmp_if(dead, free_blk, done_blk);
+    }
 
     if elem_is_ptr {
-        // Elements contain pointers — loop and drop each inner element
+        // Elements contain pointers -- loop and drop each inner element
         let inner_drop_fn = drop_fns
             .iter()
             .find(|e| e.hlssa_type == *et)
             .expect("inner drop fn should exist")
             .fn_id;
 
-        // free_blk → loop header
-        let loop_header = func.add_block();
-        let loop_body = func.add_block();
-        let loop_exit = func.add_block();
+        // We need the ptr value to access inside the loop body.
+        // Re-read it from the entry block parameters.
+        let ptr = func.get_block(entry).get_parameter_values().next().copied().unwrap();
 
-        let init_i = func.push_int_const(free_blk, 64, 0);
-        func.terminate_block_with_jmp(free_blk, loop_header, vec![init_i]);
+        let mut e = BlockEmitter::new(&mut func, free_blk);
+        let data = e.struct_field_ptr(ptr, rc_struct, 1);
 
-        // loop_header: i = param, check i < count
-        let i_param = func.add_parameter(loop_header, LLType::i64());
-        let count_val = func.push_int_const(loop_header, 64, count as u64);
-        let cmp = func.push_int_ult(loop_header, i_param, count_val);
-        func.terminate_block_with_jmp_if(loop_header, cmp, loop_body, loop_exit);
+        e.build_counted_loop(count, vec![], |e, i_val, _| {
+            let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
+            let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
+            e.call(inner_drop_fn, vec![elem_val], 0);
+            vec![]
+        });
 
-        // loop_body: load element ptr, call inner drop, increment i
-        let data = func.push_struct_field_ptr(loop_body, ptr, rc_struct, 1);
-        let elem_ptr = func.push_array_elem_ptr(loop_body, data, es, i_param);
-        let elem_val = func.push_load(loop_body, elem_ptr, LLType::Ptr);
-        func.push_call(loop_body, inner_drop_fn, vec![elem_val], 0);
-        let one_loop = func.push_int_const(loop_body, 64, 1);
-        let next_i = func.push_int_add(loop_body, i_param, one_loop);
-        func.terminate_block_with_jmp(loop_body, loop_header, vec![next_i]);
-
-        // loop_exit: free and jump to done
-        func.push_free(loop_exit, ptr);
-        func.terminate_block_with_jmp(loop_exit, done_blk, vec![]);
+        e.free(ptr);
+        e.terminate_jmp(done_blk, vec![]);
     } else {
-        // No recursive drops needed — just free
-        func.push_free(free_blk, ptr);
-        func.terminate_block_with_jmp(free_blk, done_blk, vec![]);
+        // No recursive drops needed -- just free
+        let ptr = func.get_block(entry).get_parameter_values().next().copied().unwrap();
+
+        let mut e = BlockEmitter::new(&mut func, free_blk);
+        e.free(ptr);
+        e.terminate_jmp(done_blk, vec![]);
     }
 
     // done: return
@@ -727,14 +697,13 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
     func
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // Terminator lowering
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 fn lower_terminator(
     terminator: &Terminator,
-    ll_func: &mut LLFunction,
-    block_id: BlockId,
+    e: &mut BlockEmitter<'_, LLOp, LLType>,
     val_map: &HashMap<ValueId, ValueId>,
     block_map: &HashMap<BlockId, BlockId>,
 ) {
@@ -742,17 +711,17 @@ fn lower_terminator(
         Terminator::Jmp(target, args) => {
             let ll_target = block_map[target];
             let ll_args: Vec<ValueId> = args.iter().map(|a| val_map[a]).collect();
-            ll_func.terminate_block_with_jmp(block_id, ll_target, ll_args);
+            e.terminate_jmp(ll_target, ll_args);
         }
         Terminator::JmpIf(cond, then_target, else_target) => {
             let ll_cond = val_map[cond];
             let ll_then = block_map[then_target];
             let ll_else = block_map[else_target];
-            ll_func.terminate_block_with_jmp_if(block_id, ll_cond, ll_then, ll_else);
+            e.terminate_jmp_if(ll_cond, ll_then, ll_else);
         }
         Terminator::Return(values) => {
             let ll_values: Vec<ValueId> = values.iter().map(|v| val_map[v]).collect();
-            ll_func.terminate_block_with_return(block_id, ll_values);
+            e.terminate_return(ll_values);
         }
     }
 }

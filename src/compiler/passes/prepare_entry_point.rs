@@ -78,7 +78,7 @@ impl PrepareEntryPoint {
         ssa.set_entry_point(wrapper_id);
     }
 
-    fn assert_eq_deep(b: &mut BlockEmitter, result: ValueId, public_input: ValueId, typ: &Type) {
+    fn assert_eq_deep(b: &mut BlockEmitter<'_, OpCode, Type>, result: ValueId, public_input: ValueId, typ: &Type) {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
                 b.assert_eq(result, public_input);

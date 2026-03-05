@@ -424,7 +424,7 @@ impl WitnessLowering {
         value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut BlockEmitter<'_, OpCode, Type>,
     ) -> ValueId {
         let converted_source = self.witness_lowering_in_type(source_type);
         if converted_source == *target_type {
@@ -482,7 +482,7 @@ impl WitnessLowering {
         array_len: usize,
         _source_array_type: &Type,
         target_array_type: &Type,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut BlockEmitter<'_, OpCode, Type>,
     ) -> ValueId {
         let initial_dst =
             self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);
@@ -542,7 +542,7 @@ impl WitnessLowering {
         value: ValueId,
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut BlockEmitter<'_, OpCode, Type>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_lowering_in_type(&value_type);

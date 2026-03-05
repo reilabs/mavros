@@ -422,9 +422,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
             })
             .sum()
     }
-}
 
-impl HLFunction {
     pub fn terminate_block_with_jmp_if(
         &mut self,
         block_id: BlockId,

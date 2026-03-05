@@ -847,393 +847,7 @@ pub type LLSSA = SSA<LLOp, LLType>;
 pub type LLFunction = Function<LLOp, LLType>;
 pub type LLBlock = Block<LLOp, LLType>;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Builder methods
-// ═══════════════════════════════════════════════════════════════════════════════
-
-impl LLFunction {
-    // ── Constants ────────────────────────────────────────────────────────
-
-    pub fn push_int_const(&mut self, block_id: BlockId, bits: u32, value: u64) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::IntConst {
-                result,
-                bits,
-                value,
-            });
-        result
-    }
-
-    pub fn push_null_ptr(&mut self, block_id: BlockId) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::NullPtr { result });
-        result
-    }
-
-    // ── Integer Arithmetic ──────────────────────────────────────────────
-
-    pub fn push_int_arith(
-        &mut self,
-        block_id: BlockId,
-        kind: IntArithOp,
-        a: ValueId,
-        b: ValueId,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::IntArith { kind, result, a, b });
-        result
-    }
-
-    pub fn push_int_add(&mut self, block_id: BlockId, a: ValueId, b: ValueId) -> ValueId {
-        self.push_int_arith(block_id, IntArithOp::Add, a, b)
-    }
-
-    pub fn push_int_sub(&mut self, block_id: BlockId, a: ValueId, b: ValueId) -> ValueId {
-        self.push_int_arith(block_id, IntArithOp::Sub, a, b)
-    }
-
-    pub fn push_int_mul(&mut self, block_id: BlockId, a: ValueId, b: ValueId) -> ValueId {
-        self.push_int_arith(block_id, IntArithOp::Mul, a, b)
-    }
-
-    pub fn push_not(&mut self, block_id: BlockId, value: ValueId) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Not { result, value });
-        result
-    }
-
-    // ── Integer Comparison ──────────────────────────────────────────────
-
-    pub fn push_int_cmp(
-        &mut self,
-        block_id: BlockId,
-        kind: IntCmpOp,
-        a: ValueId,
-        b: ValueId,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::IntCmp { kind, result, a, b });
-        result
-    }
-
-    pub fn push_int_eq(&mut self, block_id: BlockId, a: ValueId, b: ValueId) -> ValueId {
-        self.push_int_cmp(block_id, IntCmpOp::Eq, a, b)
-    }
-
-    pub fn push_int_ult(&mut self, block_id: BlockId, a: ValueId, b: ValueId) -> ValueId {
-        self.push_int_cmp(block_id, IntCmpOp::ULt, a, b)
-    }
-
-    // ── Width conversion ────────────────────────────────────────────────
-
-    pub fn push_truncate(&mut self, block_id: BlockId, value: ValueId, to_bits: u32) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Truncate {
-                result,
-                value,
-                to_bits,
-            });
-        result
-    }
-
-    pub fn push_zext(&mut self, block_id: BlockId, value: ValueId, to_bits: u32) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id).push_instruction(LLOp::ZExt {
-            result,
-            value,
-            to_bits,
-        });
-        result
-    }
-
-    // ── Field Arithmetic ────────────────────────────────────────────────
-
-    pub fn push_field_arith(
-        &mut self,
-        block_id: BlockId,
-        kind: FieldArithOp,
-        a: ValueId,
-        b: ValueId,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::FieldArith { kind, result, a, b });
-        result
-    }
-
-    pub fn push_field_neg(&mut self, block_id: BlockId, src: ValueId) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::FieldNeg { result, src });
-        result
-    }
-
-    pub fn push_field_eq(&mut self, block_id: BlockId, a: ValueId, b: ValueId) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::FieldEq { result, a, b });
-        result
-    }
-
-    pub fn push_field_to_limbs(&mut self, block_id: BlockId, src: ValueId) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::FieldToLimbs { result, src });
-        result
-    }
-
-    pub fn push_field_from_limbs(&mut self, block_id: BlockId, limbs: ValueId) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::FieldFromLimbs { result, limbs });
-        result
-    }
-
-    // ── Aggregate ───────────────────────────────────────────────────────
-
-    pub fn push_mk_struct(
-        &mut self,
-        block_id: BlockId,
-        struct_type: LLStruct,
-        fields: Vec<ValueId>,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::MkStruct {
-                result,
-                struct_type,
-                fields,
-            });
-        result
-    }
-
-    pub fn push_extract_field(
-        &mut self,
-        block_id: BlockId,
-        value: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::ExtractField {
-                result,
-                value,
-                struct_type,
-                field,
-            });
-        result
-    }
-
-    pub fn push_insert_field(
-        &mut self,
-        block_id: BlockId,
-        base: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-        value: ValueId,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::InsertField {
-                result,
-                base,
-                struct_type,
-                field,
-                value,
-            });
-        result
-    }
-
-    // ── Memory ──────────────────────────────────────────────────────────
-
-    pub fn push_heap_alloc(
-        &mut self,
-        block_id: BlockId,
-        struct_type: LLStruct,
-        flex_count: Option<ValueId>,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::HeapAlloc {
-                result,
-                struct_type,
-                flex_count,
-            });
-        result
-    }
-
-    pub fn push_free(&mut self, block_id: BlockId, ptr: ValueId) {
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Free { ptr });
-    }
-
-    pub fn push_load(&mut self, block_id: BlockId, ptr: ValueId, ty: LLType) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Load { result, ptr, ty });
-        result
-    }
-
-    pub fn push_store(&mut self, block_id: BlockId, ptr: ValueId, value: ValueId) {
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Store { ptr, value });
-    }
-
-    pub fn push_struct_field_ptr(
-        &mut self,
-        block_id: BlockId,
-        ptr: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::StructFieldPtr {
-                result,
-                ptr,
-                struct_type,
-                field,
-            });
-        result
-    }
-
-    pub fn push_array_elem_ptr(
-        &mut self,
-        block_id: BlockId,
-        ptr: ValueId,
-        elem_type: LLStruct,
-        index: ValueId,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::ArrayElemPtr {
-                result,
-                ptr,
-                elem_type,
-                index,
-            });
-        result
-    }
-
-    pub fn push_memcpy(
-        &mut self,
-        block_id: BlockId,
-        dst: ValueId,
-        src: ValueId,
-        struct_type: LLStruct,
-        count: Option<ValueId>,
-    ) {
-        self.get_block_mut(block_id).push_instruction(LLOp::Memcpy {
-            dst,
-            src,
-            struct_type,
-            count,
-        });
-    }
-
-    // ── Selection ───────────────────────────────────────────────────────
-
-    pub fn push_select(
-        &mut self,
-        block_id: BlockId,
-        cond: ValueId,
-        if_t: ValueId,
-        if_f: ValueId,
-    ) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id).push_instruction(LLOp::Select {
-            result,
-            cond,
-            if_t,
-            if_f,
-        });
-        result
-    }
-
-    // ── Calls ───────────────────────────────────────────────────────────
-
-    pub fn push_call(
-        &mut self,
-        block_id: BlockId,
-        func: FunctionId,
-        args: Vec<ValueId>,
-        num_results: usize,
-    ) -> Vec<ValueId> {
-        let results: Vec<ValueId> = (0..num_results).map(|_| self.fresh_value()).collect();
-        self.get_block_mut(block_id).push_instruction(LLOp::Call {
-            results: results.clone(),
-            func,
-            args,
-        });
-        results
-    }
-
-    // ── Globals ─────────────────────────────────────────────────────────
-
-    pub fn push_global_addr(&mut self, block_id: BlockId, global_id: usize) -> ValueId {
-        let result = self.fresh_value();
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::GlobalAddr { result, global_id });
-        result
-    }
-
-    // ── VM / Constraint ─────────────────────────────────────────────────
-
-    pub fn push_constrain(&mut self, block_id: BlockId, a: ValueId, b: ValueId, c: ValueId) {
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::Constrain { a, b, c });
-    }
-
-    pub fn push_write_witness(&mut self, block_id: BlockId, value: ValueId) {
-        self.get_block_mut(block_id)
-            .push_instruction(LLOp::WriteWitness { value });
-    }
-
-    // ── Trap ────────────────────────────────────────────────────────────
-
-    pub fn push_trap(&mut self, block_id: BlockId) {
-        self.get_block_mut(block_id).push_instruction(LLOp::Trap);
-    }
-
-    // ── Terminators ─────────────────────────────────────────────────────
-
-    pub fn terminate_block_with_jmp(
-        &mut self,
-        block_id: BlockId,
-        destination: BlockId,
-        arguments: Vec<ValueId>,
-    ) {
-        self.get_block_mut(block_id)
-            .set_terminator(Terminator::Jmp(destination, arguments));
-    }
-
-    pub fn terminate_block_with_jmp_if(
-        &mut self,
-        block_id: BlockId,
-        condition: ValueId,
-        then_destination: BlockId,
-        else_destination: BlockId,
-    ) {
-        self.get_block_mut(block_id)
-            .set_terminator(Terminator::JmpIf(
-                condition,
-                then_destination,
-                else_destination,
-            ));
-    }
-
-    pub fn terminate_block_with_return(&mut self, block_id: BlockId, return_values: Vec<ValueId>) {
-        self.get_block_mut(block_id)
-            .set_terminator(Terminator::Return(return_values));
-    }
-}
+// Builder methods are provided by the LLEmitter trait in block_builder.rs.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests
@@ -1242,6 +856,7 @@ impl LLFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::block_builder::{BlockEmitter, LLEmitter};
     use crate::compiler::ssa::DefaultSsaAnnotator;
 
     #[test]
@@ -1341,15 +956,16 @@ mod tests {
     #[test]
     fn build_simple_function() {
         let mut ssa = LLSSA::with_main("test_main".to_string());
-        let main_id = ssa.get_main_id();
         let func = ssa.get_main_mut();
         let entry = func.get_entry_id();
 
-        // Build: x = 42; y = 7; z = x + y; return z
-        let x = func.push_int_const(entry, 64, 42);
-        let y = func.push_int_const(entry, 64, 7);
-        let z = func.push_int_add(entry, x, y);
-        func.terminate_block_with_return(entry, vec![z]);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let x = e.int_const(64, 42);
+            let y = e.int_const(64, 7);
+            let z = e.int_add(x, y);
+            e.terminate_return(vec![z]);
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("int_const i64 42"));
@@ -1371,15 +987,18 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        let l0 = func.push_int_const(entry, 64, 1);
-        let l1 = func.push_int_const(entry, 64, 0);
-        let l2 = func.push_int_const(entry, 64, 0);
-        let l3 = func.push_int_const(entry, 64, 0);
-        let s = func.push_mk_struct(entry, field_elem.clone(), vec![l0, l1, l2, l3]);
-        let f0 = func.push_extract_field(entry, s, field_elem.clone(), 0);
-        let new_val = func.push_int_const(entry, 64, 99);
-        let s2 = func.push_insert_field(entry, s, field_elem, 0, new_val);
-        func.terminate_block_with_return(entry, vec![f0, s2]);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let l0 = e.int_const(64, 1);
+            let l1 = e.int_const(64, 0);
+            let l2 = e.int_const(64, 0);
+            let l3 = e.int_const(64, 0);
+            let s = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
+            let f0 = e.extract_field(s, field_elem.clone(), 0);
+            let new_val = e.int_const(64, 99);
+            let s2 = e.insert_field(s, field_elem, 0, new_val);
+            e.terminate_return(vec![f0, s2]);
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("mk_struct"));
@@ -1405,18 +1024,21 @@ mod tests {
             LLFieldType::InlineArray(field_elem.clone(), 3),
         ]);
 
-        let arr = func.push_heap_alloc(entry, rc_array.clone(), None);
-        let rc_ptr = func.push_struct_field_ptr(entry, arr, rc_array.clone(), 0);
-        let rc_word = func.push_struct_field_ptr(entry, rc_ptr, rc_header, 0);
-        let one = func.push_int_const(entry, 64, 1);
-        func.push_store(entry, rc_word, one);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let arr = e.heap_alloc(rc_array.clone(), None);
+            let rc_ptr = e.struct_field_ptr(arr, rc_array.clone(), 0);
+            let rc_word = e.struct_field_ptr(rc_ptr, rc_header, 0);
+            let one = e.int_const(64, 1);
+            e.ll_store(rc_word, one);
 
-        let data = func.push_struct_field_ptr(entry, arr, rc_array, 1);
-        let idx = func.push_int_const(entry, 64, 0);
-        let elem_ptr = func.push_array_elem_ptr(entry, data, field_elem, idx);
-        let loaded = func.push_load(entry, elem_ptr, LLType::i64());
-        func.push_free(entry, arr);
-        func.terminate_block_with_return(entry, vec![loaded]);
+            let data = e.struct_field_ptr(arr, rc_array, 1);
+            let idx = e.int_const(64, 0);
+            let elem_ptr = e.array_elem_ptr(data, field_elem, idx);
+            let loaded = e.ll_load(elem_ptr, LLType::i64());
+            e.free(arr);
+            e.terminate_return(vec![loaded]);
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("heap_alloc"));
@@ -1434,12 +1056,15 @@ mod tests {
         let func = ssa.get_main_mut();
         let entry = func.get_entry_id();
 
-        let a = func.push_int_const(entry, 64, 1);
-        let b = func.push_int_const(entry, 64, 2);
-        let results = func.push_call(entry, helper_id, vec![a, b], 1);
-        let cond = func.push_int_eq(entry, results[0], a);
-        let selected = func.push_select(entry, cond, a, b);
-        func.terminate_block_with_return(entry, vec![selected]);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let a = e.int_const(64, 1);
+            let b = e.int_const(64, 2);
+            let results = e.call(helper_id, vec![a, b], 1);
+            let cond = e.int_eq(results[0], a);
+            let selected = e.select(cond, a, b);
+            e.terminate_return(vec![selected]);
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("call helper@"));
@@ -1460,19 +1085,22 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        let l0 = func.push_int_const(entry, 64, 1);
-        let l1 = func.push_int_const(entry, 64, 0);
-        let l2 = func.push_int_const(entry, 64, 0);
-        let l3 = func.push_int_const(entry, 64, 0);
-        let a = func.push_mk_struct(entry, field_elem.clone(), vec![l0, l1, l2, l3]);
-        let b = func.push_mk_struct(entry, field_elem, vec![l0, l1, l2, l3]);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let l0 = e.int_const(64, 1);
+            let l1 = e.int_const(64, 0);
+            let l2 = e.int_const(64, 0);
+            let l3 = e.int_const(64, 0);
+            let a = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
+            let b = e.mk_struct(field_elem, vec![l0, l1, l2, l3]);
 
-        let c = func.push_field_arith(entry, FieldArithOp::Add, a, b);
-        let d = func.push_field_neg(entry, c);
-        let eq = func.push_field_eq(entry, c, d);
-        let limbs = func.push_field_to_limbs(entry, d);
-        let back = func.push_field_from_limbs(entry, limbs);
-        func.terminate_block_with_return(entry, vec![eq, back]);
+            let c = e.field_arith(FieldArithOp::Add, a, b);
+            let d = e.field_neg(c);
+            let eq = e.field_eq(c, d);
+            let limbs = e.field_to_limbs(d);
+            let back = e.field_from_limbs(limbs);
+            e.terminate_return(vec![eq, back]);
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("field.add"));
@@ -1488,12 +1116,15 @@ mod tests {
         let func = ssa.get_main_mut();
         let entry = func.get_entry_id();
 
-        let x = func.push_int_const(entry, 64, 256);
-        let narrow = func.push_truncate(entry, x, 8);
-        let wide = func.push_zext(entry, narrow, 64);
-        let gp = func.push_global_addr(entry, 3);
-        func.push_store(entry, gp, wide);
-        func.push_trap(entry);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let x = e.int_const(64, 256);
+            let narrow = e.truncate(x, 8);
+            let wide = e.zext(narrow, 64);
+            let gp = e.global_addr(3);
+            e.ll_store(gp, wide);
+            e.trap();
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("trunc"));
@@ -1511,16 +1142,23 @@ mod tests {
         let else_blk = func.add_block();
         let merge_blk = func.add_block();
 
-        let x = func.push_int_const(entry, 64, 42);
-        let zero = func.push_int_const(entry, 64, 0);
-        let cond = func.push_int_eq(entry, x, zero);
-        func.terminate_block_with_jmp_if(entry, cond, then_blk, else_blk);
-
-        let one = func.push_int_const(then_blk, 64, 1);
-        func.terminate_block_with_jmp(then_blk, merge_blk, vec![one]);
-
-        let two = func.push_int_const(else_blk, 64, 2);
-        func.terminate_block_with_jmp(else_blk, merge_blk, vec![two]);
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let x = e.int_const(64, 42);
+            let zero = e.int_const(64, 0);
+            let cond = e.int_eq(x, zero);
+            e.terminate_jmp_if(cond, then_blk, else_blk);
+        }
+        {
+            let mut e = BlockEmitter::new(func, then_blk);
+            let one = e.int_const(64, 1);
+            e.terminate_jmp(merge_blk, vec![one]);
+        }
+        {
+            let mut e = BlockEmitter::new(func, else_blk);
+            let two = e.int_const(64, 2);
+            e.terminate_jmp(merge_blk, vec![two]);
+        }
 
         func.terminate_block_with_return(merge_blk, vec![]);
 
@@ -1536,11 +1174,15 @@ mod tests {
         let entry = func.get_entry_id();
 
         let elem = LLStruct::new(vec![LLFieldType::Int(64)]);
-        let dst = func.push_null_ptr(entry);
-        let src = func.push_null_ptr(entry);
-        let count = func.push_int_const(entry, 64, 10);
-        func.push_memcpy(entry, dst, src, elem, Some(count));
-        func.terminate_block_with_return(entry, vec![]);
+
+        {
+            let mut e = BlockEmitter::new(func, entry);
+            let dst = e.null_ptr();
+            let src = e.null_ptr();
+            let count = e.int_const(64, 10);
+            e.memcpy(dst, src, elem, Some(count));
+            e.terminate_return(vec![]);
+        }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("memcpy"));

@@ -466,7 +466,7 @@ impl WitnessCastInsertion {
         value: ValueId,
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut BlockEmitter<'_, OpCode, Type>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         if *value_type == *target_type {
@@ -480,7 +480,7 @@ impl WitnessCastInsertion {
         value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut BlockEmitter<'_, OpCode, Type>,
     ) -> ValueId {
         match (&source_type.expr, &target_type.expr) {
             // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
@@ -532,7 +532,7 @@ impl WitnessCastInsertion {
         tgt_elem_type: &Type,
         array_len: usize,
         target_array_type: &Type,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut BlockEmitter<'_, OpCode, Type>,
     ) -> ValueId {
         let initial_dst =
             self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);
