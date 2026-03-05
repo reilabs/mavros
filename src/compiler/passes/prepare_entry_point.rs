@@ -254,22 +254,40 @@ impl PrepareEntryPoint {
             TypeExpr::Field => {
                 // WriteWitness the field value directly
                 let ww_result = function.fresh_value();
-                instructions.push(OpCode::WriteWitness { result: Some(ww_result), value: *value_id, pinned: false });
+                instructions.push(OpCode::WriteWitness {
+                    result: Some(ww_result),
+                    value: *value_id,
+                    pinned: false,
+                });
                 (ww_result, instructions)
             }
             TypeExpr::U(size) => {
                 // Cast to Field, WriteWitness, rangecheck, cast back
                 let as_field = function.fresh_value();
-                instructions.push(OpCode::Cast { result: as_field, value: *value_id, target: CastTarget::Field });
+                instructions.push(OpCode::Cast {
+                    result: as_field,
+                    value: *value_id,
+                    target: CastTarget::Field,
+                });
                 let ww_result = function.fresh_value();
-                instructions.push(OpCode::WriteWitness { result: Some(ww_result), value: as_field, pinned: false });
+                instructions.push(OpCode::WriteWitness {
+                    result: Some(ww_result),
+                    value: as_field,
+                    pinned: false,
+                });
 
                 if *size == 1 {
                     // Boolean constraint: x * (x - 1) = 0
                     let zero = function.fresh_value();
-                    instructions.push(OpCode::Const { result: zero, value: ConstValue::Field(ark_bn254::Fr::from(0)) });
+                    instructions.push(OpCode::Const {
+                        result: zero,
+                        value: ConstValue::Field(ark_bn254::Fr::from(0)),
+                    });
                     let one = function.fresh_value();
-                    instructions.push(OpCode::Const { result: one, value: ConstValue::Field(ark_bn254::Fr::from(1)) });
+                    instructions.push(OpCode::Const {
+                        result: one,
+                        value: ConstValue::Field(ark_bn254::Fr::from(1)),
+                    });
                     let x_sub_1 = function.fresh_value();
                     let x_times_x_sub_1 = function.fresh_value();
                     instructions.push(OpCode::BinaryArithOp {
@@ -307,7 +325,10 @@ impl PrepareEntryPoint {
                 let mut elems = Vec::new();
                 for i in 0..*size {
                     let index = function.fresh_value();
-                    instructions.push(OpCode::Const { result: index, value: ConstValue::U(32, i as u128) });
+                    instructions.push(OpCode::Const {
+                        result: index,
+                        value: ConstValue::U(32, i as u128),
+                    });
                     let elem = function.fresh_value();
                     instructions.push(OpCode::ArrayGet {
                         result: elem,
@@ -355,7 +376,11 @@ impl PrepareEntryPoint {
             _ => {
                 // For other types, just WriteWitness directly
                 let ww_result = function.fresh_value();
-                instructions.push(OpCode::WriteWitness { result: Some(ww_result), value: *value_id, pinned: false });
+                instructions.push(OpCode::WriteWitness {
+                    result: Some(ww_result),
+                    value: *value_id,
+                    pinned: false,
+                });
                 (ww_result, instructions)
             }
         }

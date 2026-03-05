@@ -213,7 +213,6 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         info!(message = %"VM memory leak not detected");
     }
 
-
     fs::write(
         api::debug_output_dir(&driver).join("witness_pre_comm.txt"),
         witgen_result

@@ -179,8 +179,7 @@ impl<'a> ExpressionConverter<'a> {
                 let for_loop_index = ctx.for_loop_index;
                 if let Some((loop_index, index_bit_size)) = for_loop_index {
                     // For loop: increment index and jump back to header
-                    let one =
-                        self.get_or_create_const(b, ConstValue::U(index_bit_size, 1));
+                    let one = self.get_or_create_const(b, ConstValue::U(index_bit_size, 1));
                     let mut e = b.block(self.current_block);
                     let next_index = e.add(loop_index, one);
                     e.terminate_jmp(loop_header, vec![next_index]);
@@ -573,11 +572,7 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    fn convert_while(
-        &mut self,
-        while_expr: &While,
-        b: &mut FunctionBuilder,
-    ) -> Option<ValueId> {
+    fn convert_while(&mut self, while_expr: &While, b: &mut FunctionBuilder) -> Option<ValueId> {
         // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
@@ -589,9 +584,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // In loop header: evaluate condition, branch
         self.current_block = loop_header;
-        let cond = self
-            .convert_expression(&while_expr.condition, b)
-            .unwrap();
+        let cond = self.convert_expression(&while_expr.condition, b).unwrap();
         b.block(loop_header)
             .terminate_jmp_if(cond, loop_body, exit_block);
 
@@ -620,11 +613,7 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    fn convert_loop(
-        &mut self,
-        body: &Expression,
-        b: &mut FunctionBuilder,
-    ) -> Option<ValueId> {
+    fn convert_loop(&mut self, body: &Expression, b: &mut FunctionBuilder) -> Option<ValueId> {
         // loop { body } — only exits via break
         let loop_block = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
@@ -1118,12 +1107,15 @@ impl<'a> ExpressionConverter<'a> {
                         let return_size = self.return_size(return_type);
 
                         // Constrained calling unconstrained: emit unconstrained call
-                        let is_unconstrained_call = !self.in_unconstrained
-                            && self.natively_unconstrained.contains(func_id);
+                        let is_unconstrained_call =
+                            !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
 
                         let results = if is_unconstrained_call {
-                            b.block(self.current_block)
-                                .call_unconstrained(*ssa_func_id, args, return_size)
+                            b.block(self.current_block).call_unconstrained(
+                                *ssa_func_id,
+                                args,
+                                return_size,
+                            )
                         } else {
                             b.block(self.current_block)
                                 .call(*ssa_func_id, args, return_size)

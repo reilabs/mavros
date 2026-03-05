@@ -256,8 +256,7 @@ impl SymbolicExecutor {
                             // Unconstrained calls are not followed — set outputs to unknown
                             for result in returns.iter() {
                                 let result_type = fn_type_info.get_value_type(*result);
-                                scope[result.0 as usize] =
-                                    Some(V::make_unknown(result_type, ctx));
+                                scope[result.0 as usize] = Some(V::make_unknown(result_type, ctx));
                             }
                         } else {
                             let params = arguments

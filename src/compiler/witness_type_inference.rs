@@ -694,8 +694,7 @@ impl WitnessTypeInference {
                             // (their outputs go through WriteWitness in PrepareEntryPoint)
                             let callee_func = ssa.get_function(*callee_id);
                             let callee_return_types = callee_func.get_returns();
-                            for (result, ret_type) in
-                                results.iter().zip(callee_return_types.iter())
+                            for (result, ret_type) in results.iter().zip(callee_return_types.iter())
                             {
                                 let pure_wt = Self::construct_pure_witness_for_type(ret_type);
                                 value_wt.insert(*result, pure_wt);

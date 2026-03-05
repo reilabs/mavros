@@ -300,7 +300,12 @@ impl DCE {
                                             // calls are always initially live so this passes immediately.
                                             // Unconstrained calls may be dead; when they later become
                                             // live, LiveInstruction handling will propagate at that point.
-                                            if !self.instruction_live(&live_instructions, *caller_fn, *caller_block, *caller_i) {
+                                            if !self.instruction_live(
+                                                &live_instructions,
+                                                *caller_fn,
+                                                *caller_block,
+                                                *caller_i,
+                                            ) {
                                                 continue;
                                             }
                                             let caller = ssa.get_function(*caller_fn);
