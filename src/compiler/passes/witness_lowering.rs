@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     analysis::types::TypeInfo,
-    block_builder::{BlockEmitter, HLEmitter},
+    block_builder::{HLBlockEmitter, HLEmitter},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -66,7 +66,7 @@ impl WitnessLowering {
                 let terminator = function.get_block_mut(bid).take_terminator();
                 let instructions = function.get_block_mut(bid).take_instructions();
 
-                let mut emitter = BlockEmitter::new(function, bid);
+                let mut emitter = HLBlockEmitter::new(function, bid);
 
                 for mut instruction in instructions.into_iter() {
                     replacements.replace_instruction(&mut instruction);
@@ -424,7 +424,7 @@ impl WitnessLowering {
         value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        emitter: &mut BlockEmitter<'_, OpCode, Type>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         let converted_source = self.witness_lowering_in_type(source_type);
         if converted_source == *target_type {
@@ -482,7 +482,7 @@ impl WitnessLowering {
         array_len: usize,
         _source_array_type: &Type,
         target_array_type: &Type,
-        emitter: &mut BlockEmitter<'_, OpCode, Type>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         let initial_dst =
             self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);
@@ -542,7 +542,7 @@ impl WitnessLowering {
         value: ValueId,
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-        emitter: &mut BlockEmitter<'_, OpCode, Type>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_lowering_in_type(&value_type);

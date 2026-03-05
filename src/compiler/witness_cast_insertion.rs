@@ -4,7 +4,7 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::types::Types,
-    block_builder::{BlockEmitter, HLEmitter},
+    block_builder::{HLBlockEmitter, HLEmitter},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{BlockId, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx, ValueId},
@@ -267,7 +267,7 @@ impl WitnessCastInsertion {
             let terminator = function.get_block_mut(bid).take_terminator();
             let instructions = function.get_block_mut(bid).take_instructions();
 
-            let mut emitter = BlockEmitter::new(function, bid);
+            let mut emitter = HLBlockEmitter::new(function, bid);
 
             for instruction in instructions.into_iter() {
                 match instruction {
@@ -466,7 +466,7 @@ impl WitnessCastInsertion {
         value: ValueId,
         target_type: &Type,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-        emitter: &mut BlockEmitter<'_, OpCode, Type>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         let value_type = type_info.get_value_type(value);
         if *value_type == *target_type {
@@ -480,7 +480,7 @@ impl WitnessCastInsertion {
         value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        emitter: &mut BlockEmitter<'_, OpCode, Type>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         match (&source_type.expr, &target_type.expr) {
             // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
@@ -532,7 +532,7 @@ impl WitnessCastInsertion {
         tgt_elem_type: &Type,
         array_len: usize,
         target_array_type: &Type,
-        emitter: &mut BlockEmitter<'_, OpCode, Type>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         let initial_dst =
             self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);

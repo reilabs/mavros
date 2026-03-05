@@ -12,7 +12,7 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::block_builder::{FunctionBuilder, HLEmitter};
+use crate::compiler::block_builder::{HLFunctionBuilder, HLEmitter};
 use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
 
 use expression_converter::ExpressionConverter;
@@ -229,7 +229,7 @@ impl SsaConverter {
             let init_fn = ssa.get_function_mut(init_fn_id);
             let entry = init_fn.get_entry_id();
 
-            let mut b = FunctionBuilder::new(init_fn);
+            let mut b = HLFunctionBuilder::new(init_fn);
 
             // We need an ExpressionConverter to evaluate initializer expressions
             let mut expr_converter = ExpressionConverter::new_with_globals(
@@ -259,7 +259,7 @@ impl SsaConverter {
         {
             let deinit_fn = ssa.get_function_mut(deinit_fn_id);
             let entry = deinit_fn.get_entry_id();
-            let mut b = FunctionBuilder::new(deinit_fn);
+            let mut b = HLFunctionBuilder::new(deinit_fn);
             for (i, typ) in global_types.iter().enumerate() {
                 if typ.is_heap_allocated() {
                     b.block(entry).drop_global(i);
@@ -297,7 +297,7 @@ impl SsaConverter {
             function.add_return_type(return_type);
         }
 
-        let mut b = FunctionBuilder::new(&mut function);
+        let mut b = HLFunctionBuilder::new(&mut function);
 
         // Create expression converter
         let mut expr_converter = ExpressionConverter::new_with_globals(

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
-use crate::compiler::block_builder::{BlockEmitter, FunctionBuilder, LLEmitter};
+use crate::compiler::block_builder::{LLBlockEmitter, LLEmitter};
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
@@ -195,7 +195,7 @@ fn lower_function(
         let ll_block_id = block_map[&block_id];
 
         // Create a BlockEmitter for this block
-        let mut emitter = BlockEmitter::new(&mut ll_func, ll_block_id);
+        let mut emitter = LLBlockEmitter::new(&mut ll_func, ll_block_id);
 
         // Lower instructions
         for instruction in block.get_instructions() {
@@ -227,7 +227,7 @@ fn lower_function(
 #[allow(clippy::too_many_arguments)]
 fn lower_instruction(
     instruction: &crate::compiler::ssa::OpCode,
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     fn_map: &HashMap<FunctionId, FunctionId>,
@@ -429,7 +429,7 @@ fn lower_instruction(
 
 /// Lower MkSeq(Array) to heap allocation + element stores.
 fn lower_mk_array(
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     elems: &[ValueId],
@@ -462,7 +462,7 @@ fn lower_mk_array(
 
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
 fn lower_array_get(
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     result: ValueId,
@@ -491,7 +491,7 @@ fn lower_array_get(
 /// Lower ArraySet with copy-on-write semantics.
 /// Creates new blocks for the RC check + conditional copy.
 fn lower_array_set(
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     result: ValueId,
@@ -526,7 +526,7 @@ fn lower_array_set(
 
     // -- Mutate in place --
     {
-        let mut me = BlockEmitter::new(e.function, mutate_blk);
+        let mut me = LLBlockEmitter::new(e.function, mutate_blk);
         let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
         let slot = me.array_elem_ptr(data, es.clone(), idx64);
         me.ll_store(slot, ll_val);
@@ -535,7 +535,7 @@ fn lower_array_set(
 
     // -- Copy then mutate --
     {
-        let mut ce = BlockEmitter::new(e.function, copy_blk);
+        let mut ce = LLBlockEmitter::new(e.function, copy_blk);
         // Decrement old RC
         let new_rc = ce.int_sub(rc, one);
         ce.ll_store(rc_ptr, new_rc);
@@ -572,7 +572,7 @@ fn lower_array_set(
 
 /// Lower MemOp::Bump(n) -- increment refcount by n.
 fn lower_rc_bump(
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     n: usize,
@@ -594,7 +594,7 @@ fn lower_rc_bump(
 
 /// Lower MemOp::Drop -- call the generated drop function.
 fn lower_rc_drop(
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     value: ValueId,
@@ -638,7 +638,7 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
     let (done_blk, _) = func.add_block_mut();
 
     {
-        let mut e = BlockEmitter::new(&mut func, entry);
+        let mut e = LLBlockEmitter::new(&mut func, entry);
 
         // Parameter: ptr
         let ptr = e.add_parameter(LLType::Ptr);
@@ -670,7 +670,7 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
         // Re-read it from the entry block parameters.
         let ptr = func.get_block(entry).get_parameter_values().next().copied().unwrap();
 
-        let mut e = BlockEmitter::new(&mut func, free_blk);
+        let mut e = LLBlockEmitter::new(&mut func, free_blk);
         let data = e.struct_field_ptr(ptr, rc_struct, 1);
 
         e.build_counted_loop(count, vec![], |e, i_val, _| {
@@ -686,7 +686,7 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
         // No recursive drops needed -- just free
         let ptr = func.get_block(entry).get_parameter_values().next().copied().unwrap();
 
-        let mut e = BlockEmitter::new(&mut func, free_blk);
+        let mut e = LLBlockEmitter::new(&mut func, free_blk);
         e.free(ptr);
         e.terminate_jmp(done_blk, vec![]);
     }
@@ -703,7 +703,7 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
 
 fn lower_terminator(
     terminator: &Terminator,
-    e: &mut BlockEmitter<'_, LLOp, LLType>,
+    e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     block_map: &HashMap<BlockId, BlockId>,
 ) {

@@ -5,7 +5,7 @@ use ark_ff::{AdditiveGroup, Field as _};
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
-    block_builder::{HLEmitter, InstrBuilder},
+    block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -47,7 +47,7 @@ impl ExplicitWitness {
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
-                    let b = &mut InstrBuilder::new(function, &mut new_instructions);
+                    let b = &mut HLInstrBuilder::new(function, &mut new_instructions);
                     match instruction {
                         OpCode::BinaryArithOp {
                             kind: BinaryArithOpKind::Add,
@@ -601,7 +601,7 @@ impl ExplicitWitness {
 
     fn gen_witness_rangecheck(
         &self,
-        b: &mut InstrBuilder<'_, OpCode, Type>,
+        b: &mut HLInstrBuilder<'_>,
         value: ValueId,
         max_bits: usize,
     ) {

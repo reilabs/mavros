@@ -10,7 +10,7 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    block_builder::{FunctionBuilder, HLEmitter},
+    block_builder::{HLFunctionBuilder, HLEmitter},
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
@@ -675,7 +675,7 @@ impl Specializer {
         let mut dispatcher = HLFunction::empty(fn_name);
         let entry_block = dispatcher.get_entry_id();
 
-        let mut b = FunctionBuilder::new(&mut dispatcher);
+        let mut b = HLFunctionBuilder::new(&mut dispatcher);
 
         let mut dispatcher_params = vec![];
         {

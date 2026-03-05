@@ -776,7 +776,7 @@ impl<'a, Op: Instruction, Ty: SSAType> InstrBuilder<'a, Op, Ty> {
     }
 }
 
-impl HLEmitter for InstrBuilder<'_, OpCode, Type> {
+impl HLEmitter for HLInstrBuilder<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.function.fresh_value()
     }
@@ -786,7 +786,7 @@ impl HLEmitter for InstrBuilder<'_, OpCode, Type> {
     }
 }
 
-impl LLEmitter for InstrBuilder<'_, LLOp, LLType> {
+impl LLEmitter for LLInstrBuilder<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.function.fresh_value()
     }
@@ -795,6 +795,17 @@ impl LLEmitter for InstrBuilder<'_, LLOp, LLType> {
         self.instructions.push(op);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Type aliases
+// ---------------------------------------------------------------------------
+
+pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type>;
+pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, LLType>;
+pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type>;
+pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, LLType>;
+pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type>;
+pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, LLType>;
 
 // ---------------------------------------------------------------------------
 // FunctionBuilder — function-level coordinator (no current_block)
@@ -991,7 +1002,7 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
 
 // -- HLEmitter for BlockEmitter<OpCode, Type> --------------------------------
 
-impl HLEmitter for BlockEmitter<'_, OpCode, Type> {
+impl HLEmitter for HLBlockEmitter<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.function.fresh_value()
     }
@@ -1001,7 +1012,7 @@ impl HLEmitter for BlockEmitter<'_, OpCode, Type> {
     }
 }
 
-impl BlockEmitter<'_, OpCode, Type> {
+impl HLBlockEmitter<'_> {
     /// Build a counted loop: `for i in 0..len { body(i, accumulators) -> updated_accumulators }`
     ///
     /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`),
@@ -1042,7 +1053,7 @@ impl BlockEmitter<'_, OpCode, Type> {
 
 // -- LLEmitter for BlockEmitter<LLOp, LLType> --------------------------------
 
-impl LLEmitter for BlockEmitter<'_, LLOp, LLType> {
+impl LLEmitter for LLBlockEmitter<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.function.fresh_value()
     }
@@ -1052,7 +1063,7 @@ impl LLEmitter for BlockEmitter<'_, LLOp, LLType> {
     }
 }
 
-impl BlockEmitter<'_, LLOp, LLType> {
+impl LLBlockEmitter<'_> {
     /// Build a counted loop: `for i in 0..count { body(i, accumulators) -> updated_accumulators }`
     ///
     /// LL variant: uses i64 index with int_ult/int_add.
