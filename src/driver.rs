@@ -1,6 +1,13 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::PathBuf,
+};
 
 use ark_ff::AdditiveGroup as _;
+use noirc_frontend::debug::DebugInstrumenter;
+use noirc_frontend::monomorphization::Monomorphizer;
+use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
 use tracing::info;
 
 use crate::{
@@ -35,9 +42,14 @@ use crate::{
         },
         r1cs_gen::{R1CGen, R1CS},
         ssa::{DefaultSsaAnnotator, HLSSA},
+        ssa_gen::LowLevelReplacement,
         untaint_control_flow::UntaintControlFlow,
         witness_cast_insertion::WitnessCastInsertion,
         witness_type_inference::WitnessTypeInference,
+    },
+    lowlevel_replacement::{
+        REPLACEMENT_CRATES, add_lowlevel_replacements, find_needed_lowlevels,
+        prepare_replacement_crate,
     },
 };
 
@@ -105,18 +117,44 @@ impl Driver {
         noirc_driver::check_crate(
             &mut context,
             crate_id,
-            &noirc_driver::CompileOptions {
-                deny_warnings: false,
-                debug_comptime_in_file: None,
-                ..Default::default()
-            },
+            &noirc_driver::CompileOptions::default(),
         )
         .map_err(Error::NoirCompilerError)?;
 
+        let mut prepared_replacements = Vec::new();
+        for replacement in REPLACEMENT_CRATES {
+            let functions = prepare_replacement_crate(&mut context, crate_id, replacement)?;
+            prepared_replacements.push((replacement, functions));
+        }
+
         let main = context.get_main_function(context.root_crate_id()).unwrap();
-        let program =
-            noirc_frontend::monomorphization::monomorphize(main, &mut context.def_interner, false)
-                .unwrap();
+        let debug_type_tracker =
+            DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
+        let mut monomorphizer =
+            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
+        monomorphizer.compile_main(main).unwrap();
+
+        monomorphizer.process_queue().unwrap();
+        let needed_lowlevels = find_needed_lowlevels(&monomorphizer);
+
+        let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
+        for (replacement, functions) in &prepared_replacements {
+            if replacement
+                .lowlevel_names()
+                .iter()
+                .any(|name| needed_lowlevels.contains(*name))
+            {
+                add_lowlevel_replacements(
+                    replacement,
+                    functions,
+                    &mut monomorphizer,
+                    &mut lowlevel_replacements,
+                );
+            }
+        }
+
+        monomorphizer.process_queue().unwrap();
+        let program = monomorphizer.into_program();
 
         self.abi = Some(noirc_driver::gen_abi(
             &context,
@@ -126,7 +164,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(HLSSA::from_program(&program));
+        self.initial_ssa = Some(HLSSA::from_program(&program, lowlevel_replacements));
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),

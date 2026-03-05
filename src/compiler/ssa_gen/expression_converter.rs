@@ -17,6 +17,12 @@ use crate::compiler::ssa::{
 
 use super::type_converter::TypeConverter;
 
+/// A LowLevel function replacement: either a single function or a family dispatched by array size.
+pub enum LowLevelReplacement {
+    Single(AstFuncId),
+    ByArraySize(HashMap<u32, AstFuncId>),
+}
+
 /// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
 #[derive(Debug)]
 enum AccessStep {
@@ -54,6 +60,8 @@ pub struct ExpressionConverter<'a> {
     global_slots: &'a HashMap<GlobalId, usize>,
     /// Dedup cache for constants
     const_cache: HashMap<ConstValue, ValueId>,
+    /// Maps LowLevel function name to its replacement
+    lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
     /// Current block being emitted into
     current_block: BlockId,
 }
@@ -63,6 +71,7 @@ impl<'a> ExpressionConverter<'a> {
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
+        lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
         entry_block: BlockId,
     ) -> Self {
         Self {
@@ -73,6 +82,7 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
+            lowlevel_replacements,
             const_cache: HashMap::new(),
             current_block: entry_block,
         }
@@ -1214,11 +1224,47 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_lowlevel_call(
         &mut self,
         name: &str,
-        _call: &noirc_frontend::monomorphization::ast::Call,
-        _b: &mut FunctionBuilder<'_, OpCode, Type>,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        b: &mut FunctionBuilder<'_, OpCode, Type>,
     ) -> Option<ValueId> {
-        match name {
-            _ => todo!("LowLevel function '{}' not yet supported", name),
+        let replacement = self
+            .lowlevel_replacements
+            .get(name)
+            .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name));
+
+        let replacement_id = match replacement {
+            LowLevelReplacement::Single(func_id) => func_id,
+            LowLevelReplacement::ByArraySize(size_map) => {
+                let array_size = match &call.return_type {
+                    noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n as u32,
+                    _ => panic!("{} expected array return type", name),
+                };
+                size_map
+                    .get(&array_size)
+                    .unwrap_or_else(|| panic!("No {} replacement for size {}", name, array_size))
+            }
+        };
+
+        let ssa_func_id = self
+            .function_mapper
+            .get(replacement_id)
+            .unwrap_or_else(|| panic!("Replacement function not in function_mapper"));
+
+        let args: Vec<ValueId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.convert_expression(arg, b).unwrap())
+            .collect();
+
+        let return_size = self.return_size(&call.return_type);
+        let results = b
+            .block(self.current_block)
+            .call(*ssa_func_id, args, return_size);
+
+        if results.is_empty() {
+            None
+        } else {
+            Some(results[0])
         }
     }
 }
