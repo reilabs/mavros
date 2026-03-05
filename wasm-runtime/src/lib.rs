@@ -13,18 +13,36 @@ use ark_ff::BigInt;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
+//
+// Each allocation prepends an 8-byte header storing the requested size so that
+// free() can reconstruct the Layout needed by dealloc().
 // ═══════════════════════════════════════════════════════════════════════════════
+
+const HEADER: usize = 8;
+const ALIGN: usize = 8;
 
 #[no_mangle]
 pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
-    let layout = std::alloc::Layout::from_size_align_unchecked(size as usize, 8);
-    std::alloc::alloc(layout)
+    let total = HEADER + size as usize;
+    let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
+    let base = std::alloc::alloc(layout);
+    if base.is_null() {
+        return base;
+    }
+    *(base as *mut u32) = size;
+    base.add(HEADER)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn free(_ptr: *mut u8) {
-    // Wasm instances are short-lived — leaked memory is reclaimed when the
-    // instance is dropped. Proper dealloc requires tracking allocation sizes.
+pub unsafe extern "C" fn free(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    let base = ptr.sub(HEADER);
+    let size = *(base as *mut u32) as usize;
+    let total = HEADER + size;
+    let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
+    std::alloc::dealloc(base, layout);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
