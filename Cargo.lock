@@ -2224,7 +2224,6 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
- "ssa-builder",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
@@ -3600,16 +3599,6 @@ name = "sptr"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b9b39299b249ad65f3b7e96443bad61c02ca5cd3589f46cb6d610a0fd6c0d6a"
-
-[[package]]
-name = "ssa-builder"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "stringcase",
- "syn 2.0.114",
-]
 
 [[package]]
 name = "stable_deref_trait"
