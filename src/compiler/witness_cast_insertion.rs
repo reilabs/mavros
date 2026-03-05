@@ -571,7 +571,7 @@ impl WitnessCastInsertion {
         let results = emitter.build_counted_loop(
             array_len,
             vec![(initial_dst, target_array_type.clone())],
-            |emitter, i_val, accs| {
+            |emitter: &mut HLBlockEmitter<'_>, i_val, accs| {
                 let dst_val = accs[0];
                 let elem = emitter.array_get(source_array, i_val);
                 let converted =
@@ -604,7 +604,7 @@ impl WitnessCastInsertion {
         value: ValueId,
         source_type: &Type,
         target_type: &Type,
-        emitter: &mut BlockEmitter<'_>,
+        emitter: &mut HLBlockEmitter<'_>,
     ) -> ValueId {
         match (&source_type.expr, &target_type.expr) {
             _ if source_type == target_type => value,
@@ -625,7 +625,7 @@ impl WitnessCastInsertion {
                 let results = emitter.build_counted_loop(
                     *src_size,
                     vec![(initial_dst, target_type.clone())],
-                    |emitter, i_val, accs| {
+                    |emitter: &mut HLBlockEmitter<'_>, i_val, accs| {
                         let dst = accs[0];
                         let elem = emitter.array_get(value, i_val);
                         let converted =

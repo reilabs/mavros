@@ -598,7 +598,7 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    fn convert_while(&mut self, while_expr: &While, b: &mut FunctionBuilder) -> Option<ValueId> {
+    fn convert_while(&mut self, while_expr: &While, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
@@ -639,7 +639,7 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    fn convert_loop(&mut self, body: &Expression, b: &mut FunctionBuilder) -> Option<ValueId> {
+    fn convert_loop(&mut self, body: &Expression, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         // loop { body } — only exits via break
         let loop_block = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
