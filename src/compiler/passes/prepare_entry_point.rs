@@ -203,27 +203,30 @@ impl PrepareEntryPoint {
                 for mut instr in old_instructions {
                     replacements.replace_instruction(&mut instr);
 
-                    let call_info = if let OpCode::Call {
+                    let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
                         unconstrained: true,
                         results,
                         function: CallTarget::Static(callee_id),
                         ..
                     } = &instr
                     {
-                        let ret_types = callee_return_types.get(callee_id);
-                        match ret_types {
-                            Some(rt) if !rt.is_empty() && !results.is_empty() => {
-                                Some((results[0], rt[0].clone()))
-                            }
-                            _ => None,
-                        }
+                        callee_return_types
+                            .get(callee_id)
+                            .map(|rt| {
+                                results
+                                    .iter()
+                                    .zip(rt.iter())
+                                    .map(|(r, t)| (*r, t.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
                     } else {
-                        None
+                        vec![]
                     };
 
                     new_instructions.push(instr);
 
-                    if let Some((result_vid, return_type)) = call_info {
+                    for (result_vid, return_type) in call_results {
                         let (reconstructed, extras) =
                             Self::flatten_witness_reconstruct(&result_vid, &return_type, function);
                         new_instructions.extend(extras);
