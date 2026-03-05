@@ -334,6 +334,7 @@ impl Mem2Reg {
                         results: rets,
                         function: _,
                         args,
+                        unconstrained: _,
                     } => {
                         for v in rets.iter().chain(args.iter()) {
                             let vtyp = type_info.get_value_type(*v);

@@ -218,6 +218,13 @@ impl Driver {
         let mut witness_inference = WitnessTypeInference::new();
         witness_inference.run(&mut ssa, &flow_analysis).unwrap();
 
+        PassManager::new(
+            "post_wti_cleanup".to_string(),
+            self.draw_cfg,
+            vec![Box::new(RemoveUnreachableFunctions::new())],
+        )
+        .run(&mut ssa);
+
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
             ssa.to_string(&witness_inference),
@@ -280,6 +287,7 @@ impl Driver {
                 Box::new(ExplicitWitness::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
         );

@@ -57,18 +57,23 @@ where
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
+    fn value_of(&self, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
 }
 
 pub trait Context<V> {
-    // If this returns Some, the function execution will be skipped and the returned values will be used instead
-    // as call results.
+    /// Called when a function call is encountered. If this returns Some, the function
+    /// body is skipped and the returned values are used as call results. For unconstrained
+    /// calls this MUST return Some, since unconstrained functions may contain JmpIfs on
+    /// unknown values that the symbolic executor cannot trace through.
     fn on_call(
         &mut self,
         func: FunctionId,
         params: &mut [V],
         param_types: &[&Type],
+        result_types: &[Type],
+        unconstrained: bool,
     ) -> Option<Vec<V>>;
     fn on_return(&mut self, returns: &mut [V], return_types: &[Type]);
     fn on_jmp(&mut self, target: BlockId, params: &mut [V], param_types: &[&Type]);
@@ -143,6 +148,8 @@ impl SymbolicExecutor {
             fn_id,
             &mut inputs,
             &entry.get_parameters().map(|(_, tp)| tp).collect::<Vec<_>>(),
+            &fn_body.get_returns(),
+            false,
         );
 
         if let Some(call_result) = call_result {
@@ -248,13 +255,32 @@ impl SymbolicExecutor {
                         results: returns,
                         function: crate::compiler::ssa::CallTarget::Static(function_id),
                         args: arguments,
+                        unconstrained,
                     } => {
-                        let params = arguments
+                        let mut params: Vec<_> = arguments
                             .iter()
                             .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
-                            .collect::<Vec<_>>();
-                        let outputs =
-                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx);
+                            .collect();
+                        let outputs = if *unconstrained {
+                            let entry = ssa.get_function(*function_id).get_entry();
+                            let param_types: Vec<_> =
+                                entry.get_parameters().map(|(_, tp)| tp).collect();
+                            let result_types: Vec<_> = returns
+                                .iter()
+                                .map(|r| fn_type_info.get_value_type(*r).clone())
+                                .collect();
+                            ctx.on_call(
+                                *function_id,
+                                &mut params,
+                                &param_types,
+                                &result_types,
+                                true,
+                            )
+                            .expect("ICE: on_call must return Some for unconstrained calls")
+                        } else {
+                            // For constrained calls, run_fn handles on_call internally
+                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx)
+                        };
                         for (i, val) in returns.iter().enumerate() {
                             scope[val.0 as usize] = Some(outputs[i].clone());
                         }
@@ -517,8 +543,9 @@ impl SymbolicExecutor {
                             scope[result_id.0 as usize] = Some(result_value.clone());
                         }
                     }
-                    crate::compiler::ssa::OpCode::ValueOf { .. } => {
-                        panic!("ICE: ValueOf should not appear at this stage");
+                    crate::compiler::ssa::OpCode::ValueOf { result, value } => {
+                        let val = scope[value.0 as usize].clone().unwrap();
+                        scope[result.0 as usize] = Some(val.value_of(ctx));
                     }
                     crate::compiler::ssa::OpCode::Const { result, value } => match value {
                         crate::compiler::ssa::ConstValue::U(size, val) => {

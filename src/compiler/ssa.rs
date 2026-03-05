@@ -768,6 +768,7 @@ pub enum OpCode {
         results: Vec<ValueId>,
         function: CallTarget,
         args: Vec<ValueId>,
+        unconstrained: bool,
     },
     ArrayGet {
         result: ValueId,
@@ -978,24 +979,34 @@ impl Instruction for OpCode {
                 results: result,
                 function,
                 args,
+                unconstrained,
             } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let result_str = result
                     .iter()
                     .map(|v| format!("v{}{}", v.0, annotate_value(*v)))
                     .join(", ");
+                let call_prefix = if *unconstrained {
+                    "call_unconstrained"
+                } else {
+                    "call"
+                };
                 match function {
                     CallTarget::Static(fn_id) => {
                         format!(
-                            "{} = call {}@{}({})",
+                            "{} = {} {}@{}({})",
                             result_str,
+                            call_prefix,
                             func_name(*fn_id),
                             fn_id.0,
                             args_str
                         )
                     }
                     CallTarget::Dynamic(fn_ptr) => {
-                        format!("{} = call_indirect v{}({})", result_str, fn_ptr.0, args_str)
+                        format!(
+                            "{} = {}_indirect v{}({})",
+                            result_str, call_prefix, fn_ptr.0, args_str
+                        )
                     }
                 }
             }
@@ -1435,6 +1446,7 @@ impl Instruction for OpCode {
                 results: _,
                 function,
                 args: a,
+                unconstrained: _,
             } => {
                 let mut ret_vec = Vec::new();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -1639,6 +1651,7 @@ impl Instruction for OpCode {
                 results: r,
                 function: _,
                 args: _,
+                unconstrained: _,
             } => r.iter().collect::<Vec<_>>().into_iter(),
             Self::Constrain { .. }
             | Self::BumpD {
@@ -1776,6 +1789,7 @@ impl Instruction for OpCode {
                 results: _,
                 function,
                 args: a,
+                unconstrained: _,
             } => {
                 let mut ret_vec = Vec::new();
                 if let CallTarget::Dynamic(fn_ptr) = function {
@@ -1970,6 +1984,7 @@ impl Instruction for OpCode {
                 results: r,
                 function,
                 args: a,
+                unconstrained: _,
             } => {
                 let mut ret_vec = r.iter_mut().collect::<Vec<_>>();
                 if let CallTarget::Dynamic(fn_ptr) = function {

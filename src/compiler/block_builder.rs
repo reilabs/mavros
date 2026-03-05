@@ -411,6 +411,26 @@ pub trait HLEmitter {
             results: results.clone(),
             function: CallTarget::Static(fn_id),
             args,
+            unconstrained: false,
+        });
+        results
+    }
+
+    fn call_unconstrained(
+        &mut self,
+        fn_id: FunctionId,
+        args: Vec<ValueId>,
+        n: usize,
+    ) -> Vec<ValueId> {
+        let mut results = Vec::with_capacity(n);
+        for _ in 0..n {
+            results.push(self.fresh_value());
+        }
+        self.emit(OpCode::Call {
+            results: results.clone(),
+            function: CallTarget::Static(fn_id),
+            args,
+            unconstrained: true,
         });
         results
     }
@@ -424,6 +444,7 @@ pub trait HLEmitter {
             results: results.clone(),
             function: CallTarget::Dynamic(fn_ptr),
             args,
+            unconstrained: false,
         });
         results
     }

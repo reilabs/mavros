@@ -1023,6 +1023,13 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
+    fn value_of(&self, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: self.unspecialized.unwrap_witness().clone(),
+            specialized: self.specialized.unwrap_witness().clone(),
+        }
+    }
+
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
 }
 
@@ -1160,7 +1167,41 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         func: FunctionId,
         params: &mut [SpecSplitValue],
         param_types: &[&Type],
+        result_types: &[Type],
+        unconstrained: bool,
     ) -> Option<Vec<SpecSplitValue>> {
+        if unconstrained {
+            fn unknown_value(ty: &Type) -> Value {
+                match &ty.expr {
+                    TypeExpr::Field => Value::Unknown(ScalarKind::Field),
+                    TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+                    TypeExpr::Array(elem, size) => {
+                        Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
+                    }
+                    TypeExpr::Tuple(elems) => {
+                        Value::Tuple(elems.iter().map(unknown_value).collect())
+                    }
+                    TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
+                    TypeExpr::Ref(inner) => {
+                        Value::Pointer(Rc::new(RefCell::new(unknown_value(inner))))
+                    }
+                    _ => panic!("Unsupported type for unknown value: {:?}", ty),
+                }
+            }
+            return Some(
+                result_types
+                    .iter()
+                    .map(|ty| {
+                        let v = unknown_value(ty);
+                        SpecSplitValue {
+                            unspecialized: v.clone(),
+                            specialized: v,
+                        }
+                    })
+                    .collect(),
+            );
+        }
+
         for (pval, _ptype) in params.iter_mut().zip(param_types.iter()) {
             pval.blind();
         }

@@ -430,7 +430,13 @@ impl ExplicitWitness {
                             let neg_r = b.mul(r, neg_one);
                             let l_sub_r = b.add(l, neg_r);
                             let res_sub_r = b.add(res, neg_r);
-                            b.constrain(cond, l_sub_r, res_sub_r);
+                            let cond_type = function_type_info.get_value_type(cond);
+                            let cond_field = if cond_type.strip_witness().is_field() {
+                                cond
+                            } else {
+                                b.cast_to_field(cond)
+                            };
+                            b.constrain(cond_field, l_sub_r, res_sub_r);
                         }
 
                         OpCode::MkSeq {

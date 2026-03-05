@@ -450,6 +450,11 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
+    fn value_of(&self, ctx: &mut SpecializationState) -> Self {
+        let res = HLEmitter::value_of(ctx, self.0);
+        Self(res)
+    }
+
     fn mem_op(&self, kind: MemOp, ctx: &mut SpecializationState) {
         HLEmitter::mem_op(ctx, self.0, kind);
     }
@@ -484,10 +489,19 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 impl symbolic_executor::Context<Val> for SpecializationState {
     fn on_call(
         &mut self,
-        _func: crate::compiler::ssa::FunctionId,
-        _params: &mut [Val],
+        func: crate::compiler::ssa::FunctionId,
+        params: &mut [Val],
         _param_types: &[&crate::compiler::ir::r#type::Type],
+        result_types: &[crate::compiler::ir::r#type::Type],
+        unconstrained: bool,
     ) -> Option<Vec<Val>> {
+        if unconstrained {
+            // Emit the unconstrained call as-is into the specialized function
+            let args: Vec<ValueId> = params.iter().map(|v| v.0).collect();
+            let n = result_types.len();
+            let results = self.call_unconstrained(func, args, n);
+            return Some(results.into_iter().map(Val).collect());
+        }
         None
     }
 
