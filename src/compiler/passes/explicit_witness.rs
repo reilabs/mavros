@@ -599,12 +599,7 @@ impl ExplicitWitness {
         }
     }
 
-    fn gen_witness_rangecheck(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        max_bits: usize,
-    ) {
+    fn gen_witness_rangecheck(&self, b: &mut HLInstrBuilder<'_>, value: ValueId, max_bits: usize) {
         assert!(max_bits % 8 == 0); // TODO
         let chunks = max_bits / 8;
         let pure_value = b.value_of(value);

@@ -8,7 +8,7 @@ use noirc_frontend::monomorphization::ast::{
     LValue, Let, LocalId,
 };
 
-use crate::compiler::block_builder::{HLFunctionBuilder, HLEmitter};
+use crate::compiler::block_builder::{HLEmitter, HLFunctionBuilder};
 use crate::compiler::ir::r#type::Type;
 use crate::compiler::ssa::{
     BlockId, CastTarget, ConstValue, Endianness, FunctionId, OpCode, Radix, SeqType, TupleIdx,
@@ -250,7 +250,11 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn convert_binary(&mut self, binary: &Binary, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+    fn convert_binary(
+        &mut self,
+        binary: &Binary,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         let lhs = self.convert_expression(&binary.lhs, b).unwrap();
         let rhs = self.convert_expression(&binary.rhs, b).unwrap();
 
@@ -331,7 +335,11 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    fn convert_block(&mut self, exprs: &[Expression], b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+    fn convert_block(
+        &mut self,
+        exprs: &[Expression],
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         let mut last_result = None;
         for expr in exprs {
             last_result = self.convert_expression(expr, b);
@@ -339,7 +347,11 @@ impl<'a> ExpressionConverter<'a> {
         last_result
     }
 
-    fn convert_assign(&mut self, assign: &Assign, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+    fn convert_assign(
+        &mut self,
+        assign: &Assign,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
 
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
@@ -443,7 +455,11 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     /// Read an LValue as a value (for Dereference: get the pointer that the lvalue holds).
-    fn convert_lvalue_to_value(&mut self, lvalue: &LValue, b: &mut HLFunctionBuilder<'_>) -> ValueId {
+    fn convert_lvalue_to_value(
+        &mut self,
+        lvalue: &LValue,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
         match lvalue {
             LValue::Ident(ident) => self.convert_ident(ident, b).unwrap(),
             LValue::Dereference { reference, .. } => {
@@ -972,7 +988,11 @@ impl<'a> ExpressionConverter<'a> {
         Some(result)
     }
 
-    fn convert_tuple(&mut self, exprs: &[Expression], b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+    fn convert_tuple(
+        &mut self,
+        exprs: &[Expression],
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         if exprs.is_empty() {
             // Empty struct/tuple — still a value (e.g. A {})
             return Some(b.block(self.current_block).mk_tuple(vec![], vec![]));

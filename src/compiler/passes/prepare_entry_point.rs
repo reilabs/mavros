@@ -1,5 +1,5 @@
 use crate::compiler::{
-    block_builder::{HLBlockEmitter, HLFunctionBuilder, HLEmitter},
+    block_builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -78,7 +78,12 @@ impl PrepareEntryPoint {
         ssa.set_entry_point(wrapper_id);
     }
 
-    fn assert_eq_deep(b: &mut HLBlockEmitter<'_>, result: ValueId, public_input: ValueId, typ: &Type) {
+    fn assert_eq_deep(
+        b: &mut HLBlockEmitter<'_>,
+        result: ValueId,
+        public_input: ValueId,
+        typ: &Type,
+    ) {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
                 b.assert_eq(result, public_input);

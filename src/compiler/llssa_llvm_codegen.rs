@@ -135,10 +135,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // malloc(i32) -> ptr  (i32 size for wasm32)
         let malloc_type = ptr_type.fn_type(&[i32_type.into()], false);
-        self.malloc_fn = Some(
-            self.module
-                .add_function("malloc", malloc_type, Some(Linkage::External)),
-        );
+        self.malloc_fn = Some(self.module.add_function(
+            "malloc",
+            malloc_type,
+            Some(Linkage::External),
+        ));
 
         // free(ptr) -> void
         let free_type = void_type.fn_type(&[ptr_type.into()], false);
@@ -576,7 +577,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             // ── Memory operations ───────────────────────────────────────
-
             LLOp::NullPtr { result } => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let null = ptr_type.const_null();
@@ -610,9 +610,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLOp::Free { ptr } => {
                 let p = self.value_map[ptr].into_pointer_value();
                 let free_fn = self.free_fn.expect("free not declared");
-                self.builder
-                    .build_call(free_fn, &[p.into()], "")
-                    .unwrap();
+                self.builder.build_call(free_fn, &[p.into()], "").unwrap();
             }
 
             LLOp::Load { result, ptr, ty } => {
@@ -678,11 +676,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     let cnt = self.value_map[count_val].into_int_value();
                     let cnt_ext = self
                         .builder
-                        .build_int_z_extend_or_bit_cast(
-                            cnt,
-                            elem_size.get_type(),
-                            "cnt_ext",
-                        )
+                        .build_int_z_extend_or_bit_cast(cnt, elem_size.get_type(), "cnt_ext")
                         .unwrap();
                     self.builder
                         .build_int_mul(elem_size, cnt_ext, "total_size")
@@ -711,7 +705,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             // ── Calls ───────────────────────────────────────────────────
-
             LLOp::Call {
                 results,
                 func,

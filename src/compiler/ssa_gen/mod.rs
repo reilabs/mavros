@@ -12,7 +12,7 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::block_builder::{HLFunctionBuilder, HLEmitter};
+use crate::compiler::block_builder::{HLEmitter, HLFunctionBuilder};
 use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
 
 use expression_converter::ExpressionConverter;

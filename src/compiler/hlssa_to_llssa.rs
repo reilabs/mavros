@@ -15,10 +15,10 @@ use crate::compiler::block_builder::{LLBlockEmitter, LLEmitter};
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLStruct, LLType, LLSSA,
+    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{
-    BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLFunction, Terminator, ValueId, HLSSA,
+    BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLFunction, HLSSA, Terminator, ValueId,
 };
 
 // =============================================================================
@@ -350,30 +350,27 @@ fn lower_instruction(
             val_map.insert(*result, ll_result);
         }
 
-        OpCode::Const { result, value } => {
-            match value {
-                ConstValue::U(bits, val) => {
-                    let ll_val = e.int_const(*bits as u32, *val as u64);
-                    val_map.insert(*result, ll_val);
-                }
-                ConstValue::Field(fr) => {
-                    let field_struct = LLStruct::field_elem();
-                    let limbs = fr.0.0;
-                    let l0 = e.int_const(64, limbs[0]);
-                    let l1 = e.int_const(64, limbs[1]);
-                    let l2 = e.int_const(64, limbs[2]);
-                    let l3 = e.int_const(64, limbs[3]);
-                    let mk = e.mk_struct(field_struct, vec![l0, l1, l2, l3]);
-                    val_map.insert(*result, mk);
-                }
-                ConstValue::FnPtr(_) => {
-                    panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
-                }
+        OpCode::Const { result, value } => match value {
+            ConstValue::U(bits, val) => {
+                let ll_val = e.int_const(*bits as u32, *val as u64);
+                val_map.insert(*result, ll_val);
             }
-        }
+            ConstValue::Field(fr) => {
+                let field_struct = LLStruct::field_elem();
+                let limbs = fr.0.0;
+                let l0 = e.int_const(64, limbs[0]);
+                let l1 = e.int_const(64, limbs[1]);
+                let l2 = e.int_const(64, limbs[2]);
+                let l3 = e.int_const(64, limbs[3]);
+                let mk = e.mk_struct(field_struct, vec![l0, l1, l2, l3]);
+                val_map.insert(*result, mk);
+            }
+            ConstValue::FnPtr(_) => {
+                panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
+            }
+        },
 
         // -- Array operations --
-
         OpCode::MkSeq {
             result,
             elems,
@@ -401,7 +398,6 @@ fn lower_instruction(
         }
 
         // -- RC operations --
-
         OpCode::MemOp {
             kind: MemOp::Bump(n),
             value,
@@ -562,10 +558,7 @@ fn lower_array_set(
     }
 
     // Seal current block and switch to merge block
-    e.seal_and_switch(
-        Terminator::JmpIf(unique, mutate_blk, copy_blk),
-        merge_blk,
-    );
+    e.seal_and_switch(Terminator::JmpIf(unique, mutate_blk, copy_blk), merge_blk);
 
     val_map.insert(result, merge_param);
 }
@@ -668,7 +661,12 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
 
         // We need the ptr value to access inside the loop body.
         // Re-read it from the entry block parameters.
-        let ptr = func.get_block(entry).get_parameter_values().next().copied().unwrap();
+        let ptr = func
+            .get_block(entry)
+            .get_parameter_values()
+            .next()
+            .copied()
+            .unwrap();
 
         let mut e = LLBlockEmitter::new(&mut func, free_blk);
         let data = e.struct_field_ptr(ptr, rc_struct, 1);
@@ -684,7 +682,12 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
         e.terminate_jmp(done_blk, vec![]);
     } else {
         // No recursive drops needed -- just free
-        let ptr = func.get_block(entry).get_parameter_values().next().copied().unwrap();
+        let ptr = func
+            .get_block(entry)
+            .get_parameter_values()
+            .next()
+            .copied()
+            .unwrap();
 
         let mut e = LLBlockEmitter::new(&mut func, free_blk);
         e.free(ptr);

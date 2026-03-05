@@ -3,8 +3,8 @@ use crate::compiler::{
     llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
-        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType,
-        SliceOpDir, Terminator, TupleIdx, ValueId,
+        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
+        Terminator, TupleIdx, ValueId,
     },
 };
 
@@ -589,12 +589,7 @@ pub trait LLEmitter {
         r
     }
 
-    fn extract_field(
-        &mut self,
-        value: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-    ) -> ValueId {
+    fn extract_field(&mut self, value: ValueId, struct_type: LLStruct, field: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::ExtractField {
             result: r,
@@ -641,11 +636,7 @@ pub trait LLEmitter {
 
     fn ll_load(&mut self, ptr: ValueId, ty: LLType) -> ValueId {
         let r = self.fresh_value();
-        self.emit_ll(LLOp::Load {
-            result: r,
-            ptr,
-            ty,
-        });
+        self.emit_ll(LLOp::Load { result: r, ptr, ty });
         r
     }
 
@@ -653,12 +644,7 @@ pub trait LLEmitter {
         self.emit_ll(LLOp::Store { ptr, value });
     }
 
-    fn struct_field_ptr(
-        &mut self,
-        ptr: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-    ) -> ValueId {
+    fn struct_field_ptr(&mut self, ptr: ValueId, struct_type: LLStruct, field: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::StructFieldPtr {
             result: r,
@@ -669,12 +655,7 @@ pub trait LLEmitter {
         r
     }
 
-    fn array_elem_ptr(
-        &mut self,
-        ptr: ValueId,
-        elem_type: LLStruct,
-        index: ValueId,
-    ) -> ValueId {
+    fn array_elem_ptr(&mut self, ptr: ValueId, elem_type: LLStruct, index: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::ArrayElemPtr {
             result: r,
@@ -820,10 +801,7 @@ impl<'a, Op: Instruction, Ty: SSAType> FunctionBuilder<'a, Op, Ty> {
         Self { function }
     }
 
-    pub fn add_block(
-        &mut self,
-        f: impl FnOnce(&mut BlockEmitter<'_, Op, Ty>),
-    ) -> BlockId {
+    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_, Op, Ty>)) -> BlockId {
         let (id, mut emitter) = BlockEmitter::from_new_block(self.function);
         f(&mut emitter);
         id

@@ -10,7 +10,7 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    block_builder::{HLFunctionBuilder, HLEmitter},
+    block_builder::{HLEmitter, HLFunctionBuilder},
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{

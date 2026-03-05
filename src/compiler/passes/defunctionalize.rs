@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
-    block_builder::{HLFunctionBuilder, HLEmitter},
+    block_builder::{HLEmitter, HLFunctionBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     ssa::{
