@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::compiler::{
     block_builder::{BlockEmitter, FunctionBuilder, HLEmitter},
     ir::r#type::{Type, TypeExpr},
@@ -162,82 +164,77 @@ impl PrepareEntryPoint {
     /// Process unconstrained call results: flatten to Fields, WriteWitness,
     /// rangecheck + reconstruct, and replace original results.
     fn process_unconstrained_calls(ssa: &mut HLSSA) {
-        // Collect callee return types first (need to borrow ssa immutably)
+        // Pre-collect callee return types (need immutable ssa access)
+        let mut callee_return_types: HashMap<FunctionId, Vec<Type>> = HashMap::new();
         let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
-
-        // Collect (function_id, block_id, instruction_index, callee_id, result_value_id)
-        // for all unconstrained calls
-        let mut unconstrained_call_sites: Vec<(FunctionId, BlockId, usize, FunctionId, ValueId)> =
-            Vec::new();
-
         for &fid in &func_ids {
-            let function = ssa.get_function(fid);
-            for (&bid, block) in function.get_blocks() {
-                for (idx, instr) in block.get_instructions().enumerate() {
+            for (_, block) in ssa.get_function(fid).get_blocks() {
+                for instr in block.get_instructions() {
                     if let OpCode::Call {
                         unconstrained: true,
-                        results,
                         function: CallTarget::Static(callee_id),
                         ..
                     } = instr
                     {
-                        if !results.is_empty() {
-                            unconstrained_call_sites.push((fid, bid, idx, *callee_id, results[0]));
-                        }
+                        callee_return_types
+                            .entry(*callee_id)
+                            .or_insert_with(|| ssa.get_function(*callee_id).get_returns().to_vec());
                     }
                 }
             }
         }
 
-        // Process each call site
-        for (fid, bid, _idx, callee_id, result_vid) in unconstrained_call_sites {
-            // Get callee return types
-            let return_types: Vec<Type> = ssa.get_function(callee_id).get_returns().to_vec();
-            if return_types.is_empty() {
-                continue;
-            }
-            let return_type = return_types[0].clone();
+        // Process each function/block: single pass over instructions, handling
+        // all unconstrained calls inline so indices never go stale.
+        for &fid in &func_ids {
+            let block_ids: Vec<BlockId> = ssa
+                .get_function(fid)
+                .get_blocks()
+                .map(|(id, _)| *id)
+                .collect();
+            for bid in block_ids {
+                let function = ssa.get_function_mut(fid);
+                let block = function.get_block_mut(bid);
+                let old_instructions = block.take_instructions();
 
-            let function = ssa.get_function_mut(fid);
+                let mut replacements = ValueReplacements::new();
+                let mut new_instructions = Vec::new();
 
-            let (reconstructed_val, mut extra_instructions) =
-                Self::flatten_witness_reconstruct(&result_vid, &return_type, function);
-
-            // Build replacement map
-            let mut replacements = ValueReplacements::new();
-            replacements.insert(result_vid, reconstructed_val);
-
-            // Insert extra instructions after the unconstrained Call in the block's instruction list
-            // and apply replacements to the ORIGINAL instructions that come after
-            let block = function.get_block_mut(bid);
-            let old_instructions = block.take_instructions();
-            let extra_count = extra_instructions.len();
-            let mut new_instructions = Vec::new();
-            let mut found_call = false;
-            for mut instr in old_instructions {
-                if found_call {
-                    // Apply replacement to original instructions after the call+extras
+                for mut instr in old_instructions {
                     replacements.replace_instruction(&mut instr);
+
+                    let call_info = if let OpCode::Call {
+                        unconstrained: true,
+                        results,
+                        function: CallTarget::Static(callee_id),
+                        ..
+                    } = &instr
+                    {
+                        let ret_types = callee_return_types.get(callee_id);
+                        match ret_types {
+                            Some(rt) if !rt.is_empty() && !results.is_empty() => {
+                                Some((results[0], rt[0].clone()))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    new_instructions.push(instr);
+
+                    if let Some((result_vid, return_type)) = call_info {
+                        let (reconstructed, extras) =
+                            Self::flatten_witness_reconstruct(&result_vid, &return_type, function);
+                        new_instructions.extend(extras);
+                        replacements.insert(result_vid, reconstructed);
+                    }
                 }
-                let is_the_call = if let OpCode::Call {
-                    unconstrained: true,
-                    results,
-                    ..
-                } = &instr
-                {
-                    !results.is_empty() && results[0] == result_vid
-                } else {
-                    false
-                };
-                new_instructions.push(instr);
-                if is_the_call {
-                    // Insert extra instructions (these should NOT get replacements applied)
-                    new_instructions.extend(extra_instructions.drain(..));
-                    found_call = true;
-                }
+
+                let block = function.get_block_mut(bid);
+                block.put_instructions(new_instructions);
+                replacements.replace_terminator(block.get_terminator_mut());
             }
-            block.put_instructions(new_instructions);
-            replacements.replace_terminator(block.get_terminator_mut());
         }
     }
 

@@ -266,9 +266,8 @@ impl WitnessTypeInference {
                 .insert(spec_value.specialized_func_id, final_fwt);
         }
 
-        // Original unspecialized functions are now unreachable (entry point
-        // was moved to the specialized main). RemoveUnreachableFunctions will
-        // clean them up later in the pipeline.
+        // Original functions are now unreachable (entry point was moved to
+        // specialized main). RemoveUnreachableFunctions cleans them up.
 
         Ok(())
     }
