@@ -353,6 +353,7 @@ impl RCInsertion {
                         results: returns,
                         function: _,
                         args: params,
+                        unconstrained: _,
                     } => {
                         // Functions take parameters with the correct RC counter
                         // and return results with the correct RC counter.

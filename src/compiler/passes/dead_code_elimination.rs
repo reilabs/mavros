@@ -130,6 +130,12 @@ impl DCE {
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
                     match instruction {
+                        OpCode::Call {
+                            unconstrained: true,
+                            ..
+                        } => {
+                            // Unconstrained calls are NOT initially live — DCE'd when results unused
+                        }
                         OpCode::Call { .. } | OpCode::Store { .. } => {
                             worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                         }
@@ -289,6 +295,19 @@ impl DCE {
                                         static_calls_by_callee.get(&function_id)
                                     {
                                         for (caller_fn, caller_block, caller_i) in callsites {
+                                            // Only propagate callee param liveness to callsite args
+                                            // if the callsite instruction is already live. Constrained
+                                            // calls are always initially live so this passes immediately.
+                                            // Unconstrained calls may be dead; when they later become
+                                            // live, LiveInstruction handling will propagate at that point.
+                                            if !self.instruction_live(
+                                                &live_instructions,
+                                                *caller_fn,
+                                                *caller_block,
+                                                *caller_i,
+                                            ) {
+                                                continue;
+                                            }
                                             let caller = ssa.get_function(*caller_fn);
                                             if let OpCode::Call { args, .. } = caller
                                                 .get_block(*caller_block)
@@ -366,6 +385,26 @@ impl DCE {
                     for input in instruction.get_inputs() {
                         worklist.push(WorkItem::LiveValue(function_id, *input));
                     }
+
+                    // When a Call becomes live, propagate already-live callee entry
+                    // params to the corresponding args. This is the reverse direction
+                    // of the callee-param-to-caller-arg propagation above, needed for
+                    // calls that weren't initially live (e.g. unconstrained calls).
+                    if let OpCode::Call {
+                        function: CallTarget::Static(callee),
+                        args,
+                        ..
+                    } = instruction
+                    {
+                        if let Some(live_params) = live_entry_params.get(callee) {
+                            for param_idx in live_params.iter() {
+                                if *param_idx < args.len() {
+                                    worklist
+                                        .push(WorkItem::LiveValue(function_id, args[*param_idx]));
+                                }
+                            }
+                        }
+                    }
                 }
                 WorkItem::LiveReturnSlot(function_id, slot) => {
                     if !live_return_slots
@@ -414,6 +453,7 @@ impl DCE {
                         results,
                         function: CallTarget::Static(callee),
                         args,
+                        unconstrained: _,
                     } = &mut instruction
                     {
                         let mut new_args = vec![];

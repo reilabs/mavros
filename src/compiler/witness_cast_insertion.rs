@@ -43,9 +43,14 @@ impl WitnessCastInsertion {
         result_ssa.set_global_types(old_global_types);
 
         for (function_id, function) in functions.into_iter() {
-            let function_wt = witness_inference.get_function_witness_type(function_id);
-            let new_function = self.apply_types_to_function(function, function_wt);
-            result_ssa.put_function(function_id, new_function);
+            if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
+            {
+                let new_function = self.apply_types_to_function(function, function_wt);
+                result_ssa.put_function(function_id, new_function);
+            } else {
+                // Function has no witness type (unreachable or unconstrained-only) — keep as-is
+                result_ssa.put_function(function_id, function);
+            }
         }
 
         result_ssa
@@ -380,6 +385,32 @@ impl WitnessCastInsertion {
                             if_f,
                         });
                     }
+                    OpCode::Call {
+                        results,
+                        function: call_target,
+                        args,
+                        unconstrained: true,
+                    } => {
+                        // Unconstrained call: strip all WitnessOf from args
+                        let new_args: Vec<_> = args
+                            .into_iter()
+                            .map(|arg| {
+                                let arg_type = type_info.get_value_type(arg);
+                                let pure_type = arg_type.strip_all_witness();
+                                if *arg_type != pure_type {
+                                    self.emit_strip_witness(arg, arg_type, &pure_type, &mut emitter)
+                                } else {
+                                    arg
+                                }
+                            })
+                            .collect();
+                        emitter.emit(OpCode::Call {
+                            results,
+                            function: call_target,
+                            args: new_args,
+                            unconstrained: true,
+                        });
+                    }
                     op @ (OpCode::Cmp { .. }
                     | OpCode::BinaryArithOp { .. }
                     | OpCode::Cast { .. }
@@ -564,6 +595,63 @@ impl WitnessCastInsertion {
         let dummy_elem = self.create_dummy_value(elem_type, b);
         let elems = vec![dummy_elem; array_len];
         b.mk_seq(elems, SeqType::Array(array_len), elem_type.clone())
+    }
+
+    /// Recursively strip WitnessOf from a value, producing a pure-typed value.
+    /// This is the inverse of emit_value_conversion: it goes from witnessed to pure.
+    fn emit_strip_witness(
+        &self,
+        value: ValueId,
+        source_type: &Type,
+        target_type: &Type,
+        emitter: &mut BlockEmitter<'_>,
+    ) -> ValueId {
+        match (&source_type.expr, &target_type.expr) {
+            _ if source_type == target_type => value,
+            // WitnessOf(X) → X: emit ValueOf
+            (TypeExpr::WitnessOf(inner), _) => {
+                let unwrapped = emitter.fresh_value();
+                emitter.emit(OpCode::ValueOf {
+                    result: unwrapped,
+                    value,
+                });
+                self.emit_strip_witness(unwrapped, inner, target_type, emitter)
+            }
+            // Array<S, n> → Array<T, n>: loop, strip each element
+            (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
+                assert_eq!(src_size, tgt_size);
+                let initial_dst =
+                    self.create_dummy_array(tgt_inner, *src_size, target_type, emitter);
+                let results = emitter.build_counted_loop(
+                    *src_size,
+                    vec![(initial_dst, target_type.clone())],
+                    |emitter, i_val, accs| {
+                        let dst = accs[0];
+                        let elem = emitter.array_get(value, i_val);
+                        let converted =
+                            self.emit_strip_witness(elem, src_inner, tgt_inner, emitter);
+                        let new_dst = emitter.array_set(dst, i_val, converted);
+                        vec![new_dst]
+                    },
+                );
+                results[0]
+            }
+            // Tuple: decompose, per-field recursive, recompose
+            (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
+                assert_eq!(src_fields.len(), tgt_fields.len());
+                let mut converted_elems = vec![];
+                for (i, (sf, tf)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
+                    let proj = emitter.tuple_proj(value, TupleIdx::Static(i));
+                    let converted = self.emit_strip_witness(proj, sf, tf, emitter);
+                    converted_elems.push(converted);
+                }
+                emitter.mk_tuple(converted_elems, tgt_fields.clone())
+            }
+            _ => panic!(
+                "emit_strip_witness: unsupported conversion {:?} -> {:?}",
+                source_type, target_type
+            ),
+        }
     }
 
     /// Create a single dummy value of the given target type.

@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+
 use crate::compiler::{
     block_builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, SeqType, TupleIdx,
-        ValueId,
+        BinaryArithOpKind, BlockId, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction,
+        HLSSA, OpCode, SeqType, TupleIdx, ValueId,
     },
 };
 
@@ -20,6 +22,7 @@ impl Pass for PrepareEntryPoint {
         Self::wrap_main(ssa);
         self.rebuild_main_params(ssa);
         Self::insert_witness_writes(ssa);
+        Self::process_unconstrained_calls(ssa);
     }
 }
 
@@ -137,15 +140,16 @@ impl PrepareEntryPoint {
             },
         ];
 
-        // Create WriteWitness for each param and build replacements.
-        // These writes are naturally live because their results replace the params in the entry body.
+        // Create pinned WriteWitness for each param and build replacements.
+        // These must be pinned so they survive DCE even when their results become unused
+        // (e.g. when inter-procedural DCE prunes call args to original_main).
         let mut replacements = ValueReplacements::new();
         for param_id in &params {
             let witness_val = main.fresh_value();
             write_witness_instructions.push(OpCode::WriteWitness {
                 result: Some(witness_val),
                 value: *param_id,
-                pinned: false,
+                pinned: true,
             });
             replacements.insert(*param_id, witness_val);
         }
@@ -160,6 +164,231 @@ impl PrepareEntryPoint {
         }
         entry_block.put_instructions(new_instructions);
         replacements.replace_terminator(entry_block.get_terminator_mut());
+    }
+
+    /// Process unconstrained call results: flatten to Fields, WriteWitness,
+    /// rangecheck + reconstruct, and replace original results.
+    fn process_unconstrained_calls(ssa: &mut HLSSA) {
+        // Pre-collect callee return types (need immutable ssa access)
+        let mut callee_return_types: HashMap<FunctionId, Vec<Type>> = HashMap::new();
+        let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+        for &fid in &func_ids {
+            for (_, block) in ssa.get_function(fid).get_blocks() {
+                for instr in block.get_instructions() {
+                    if let OpCode::Call {
+                        unconstrained: true,
+                        function: CallTarget::Static(callee_id),
+                        ..
+                    } = instr
+                    {
+                        callee_return_types
+                            .entry(*callee_id)
+                            .or_insert_with(|| ssa.get_function(*callee_id).get_returns().to_vec());
+                    }
+                }
+            }
+        }
+
+        // Process each function/block: single pass over instructions, handling
+        // all unconstrained calls inline so indices never go stale.
+        for &fid in &func_ids {
+            let block_ids: Vec<BlockId> = ssa
+                .get_function(fid)
+                .get_blocks()
+                .map(|(id, _)| *id)
+                .collect();
+            for bid in block_ids {
+                let function = ssa.get_function_mut(fid);
+                let block = function.get_block_mut(bid);
+                let old_instructions = block.take_instructions();
+
+                let mut replacements = ValueReplacements::new();
+                let mut new_instructions = Vec::new();
+
+                for mut instr in old_instructions {
+                    replacements.replace_instruction(&mut instr);
+
+                    let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
+                        unconstrained: true,
+                        results,
+                        function: CallTarget::Static(callee_id),
+                        ..
+                    } = &instr
+                    {
+                        callee_return_types
+                            .get(callee_id)
+                            .map(|rt| {
+                                results
+                                    .iter()
+                                    .zip(rt.iter())
+                                    .map(|(r, t)| (*r, t.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+
+                    new_instructions.push(instr);
+
+                    for (result_vid, return_type) in call_results {
+                        let (reconstructed, extras) =
+                            Self::flatten_witness_reconstruct(&result_vid, &return_type, function);
+                        new_instructions.extend(extras);
+                        replacements.insert(result_vid, reconstructed);
+                    }
+                }
+
+                let block = function.get_block_mut(bid);
+                block.put_instructions(new_instructions);
+                replacements.replace_terminator(block.get_terminator_mut());
+            }
+        }
+    }
+
+    /// Flatten a call result to field-level, WriteWitness each field, rangecheck + reconstruct.
+    /// Returns (reconstructed_value_id, instructions_to_insert).
+    fn flatten_witness_reconstruct(
+        value_id: &ValueId,
+        typ: &Type,
+        function: &mut HLFunction,
+    ) -> (ValueId, Vec<OpCode>) {
+        let mut instructions = Vec::new();
+
+        match &typ.expr {
+            TypeExpr::Field => {
+                // WriteWitness the field value directly
+                let ww_result = function.fresh_value();
+                instructions.push(OpCode::WriteWitness {
+                    result: Some(ww_result),
+                    value: *value_id,
+                    pinned: false,
+                });
+                (ww_result, instructions)
+            }
+            TypeExpr::U(size) => {
+                // Cast to Field, WriteWitness, rangecheck, cast back
+                let as_field = function.fresh_value();
+                instructions.push(OpCode::Cast {
+                    result: as_field,
+                    value: *value_id,
+                    target: CastTarget::Field,
+                });
+                let ww_result = function.fresh_value();
+                instructions.push(OpCode::WriteWitness {
+                    result: Some(ww_result),
+                    value: as_field,
+                    pinned: false,
+                });
+
+                if *size == 1 {
+                    // Boolean constraint: x * (x - 1) = 0
+                    let zero = function.fresh_value();
+                    instructions.push(OpCode::Const {
+                        result: zero,
+                        value: ConstValue::Field(ark_bn254::Fr::from(0)),
+                    });
+                    let one = function.fresh_value();
+                    instructions.push(OpCode::Const {
+                        result: one,
+                        value: ConstValue::Field(ark_bn254::Fr::from(1)),
+                    });
+                    let x_sub_1 = function.fresh_value();
+                    let x_times_x_sub_1 = function.fresh_value();
+                    instructions.push(OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::Sub,
+                        result: x_sub_1,
+                        lhs: ww_result,
+                        rhs: one,
+                    });
+                    instructions.push(OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::Mul,
+                        result: x_times_x_sub_1,
+                        lhs: ww_result,
+                        rhs: x_sub_1,
+                    });
+                    instructions.push(OpCode::AssertEq {
+                        lhs: x_times_x_sub_1,
+                        rhs: zero,
+                    });
+                } else {
+                    instructions.push(OpCode::Rangecheck {
+                        value: ww_result,
+                        max_bits: *size,
+                    });
+                }
+
+                let casted = function.fresh_value();
+                instructions.push(OpCode::Cast {
+                    result: casted,
+                    value: ww_result,
+                    target: CastTarget::U(*size),
+                });
+                (casted, instructions)
+            }
+            TypeExpr::Array(inner, size) => {
+                let mut elems = Vec::new();
+                for i in 0..*size {
+                    let index = function.fresh_value();
+                    instructions.push(OpCode::Const {
+                        result: index,
+                        value: ConstValue::U(32, i as u128),
+                    });
+                    let elem = function.fresh_value();
+                    instructions.push(OpCode::ArrayGet {
+                        result: elem,
+                        array: *value_id,
+                        index,
+                    });
+                    let (reconstructed_elem, child_instructions) =
+                        Self::flatten_witness_reconstruct(&elem, inner, function);
+                    instructions.extend(child_instructions);
+                    elems.push(reconstructed_elem);
+                }
+                let reconstructed = function.fresh_value();
+                instructions.push(OpCode::MkSeq {
+                    result: reconstructed,
+                    elems,
+                    seq_type: SeqType::Array(*size),
+                    elem_type: *inner.clone(),
+                });
+                (reconstructed, instructions)
+            }
+            TypeExpr::Tuple(element_types) => {
+                let mut elems = Vec::new();
+                let mut elem_types = Vec::new();
+                for (i, elem_type) in element_types.iter().enumerate() {
+                    let proj = function.fresh_value();
+                    instructions.push(OpCode::TupleProj {
+                        result: proj,
+                        tuple: *value_id,
+                        idx: TupleIdx::Static(i),
+                    });
+                    let (reconstructed_elem, child_instructions) =
+                        Self::flatten_witness_reconstruct(&proj, elem_type, function);
+                    instructions.extend(child_instructions);
+                    elems.push(reconstructed_elem);
+                    elem_types.push(elem_type.clone());
+                }
+                let reconstructed = function.fresh_value();
+                instructions.push(OpCode::MkTuple {
+                    result: reconstructed,
+                    elems,
+                    element_types: elem_types,
+                });
+                (reconstructed, instructions)
+            }
+            _ => {
+                // For other types, just WriteWitness directly
+                let ww_result = function.fresh_value();
+                instructions.push(OpCode::WriteWitness {
+                    result: Some(ww_result),
+                    value: *value_id,
+                    pinned: false,
+                });
+                (ww_result, instructions)
+            }
+        }
     }
 
     fn rebuild_main_params(&self, ssa: &mut HLSSA) {

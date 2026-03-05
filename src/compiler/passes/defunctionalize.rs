@@ -166,6 +166,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         results,
                         function: CallTarget::Dynamic(fn_ptr_val),
                         args,
+                        unconstrained,
                     } => {
                         let dispatch_fn = *call_site_dispatch.get(&(fid, fn_ptr_val)).expect(
                             &format!("No dispatch function for v{} in {:?}", fn_ptr_val.0, fid),
@@ -178,6 +179,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                             results,
                             function: CallTarget::Static(dispatch_fn),
                             args: new_args,
+                            unconstrained,
                         });
                     }
                     other => new_instructions.push(other),
@@ -356,6 +358,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                             function,
                             args,
                             results,
+                            unconstrained: _,
                         } => {
                             let target_fns: Vec<FunctionId> = match function {
                                 CallTarget::Static(callee_id) => vec![*callee_id],

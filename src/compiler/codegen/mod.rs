@@ -730,6 +730,7 @@ impl CodeGen {
                     results: r,
                     function: ssa::CallTarget::Static(fnid),
                     args: params,
+                    unconstrained: _,
                 } => {
                     let r = layouter.alloc_many_contiguous(
                         r.iter()

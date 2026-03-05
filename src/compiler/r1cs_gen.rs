@@ -272,7 +272,13 @@ impl symbolic_executor::Context<Value> for R1CGen {
         _func: FunctionId,
         _params: &mut [Value],
         _param_types: &[&Type],
+        _result_types: &[Type],
+        unconstrained: bool,
     ) -> Option<Vec<Value>> {
+        assert!(
+            !unconstrained,
+            "ICE: unconstrained calls should be DCE'd before R1CS gen"
+        );
         None
     }
 
@@ -639,6 +645,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
     fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
+    }
+
+    fn value_of(&self, _ctx: &mut R1CGen) -> Self {
+        panic!("ICE: ValueOf should not reach R1CS gen")
     }
 
     fn mem_op(&self, _kind: MemOp, _ctx: &mut R1CGen) {}

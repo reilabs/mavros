@@ -174,6 +174,7 @@ impl Types {
                 results: result,
                 function,
                 args,
+                unconstrained: _,
             } => match function {
                 CallTarget::Static(fn_id) => {
                     let (param_types, return_types) = function_types
