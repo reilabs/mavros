@@ -621,7 +621,6 @@ pub trait LLEmitter {
         r
     }
 
-
     // -- Memory --
 
     fn heap_alloc(&mut self, struct_type: LLStruct, flex_count: Option<ValueId>) -> ValueId {

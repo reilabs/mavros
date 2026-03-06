@@ -395,7 +395,17 @@ fn lower_instruction(
             index,
             value,
         } => {
-            lower_array_set(e, val_map, fn_type_info, *result, *array, *index, *value);
+            lower_array_set(
+                e,
+                val_map,
+                fn_type_info,
+                *result,
+                *array,
+                *index,
+                *value,
+                llssa,
+                drop_fns,
+            );
         }
 
         // -- RC operations --
@@ -487,6 +497,11 @@ fn lower_array_get(
 
 /// Lower ArraySet with copy-on-write semantics.
 /// Creates new blocks for the RC check + conditional copy.
+///
+/// When elements are themselves RC'd (arrays of arrays):
+/// - Reuse branch: drop the old element's RC (it's being replaced)
+/// - Copy branch: bump RC of every copied element except the one at `index`
+///   (which is overwritten), then decrement old array's RC
 fn lower_array_set(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
@@ -495,11 +510,26 @@ fn lower_array_set(
     array: ValueId,
     index: ValueId,
     value: ValueId,
+    llssa: &mut LLSSA,
+    drop_fns: &mut Vec<DropFnEntry>,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
     let (et, count) = array_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
+    let elem_is_rc = matches!(et.expr, TypeExpr::Array(..));
+
+    let inner_drop_fn = if elem_is_rc {
+        Some(get_or_create_drop_fn(et, llssa, drop_fns))
+    } else {
+        None
+    };
+    let inner_rc_struct = if elem_is_rc {
+        let (inner_et, inner_count) = array_info(et);
+        Some(rc_array_struct(inner_et, inner_count))
+    } else {
+        None
+    };
 
     let ll_arr = val_map[&array];
     let ll_idx = val_map[&index];
@@ -522,12 +552,19 @@ fn lower_array_set(
         |me| {
             let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
             let slot = me.array_elem_ptr(data, es.clone(), idx64);
+
+            // Drop old element's RC before overwriting
+            if let Some(drop_fn) = inner_drop_fn {
+                let old_elem = me.ll_load(slot, LLType::Ptr);
+                me.call(drop_fn, vec![old_elem], 0);
+            }
+
             me.ll_store(slot, ll_val);
             vec![ll_arr]
         },
         // -- Copy then mutate --
         |ce| {
-            // Decrement old RC
+            // Decrement old array's RC
             let new_rc = ce.int_sub(rc, one);
             ce.ll_store(rc_ptr, new_rc);
 
@@ -544,6 +581,33 @@ fn lower_array_set(
             let new_data = ce.struct_field_ptr(new_arr, rc_struct.clone(), 1);
             let count_val = ce.int_const(64, count as u64);
             ce.memcpy(new_data, old_data, es.clone(), Some(count_val));
+
+            // Bump RC of all copied elements except the one we're overwriting
+            if inner_drop_fn.is_some() {
+                ce.build_counted_loop(count, vec![], |ce, i_val, _| {
+                    let elem_ptr = ce.array_elem_ptr(new_data, es.clone(), i_val);
+                    let elem_val = ce.ll_load(elem_ptr, LLType::Ptr);
+                    let is_replaced = ce.int_eq(i_val, idx64);
+                    // Bump RC only if this is NOT the replaced element
+                    let not_replaced = ce.not(is_replaced);
+                    ce.build_if_else(
+                        not_replaced,
+                        vec![],
+                        |be| {
+                            let inner_hdr =
+                                be.struct_field_ptr(elem_val, inner_rc_struct.clone().unwrap(), 0);
+                            let inner_rc_ptr =
+                                be.struct_field_ptr(inner_hdr, LLStruct::rc_header(), 0);
+                            let inner_rc = be.ll_load(inner_rc_ptr, LLType::i64());
+                            let new_inner_rc = be.int_add(inner_rc, one);
+                            be.ll_store(inner_rc_ptr, new_inner_rc);
+                            vec![]
+                        },
+                        |_| vec![],
+                    );
+                    vec![]
+                });
+            }
 
             // Write new value at index
             let new_slot = ce.array_elem_ptr(new_data, es.clone(), idx64);
@@ -608,28 +672,29 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
 
 /// Generate a type-specific drop function.
 ///
-/// Structure:
-///   entry: decrement RC, check if zero -> free or done
-///   free_blk: (optionally loop to drop inner elements) -> Free -> done
-///   done: Return
+/// Pseudocode:
+///   fn drop(ptr):
+///     rc = --ptr.header.rc
+///     if rc == 0:
+///       for i in 0..count:        // only if elements are RC'd
+///         drop(ptr.data[i])
+///       free(ptr)
+///     return
 fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
     let (et, count) = array_info(ty);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
-    let elem_is_ptr = matches!(et.expr, TypeExpr::Array(..));
+    let elem_is_rc = matches!(et.expr, TypeExpr::Array(..));
 
     let mut func = LLFunction::empty(format!("drop_{}", ty));
     let entry = func.get_entry_id();
-    let (free_blk, _) = func.add_block_mut();
-    let (done_blk, _) = func.add_block_mut();
 
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
 
-        // Parameter: ptr
         let ptr = e.add_parameter(LLType::Ptr);
 
-        // Load RC, decrement, store
+        // Decrement RC
         let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
         let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
         let rc = e.ll_load(rc_ptr, LLType::i64());
@@ -637,58 +702,36 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
         let new_rc = e.int_sub(rc, one);
         e.ll_store(rc_ptr, new_rc);
 
-        // Check if dead (new_rc == 0)
+        // If RC hit zero, drop inner elements and free
         let zero = e.int_const(64, 0);
         let dead = e.int_eq(new_rc, zero);
+        e.build_if_else(
+            dead,
+            vec![],
+            |e| {
+                if elem_is_rc {
+                    let inner_drop_fn = drop_fns
+                        .iter()
+                        .find(|entry| entry.hlssa_type == *et)
+                        .expect("inner drop fn should exist")
+                        .fn_id;
 
-        e.terminate_jmp_if(dead, free_blk, done_blk);
+                    let data = e.struct_field_ptr(ptr, rc_struct, 1);
+                    e.build_counted_loop(count, vec![], |e, i_val, _| {
+                        let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
+                        let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
+                        e.call(inner_drop_fn, vec![elem_val], 0);
+                        vec![]
+                    });
+                }
+                e.free(ptr);
+                vec![]
+            },
+            |_| vec![],
+        );
+
+        e.terminate_return(vec![]);
     }
-
-    if elem_is_ptr {
-        // Elements contain pointers -- loop and drop each inner element
-        let inner_drop_fn = drop_fns
-            .iter()
-            .find(|e| e.hlssa_type == *et)
-            .expect("inner drop fn should exist")
-            .fn_id;
-
-        // We need the ptr value to access inside the loop body.
-        // Re-read it from the entry block parameters.
-        let ptr = func
-            .get_block(entry)
-            .get_parameter_values()
-            .next()
-            .copied()
-            .unwrap();
-
-        let mut e = LLBlockEmitter::new(&mut func, free_blk);
-        let data = e.struct_field_ptr(ptr, rc_struct, 1);
-
-        e.build_counted_loop(count, vec![], |e, i_val, _| {
-            let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
-            let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
-            e.call(inner_drop_fn, vec![elem_val], 0);
-            vec![]
-        });
-
-        e.free(ptr);
-        e.terminate_jmp(done_blk, vec![]);
-    } else {
-        // No recursive drops needed -- just free
-        let ptr = func
-            .get_block(entry)
-            .get_parameter_values()
-            .next()
-            .copied()
-            .unwrap();
-
-        let mut e = LLBlockEmitter::new(&mut func, free_blk);
-        e.free(ptr);
-        e.terminate_jmp(done_blk, vec![]);
-    }
-
-    // done: return
-    func.terminate_block_with_return(done_blk, vec![]);
 
     func
 }
