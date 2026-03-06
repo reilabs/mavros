@@ -1,0 +1,5 @@
+[package]
+name = "int_witness_arith"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"

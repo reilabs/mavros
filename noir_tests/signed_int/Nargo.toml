@@ -1,0 +1,5 @@
+[package]
+name = "signed_int"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"

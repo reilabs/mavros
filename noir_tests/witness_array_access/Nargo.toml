@@ -1,0 +1,5 @@
+[package]
+name = "witness_array_access"
+type = "bin"
+authors = ["test"]
+compiler_version = ">=1.0.0"
