@@ -997,6 +997,52 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         // Emitter is now at continuation; return param ids
         param_ids
     }
+
+    /// Build an if-then-else diamond:
+    ///
+    ///   current_block → JmpIf(cond, then_blk, else_blk)
+    ///   then_blk → ... → Jmp(merge_blk, then_results)
+    ///   else_blk → ... → Jmp(merge_blk, else_results)
+    ///   merge_blk(params...) → continues here
+    ///
+    /// `result_types` defines the merge block parameters.
+    /// `then_branch` and `else_branch` each receive the emitter and return values
+    /// that are passed to the merge block.
+    ///
+    /// Returns the merge parameter `ValueId`s.
+    pub fn build_if_else(
+        &mut self,
+        cond: ValueId,
+        result_types: Vec<Ty>,
+        then_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
+        else_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
+    ) -> Vec<ValueId> {
+        let (then_blk, _) = self.add_block();
+        let (else_blk, _) = self.add_block();
+        let (merge_blk, _) = self.add_block();
+
+        // Add merge parameters
+        let mut merge_params = vec![];
+        for ty in result_types {
+            let v = self.function.fresh_value();
+            self.function.get_block_mut(merge_blk).push_parameter(v, ty);
+            merge_params.push(v);
+        }
+
+        // Seal current block → JmpIf
+        self.seal_and_switch(Terminator::JmpIf(cond, then_blk, else_blk), then_blk);
+
+        // Build then branch
+        let then_results = then_branch(self);
+        self.seal_and_switch(Terminator::Jmp(merge_blk, then_results), else_blk);
+
+        // Build else branch
+        let else_results = else_branch(self);
+        self.seal_and_switch(Terminator::Jmp(merge_blk, else_results), merge_blk);
+
+        // Emitter is now at merge block
+        merge_params
+    }
 }
 
 // -- HLEmitter for BlockEmitter<OpCode, Type> --------------------------------

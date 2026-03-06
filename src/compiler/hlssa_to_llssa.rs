@@ -515,53 +515,45 @@ fn lower_array_set(
     let one = e.int_const(64, 1);
     let unique = e.int_eq(rc, one);
 
-    // Create blocks
-    let (mutate_blk, _) = e.add_block();
-    let (copy_blk, _) = e.add_block();
-    let (merge_blk, _) = e.add_block();
-    let merge_param = e.function.add_parameter(merge_blk, LLType::Ptr);
+    let merge_results = e.build_if_else(
+        unique,
+        vec![LLType::Ptr],
+        // -- Mutate in place --
+        |me| {
+            let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
+            let slot = me.array_elem_ptr(data, es.clone(), idx64);
+            me.ll_store(slot, ll_val);
+            vec![ll_arr]
+        },
+        // -- Copy then mutate --
+        |ce| {
+            // Decrement old RC
+            let new_rc = ce.int_sub(rc, one);
+            ce.ll_store(rc_ptr, new_rc);
 
-    // -- Mutate in place --
-    {
-        let mut me = LLBlockEmitter::new(e.function, mutate_blk);
-        let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
-        let slot = me.array_elem_ptr(data, es.clone(), idx64);
-        me.ll_store(slot, ll_val);
-        me.terminate_jmp(merge_blk, vec![ll_arr]);
-    }
+            // Allocate new array
+            let new_arr = ce.heap_alloc(rc_struct.clone(), None);
 
-    // -- Copy then mutate --
-    {
-        let mut ce = LLBlockEmitter::new(e.function, copy_blk);
-        // Decrement old RC
-        let new_rc = ce.int_sub(rc, one);
-        ce.ll_store(rc_ptr, new_rc);
+            // Init new RC to 1
+            let new_hdr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 0);
+            let new_rc_ptr = ce.struct_field_ptr(new_hdr, LLStruct::rc_header(), 0);
+            ce.ll_store(new_rc_ptr, one);
 
-        // Allocate new array
-        let new_arr = ce.heap_alloc(rc_struct.clone(), None);
+            // Copy all data
+            let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
+            let new_data = ce.struct_field_ptr(new_arr, rc_struct.clone(), 1);
+            let count_val = ce.int_const(64, count as u64);
+            ce.memcpy(new_data, old_data, es.clone(), Some(count_val));
 
-        // Init new RC to 1
-        let new_hdr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 0);
-        let new_rc_ptr = ce.struct_field_ptr(new_hdr, LLStruct::rc_header(), 0);
-        ce.ll_store(new_rc_ptr, one);
+            // Write new value at index
+            let new_slot = ce.array_elem_ptr(new_data, es.clone(), idx64);
+            ce.ll_store(new_slot, ll_val);
 
-        // Copy all data
-        let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
-        let new_data = ce.struct_field_ptr(new_arr, rc_struct, 1);
-        let count_val = ce.int_const(64, count as u64);
-        ce.memcpy(new_data, old_data, es.clone(), Some(count_val));
+            vec![new_arr]
+        },
+    );
 
-        // Write new value at index
-        let new_slot = ce.array_elem_ptr(new_data, es, idx64);
-        ce.ll_store(new_slot, ll_val);
-
-        ce.terminate_jmp(merge_blk, vec![new_arr]);
-    }
-
-    // Seal current block and switch to merge block
-    e.seal_and_switch(Terminator::JmpIf(unique, mutate_blk, copy_blk), merge_blk);
-
-    val_map.insert(result, merge_param);
+    val_map.insert(result, merge_results[0]);
 }
 
 /// Lower MemOp::Bump(n) -- increment refcount by n.
