@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    block_builder::{BlockEmitter, FunctionBuilder, HLEmitter},
+    block_builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -46,7 +46,7 @@ impl PrepareEntryPoint {
         {
             let wrapper = ssa.get_function_mut(wrapper_id);
             let entry_block = wrapper.get_entry_id();
-            let mut b = FunctionBuilder::new(wrapper);
+            let mut b = HLFunctionBuilder::new(wrapper);
             let mut e = b.block(entry_block);
 
             let mut arg_values = Vec::new();
@@ -81,7 +81,12 @@ impl PrepareEntryPoint {
         ssa.set_entry_point(wrapper_id);
     }
 
-    fn assert_eq_deep(b: &mut BlockEmitter, result: ValueId, public_input: ValueId, typ: &Type) {
+    fn assert_eq_deep(
+        b: &mut HLBlockEmitter<'_>,
+        result: ValueId,
+        public_input: ValueId,
+        typ: &Type,
+    ) {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) => {
                 b.assert_eq(result, public_input);

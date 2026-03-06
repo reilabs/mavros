@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
-    block_builder::{FunctionBuilder, HLEmitter},
+    block_builder::{HLEmitter, HLFunctionBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     ssa::{
@@ -529,7 +529,7 @@ fn build_dispatch_function(
     }
 
     let entry_block = func.get_entry_id();
-    let mut b = FunctionBuilder::new(func);
+    let mut b = HLFunctionBuilder::new(func);
 
     let fn_id_param;
     let mut forwarded_params: Vec<ValueId> = Vec::new();

@@ -1,6 +1,7 @@
 //! Runtime Library for Mavros WASM
 //!
-//! Provides BN254 field arithmetic and VM write functions called by LLVM-generated WASM.
+//! Provides BN254 field arithmetic, VM write functions, and heap allocation
+//! called by LLVM-generated WASM.
 //! Field elements are 4 x i64 limbs in Montgomery form.
 //!
 //! ABI (matching LLVM's wasm32 lowering of [4 x i64]):
@@ -9,6 +10,44 @@
 
 use ark_bn254::Fr;
 use ark_ff::BigInt;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
+//
+// Each allocation prepends an 8-byte header storing the requested size so that
+// free() can reconstruct the Layout needed by dealloc().
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const HEADER: usize = 8;
+const ALIGN: usize = 8;
+
+#[no_mangle]
+pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
+    let total = HEADER + size as usize;
+    let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
+    let base = std::alloc::alloc(layout);
+    if base.is_null() {
+        return base;
+    }
+    *(base as *mut u32) = size;
+    base.add(HEADER)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn free(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    let base = ptr.sub(HEADER);
+    let size = *(base as *mut u32) as usize;
+    let total = HEADER + size;
+    let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
+    std::alloc::dealloc(base, layout);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Field arithmetic
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[inline]
 fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> Fr {
@@ -40,6 +79,10 @@ pub unsafe extern "C" fn __field_mul(
     let b = limbs_to_fr(b0, b1, b2, b3);
     write_field(result_ptr, a * b);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VM write functions
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[no_mangle]
 pub unsafe extern "C" fn __write_witness(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v3: i64) {

@@ -1,9 +1,10 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
+    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType},
     ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
-        Function, FunctionId, HLBlock, HLFunction, Instruction, LookupTarget, MemOp, OpCode, Radix,
-        SeqType, SliceOpDir, Terminator, TupleIdx, ValueId,
+        BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
+        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
+        Terminator, TupleIdx, ValueId,
     },
 };
 
@@ -461,6 +462,282 @@ pub trait HLEmitter {
 }
 
 // ---------------------------------------------------------------------------
+// LLEmitter — unified trait for emitting LL SSA instructions
+// ---------------------------------------------------------------------------
+
+pub trait LLEmitter {
+    fn fresh_value(&mut self) -> ValueId;
+    fn emit_ll(&mut self, op: LLOp);
+
+    // -- Constants --
+
+    fn int_const(&mut self, bits: u32, value: u64) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::IntConst {
+            result: r,
+            bits,
+            value,
+        });
+        r
+    }
+
+    fn null_ptr(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::NullPtr { result: r });
+        r
+    }
+
+    // -- Integer Arithmetic --
+
+    fn int_arith(&mut self, kind: IntArithOp, a: ValueId, b: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::IntArith {
+            kind,
+            result: r,
+            a,
+            b,
+        });
+        r
+    }
+
+    fn int_add(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.int_arith(IntArithOp::Add, a, b)
+    }
+
+    fn int_sub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.int_arith(IntArithOp::Sub, a, b)
+    }
+
+    fn int_mul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.int_arith(IntArithOp::Mul, a, b)
+    }
+
+    fn not(&mut self, value: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::Not { result: r, value });
+        r
+    }
+
+    // -- Integer Comparison --
+
+    fn int_cmp(&mut self, kind: IntCmpOp, a: ValueId, b: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::IntCmp {
+            kind,
+            result: r,
+            a,
+            b,
+        });
+        r
+    }
+
+    fn int_eq(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.int_cmp(IntCmpOp::Eq, a, b)
+    }
+
+    fn int_ult(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.int_cmp(IntCmpOp::ULt, a, b)
+    }
+
+    // -- Width conversion --
+
+    fn truncate(&mut self, value: ValueId, to_bits: u32) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::Truncate {
+            result: r,
+            value,
+            to_bits,
+        });
+        r
+    }
+
+    fn zext(&mut self, value: ValueId, to_bits: u32) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ZExt {
+            result: r,
+            value,
+            to_bits,
+        });
+        r
+    }
+
+    // -- Field Arithmetic --
+
+    fn field_arith(&mut self, kind: FieldArithOp, a: ValueId, b: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::FieldArith {
+            kind,
+            result: r,
+            a,
+            b,
+        });
+        r
+    }
+
+    fn field_neg(&mut self, src: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::FieldNeg { result: r, src });
+        r
+    }
+
+    fn field_eq(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::FieldEq { result: r, a, b });
+        r
+    }
+
+    fn field_to_limbs(&mut self, src: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::FieldToLimbs { result: r, src });
+        r
+    }
+
+    fn field_from_limbs(&mut self, limbs: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::FieldFromLimbs { result: r, limbs });
+        r
+    }
+
+    // -- Aggregate --
+
+    fn mk_struct(&mut self, struct_type: LLStruct, fields: Vec<ValueId>) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::MkStruct {
+            result: r,
+            struct_type,
+            fields,
+        });
+        r
+    }
+
+    fn extract_field(&mut self, value: ValueId, struct_type: LLStruct, field: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ExtractField {
+            result: r,
+            value,
+            struct_type,
+            field,
+        });
+        r
+    }
+
+    // -- Memory --
+
+    fn heap_alloc(&mut self, struct_type: LLStruct, flex_count: Option<ValueId>) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::HeapAlloc {
+            result: r,
+            struct_type,
+            flex_count,
+        });
+        r
+    }
+
+    fn free(&mut self, ptr: ValueId) {
+        self.emit_ll(LLOp::Free { ptr });
+    }
+
+    fn ll_load(&mut self, ptr: ValueId, ty: LLType) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::Load { result: r, ptr, ty });
+        r
+    }
+
+    fn ll_store(&mut self, ptr: ValueId, value: ValueId) {
+        self.emit_ll(LLOp::Store { ptr, value });
+    }
+
+    fn struct_field_ptr(&mut self, ptr: ValueId, struct_type: LLStruct, field: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::StructFieldPtr {
+            result: r,
+            ptr,
+            struct_type,
+            field,
+        });
+        r
+    }
+
+    fn array_elem_ptr(&mut self, ptr: ValueId, elem_type: LLStruct, index: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ArrayElemPtr {
+            result: r,
+            ptr,
+            elem_type,
+            index,
+        });
+        r
+    }
+
+    fn memcpy(
+        &mut self,
+        dst: ValueId,
+        src: ValueId,
+        struct_type: LLStruct,
+        count: Option<ValueId>,
+    ) {
+        self.emit_ll(LLOp::Memcpy {
+            dst,
+            src,
+            struct_type,
+            count,
+        });
+    }
+
+    // -- Selection --
+
+    fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::Select {
+            result: r,
+            cond,
+            if_t,
+            if_f,
+        });
+        r
+    }
+
+    // -- Calls --
+
+    fn call(&mut self, func: FunctionId, args: Vec<ValueId>, num_results: usize) -> Vec<ValueId> {
+        let results: Vec<ValueId> = (0..num_results).map(|_| self.fresh_value()).collect();
+        self.emit_ll(LLOp::Call {
+            results: results.clone(),
+            func,
+            args,
+        });
+        results
+    }
+
+    // -- Globals --
+
+    fn global_addr(&mut self, global_id: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::GlobalAddr {
+            result: r,
+            global_id,
+        });
+        r
+    }
+
+    // -- VM / Constraint --
+
+    fn constrain(&mut self, a: ValueId, b: ValueId, c: ValueId) {
+        self.emit_ll(LLOp::Constrain { a, b, c });
+    }
+
+    fn write_witness(&mut self, value: ValueId) {
+        self.emit_ll(LLOp::WriteWitness { value });
+    }
+
+    // -- Trap --
+
+    fn trap(&mut self) {
+        self.emit_ll(LLOp::Trap);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InstrBuilder — lightweight instruction emitter
 // ---------------------------------------------------------------------------
 
@@ -483,7 +760,7 @@ impl<'a, Op: Instruction, Ty: SSAType> InstrBuilder<'a, Op, Ty> {
     }
 }
 
-impl HLEmitter for InstrBuilder<'_, OpCode, Type> {
+impl HLEmitter for HLInstrBuilder<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.function.fresh_value()
     }
@@ -493,20 +770,41 @@ impl HLEmitter for InstrBuilder<'_, OpCode, Type> {
     }
 }
 
+impl LLEmitter for LLInstrBuilder<'_> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
+    }
+
+    fn emit_ll(&mut self, op: LLOp) {
+        self.instructions.push(op);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type aliases
+// ---------------------------------------------------------------------------
+
+pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type>;
+pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, LLType>;
+pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type>;
+pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, LLType>;
+pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type>;
+pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, LLType>;
+
 // ---------------------------------------------------------------------------
 // FunctionBuilder — function-level coordinator (no current_block)
 // ---------------------------------------------------------------------------
 
-pub struct FunctionBuilder<'a> {
-    pub function: &'a mut HLFunction,
+pub struct FunctionBuilder<'a, Op: Instruction, Ty: SSAType> {
+    pub function: &'a mut Function<Op, Ty>,
 }
 
-impl<'a> FunctionBuilder<'a> {
-    pub fn new(function: &'a mut HLFunction) -> Self {
+impl<'a, Op: Instruction, Ty: SSAType> FunctionBuilder<'a, Op, Ty> {
+    pub fn new(function: &'a mut Function<Op, Ty>) -> Self {
         Self { function }
     }
 
-    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_>)) -> BlockId {
+    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_, Op, Ty>)) -> BlockId {
         let (id, mut emitter) = BlockEmitter::from_new_block(self.function);
         f(&mut emitter);
         id
@@ -517,12 +815,12 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Escape hatch for direct function access.
-    pub fn function(&mut self) -> &mut HLFunction {
+    pub fn function(&mut self) -> &mut Function<Op, Ty> {
         self.function
     }
 
     /// Get a BlockEmitter for a specific block.
-    pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_> {
+    pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty> {
         BlockEmitter::new(self.function, id)
     }
 }
@@ -534,32 +832,22 @@ impl<'a> FunctionBuilder<'a> {
 /// Holds the current block *taken out* of the function, so `emit()` is a
 /// direct `Vec::push` with no HashMap lookup.  The block is put back into the
 /// function on `seal_and_switch` or `Drop`.
-pub struct BlockEmitter<'a> {
-    pub function: &'a mut HLFunction,
+pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType> {
+    pub function: &'a mut Function<Op, Ty>,
     block_id: BlockId,
-    block: HLBlock,
+    block: Block<Op, Ty>,
 }
 
-impl Drop for BlockEmitter<'_> {
+impl<Op: Instruction, Ty: SSAType> Drop for BlockEmitter<'_, Op, Ty> {
     fn drop(&mut self) {
-        let block = std::mem::replace(&mut self.block, HLBlock::empty());
+        let block = std::mem::replace(&mut self.block, Block::empty());
         self.function.put_block(self.block_id, block);
     }
 }
 
-impl HLEmitter for BlockEmitter<'_> {
-    fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
-    }
-
-    fn emit(&mut self, op: OpCode) {
-        self.block.push_instruction(op);
-    }
-}
-
-impl<'a> BlockEmitter<'a> {
+impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
     /// Create an emitter for an existing block (takes it out of the function).
-    pub fn new(function: &'a mut HLFunction, block_id: BlockId) -> Self {
+    pub fn new(function: &'a mut Function<Op, Ty>, block_id: BlockId) -> Self {
         let block = function.take_block(block_id);
         Self {
             function,
@@ -570,7 +858,7 @@ impl<'a> BlockEmitter<'a> {
 
     /// Create an emitter for a fresh block (not yet in the function).
     /// The block is inserted into the function on drop.
-    pub(crate) fn from_new_block(function: &'a mut HLFunction) -> (BlockId, Self) {
+    pub(crate) fn from_new_block(function: &'a mut Function<Op, Ty>) -> (BlockId, Self) {
         let (block_id, block) = function.next_virtual_block();
         (
             block_id,
@@ -586,11 +874,11 @@ impl<'a> BlockEmitter<'a> {
         self.block_id
     }
 
-    pub fn add_block(&mut self) -> (BlockId, &mut HLBlock) {
+    pub fn add_block(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
         self.function.add_block_mut()
     }
 
-    pub fn add_parameter(&mut self, typ: Type) -> ValueId {
+    pub fn add_parameter(&mut self, typ: Ty) -> ValueId {
         let v = self.function.fresh_value();
         self.block.push_parameter(v, typ);
         v
@@ -627,7 +915,7 @@ impl<'a> BlockEmitter<'a> {
         self.block.get_terminator().is_some()
     }
 
-    /// Build a loop with the three-block structure: header → body → back-edge.
+    /// Build a loop with the three-block structure: header -> body -> back-edge.
     ///
     /// The caller provides:
     /// - `params`: `(initial_value, type)` for all loop-carried state
@@ -641,8 +929,8 @@ impl<'a> BlockEmitter<'a> {
     /// Returns the loop parameter `ValueId`s as seen from the continuation block.
     pub fn build_loop(
         &mut self,
-        params: Vec<(ValueId, Type)>,
-        header: impl FnOnce(&mut InstrBuilder<'_, OpCode, Type>, &[ValueId]) -> ValueId,
+        params: Vec<(ValueId, Ty)>,
+        header: impl FnOnce(&mut InstrBuilder<'_, Op, Ty>, &[ValueId]) -> ValueId,
         body: impl FnOnce(&mut Self, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Create blocks
@@ -650,7 +938,7 @@ impl<'a> BlockEmitter<'a> {
         let (body_id, _) = self.add_block();
         let (cont_id, _) = self.add_block();
 
-        // Seal current block → Jmp(header, initial values)
+        // Seal current block -> Jmp(header, initial values)
         let init_values: Vec<ValueId> = params.iter().map(|(v, _)| *v).collect();
         self.seal_and_switch(Terminator::Jmp(header_id, init_values), body_id);
 
@@ -685,14 +973,74 @@ impl<'a> BlockEmitter<'a> {
         // Call body closure (emitter is at body block, may split it further)
         let updated = body(self, &param_ids);
 
-        // Seal body → Jmp(header, updated values)
+        // Seal body -> Jmp(header, updated values)
         self.seal_and_switch(Terminator::Jmp(header_id, updated), cont_id);
 
         // Emitter is now at continuation; return param ids
         param_ids
     }
 
-    /// Build a counted loop: `for i in 0..len { body(i, accumulators) → updated_accumulators }`
+    /// Build an if-then-else diamond:
+    ///
+    ///   current_block → JmpIf(cond, then_blk, else_blk)
+    ///   then_blk → ... → Jmp(merge_blk, then_results)
+    ///   else_blk → ... → Jmp(merge_blk, else_results)
+    ///   merge_blk(params...) → continues here
+    ///
+    /// `result_types` defines the merge block parameters.
+    /// `then_branch` and `else_branch` each receive the emitter and return values
+    /// that are passed to the merge block.
+    ///
+    /// Returns the merge parameter `ValueId`s.
+    pub fn build_if_else(
+        &mut self,
+        cond: ValueId,
+        result_types: Vec<Ty>,
+        then_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
+        else_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
+    ) -> Vec<ValueId> {
+        let (then_blk, _) = self.add_block();
+        let (else_blk, _) = self.add_block();
+        let (merge_blk, _) = self.add_block();
+
+        // Add merge parameters
+        let mut merge_params = vec![];
+        for ty in result_types {
+            let v = self.function.fresh_value();
+            self.function.get_block_mut(merge_blk).push_parameter(v, ty);
+            merge_params.push(v);
+        }
+
+        // Seal current block → JmpIf
+        self.seal_and_switch(Terminator::JmpIf(cond, then_blk, else_blk), then_blk);
+
+        // Build then branch
+        let then_results = then_branch(self);
+        self.seal_and_switch(Terminator::Jmp(merge_blk, then_results), else_blk);
+
+        // Build else branch
+        let else_results = else_branch(self);
+        self.seal_and_switch(Terminator::Jmp(merge_blk, else_results), merge_blk);
+
+        // Emitter is now at merge block
+        merge_params
+    }
+}
+
+// -- HLEmitter for BlockEmitter<OpCode, Type> --------------------------------
+
+impl HLEmitter for HLBlockEmitter<'_> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
+    }
+
+    fn emit(&mut self, op: OpCode) {
+        self.block.push_instruction(op);
+    }
+}
+
+impl HLBlockEmitter<'_> {
+    /// Build a counted loop: `for i in 0..len { body(i, accumulators) -> updated_accumulators }`
     ///
     /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`),
     /// and increment (`i + 1`). Returns only the accumulator values at loop exit.
@@ -726,6 +1074,53 @@ impl<'a> BlockEmitter<'a> {
         );
 
         // Skip index, return accumulator results
+        results[1..].to_vec()
+    }
+}
+
+// -- LLEmitter for BlockEmitter<LLOp, LLType> --------------------------------
+
+impl LLEmitter for LLBlockEmitter<'_> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.function.fresh_value()
+    }
+
+    fn emit_ll(&mut self, op: LLOp) {
+        self.block.push_instruction(op);
+    }
+}
+
+impl LLBlockEmitter<'_> {
+    /// Build a counted loop: `for i in 0..count { body(i, accumulators) -> updated_accumulators }`
+    ///
+    /// LL variant: uses i64 index with int_ult/int_add.
+    pub fn build_counted_loop(
+        &mut self,
+        count: usize,
+        accumulators: Vec<(ValueId, LLType)>,
+        body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
+    ) -> Vec<ValueId> {
+        let const_0 = self.int_const(64, 0);
+        let const_1 = self.int_const(64, 1);
+        let const_len = self.int_const(64, count as u64);
+
+        let mut params = vec![(const_0, LLType::i64())];
+        params.extend(accumulators);
+
+        let results = self.build_loop(
+            params,
+            |b, loop_params| b.int_ult(loop_params[0], const_len),
+            |emitter, loop_params| {
+                let i_val = loop_params[0];
+                let acc_params = &loop_params[1..];
+                let updated_accs = body(emitter, i_val, acc_params);
+                let next_i = emitter.int_add(i_val, const_1);
+                let mut result = vec![next_i];
+                result.extend(updated_accs);
+                result
+            },
+        );
+
         results[1..].to_vec()
     }
 }
