@@ -123,5 +123,5 @@ This is lazy reverse-mode AD - gradient propagation is deferred until values are
 
 ### Lookups (LogUp)
 
-The `Lookup` and `DLookup` opcodes handle PLONK-style lookup constraints. We extend Spartan with the [LogUp argument](https://eprint.iacr.org/2022/1530) to support these. `Lookup` is used in witgen; `DLookup` computes the corresponding derivatives for AD. The VM has special handling for these instructions, to reuse yet-unused parts of the
+The `Lookup` and `DLookup` opcodes handle PLONK-style lookup constraints. We extend Spartan with the [LogUp argument](https://eprint.iacr.org/2022/1530) to support these. `Lookup` is used in witgen; `DLookup` computes the corresponding derivatives for AD. The VM has special handling for these instructions, to reuse yet unused parts of the
 output vector to store intermediate results and then compute the challenge-based values in a final pass after execution is done.
