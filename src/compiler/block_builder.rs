@@ -621,23 +621,6 @@ pub trait LLEmitter {
         r
     }
 
-    fn insert_field(
-        &mut self,
-        base: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-        value: ValueId,
-    ) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::InsertField {
-            result: r,
-            base,
-            struct_type,
-            field,
-            value,
-        });
-        r
-    }
 
     // -- Memory --
 

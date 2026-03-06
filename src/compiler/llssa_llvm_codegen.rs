@@ -506,23 +506,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.call_write_fn(self.write_witness_fn.unwrap(), vm_ptr, val);
             }
 
-            LLOp::InsertField {
-                result,
-                base,
-                struct_type: _,
-                field,
-                value,
-            } => {
-                let agg = self.value_map[base].into_struct_value();
-                let field_val = self.value_map[value];
-                let new_agg = self
-                    .builder
-                    .build_insert_value(agg, field_val, *field as u32, &format!("v{}", result.0))
-                    .unwrap()
-                    .into_struct_value();
-                self.value_map.insert(*result, new_agg.into());
-            }
-
             LLOp::Truncate {
                 result,
                 value,

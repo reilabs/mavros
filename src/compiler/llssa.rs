@@ -299,14 +299,6 @@ pub enum LLOp {
         struct_type: LLStruct,
         field: usize,
     },
-    InsertField {
-        result: ValueId,
-        base: ValueId,
-        struct_type: LLStruct,
-        field: usize,
-        value: ValueId,
-    },
-
     // ── Memory ──────────────────────────────────────────────────────────
     HeapAlloc {
         result: ValueId,
@@ -420,9 +412,6 @@ impl Instruction for LLOp {
             // Struct ops
             LLOp::MkStruct { fields, .. } => fields.iter().collect::<Vec<_>>().into_iter(),
             LLOp::ExtractField { value, .. } => vec![value].into_iter(),
-            LLOp::InsertField {
-                base, value: val, ..
-            } => vec![base, val].into_iter(),
 
             // Memory with pointer
             LLOp::HeapAlloc { flex_count, .. } => flex_count.iter().collect::<Vec<_>>().into_iter(),
@@ -462,7 +451,6 @@ impl Instruction for LLOp {
             | LLOp::FieldFromLimbs { result, .. }
             | LLOp::MkStruct { result, .. }
             | LLOp::ExtractField { result, .. }
-            | LLOp::InsertField { result, .. }
             | LLOp::HeapAlloc { result, .. }
             | LLOp::Load { result, .. }
             | LLOp::StructFieldPtr { result, .. }
@@ -517,9 +505,6 @@ impl Instruction for LLOp {
             // Struct ops
             LLOp::MkStruct { fields, .. } => fields.iter_mut().collect::<Vec<_>>().into_iter(),
             LLOp::ExtractField { value, .. } => vec![value].into_iter(),
-            LLOp::InsertField {
-                base, value: val, ..
-            } => vec![base, val].into_iter(),
 
             // Memory with pointer
             LLOp::HeapAlloc { flex_count, .. } => {
@@ -586,12 +571,6 @@ impl Instruction for LLOp {
                 v.into_iter()
             }
             LLOp::ExtractField { result, value, .. } => vec![result, value].into_iter(),
-            LLOp::InsertField {
-                result,
-                base,
-                value,
-                ..
-            } => vec![result, base, value].into_iter(),
 
             LLOp::HeapAlloc {
                 result, flex_count, ..
@@ -712,22 +691,6 @@ impl Instruction for LLOp {
                     vr(*value),
                     struct_type,
                     field
-                )
-            }
-            LLOp::InsertField {
-                result,
-                base,
-                struct_type,
-                field,
-                value,
-            } => {
-                format!(
-                    "{} = insert_field {}, {}, {}, {}",
-                    v(*result),
-                    vr(*base),
-                    struct_type,
-                    field,
-                    vr(*value)
                 )
             }
             LLOp::HeapAlloc {
@@ -994,16 +957,13 @@ mod tests {
             let l2 = e.int_const(64, 0);
             let l3 = e.int_const(64, 0);
             let s = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
-            let f0 = e.extract_field(s, field_elem.clone(), 0);
-            let new_val = e.int_const(64, 99);
-            let s2 = e.insert_field(s, field_elem, 0, new_val);
-            e.terminate_return(vec![f0, s2]);
+            let f0 = e.extract_field(s, field_elem, 0);
+            e.terminate_return(vec![f0, s]);
         }
 
         let dump = ssa.to_string(&DefaultSsaAnnotator);
         assert!(dump.contains("mk_struct"));
         assert!(dump.contains("extract_field"));
-        assert!(dump.contains("insert_field"));
     }
 
     #[test]
