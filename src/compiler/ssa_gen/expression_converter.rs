@@ -269,9 +269,31 @@ impl<'a> ExpressionConverter<'a> {
 
         let mut e = b.block(self.current_block);
         let result = match binary.operator {
-            BinaryOpKind::Add => e.add(lhs, rhs),
-            BinaryOpKind::Subtract => e.sub(lhs, rhs),
-            BinaryOpKind::Multiply => e.mul(lhs, rhs),
+            BinaryOpKind::Add | BinaryOpKind::Subtract | BinaryOpKind::Multiply => {
+                if let Some(bits) = Self::get_uint_bits(&binary.lhs) {
+                    // Non-overflowing unsigned arithmetic: compute in Field so the
+                    // result type is honest (Field, not U(N)), then rangecheck to
+                    // prove the result fits, then narrow back to U(N).
+                    let lhs_f = e.cast_to_field(lhs);
+                    let rhs_f = e.cast_to_field(rhs);
+                    let r = match binary.operator {
+                        BinaryOpKind::Add => e.add(lhs_f, rhs_f),
+                        BinaryOpKind::Subtract => e.sub(lhs_f, rhs_f),
+                        BinaryOpKind::Multiply => e.mul(lhs_f, rhs_f),
+                        _ => unreachable!(),
+                    };
+                    e.rangecheck(r, bits);
+                    e.cast_to(CastTarget::U(bits), r)
+                } else {
+                    // Field arithmetic wraps naturally, no overflow check needed
+                    match binary.operator {
+                        BinaryOpKind::Add => e.add(lhs, rhs),
+                        BinaryOpKind::Subtract => e.sub(lhs, rhs),
+                        BinaryOpKind::Multiply => e.mul(lhs, rhs),
+                        _ => unreachable!(),
+                    }
+                }
+            }
             BinaryOpKind::Divide => e.div(lhs, rhs),
             BinaryOpKind::Equal => e.eq(lhs, rhs),
             BinaryOpKind::NotEqual => {
@@ -1387,6 +1409,19 @@ impl<'a> ExpressionConverter<'a> {
             None
         } else {
             Some(results[0])
+        }
+    }
+
+    /// If the expression has an unsigned integer type, return its bit width.
+    /// Returns `None` for Field, Bool, and signed integers.
+    fn get_uint_bits(expr: &Expression) -> Option<usize> {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+        use noirc_frontend::shared::Signedness;
+        match expr.return_type()?.as_ref() {
+            AstType::Integer(Signedness::Unsigned, bit_size) => {
+                Some(bit_size.bit_size() as usize)
+            }
+            _ => None,
         }
     }
 }

@@ -6,8 +6,8 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
-        Terminator, ValueId,
+        BinaryArithOpKind, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA,
+        OpCode, Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
@@ -108,7 +108,6 @@ impl UntaintControlFlow {
                     | OpCode::Cast { .. }
                     | OpCode::Truncate { .. }
                     | OpCode::Not { .. }
-                    | OpCode::Rangecheck { .. }
                     | OpCode::ToBits { .. }
                     | OpCode::ToRadix { .. }
                     | OpCode::ReadGlobal { .. }
@@ -139,6 +138,29 @@ impl UntaintControlFlow {
                                 lhs: lhs,
                                 rhs: new_rhs,
                             })
+                        }
+                        None => new_instructions.push(instruction),
+                    },
+                    OpCode::Rangecheck { value, max_bits } => match block_taint {
+                        Some(taint) => {
+                            // On dead paths (taint=false), substitute 0 which
+                            // trivially passes any rangecheck.
+                            let zero = function.fresh_value();
+                            new_instructions.push(OpCode::Const {
+                                result: zero,
+                                value: ConstValue::Field(ark_bn254::Fr::from(0u64)),
+                            });
+                            let safe = function.fresh_value();
+                            new_instructions.push(OpCode::Select {
+                                result: safe,
+                                cond: taint,
+                                if_t: value,
+                                if_f: zero,
+                            });
+                            new_instructions.push(OpCode::Rangecheck {
+                                value: safe,
+                                max_bits,
+                            });
                         }
                         None => new_instructions.push(instruction),
                     },
