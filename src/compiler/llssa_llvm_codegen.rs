@@ -527,6 +527,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .left()
                             .expect("field_mul should return a value")
                     }
+                    FieldArithOp::Add => {
+                        let add_fn = self.field_add_fn.expect("__field_add not declared");
+                        let call_site = self
+                            .builder
+                            .build_call(add_fn, &[lhs.into(), rhs.into()], "field_add")
+                            .unwrap();
+                        call_site
+                            .try_as_basic_value()
+                            .left()
+                            .expect("field_add should return a value")
+                    }
                     _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val);
@@ -823,7 +834,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             // ── AD operations ──────────────────────────────────────────
             LLOp::NextDCoeff { result } => {
                 let vm_ptr = self.vm_ptr.unwrap();
-                let ad_fn = self.ad_next_d_coeff_fn.expect("__ad_next_d_coeff not declared");
+                let ad_fn = self
+                    .ad_next_d_coeff_fn
+                    .expect("__ad_next_d_coeff not declared");
                 let call_result = self
                     .builder
                     .build_call(ad_fn, &[vm_ptr.into()], "d_coeff")

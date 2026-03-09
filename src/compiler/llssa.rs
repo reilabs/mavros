@@ -432,7 +432,6 @@ pub enum LLOp {
     },
 
     // ── AD (Automatic Differentiation) ─────────────────────────────────
-
     /// Read the next sensitivity coefficient from the AD input tape.
     /// Result: Struct(FieldElem).
     NextDCoeff {

@@ -203,8 +203,14 @@ unsafe fn field_accum(dst: *mut u64, v: Fr) {
 #[no_mangle]
 pub unsafe extern "C" fn __ad_accum_da(
     vm_ptr: *mut u8,
-    cv0: i64, cv1: i64, cv2: i64, cv3: i64,
-    s0: i64, s1: i64, s2: i64, s3: i64,
+    cv0: i64,
+    cv1: i64,
+    cv2: i64,
+    cv3: i64,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
 ) {
     let cv = limbs_to_fr(cv0, cv1, cv2, cv3);
     let s = limbs_to_fr(s0, s1, s2, s3);
@@ -216,8 +222,14 @@ pub unsafe extern "C" fn __ad_accum_da(
 #[no_mangle]
 pub unsafe extern "C" fn __ad_accum_db(
     vm_ptr: *mut u8,
-    cv0: i64, cv1: i64, cv2: i64, cv3: i64,
-    s0: i64, s1: i64, s2: i64, s3: i64,
+    cv0: i64,
+    cv1: i64,
+    cv2: i64,
+    cv3: i64,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
 ) {
     let cv = limbs_to_fr(cv0, cv1, cv2, cv3);
     let s = limbs_to_fr(s0, s1, s2, s3);
@@ -229,8 +241,14 @@ pub unsafe extern "C" fn __ad_accum_db(
 #[no_mangle]
 pub unsafe extern "C" fn __ad_accum_dc(
     vm_ptr: *mut u8,
-    cv0: i64, cv1: i64, cv2: i64, cv3: i64,
-    s0: i64, s1: i64, s2: i64, s3: i64,
+    cv0: i64,
+    cv1: i64,
+    cv2: i64,
+    cv3: i64,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
 ) {
     let cv = limbs_to_fr(cv0, cv1, cv2, cv3);
     let s = limbs_to_fr(s0, s1, s2, s3);
@@ -243,7 +261,10 @@ pub unsafe extern "C" fn __ad_accum_dc(
 pub unsafe extern "C" fn __ad_accum_at_da(
     vm_ptr: *mut u8,
     index: i32,
-    s0: i64, s1: i64, s2: i64, s3: i64,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
 ) {
     let s = limbs_to_fr(s0, s1, s2, s3);
     let da_ptr = *(vm_ptr as *mut *mut u64).add(AD_VM_OUT_DA);
@@ -256,7 +277,10 @@ pub unsafe extern "C" fn __ad_accum_at_da(
 pub unsafe extern "C" fn __ad_accum_at_db(
     vm_ptr: *mut u8,
     index: i32,
-    s0: i64, s1: i64, s2: i64, s3: i64,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
 ) {
     let s = limbs_to_fr(s0, s1, s2, s3);
     let db_ptr = *(vm_ptr as *mut *mut u64).add(AD_VM_OUT_DB);
@@ -268,7 +292,10 @@ pub unsafe extern "C" fn __ad_accum_at_db(
 pub unsafe extern "C" fn __ad_accum_at_dc(
     vm_ptr: *mut u8,
     index: i32,
-    s0: i64, s1: i64, s2: i64, s3: i64,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
 ) {
     let s = limbs_to_fr(s0, s1, s2, s3);
     let dc_ptr = *(vm_ptr as *mut *mut u64).add(AD_VM_OUT_DC);

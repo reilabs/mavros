@@ -46,6 +46,7 @@ fn elem_struct(ty: &Type) -> LLStruct {
         TypeExpr::Field => LLStruct::field_elem(),
         TypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
     }
 }
@@ -335,9 +336,7 @@ fn lower_instruction(
                 TypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind {
-                        BinaryArithOpKind::Add => {
-                            lower_ad_sum(e, ll_lhs, ll_rhs)
-                        }
+                        BinaryArithOpKind::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
                         _ => panic!(
                             "Unsupported WitnessOf arith op: {:?} (should be lowered by WitnessLowering)",
                             kind
@@ -1133,9 +1132,15 @@ fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
     let mul_node_struct = LLStruct::ad_mul_const_node();
     let field_type = LLType::Struct(LLStruct::field_elem());
 
-    let bump_da = ad_fns.bump_da.expect("bump_da must exist if ad_drop exists");
-    let bump_db = ad_fns.bump_db.expect("bump_db must exist if ad_drop exists");
-    let bump_dc = ad_fns.bump_dc.expect("bump_dc must exist if ad_drop exists");
+    let bump_da = ad_fns
+        .bump_da
+        .expect("bump_da must exist if ad_drop exists");
+    let bump_db = ad_fns
+        .bump_db
+        .expect("bump_db must exist if ad_drop exists");
+    let bump_dc = ad_fns
+        .bump_dc
+        .expect("bump_dc must exist if ad_drop exists");
     let ad_drop_id = ad_fns.ad_drop.expect("ad_drop must exist");
 
     // Pre-create blocks
