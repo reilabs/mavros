@@ -101,7 +101,9 @@ impl SsaConverter {
             }
         }
 
-        let main_is_unconstrained = program.functions.iter()
+        let main_is_unconstrained = program
+            .functions
+            .iter()
             .find(|f| f.id == Program::main_id())
             .map(|f| f.unconstrained)
             .unwrap_or(false);

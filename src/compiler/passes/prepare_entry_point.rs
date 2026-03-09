@@ -30,7 +30,9 @@ impl Pass for PrepareEntryPoint {
 
 impl PrepareEntryPoint {
     pub fn new(main_is_unconstrained: bool) -> Self {
-        Self { main_is_unconstrained }
+        Self {
+            main_is_unconstrained,
+        }
     }
 
     fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool) {

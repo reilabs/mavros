@@ -1330,13 +1330,9 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 TypeExpr::Array(elem, size) => {
                     Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
                 }
-                TypeExpr::Tuple(elems) => {
-                    Value::Tuple(elems.iter().map(unknown_value).collect())
-                }
+                TypeExpr::Tuple(elems) => Value::Tuple(elems.iter().map(unknown_value).collect()),
                 TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
-                TypeExpr::Ref(inner) => {
-                    Value::Pointer(Rc::new(RefCell::new(unknown_value(inner))))
-                }
+                TypeExpr::Ref(inner) => Value::Pointer(Rc::new(RefCell::new(unknown_value(inner)))),
                 _ => panic!("Unsupported type for unknown value: {:?}", ty),
             }
         }

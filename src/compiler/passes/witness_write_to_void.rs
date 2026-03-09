@@ -47,27 +47,25 @@ impl WitnessWriteToVoid {
                         } => {
                             replacements.insert(*r, *v);
                         }
-                        OpCode::Guard { inner, .. } => {
-                            match inner.as_mut() {
-                                OpCode::WriteWitness {
-                                    result: r,
-                                    value: b,
-                                    ..
-                                } => {
-                                    if let Some(r) = r {
-                                        replacements.insert(*r, *b);
-                                    }
-                                    *r = None;
+                        OpCode::Guard { inner, .. } => match inner.as_mut() {
+                            OpCode::WriteWitness {
+                                result: r,
+                                value: b,
+                                ..
+                            } => {
+                                if let Some(r) = r {
+                                    replacements.insert(*r, *b);
                                 }
-                                OpCode::ValueOf {
-                                    result: r,
-                                    value: v,
-                                } => {
-                                    replacements.insert(*r, *v);
-                                }
-                                _ => {}
+                                *r = None;
                             }
-                        }
+                            OpCode::ValueOf {
+                                result: r,
+                                value: v,
+                            } => {
+                                replacements.insert(*r, *v);
+                            }
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }

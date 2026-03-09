@@ -75,11 +75,7 @@ impl LowerGuards {
 
                     // Terminate current block with JmpIf
                     block.put_instructions(current_instructions);
-                    block.set_terminator(Terminator::JmpIf(
-                        condition,
-                        exec_block_id,
-                        false_target,
-                    ));
+                    block.set_terminator(Terminator::JmpIf(condition, exec_block_id, false_target));
                     function.put_block(current_block_id, block);
 
                     // Build exec block: run the inner instruction, then jump to continue
@@ -92,10 +88,8 @@ impl LowerGuards {
 
                     if let Some(skip_block_id) = skip_block_id {
                         // Allocate default values upfront, then build the skip block
-                        let default_values: Vec<ValueId> = results
-                            .iter()
-                            .map(|_| function.fresh_value())
-                            .collect();
+                        let default_values: Vec<ValueId> =
+                            results.iter().map(|_| function.fresh_value()).collect();
 
                         for default_val in &default_values {
                             function
@@ -109,10 +103,7 @@ impl LowerGuards {
                         }
                         function
                             .get_block_mut(skip_block_id)
-                            .set_terminator(Terminator::Jmp(
-                                continue_block_id,
-                                default_values,
-                            ));
+                            .set_terminator(Terminator::Jmp(continue_block_id, default_values));
 
                         // Add phi parameters to continue block
                         for result in &results {

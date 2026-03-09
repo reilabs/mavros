@@ -572,11 +572,13 @@ impl SymbolicExecutor {
                     },
                     crate::compiler::ssa::OpCode::Guard { condition, inner } => {
                         let condition_val = scope[condition.0 as usize].as_ref().unwrap();
-                        let inputs: Vec<&V> = inner.get_inputs()
+                        let inputs: Vec<&V> = inner
+                            .get_inputs()
                             .map(|id| scope[id.0 as usize].as_ref().unwrap())
                             .collect();
                         let result_ids: Vec<_> = inner.get_results().cloned().collect();
-                        let result_types: Vec<&Type> = result_ids.iter()
+                        let result_types: Vec<&Type> = result_ids
+                            .iter()
                             .map(|id| fn_type_info.get_value_type(*id))
                             .collect();
                         let results = ctx.on_guard(inner, condition_val, inputs, result_types);
