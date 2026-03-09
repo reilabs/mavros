@@ -1418,9 +1418,7 @@ impl<'a> ExpressionConverter<'a> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
         use noirc_frontend::shared::Signedness;
         match expr.return_type()?.as_ref() {
-            AstType::Integer(Signedness::Unsigned, bit_size) => {
-                Some(bit_size.bit_size() as usize)
-            }
+            AstType::Integer(Signedness::Unsigned, bit_size) => Some(bit_size.bit_size() as usize),
             _ => None,
         }
     }
