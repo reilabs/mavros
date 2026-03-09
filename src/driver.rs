@@ -64,6 +64,7 @@ pub struct Driver {
     base_witgen_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
+    main_is_unconstrained: bool,
 }
 
 #[derive(Debug)]
@@ -100,6 +101,7 @@ impl Driver {
             base_witgen_ssa: None,
             abi: None,
             draw_cfg,
+            main_is_unconstrained: false,
         }
     }
 
@@ -165,7 +167,9 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(HLSSA::from_program(&program, lowlevel_replacements));
+        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program, lowlevel_replacements);
+        self.initial_ssa = Some(ssa);
+        self.main_is_unconstrained = main_is_unconstrained;
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
@@ -186,7 +190,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(PrepareEntryPoint::new()),
+                Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 Box::new(MakeStructAccessStatic::new()),
@@ -283,7 +287,6 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(FixDoubleJumps::new()),
-                Box::new(Mem2Reg::new()),
                 Box::new(ArithmeticSimplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(ConditionPropagation::new()),

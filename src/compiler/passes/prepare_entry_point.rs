@@ -11,7 +11,9 @@ use crate::compiler::{
     },
 };
 
-pub struct PrepareEntryPoint {}
+pub struct PrepareEntryPoint {
+    main_is_unconstrained: bool,
+}
 
 impl Pass for PrepareEntryPoint {
     fn name(&self) -> &'static str {
@@ -19,7 +21,7 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        Self::wrap_main(ssa);
+        Self::wrap_main(ssa, self.main_is_unconstrained);
         self.rebuild_main_params(ssa);
         Self::insert_witness_writes(ssa);
         Self::process_unconstrained_calls(ssa);
@@ -27,11 +29,11 @@ impl Pass for PrepareEntryPoint {
 }
 
 impl PrepareEntryPoint {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(main_is_unconstrained: bool) -> Self {
+        Self { main_is_unconstrained }
     }
 
-    fn wrap_main(ssa: &mut HLSSA) {
+    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool) {
         let original_main_id = ssa.get_main_id();
         let original_main = ssa.get_main();
         let param_types = original_main.get_param_types();
@@ -63,7 +65,11 @@ impl PrepareEntryPoint {
                 e.call(init_fn, vec![], 0);
             }
 
-            let results = e.call(original_main_id, arg_values, return_types.len());
+            let results = if main_is_unconstrained {
+                e.call_unconstrained(original_main_id, arg_values, return_types.len())
+            } else {
+                e.call(original_main_id, arg_values, return_types.len())
+            };
             for ((result, public_input), return_type) in results
                 .iter()
                 .zip(return_input_values.iter())
