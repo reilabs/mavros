@@ -768,6 +768,9 @@ impl WitnessTypeInference {
                     OpCode::Const { result, .. } => {
                         value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Pure));
                     }
+                    OpCode::Guard { .. } => {
+                        panic!("ICE: Guard should not be present during witness type inference");
+                    }
                 }
             }
 

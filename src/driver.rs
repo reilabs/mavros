@@ -27,6 +27,7 @@ use crate::{
             defunctionalize::Defunctionalize,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
+            lower_guards::LowerGuards,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             pull_into_assert::PullIntoAssert,
@@ -240,6 +241,16 @@ impl Driver {
         )
         .unwrap();
 
+        // Run Mem2Reg before UntaintControlFlow so that Guard never wraps Store/Load
+        // that could be promoted to SSA values. Mem2Reg doesn't need to understand Guard.
+        let mut ssa = ssa;
+        PassManager::new(
+            "pre_untaint_mem2reg".to_string(),
+            self.draw_cfg,
+            vec![Box::new(Mem2Reg::new())],
+        )
+        .run(&mut ssa);
+
         let flow_analysis = FlowAnalysis::run(&ssa);
 
         if self.draw_cfg {
@@ -314,6 +325,12 @@ impl Driver {
         );
         r1cs_phase_1.set_debug_output_dir(self.get_debug_output_dir().clone());
         r1cs_phase_1.run(&mut r1cs_ssa);
+
+        fs::write(
+            self.get_debug_output_dir().join("r1cs_input_ssa.txt"),
+            r1cs_ssa.to_string(&DefaultSsaAnnotator),
+        )
+        .unwrap();
 
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
@@ -424,6 +441,7 @@ impl Driver {
             "base_witgen".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(LowerGuards::new()),
                 Box::new(WitnessWriteToVoid::new()),
                 Box::new(StripWitnessOf::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),

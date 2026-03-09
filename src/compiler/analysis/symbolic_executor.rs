@@ -6,7 +6,7 @@ use crate::compiler::{
     ir::r#type::Type,
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
-        LookupTarget, MemOp, Radix, SeqType, SliceOpDir, Terminator,
+        Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir, Terminator,
     },
 };
 
@@ -99,6 +99,18 @@ pub trait Context<V> {
     fn slice_len(&mut self, _slice: &V) -> V {
         panic!("ICE: backend does not implement slice_len");
     }
+
+    /// Handle a Guard instruction. Receives the inner opcode, the condition value,
+    /// all resolved inner inputs, and result types. Returns values for each result.
+    /// The implementer should nuke information on outputs and handle effectful ops
+    /// (e.g. Store → nuke ptr contents).
+    fn on_guard(
+        &mut self,
+        inner: &OpCode,
+        condition: &V,
+        inputs: Vec<&V>,
+        result_types: Vec<&Type>,
+    ) -> Vec<V>;
 }
 
 pub struct SymbolicExecutor {}
@@ -558,6 +570,20 @@ impl SymbolicExecutor {
                             todo!("FnPtrConst in symbolic executor");
                         }
                     },
+                    crate::compiler::ssa::OpCode::Guard { condition, inner } => {
+                        let condition_val = scope[condition.0 as usize].as_ref().unwrap();
+                        let inputs: Vec<&V> = inner.get_inputs()
+                            .map(|id| scope[id.0 as usize].as_ref().unwrap())
+                            .collect();
+                        let result_ids: Vec<_> = inner.get_results().cloned().collect();
+                        let result_types: Vec<&Type> = result_ids.iter()
+                            .map(|id| fn_type_info.get_value_type(*id))
+                            .collect();
+                        let results = ctx.on_guard(inner, condition_val, inputs, result_types);
+                        for (result_id, result_val) in result_ids.iter().zip(results.into_iter()) {
+                            scope[result_id.0 as usize] = Some(result_val);
+                        }
+                    }
                 }
             }
 

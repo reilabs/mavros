@@ -47,17 +47,41 @@ impl WitnessWriteToVoid {
                         } => {
                             replacements.insert(*r, *v);
                         }
+                        OpCode::Guard { inner, .. } => {
+                            match inner.as_mut() {
+                                OpCode::WriteWitness {
+                                    result: r,
+                                    value: b,
+                                    ..
+                                } => {
+                                    if let Some(r) = r {
+                                        replacements.insert(*r, *b);
+                                    }
+                                    *r = None;
+                                }
+                                OpCode::ValueOf {
+                                    result: r,
+                                    value: v,
+                                } => {
+                                    replacements.insert(*r, *v);
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
 
             for (_, block) in function.get_blocks_mut() {
-                // Remove ValueOf instructions (identity in witgen pipeline)
+                // Remove ValueOf instructions and Guard-wrapped ValueOf (identity in witgen pipeline)
                 let old_instructions = block.take_instructions();
                 let new_instructions = old_instructions
                     .into_iter()
-                    .filter(|instr| !matches!(instr, OpCode::ValueOf { .. }))
+                    .filter(|instr| {
+                        !matches!(instr, OpCode::ValueOf { .. })
+                            && !matches!(instr, OpCode::Guard { inner, .. } if matches!(inner.as_ref(), OpCode::ValueOf { .. }))
+                    })
                     .collect();
                 block.put_instructions(new_instructions);
 

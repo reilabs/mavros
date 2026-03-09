@@ -207,6 +207,24 @@ impl DCE {
                         | OpCode::MkTuple { .. }
                         | OpCode::ValueOf { .. }
                         | OpCode::Const { .. } => {}
+                        OpCode::Guard { inner, .. } => {
+                            // Guard is live if inner is side-effectful
+                            match inner.as_ref() {
+                                OpCode::AssertEq { .. }
+                                | OpCode::Store { .. }
+                                | OpCode::Call { .. }
+                                | OpCode::MemOp { .. }
+                                | OpCode::InitGlobal { .. }
+                                | OpCode::DropGlobal { .. } => {
+                                    worklist.push(WorkItem::LiveInstruction(
+                                        *function_id,
+                                        *block_id,
+                                        i,
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
 

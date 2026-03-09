@@ -1315,6 +1315,57 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
             specialized: spec,
         }
     }
+
+    fn on_guard(
+        &mut self,
+        inner: &crate::compiler::ssa::OpCode,
+        _condition: &SpecSplitValue,
+        inputs: Vec<&SpecSplitValue>,
+        result_types: Vec<&Type>,
+    ) -> Vec<SpecSplitValue> {
+        fn unknown_value(ty: &Type) -> Value {
+            match &ty.expr {
+                TypeExpr::Field => Value::Unknown(ScalarKind::Field),
+                TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+                TypeExpr::Array(elem, size) => {
+                    Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
+                }
+                TypeExpr::Tuple(elems) => {
+                    Value::Tuple(elems.iter().map(unknown_value).collect())
+                }
+                TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
+                TypeExpr::Ref(inner) => {
+                    Value::Pointer(Rc::new(RefCell::new(unknown_value(inner))))
+                }
+                _ => panic!("Unsupported type for unknown value: {:?}", ty),
+            }
+        }
+
+        // Nuke ptr contents for effectful ptr ops
+        if let crate::compiler::ssa::OpCode::Store { .. } = inner {
+            // First input is the ptr
+            if let Some(ptr_val) = inputs.first() {
+                if let Value::Pointer(p) = &ptr_val.unspecialized {
+                    *p.borrow_mut() = Value::Unknown(ScalarKind::Field);
+                }
+                if let Value::Pointer(p) = &ptr_val.specialized {
+                    *p.borrow_mut() = Value::Unknown(ScalarKind::Field);
+                }
+            }
+        }
+
+        // Create unknown values for all results
+        result_types
+            .iter()
+            .map(|ty| {
+                let v = unknown_value(ty);
+                SpecSplitValue {
+                    unspecialized: v.clone(),
+                    specialized: v,
+                }
+            })
+            .collect()
+    }
 }
 
 pub struct SpecializationSummary {

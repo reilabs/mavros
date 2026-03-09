@@ -11,7 +11,7 @@ use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLFunction, HLSSA,
-        LookupTarget, OpCode, Radix, SeqType, ValueId,
+        Instruction, LookupTarget, OpCode, Radix, SeqType, ValueId,
     },
 };
 
@@ -48,6 +48,21 @@ impl ExplicitWitness {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
                     let b = &mut HLInstrBuilder::new(function, &mut new_instructions);
+                    self.process_instruction(b, function_type_info, instruction);
+                }
+                block.put_instructions(new_instructions);
+                new_blocks.insert(bid, block);
+            }
+            function.put_blocks(new_blocks);
+        }
+    }
+
+    fn process_instruction(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        instruction: OpCode,
+    ) {
                     match instruction {
                         OpCode::BinaryArithOp {
                             kind: BinaryArithOpKind::Add,
@@ -180,7 +195,7 @@ impl ExplicitWitness {
 
                             if !l_taint || !r_taint {
                                 b.push(instruction);
-                                continue;
+                                return;
                             }
 
                             // witness-witness mul
@@ -260,7 +275,7 @@ impl ExplicitWitness {
                             let r_taint = r_type.is_witness_of();
                             if !l_taint && !r_taint {
                                 b.push(instruction);
-                                continue;
+                                return;
                             }
                             let one = b.field_const(Field::ONE);
                             let l = if l_type.strip_witness().is_field() {
@@ -281,7 +296,7 @@ impl ExplicitWitness {
                             let c_taint = function_type_info.get_value_type(c).is_witness_of();
                             if !a_taint && !b_taint && !c_taint {
                                 b.push(instruction);
-                                continue;
+                                return;
                             }
                             b.constrain(a, r1c_b, c);
                         }
@@ -397,7 +412,7 @@ impl ExplicitWitness {
                             // If cond is pure, this is just a conditional move
                             if !cond_taint {
                                 b.push(instruction);
-                                continue;
+                                return;
                             }
                             // If both branches are pure, result is a linear combination
                             // of cond and constants: cond * (l - r) + r. No constraint needed.
@@ -414,7 +429,7 @@ impl ExplicitWitness {
                                     lhs: cond_times_diff,
                                     rhs: r,
                                 });
-                                continue;
+                                return;
                             }
                             // At least one branch is witness: full lowering with constraint
                             let select_witness = b.select(cond, l, r);
@@ -596,12 +611,58 @@ impl ExplicitWitness {
                         | OpCode::Const { .. } => {
                             b.push(instruction);
                         }
+                        OpCode::Guard { condition, inner } => {
+                            self.lower_guard(b, function_type_info, condition, *inner);
+                        }
                     }
-                }
-                block.put_instructions(new_instructions);
-                new_blocks.insert(bid, block);
+    }
+
+    fn lower_guard(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        condition: ValueId,
+        inner: OpCode,
+    ) {
+        match inner {
+            OpCode::AssertEq { lhs: l, rhs: r } => {
+                // Guard(cond, AssertEq(l, r)) → constrain(cond_field, l_sub_r, zero)
+                // This asserts cond * (l - r) = 0, i.e., if cond then l == r
+                let l_type = function_type_info.get_value_type(l);
+                let r_type = function_type_info.get_value_type(r);
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                let l_field = if l_type.strip_witness().is_field() {
+                    l
+                } else {
+                    b.cast_to(CastTarget::Field, l)
+                };
+                let r_field = if r_type.strip_witness().is_field() {
+                    r
+                } else {
+                    b.cast_to(CastTarget::Field, r)
+                };
+                let diff = b.sub(l_field, r_field);
+                let zero = b.field_const(Field::ZERO);
+                b.constrain(cond_field, diff, zero);
             }
-            function.put_blocks(new_blocks);
+            OpCode::Store { ptr, value: v } => {
+                // Guard(cond, Store(ptr, v)) → old = Load(ptr); new = Select(cond, v, old); Store(ptr, new)
+                let old_value = b.load(ptr);
+                let new_value = b.select(condition, v, old_value);
+                b.store(ptr, new_value);
+            }
+            inner => {
+                // All other ops (both pure and witness): strip Guard, process unconditionally.
+                // Witness computations run unconditionally even in tainted blocks — their
+                // constraints are tautological (res IS defined as op(args)). Only AssertEq
+                // and Store need conditioning (handled above).
+                self.process_instruction(b, function_type_info, inner);
+            }
         }
     }
 

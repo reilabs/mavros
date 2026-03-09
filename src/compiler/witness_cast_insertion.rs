@@ -445,6 +445,9 @@ impl WitnessCastInsertion {
                     | OpCode::Const { .. }) => {
                         emitter.emit(op);
                     }
+                    OpCode::Guard { .. } => {
+                        panic!("ICE: Guard should not be present during witness cast insertion");
+                    }
                 }
             }
 
