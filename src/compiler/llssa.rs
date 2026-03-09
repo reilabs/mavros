@@ -1,6 +1,6 @@
 use crate::compiler::ir::r#type::SSAType;
 use crate::compiler::ssa::{
-    Block, BlockId, Function, FunctionId, Instruction, SSA, Terminator, ValueId,
+    Block, BlockId, DMatrix, Function, FunctionId, Instruction, SSA, Terminator, ValueId,
 };
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
@@ -80,6 +80,68 @@ impl LLStruct {
             LLFieldType::InlineArray(elem, count),
         ])
     }
+
+    // ── AD node structs ────────────────────────────────────────────────
+    // All AD nodes share a common prefix: { Inline(RcHeader), Int(32) }
+    // so the tag can be read from any node pointer using ad_node_base().
+
+    /// Common prefix for all AD nodes: { RC, tag }.
+    pub fn ad_node_base() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+        ])
+    }
+
+    /// AD constant node: { RC, tag, FieldElem(value) }
+    pub fn ad_const_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Inline(Self::field_elem()),
+        ])
+    }
+
+    /// AD witness node: { RC, tag, Int(64)(index) }
+    pub fn ad_witness_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Int(64),
+        ])
+    }
+
+    /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db), FieldElem(dc) }
+    pub fn ad_sum_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+        ])
+    }
+
+    /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
+    pub fn ad_mul_const_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Ptr,
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+        ])
+    }
+
+    /// AD tag constants.
+    pub const AD_TAG_CONST: u64 = 0;
+    pub const AD_TAG_WITNESS: u64 = 1;
+    pub const AD_TAG_SUM: u64 = 2;
+    pub const AD_TAG_MUL_CONST: u64 = 3;
 
     /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
     /// Value-safe structs can be used as SSA values (`LLType::Struct`).
@@ -369,6 +431,33 @@ pub enum LLOp {
         value: ValueId,
     },
 
+    // ── AD (Automatic Differentiation) ─────────────────────────────────
+
+    /// Read the next sensitivity coefficient from the AD input tape.
+    /// Result: Struct(FieldElem).
+    NextDCoeff {
+        result: ValueId,
+    },
+    /// Accumulate sensitivity into AD output matrix for a constant node.
+    /// Computes: out_d[matrix][0] += sensitivity * const_value
+    ADWriteConst {
+        matrix: DMatrix,
+        const_value: ValueId,
+        sensitivity: ValueId,
+    },
+    /// Accumulate sensitivity into AD output matrix for a witness node.
+    /// Computes: out_d[matrix][witness_index] += sensitivity
+    ADWriteWitness {
+        matrix: DMatrix,
+        witness_index: ValueId,
+        sensitivity: ValueId,
+    },
+    /// Allocate a fresh AD witness node with the next witness index.
+    /// Result: Ptr to ADWitnessNode.
+    ADFreshWitness {
+        result: ValueId,
+    },
+
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -381,9 +470,12 @@ impl Instruction for LLOp {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             // No inputs (constants / traps / etc.)
-            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
-                vec![].into_iter()
-            }
+            LLOp::IntConst { .. }
+            | LLOp::NullPtr { .. }
+            | LLOp::GlobalAddr { .. }
+            | LLOp::NextDCoeff { .. }
+            | LLOp::ADFreshWitness { .. }
+            | LLOp::Trap => vec![].into_iter(),
 
             // Unary
             LLOp::Not { value, .. }
@@ -431,6 +523,18 @@ impl Instruction for LLOp {
             // VM / Constraint
             LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             LLOp::WriteWitness { value } => vec![value].into_iter(),
+
+            // AD
+            LLOp::ADWriteConst {
+                const_value,
+                sensitivity,
+                ..
+            } => vec![const_value, sensitivity].into_iter(),
+            LLOp::ADWriteWitness {
+                witness_index,
+                sensitivity,
+                ..
+            } => vec![witness_index, sensitivity].into_iter(),
         }
     }
 
@@ -456,7 +560,9 @@ impl Instruction for LLOp {
             | LLOp::StructFieldPtr { result, .. }
             | LLOp::ArrayElemPtr { result, .. }
             | LLOp::Select { result, .. }
-            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            | LLOp::GlobalAddr { result, .. }
+            | LLOp::NextDCoeff { result, .. }
+            | LLOp::ADFreshWitness { result, .. } => vec![result].into_iter(),
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
@@ -467,6 +573,8 @@ impl Instruction for LLOp {
             | LLOp::Memcpy { .. }
             | LLOp::Constrain { .. }
             | LLOp::WriteWitness { .. }
+            | LLOp::ADWriteConst { .. }
+            | LLOp::ADWriteWitness { .. }
             | LLOp::Trap => vec![].into_iter(),
         }
     }
@@ -474,9 +582,12 @@ impl Instruction for LLOp {
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             // No inputs
-            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
-                vec![].into_iter()
-            }
+            LLOp::IntConst { .. }
+            | LLOp::NullPtr { .. }
+            | LLOp::GlobalAddr { .. }
+            | LLOp::NextDCoeff { .. }
+            | LLOp::ADFreshWitness { .. }
+            | LLOp::Trap => vec![].into_iter(),
 
             // Unary
             LLOp::Not { value, .. }
@@ -526,6 +637,18 @@ impl Instruction for LLOp {
             // VM / Constraint
             LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             LLOp::WriteWitness { value } => vec![value].into_iter(),
+
+            // AD
+            LLOp::ADWriteConst {
+                const_value,
+                sensitivity,
+                ..
+            } => vec![const_value, sensitivity].into_iter(),
+            LLOp::ADWriteWitness {
+                witness_index,
+                sensitivity,
+                ..
+            } => vec![witness_index, sensitivity].into_iter(),
         }
     }
 
@@ -533,7 +656,9 @@ impl Instruction for LLOp {
         match self {
             LLOp::IntConst { result, .. }
             | LLOp::NullPtr { result }
-            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            | LLOp::GlobalAddr { result, .. }
+            | LLOp::NextDCoeff { result }
+            | LLOp::ADFreshWitness { result } => vec![result].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
 
@@ -600,6 +725,18 @@ impl Instruction for LLOp {
             // VM / Constraint
             LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             LLOp::WriteWitness { value } => vec![value].into_iter(),
+
+            // AD
+            LLOp::ADWriteConst {
+                const_value,
+                sensitivity,
+                ..
+            } => vec![const_value, sensitivity].into_iter(),
+            LLOp::ADWriteWitness {
+                witness_index,
+                sensitivity,
+                ..
+            } => vec![witness_index, sensitivity].into_iter(),
         }
     }
 
@@ -798,6 +935,48 @@ impl Instruction for LLOp {
                 format!("write_witness {}", vr(*value))
             }
             LLOp::Trap => "trap".to_string(),
+
+            // AD
+            LLOp::NextDCoeff { result } => {
+                format!("{} = next_d_coeff", v(*result))
+            }
+            LLOp::ADWriteConst {
+                matrix,
+                const_value,
+                sensitivity,
+            } => {
+                let m = match matrix {
+                    DMatrix::A => "A",
+                    DMatrix::B => "B",
+                    DMatrix::C => "C",
+                };
+                format!(
+                    "ad_write_const {} {}, {}",
+                    m,
+                    vr(*const_value),
+                    vr(*sensitivity)
+                )
+            }
+            LLOp::ADWriteWitness {
+                matrix,
+                witness_index,
+                sensitivity,
+            } => {
+                let m = match matrix {
+                    DMatrix::A => "A",
+                    DMatrix::B => "B",
+                    DMatrix::C => "C",
+                };
+                format!(
+                    "ad_write_witness {} {}, {}",
+                    m,
+                    vr(*witness_index),
+                    vr(*sensitivity)
+                )
+            }
+            LLOp::ADFreshWitness { result } => {
+                format!("{} = ad_fresh_witness", v(*result))
+            }
         }
     }
 }
@@ -809,6 +988,9 @@ impl Instruction for LLOp {
 pub type LLSSA = SSA<LLOp, LLType>;
 pub type LLFunction = Function<LLOp, LLType>;
 pub type LLBlock = Block<LLOp, LLType>;
+
+// Re-export DMatrix for use by other LLSSA modules.
+pub use crate::compiler::ssa::DMatrix as LLDMatrix;
 
 // Builder methods are provided by the LLEmitter trait in block_builder.rs.
 

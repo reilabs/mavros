@@ -22,13 +22,20 @@ use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
-use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
+use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
-/// VM struct layout (offsets in bytes):
+/// Witgen VM struct layout (offsets in bytes):
 const VM_WITNESS_PTR_OFFSET: u32 = 0;
 const VM_A_PTR_OFFSET: u32 = 4;
 const VM_B_PTR_OFFSET: u32 = 8;
 const VM_C_PTR_OFFSET: u32 = 12;
+
+/// AD VM struct layout (offsets in bytes, wasm32):
+const AD_VM_OUT_DA_OFFSET: u32 = 0;
+const AD_VM_OUT_DB_OFFSET: u32 = 4;
+const AD_VM_OUT_DC_OFFSET: u32 = 8;
+const AD_VM_COEFFS_OFFSET: u32 = 12;
+const AD_VM_WIT_OFF_OFFSET: u32 = 16;
 
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
@@ -41,12 +48,22 @@ pub struct LLVMCodeGen<'ctx> {
     vm_ptr: Option<PointerValue<'ctx>>,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
+    field_add_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     write_witness_fn: Option<FunctionValue<'ctx>>,
     write_a_fn: Option<FunctionValue<'ctx>>,
     write_b_fn: Option<FunctionValue<'ctx>>,
     write_c_fn: Option<FunctionValue<'ctx>>,
+    // AD runtime functions
+    ad_next_d_coeff_fn: Option<FunctionValue<'ctx>>,
+    ad_fresh_witness_index_fn: Option<FunctionValue<'ctx>>,
+    ad_accum_da_fn: Option<FunctionValue<'ctx>>,
+    ad_accum_db_fn: Option<FunctionValue<'ctx>>,
+    ad_accum_dc_fn: Option<FunctionValue<'ctx>>,
+    ad_accum_at_da_fn: Option<FunctionValue<'ctx>>,
+    ad_accum_at_db_fn: Option<FunctionValue<'ctx>>,
+    ad_accum_at_dc_fn: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -63,12 +80,21 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             function_map: HashMap::new(),
             vm_ptr: None,
             field_mul_fn: None,
+            field_add_fn: None,
             malloc_fn: None,
             free_fn: None,
             write_witness_fn: None,
             write_a_fn: None,
             write_b_fn: None,
             write_c_fn: None,
+            ad_next_d_coeff_fn: None,
+            ad_fresh_witness_index_fn: None,
+            ad_accum_da_fn: None,
+            ad_accum_db_fn: None,
+            ad_accum_dc_fn: None,
+            ad_accum_at_da_fn: None,
+            ad_accum_at_db_fn: None,
+            ad_accum_at_dc_fn: None,
         };
 
         codegen.declare_runtime_functions();
@@ -147,6 +173,71 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.module
                 .add_function("free", free_type, Some(Linkage::External)),
         );
+
+        // __field_add(FieldElem, FieldElem) -> FieldElem
+        let field_add_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_add_fn = Some(
+            self.module
+                .add_function("__field_add", field_add_type, None),
+        );
+
+        // __ad_next_d_coeff(vm*) -> FieldElem
+        let ad_next_d_coeff_type = field_type.fn_type(&[ptr_type.into()], false);
+        self.ad_next_d_coeff_fn = Some(self.module.add_function(
+            "__ad_next_d_coeff",
+            ad_next_d_coeff_type,
+            Some(Linkage::External),
+        ));
+
+        // __ad_fresh_witness_index(vm*) -> i32
+        let ad_fresh_wit_type = i32_type.fn_type(&[ptr_type.into()], false);
+        self.ad_fresh_witness_index_fn = Some(self.module.add_function(
+            "__ad_fresh_witness_index",
+            ad_fresh_wit_type,
+            Some(Linkage::External),
+        ));
+
+        // __ad_accum_{da,db,dc}(vm*, const_value: FieldElem, sensitivity: FieldElem) -> void
+        let ad_accum_type = void_type.fn_type(
+            &[ptr_type.into(), field_type.into(), field_type.into()],
+            false,
+        );
+        self.ad_accum_da_fn = Some(self.module.add_function(
+            "__ad_accum_da",
+            ad_accum_type,
+            Some(Linkage::External),
+        ));
+        self.ad_accum_db_fn = Some(self.module.add_function(
+            "__ad_accum_db",
+            ad_accum_type,
+            Some(Linkage::External),
+        ));
+        self.ad_accum_dc_fn = Some(self.module.add_function(
+            "__ad_accum_dc",
+            ad_accum_type,
+            Some(Linkage::External),
+        ));
+
+        // __ad_accum_at_{da,db,dc}(vm*, index: i32, sensitivity: FieldElem) -> void
+        let ad_accum_at_type = void_type.fn_type(
+            &[ptr_type.into(), i32_type.into(), field_type.into()],
+            false,
+        );
+        self.ad_accum_at_da_fn = Some(self.module.add_function(
+            "__ad_accum_at_da",
+            ad_accum_at_type,
+            Some(Linkage::External),
+        ));
+        self.ad_accum_at_db_fn = Some(self.module.add_function(
+            "__ad_accum_at_db",
+            ad_accum_at_type,
+            Some(Linkage::External),
+        ));
+        self.ad_accum_at_dc_fn = Some(self.module.add_function(
+            "__ad_accum_at_dc",
+            ad_accum_at_type,
+            Some(Linkage::External),
+        ));
     }
 
     fn define_write_functions(&mut self) {
@@ -727,6 +818,75 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         self.value_map.insert(*result_id, val.into());
                     }
                 }
+            }
+
+            // ── AD operations ──────────────────────────────────────────
+            LLOp::NextDCoeff { result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let ad_fn = self.ad_next_d_coeff_fn.expect("__ad_next_d_coeff not declared");
+                let call_result = self
+                    .builder
+                    .build_call(ad_fn, &[vm_ptr.into()], "d_coeff")
+                    .unwrap();
+                let val = call_result
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__ad_next_d_coeff should return a value");
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::ADFreshWitness { result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let ad_fn = self
+                    .ad_fresh_witness_index_fn
+                    .expect("__ad_fresh_witness_index not declared");
+                let call_result = self
+                    .builder
+                    .build_call(ad_fn, &[vm_ptr.into()], "wit_idx")
+                    .unwrap();
+                let val = call_result
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__ad_fresh_witness_index should return a value");
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::ADWriteConst {
+                matrix,
+                const_value,
+                sensitivity,
+            } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let cv = self.value_map[const_value];
+                let s = self.value_map[sensitivity];
+                let accum_fn = match matrix {
+                    DMatrix::A => self.ad_accum_da_fn,
+                    DMatrix::B => self.ad_accum_db_fn,
+                    DMatrix::C => self.ad_accum_dc_fn,
+                }
+                .expect("AD accum function not declared");
+                self.builder
+                    .build_call(accum_fn, &[vm_ptr.into(), cv.into(), s.into()], "")
+                    .unwrap();
+            }
+
+            LLOp::ADWriteWitness {
+                matrix,
+                witness_index,
+                sensitivity,
+            } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let idx = self.value_map[witness_index];
+                let s = self.value_map[sensitivity];
+                let accum_fn = match matrix {
+                    DMatrix::A => self.ad_accum_at_da_fn,
+                    DMatrix::B => self.ad_accum_at_db_fn,
+                    DMatrix::C => self.ad_accum_at_dc_fn,
+                }
+                .expect("AD accum_at function not declared");
+                self.builder
+                    .build_call(accum_fn, &[vm_ptr.into(), idx.into(), s.into()], "")
+                    .unwrap();
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),
