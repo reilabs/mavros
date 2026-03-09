@@ -1007,7 +1007,6 @@ fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFuncti
         DMatrix::B => "__ad_bump_db",
         DMatrix::C => "__ad_bump_dc",
     };
-    // Field index for da/db/dc in ADSumNode and ADMulConstNode
     let d_field: usize = match matrix {
         DMatrix::A => 4,
         DMatrix::B => 5,
@@ -1017,103 +1016,86 @@ fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFuncti
     let mut func = LLFunction::empty(name.to_string());
     let entry = func.get_entry_id();
 
-    let base = LLStruct::ad_node_base();
-    let const_node = LLStruct::ad_const_node();
-    let witness_node = LLStruct::ad_witness_node();
-    let sum_node = LLStruct::ad_sum_node();
-    let mul_node = LLStruct::ad_mul_const_node();
-    let field_type = LLType::Struct(LLStruct::field_elem());
-
-    // Pre-create all blocks
-    let const_blk = func.add_block();
-    let check_wit_blk = func.add_block();
-    let wit_blk = func.add_block();
-    let check_sum_blk = func.add_block();
-    let sum_blk = func.add_block();
-    let mul_blk = func.add_block();
-    let done = func.add_block();
-
-    // -- entry: read tag, check CONST --
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
         let node = e.add_parameter(LLType::Ptr);
-        let amount = e.add_parameter(field_type.clone());
-        let tag_ptr = e.struct_field_ptr(node, base, 1);
+        let amount = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
         let tag = e.ll_load(tag_ptr, LLType::i32());
+
+        // CONST?
         let const_tag = e.int_const(32, LLStruct::AD_TAG_CONST);
         let is_const = e.int_eq(tag, const_tag);
-        e.terminate_jmp_if(is_const, const_blk, check_wit_blk);
+        e.build_if_else(
+            is_const,
+            vec![],
+            |e| {
+                // CONST: write to output matrix directly
+                let val_ptr = e.struct_field_ptr(node, LLStruct::ad_const_node(), 2);
+                let const_val = e.ll_load(val_ptr, LLType::Struct(LLStruct::field_elem()));
+                e.ad_write_const(matrix, const_val, amount);
+                vec![]
+            },
+            |e| {
+                // Not CONST — check WITNESS
+                let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                let tag = e.ll_load(tag_ptr, LLType::i32());
+                let wit_tag = e.int_const(32, LLStruct::AD_TAG_WITNESS);
+                let is_wit = e.int_eq(tag, wit_tag);
+                e.build_if_else(
+                    is_wit,
+                    vec![],
+                    |e| {
+                        // WITNESS: write to output matrix at witness index
+                        let idx_ptr = e.struct_field_ptr(node, LLStruct::ad_witness_node(), 2);
+                        let index64 = e.ll_load(idx_ptr, LLType::i64());
+                        let index32 = e.truncate(index64, 32);
+                        e.ad_write_witness(matrix, index32, amount);
+                        vec![]
+                    },
+                    |e| {
+                        // SUM or MUL_CONST: accumulate into node.d{a,b,c}
+                        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                        let tag = e.ll_load(tag_ptr, LLType::i32());
+                        let sum_tag = e.int_const(32, LLStruct::AD_TAG_SUM);
+                        let is_sum = e.int_eq(tag, sum_tag);
+                        e.build_if_else(
+                            is_sum,
+                            vec![],
+                            |e| {
+                                // SUM node
+                                let d_ptr =
+                                    e.struct_field_ptr(node, LLStruct::ad_sum_node(), d_field);
+                                let old_d =
+                                    e.ll_load(d_ptr, LLType::Struct(LLStruct::field_elem()));
+                                let new_d = e.field_arith(FieldArithOp::Add, old_d, amount);
+                                e.ll_store(d_ptr, new_d);
+                                vec![]
+                            },
+                            |e| {
+                                // MUL_CONST node
+                                let d_ptr = e.struct_field_ptr(
+                                    node,
+                                    LLStruct::ad_mul_const_node(),
+                                    d_field,
+                                );
+                                let old_d =
+                                    e.ll_load(d_ptr, LLType::Struct(LLStruct::field_elem()));
+                                let new_d = e.field_arith(FieldArithOp::Add, old_d, amount);
+                                e.ll_store(d_ptr, new_d);
+                                vec![]
+                            },
+                        );
+                        vec![]
+                    },
+                );
+                vec![]
+            },
+        );
+
+        e.terminate_return(vec![]);
     }
-
-    // Get node and amount ValueIds from entry params
-    let entry_block = func.get_block(entry);
-    let params: Vec<ValueId> = entry_block.get_parameters().map(|(v, _)| *v).collect();
-    let node = params[0];
-    let amount = params[1];
-    // Re-read tag in each check block (or pass through block params)
-    // For simplicity, re-read from the node pointer which is available in all blocks.
-
-    // -- const_blk --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, const_blk);
-        let val_ptr = e.struct_field_ptr(node, const_node, 2);
-        let const_val = e.ll_load(val_ptr, field_type.clone());
-        e.ad_write_const(matrix, const_val, amount);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- check_wit_blk: is WITNESS? --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, check_wit_blk);
-        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
-        let tag = e.ll_load(tag_ptr, LLType::i32());
-        let wit_tag = e.int_const(32, LLStruct::AD_TAG_WITNESS);
-        let is_wit = e.int_eq(tag, wit_tag);
-        e.terminate_jmp_if(is_wit, wit_blk, check_sum_blk);
-    }
-
-    // -- wit_blk --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, wit_blk);
-        let idx_ptr = e.struct_field_ptr(node, witness_node, 2);
-        let index64 = e.ll_load(idx_ptr, LLType::i64());
-        let index32 = e.truncate(index64, 32);
-        e.ad_write_witness(matrix, index32, amount);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- check_sum_blk: is SUM? --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, check_sum_blk);
-        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
-        let tag = e.ll_load(tag_ptr, LLType::i32());
-        let sum_tag = e.int_const(32, LLStruct::AD_TAG_SUM);
-        let is_sum = e.int_eq(tag, sum_tag);
-        e.terminate_jmp_if(is_sum, sum_blk, mul_blk);
-    }
-
-    // -- sum_blk: node.d{a,b,c} += amount --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, sum_blk);
-        let d_ptr = e.struct_field_ptr(node, sum_node, d_field);
-        let old_d = e.ll_load(d_ptr, field_type.clone());
-        let new_d = e.field_arith(FieldArithOp::Add, old_d, amount);
-        e.ll_store(d_ptr, new_d);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- mul_blk: node.d{a,b,c} += amount --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, mul_blk);
-        let d_ptr = e.struct_field_ptr(node, mul_node, d_field);
-        let old_d = e.ll_load(d_ptr, field_type.clone());
-        let new_d = e.field_arith(FieldArithOp::Add, old_d, amount);
-        e.ll_store(d_ptr, new_d);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- done --
-    func.terminate_block_with_return(done, vec![]);
 
     func
 }
@@ -1128,35 +1110,18 @@ fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
     let mut func = LLFunction::empty("__ad_drop".to_string());
     let entry = func.get_entry_id();
 
-    let sum_node_struct = LLStruct::ad_sum_node();
-    let mul_node_struct = LLStruct::ad_mul_const_node();
     let field_type = LLType::Struct(LLStruct::field_elem());
 
-    let bump_da = ad_fns
-        .bump_da
-        .expect("bump_da must exist if ad_drop exists");
-    let bump_db = ad_fns
-        .bump_db
-        .expect("bump_db must exist if ad_drop exists");
-    let bump_dc = ad_fns
-        .bump_dc
-        .expect("bump_dc must exist if ad_drop exists");
+    let bump_da = ad_fns.bump_da.expect("bump_da must exist");
+    let bump_db = ad_fns.bump_db.expect("bump_db must exist");
+    let bump_dc = ad_fns.bump_dc.expect("bump_dc must exist");
     let ad_drop_id = ad_fns.ad_drop.expect("ad_drop must exist");
 
-    // Pre-create blocks
-    let dispatch_blk = func.add_block();
-    let simple_free_blk = func.add_block();
-    let check_sum_blk = func.add_block();
-    let sum_blk = func.add_block();
-    let mul_blk = func.add_block();
-    let done = func.add_block();
-
-    // -- entry: decrement RC, check if dead --
-    let node;
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
-        node = e.add_parameter(LLType::Ptr);
+        let node = e.add_parameter(LLType::Ptr);
 
+        // Decrement RC
         let rc_hdr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 0);
         let rc_ptr = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
         let rc = e.ll_load(rc_ptr, LLType::i64());
@@ -1164,97 +1129,99 @@ fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
         let new_rc = e.int_sub(rc, one);
         e.ll_store(rc_ptr, new_rc);
 
+        // If RC hit zero, dispatch on tag and tear down
         let zero = e.int_const(64, 0);
         let dead = e.int_eq(new_rc, zero);
-        e.terminate_jmp_if(dead, dispatch_blk, done);
+        e.build_if_else(
+            dead,
+            vec![],
+            |e| {
+                // Read tag
+                let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                let tag = e.ll_load(tag_ptr, LLType::i32());
+
+                // CONST or WITNESS (tag < 2) → just free
+                let two = e.int_const(32, 2);
+                let is_simple = e.int_ult(tag, two);
+                e.build_if_else(
+                    is_simple,
+                    vec![],
+                    |e| {
+                        e.free(node);
+                        vec![]
+                    },
+                    |e| {
+                        // SUM or MUL_CONST
+                        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                        let tag = e.ll_load(tag_ptr, LLType::i32());
+                        let sum_tag = e.int_const(32, LLStruct::AD_TAG_SUM);
+                        let is_sum = e.int_eq(tag, sum_tag);
+                        e.build_if_else(
+                            is_sum,
+                            vec![],
+                            |e| {
+                                // SUM: propagate da/db/dc to both children
+                                let sum = LLStruct::ad_sum_node();
+                                let a_ptr = e.struct_field_ptr(node, sum.clone(), 2);
+                                let a = e.ll_load(a_ptr, LLType::Ptr);
+                                let b_ptr = e.struct_field_ptr(node, sum.clone(), 3);
+                                let b = e.ll_load(b_ptr, LLType::Ptr);
+
+                                let da_ptr = e.struct_field_ptr(node, sum.clone(), 4);
+                                let da = e.ll_load(da_ptr, field_type.clone());
+                                let db_ptr = e.struct_field_ptr(node, sum.clone(), 5);
+                                let db = e.ll_load(db_ptr, field_type.clone());
+                                let dc_ptr = e.struct_field_ptr(node, sum, 6);
+                                let dc = e.ll_load(dc_ptr, field_type.clone());
+
+                                e.call(bump_da, vec![a, da], 0);
+                                e.call(bump_db, vec![a, db], 0);
+                                e.call(bump_dc, vec![a, dc], 0);
+                                e.call(bump_da, vec![b, da], 0);
+                                e.call(bump_db, vec![b, db], 0);
+                                e.call(bump_dc, vec![b, dc], 0);
+                                e.call(ad_drop_id, vec![a], 0);
+                                e.call(ad_drop_id, vec![b], 0);
+                                e.free(node);
+                                vec![]
+                            },
+                            |e| {
+                                // MUL_CONST: scale sensitivities by coeff, propagate
+                                let mul = LLStruct::ad_mul_const_node();
+                                let coeff_ptr = e.struct_field_ptr(node, mul.clone(), 2);
+                                let coeff = e.ll_load(coeff_ptr, field_type.clone());
+                                let val_ptr = e.struct_field_ptr(node, mul.clone(), 3);
+                                let child = e.ll_load(val_ptr, LLType::Ptr);
+
+                                let da_ptr = e.struct_field_ptr(node, mul.clone(), 4);
+                                let da = e.ll_load(da_ptr, field_type.clone());
+                                let db_ptr = e.struct_field_ptr(node, mul.clone(), 5);
+                                let db = e.ll_load(db_ptr, field_type.clone());
+                                let dc_ptr = e.struct_field_ptr(node, mul, 6);
+                                let dc = e.ll_load(dc_ptr, field_type.clone());
+
+                                let scaled_da = e.field_arith(FieldArithOp::Mul, da, coeff);
+                                let scaled_db = e.field_arith(FieldArithOp::Mul, db, coeff);
+                                let scaled_dc = e.field_arith(FieldArithOp::Mul, dc, coeff);
+
+                                e.call(bump_da, vec![child, scaled_da], 0);
+                                e.call(bump_db, vec![child, scaled_db], 0);
+                                e.call(bump_dc, vec![child, scaled_dc], 0);
+                                e.call(ad_drop_id, vec![child], 0);
+                                e.free(node);
+                                vec![]
+                            },
+                        );
+                        vec![]
+                    },
+                );
+                vec![]
+            },
+            |_| vec![],
+        );
+
+        e.terminate_return(vec![]);
     }
-
-    // -- dispatch: read tag, check CONST/WITNESS (tag < 2) --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, dispatch_blk);
-        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
-        let tag = e.ll_load(tag_ptr, LLType::i32());
-        let two = e.int_const(32, 2);
-        let is_simple = e.int_ult(tag, two);
-        e.terminate_jmp_if(is_simple, simple_free_blk, check_sum_blk);
-    }
-
-    // -- simple_free: CONST or WITNESS → just free --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, simple_free_blk);
-        e.free(node);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- check_sum: is SUM? --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, check_sum_blk);
-        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
-        let tag = e.ll_load(tag_ptr, LLType::i32());
-        let sum_tag = e.int_const(32, LLStruct::AD_TAG_SUM);
-        let is_sum = e.int_eq(tag, sum_tag);
-        e.terminate_jmp_if(is_sum, sum_blk, mul_blk);
-    }
-
-    // -- sum_blk: propagate da/db/dc to children a, b --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, sum_blk);
-        let a_ptr = e.struct_field_ptr(node, sum_node_struct.clone(), 2);
-        let a = e.ll_load(a_ptr, LLType::Ptr);
-        let b_ptr = e.struct_field_ptr(node, sum_node_struct.clone(), 3);
-        let b = e.ll_load(b_ptr, LLType::Ptr);
-
-        let da_ptr = e.struct_field_ptr(node, sum_node_struct.clone(), 4);
-        let da = e.ll_load(da_ptr, field_type.clone());
-        let db_ptr = e.struct_field_ptr(node, sum_node_struct.clone(), 5);
-        let db = e.ll_load(db_ptr, field_type.clone());
-        let dc_ptr = e.struct_field_ptr(node, sum_node_struct, 6);
-        let dc = e.ll_load(dc_ptr, field_type.clone());
-
-        // Propagate to child a
-        e.call(bump_da, vec![a, da], 0);
-        e.call(bump_db, vec![a, db], 0);
-        e.call(bump_dc, vec![a, dc], 0);
-        // Propagate to child b
-        e.call(bump_da, vec![b, da], 0);
-        e.call(bump_db, vec![b, db], 0);
-        e.call(bump_dc, vec![b, dc], 0);
-        // Drop children
-        e.call(ad_drop_id, vec![a], 0);
-        e.call(ad_drop_id, vec![b], 0);
-        e.free(node);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- mul_blk: propagate scaled sensitivities to child --
-    {
-        let mut e = LLBlockEmitter::new(&mut func, mul_blk);
-        let coeff_ptr = e.struct_field_ptr(node, mul_node_struct.clone(), 2);
-        let coeff = e.ll_load(coeff_ptr, field_type.clone());
-        let val_ptr = e.struct_field_ptr(node, mul_node_struct.clone(), 3);
-        let child = e.ll_load(val_ptr, LLType::Ptr);
-
-        let da_ptr = e.struct_field_ptr(node, mul_node_struct.clone(), 4);
-        let da = e.ll_load(da_ptr, field_type.clone());
-        let db_ptr = e.struct_field_ptr(node, mul_node_struct.clone(), 5);
-        let db = e.ll_load(db_ptr, field_type.clone());
-        let dc_ptr = e.struct_field_ptr(node, mul_node_struct, 6);
-        let dc = e.ll_load(dc_ptr, field_type.clone());
-
-        let scaled_da = e.field_arith(FieldArithOp::Mul, da, coeff);
-        let scaled_db = e.field_arith(FieldArithOp::Mul, db, coeff);
-        let scaled_dc = e.field_arith(FieldArithOp::Mul, dc, coeff);
-
-        e.call(bump_da, vec![child, scaled_da], 0);
-        e.call(bump_db, vec![child, scaled_db], 0);
-        e.call(bump_dc, vec![child, scaled_dc], 0);
-        e.call(ad_drop_id, vec![child], 0);
-        e.free(node);
-        e.terminate_jmp(done, vec![]);
-    }
-
-    // -- done --
-    func.terminate_block_with_return(done, vec![]);
 
     func
 }
