@@ -18,7 +18,8 @@ use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{
-    BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLFunction, HLSSA, Terminator, ValueId,
+    BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
+    ValueId,
 };
 
 // =============================================================================
@@ -31,6 +32,8 @@ fn lower_type(ty: &Type) -> LLType {
         TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
         TypeExpr::U(bits) => LLType::Int(*bits as u32),
         TypeExpr::Array(..) => LLType::Ptr,
+        // In the AD path, WitnessOf values are heap-allocated AD nodes
+        TypeExpr::WitnessOf(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
@@ -42,6 +45,7 @@ fn elem_struct(ty: &Type) -> LLStruct {
         TypeExpr::Field => LLStruct::field_elem(),
         TypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
     }
 }
@@ -98,6 +102,58 @@ fn get_or_create_drop_fn(
 }
 
 // =============================================================================
+// AD generated function tracking
+// =============================================================================
+
+/// Holds function IDs for the generated AD dispatch functions.
+/// These are created lazily on first use.
+struct AdFunctions {
+    bump_da: Option<FunctionId>,
+    bump_db: Option<FunctionId>,
+    bump_dc: Option<FunctionId>,
+    ad_drop: Option<FunctionId>,
+}
+
+impl AdFunctions {
+    fn new() -> Self {
+        Self {
+            bump_da: None,
+            bump_db: None,
+            bump_dc: None,
+            ad_drop: None,
+        }
+    }
+
+    fn get_bump_fn(&mut self, matrix: DMatrix, llssa: &mut LLSSA) -> FunctionId {
+        let slot = match matrix {
+            DMatrix::A => &mut self.bump_da,
+            DMatrix::B => &mut self.bump_db,
+            DMatrix::C => &mut self.bump_dc,
+        };
+        if let Some(id) = *slot {
+            return id;
+        }
+        let name = match matrix {
+            DMatrix::A => "__ad_bump_da",
+            DMatrix::B => "__ad_bump_db",
+            DMatrix::C => "__ad_bump_dc",
+        };
+        let id = llssa.add_function(name.to_string());
+        *slot = Some(id);
+        id
+    }
+
+    fn get_drop_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.ad_drop {
+            return id;
+        }
+        let id = llssa.add_function("__ad_drop".to_string());
+        self.ad_drop = Some(id);
+        id
+    }
+}
+
+// =============================================================================
 // Main entry point
 // =============================================================================
 
@@ -108,6 +164,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     let mut llssa = LLSSA::with_main(main_name);
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
+    let mut ad_fns = AdFunctions::new();
 
     // First pass: create all functions (so we can map FunctionIds)
     fn_map.insert(main_id, llssa.get_main_id());
@@ -133,6 +190,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
             &fn_map,
             &mut llssa,
             &mut drop_fns,
+            &mut ad_fns,
         );
 
         let _old = llssa.take_function(ll_fn_id);
@@ -141,6 +199,9 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
 
     // Third pass: generate drop function bodies
     generate_all_drop_functions(&mut llssa, &drop_fns);
+
+    // Fourth pass: generate AD dispatch function bodies
+    generate_all_ad_functions(&mut llssa, &ad_fns);
 
     llssa
 }
@@ -156,6 +217,7 @@ fn lower_function(
     fn_map: &HashMap<FunctionId, FunctionId>,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -207,6 +269,7 @@ fn lower_function(
                 fn_map,
                 llssa,
                 drop_fns,
+                ad_fns,
             );
         }
 
@@ -233,8 +296,9 @@ fn lower_instruction(
     fn_map: &HashMap<FunctionId, FunctionId>,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
 ) {
-    use crate::compiler::ssa::{CallTarget, ConstValue, MemOp, OpCode, SeqType};
+    use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
 
     match instruction {
         OpCode::BinaryArithOp {
@@ -267,6 +331,16 @@ fn lower_instruction(
                         _ => panic!("Unsupported int arith op: {:?}", kind),
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
+                }
+                TypeExpr::WitnessOf(_) => {
+                    // AD path: Add on WitnessOf → allocate ADSumNode
+                    match kind {
+                        BinaryArithOpKind::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
+                        _ => panic!(
+                            "Unsupported WitnessOf arith op: {:?} (should be lowered by WitnessLowering)",
+                            kind
+                        ),
+                    }
                 }
                 _ => panic!(
                     "Unsupported type for BinaryArithOp in lowering: {:?}",
@@ -413,14 +487,70 @@ fn lower_instruction(
             kind: MemOp::Bump(n),
             value,
         } => {
-            lower_rc_bump(e, val_map, fn_type_info, *n, *value);
+            let val_type = fn_type_info.get_value_type(*value);
+            if val_type.is_witness_of() {
+                lower_ad_rc_bump(e, val_map, *n, *value);
+            } else {
+                lower_rc_bump(e, val_map, fn_type_info, *n, *value);
+            }
         }
 
         OpCode::MemOp {
             kind: MemOp::Drop,
             value,
         } => {
-            lower_rc_drop(e, val_map, fn_type_info, *value, llssa, drop_fns);
+            let val_type = fn_type_info.get_value_type(*value);
+            if val_type.is_witness_of() {
+                lower_ad_rc_drop(e, val_map, *value, llssa, ad_fns);
+            } else {
+                lower_rc_drop(e, val_map, fn_type_info, *value, llssa, drop_fns);
+            }
+        }
+
+        // -- AD operations --
+        OpCode::NextDCoeff { result } => {
+            let ll_result = e.next_d_coeff();
+            val_map.insert(*result, ll_result);
+        }
+
+        OpCode::BumpD {
+            matrix,
+            variable,
+            sensitivity,
+        } => {
+            let ll_var = val_map[variable];
+            let ll_sens = val_map[sensitivity];
+            let bump_fn = ad_fns.get_bump_fn(*matrix, llssa);
+            e.call(bump_fn, vec![ll_var, ll_sens], 0);
+        }
+
+        OpCode::FreshWitness { result, .. } => {
+            lower_ad_fresh_witness(e, val_map, *result);
+        }
+
+        OpCode::MulConst {
+            result,
+            const_val,
+            var,
+        } => {
+            lower_ad_mul_const(e, val_map, *result, *const_val, *var);
+        }
+
+        OpCode::Cast {
+            result,
+            value,
+            target,
+        } => {
+            match target {
+                CastTarget::WitnessOf => {
+                    // Pure value → AD constant node
+                    lower_ad_const_wrap(e, val_map, *result, *value);
+                }
+                _ => panic!(
+                    "Unsupported cast target in HLSSA->LLSSA lowering: {:?}",
+                    target
+                ),
+            }
         }
 
         _ => panic!(
@@ -655,6 +785,442 @@ fn lower_rc_drop(
     let drop_fn_id = get_or_create_drop_fn(arr_type, llssa, drop_fns);
     let ll_arr = val_map[&value];
     e.call(drop_fn_id, vec![ll_arr], 0);
+}
+
+// =============================================================================
+// AD lowering helpers
+// =============================================================================
+
+/// Allocate an ADConstNode wrapping a pure field value.
+fn lower_ad_const_wrap(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    value: ValueId,
+) {
+    let ll_val = val_map[&value];
+    let node_struct = LLStruct::ad_const_node();
+    let node = e.heap_alloc(node_struct.clone(), None);
+
+    // RC = 1
+    let rc_hdr = e.struct_field_ptr(node, node_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // tag = AD_TAG_CONST
+    let tag_ptr = e.struct_field_ptr(node, node_struct.clone(), 1);
+    let tag = e.int_const(32, LLStruct::AD_TAG_CONST);
+    e.ll_store(tag_ptr, tag);
+
+    // value = field element
+    let val_ptr = e.struct_field_ptr(node, node_struct, 2);
+    e.ll_store(val_ptr, ll_val);
+
+    val_map.insert(result, node);
+}
+
+/// Allocate an ADWitnessNode with the next witness index.
+fn lower_ad_fresh_witness(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+) {
+    let node_struct = LLStruct::ad_witness_node();
+    let node = e.heap_alloc(node_struct.clone(), None);
+
+    // RC = 1
+    let rc_hdr = e.struct_field_ptr(node, node_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // tag = AD_TAG_WITNESS
+    let tag_ptr = e.struct_field_ptr(node, node_struct.clone(), 1);
+    let tag = e.int_const(32, LLStruct::AD_TAG_WITNESS);
+    e.ll_store(tag_ptr, tag);
+
+    // index = next witness index from VM
+    let index = e.ad_fresh_witness();
+    let index64 = e.zext(index, 64);
+    let idx_ptr = e.struct_field_ptr(node, node_struct, 2);
+    e.ll_store(idx_ptr, index64);
+
+    val_map.insert(result, node);
+}
+
+/// Allocate an ADSumNode for two AD values.
+fn lower_ad_sum(e: &mut LLBlockEmitter<'_>, ll_a: ValueId, ll_b: ValueId) -> ValueId {
+    let node_struct = LLStruct::ad_sum_node();
+    let field_elem = LLStruct::field_elem();
+    let node = e.heap_alloc(node_struct.clone(), None);
+
+    // RC = 1
+    let rc_hdr = e.struct_field_ptr(node, node_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // tag = AD_TAG_SUM
+    let tag_ptr = e.struct_field_ptr(node, node_struct.clone(), 1);
+    let tag = e.int_const(32, LLStruct::AD_TAG_SUM);
+    e.ll_store(tag_ptr, tag);
+
+    // a, b = children
+    let a_ptr = e.struct_field_ptr(node, node_struct.clone(), 2);
+    e.ll_store(a_ptr, ll_a);
+    let b_ptr = e.struct_field_ptr(node, node_struct.clone(), 3);
+    e.ll_store(b_ptr, ll_b);
+
+    // da, db, dc = zero
+    let zero_field = make_field_zero(e);
+    let da_ptr = e.struct_field_ptr(node, node_struct.clone(), 4);
+    e.ll_store(da_ptr, zero_field);
+    let db_ptr = e.struct_field_ptr(node, node_struct.clone(), 5);
+    e.ll_store(db_ptr, zero_field);
+    let dc_ptr = e.struct_field_ptr(node, node_struct, 6);
+    e.ll_store(dc_ptr, zero_field);
+
+    node
+}
+
+/// Allocate an ADMulConstNode: coeff * var.
+fn lower_ad_mul_const(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    const_val: ValueId,
+    var: ValueId,
+) {
+    let ll_coeff = val_map[&const_val];
+    let ll_var = val_map[&var];
+    let node_struct = LLStruct::ad_mul_const_node();
+    let node = e.heap_alloc(node_struct.clone(), None);
+
+    // RC = 1
+    let rc_hdr = e.struct_field_ptr(node, node_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // tag = AD_TAG_MUL_CONST
+    let tag_ptr = e.struct_field_ptr(node, node_struct.clone(), 1);
+    let tag = e.int_const(32, LLStruct::AD_TAG_MUL_CONST);
+    e.ll_store(tag_ptr, tag);
+
+    // coeff
+    let coeff_ptr = e.struct_field_ptr(node, node_struct.clone(), 2);
+    e.ll_store(coeff_ptr, ll_coeff);
+
+    // value (child)
+    let val_ptr = e.struct_field_ptr(node, node_struct.clone(), 3);
+    e.ll_store(val_ptr, ll_var);
+
+    // da, db, dc = zero
+    let zero_field = make_field_zero(e);
+    let da_ptr = e.struct_field_ptr(node, node_struct.clone(), 4);
+    e.ll_store(da_ptr, zero_field);
+    let db_ptr = e.struct_field_ptr(node, node_struct.clone(), 5);
+    e.ll_store(db_ptr, zero_field);
+    let dc_ptr = e.struct_field_ptr(node, node_struct, 6);
+    e.ll_store(dc_ptr, zero_field);
+
+    val_map.insert(result, node);
+}
+
+/// RC bump for AD nodes: load RC, add n, store.
+fn lower_ad_rc_bump(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &HashMap<ValueId, ValueId>,
+    n: usize,
+    value: ValueId,
+) {
+    let ll_node = val_map[&value];
+    let base = LLStruct::ad_node_base();
+    let hdr = e.struct_field_ptr(ll_node, base, 0);
+    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let n_val = e.int_const(64, n as u64);
+    let new_rc = e.int_add(rc, n_val);
+    e.ll_store(rc_ptr, new_rc);
+}
+
+/// RC drop for AD nodes: call __ad_drop.
+fn lower_ad_rc_drop(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &HashMap<ValueId, ValueId>,
+    value: ValueId,
+    llssa: &mut LLSSA,
+    ad_fns: &mut AdFunctions,
+) {
+    let ll_node = val_map[&value];
+    let drop_fn = ad_fns.get_drop_fn(llssa);
+    e.call(drop_fn, vec![ll_node], 0);
+}
+
+/// Construct a zero field element as a struct value.
+fn make_field_zero(e: &mut LLBlockEmitter<'_>) -> ValueId {
+    let z = e.int_const(64, 0);
+    e.mk_struct(LLStruct::field_elem(), vec![z, z, z, z])
+}
+
+// =============================================================================
+// AD generated function bodies
+// =============================================================================
+
+/// Generate all AD dispatch function bodies.
+fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
+    // Generate bump functions
+    for (matrix, fn_id) in [
+        (DMatrix::A, ad_fns.bump_da),
+        (DMatrix::B, ad_fns.bump_db),
+        (DMatrix::C, ad_fns.bump_dc),
+    ] {
+        if let Some(id) = fn_id {
+            let func = generate_ad_bump_function(matrix, ad_fns);
+            let _old = llssa.take_function(id);
+            llssa.put_function(id, func);
+        }
+    }
+
+    // Generate drop function
+    if let Some(id) = ad_fns.ad_drop {
+        let func = generate_ad_drop_function(ad_fns);
+        let _old = llssa.take_function(id);
+        llssa.put_function(id, func);
+    }
+}
+
+/// Generate __ad_bump_d{a,b,c}(node: Ptr, amount: FieldElem):
+///
+/// Reads the tag from the node, then:
+///   CONST:     ad_write_const(matrix, node.value, amount)
+///   WITNESS:   ad_write_witness(matrix, node.index, amount)
+///   SUM:       node.d{a,b,c} += amount  (field add)
+///   MUL_CONST: node.d{a,b,c} += amount  (field add)
+fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFunction {
+    let name = match matrix {
+        DMatrix::A => "__ad_bump_da",
+        DMatrix::B => "__ad_bump_db",
+        DMatrix::C => "__ad_bump_dc",
+    };
+    let d_field: usize = match matrix {
+        DMatrix::A => 4,
+        DMatrix::B => 5,
+        DMatrix::C => 6,
+    };
+
+    let mut func = LLFunction::empty(name.to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let node = e.add_parameter(LLType::Ptr);
+        let amount = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+        let tag = e.ll_load(tag_ptr, LLType::i32());
+
+        // CONST?
+        let const_tag = e.int_const(32, LLStruct::AD_TAG_CONST);
+        let is_const = e.int_eq(tag, const_tag);
+        e.build_if_else(
+            is_const,
+            vec![],
+            |e| {
+                // CONST: write to output matrix directly
+                let val_ptr = e.struct_field_ptr(node, LLStruct::ad_const_node(), 2);
+                let const_val = e.ll_load(val_ptr, LLType::Struct(LLStruct::field_elem()));
+                e.ad_write_const(matrix, const_val, amount);
+                vec![]
+            },
+            |e| {
+                // Not CONST — check WITNESS
+                let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                let tag = e.ll_load(tag_ptr, LLType::i32());
+                let wit_tag = e.int_const(32, LLStruct::AD_TAG_WITNESS);
+                let is_wit = e.int_eq(tag, wit_tag);
+                e.build_if_else(
+                    is_wit,
+                    vec![],
+                    |e| {
+                        // WITNESS: write to output matrix at witness index
+                        let idx_ptr = e.struct_field_ptr(node, LLStruct::ad_witness_node(), 2);
+                        let index64 = e.ll_load(idx_ptr, LLType::i64());
+                        let index32 = e.truncate(index64, 32);
+                        e.ad_write_witness(matrix, index32, amount);
+                        vec![]
+                    },
+                    |e| {
+                        // SUM or MUL_CONST: accumulate into node.d{a,b,c}
+                        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                        let tag = e.ll_load(tag_ptr, LLType::i32());
+                        let sum_tag = e.int_const(32, LLStruct::AD_TAG_SUM);
+                        let is_sum = e.int_eq(tag, sum_tag);
+                        e.build_if_else(
+                            is_sum,
+                            vec![],
+                            |e| {
+                                // SUM node
+                                let d_ptr =
+                                    e.struct_field_ptr(node, LLStruct::ad_sum_node(), d_field);
+                                let old_d =
+                                    e.ll_load(d_ptr, LLType::Struct(LLStruct::field_elem()));
+                                let new_d = e.field_arith(FieldArithOp::Add, old_d, amount);
+                                e.ll_store(d_ptr, new_d);
+                                vec![]
+                            },
+                            |e| {
+                                // MUL_CONST node
+                                let d_ptr = e.struct_field_ptr(
+                                    node,
+                                    LLStruct::ad_mul_const_node(),
+                                    d_field,
+                                );
+                                let old_d =
+                                    e.ll_load(d_ptr, LLType::Struct(LLStruct::field_elem()));
+                                let new_d = e.field_arith(FieldArithOp::Add, old_d, amount);
+                                e.ll_store(d_ptr, new_d);
+                                vec![]
+                            },
+                        );
+                        vec![]
+                    },
+                );
+                vec![]
+            },
+        );
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate __ad_drop(node: Ptr):
+///
+/// Decrements RC. If RC hits zero, dispatches on tag:
+///   CONST/WITNESS: free
+///   SUM: propagate da/db/dc to children, drop children, free
+///   MUL_CONST: propagate da*coeff/db*coeff/dc*coeff to child, drop child, free
+fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
+    let mut func = LLFunction::empty("__ad_drop".to_string());
+    let entry = func.get_entry_id();
+
+    let field_type = LLType::Struct(LLStruct::field_elem());
+
+    let bump_da = ad_fns.bump_da.expect("bump_da must exist");
+    let bump_db = ad_fns.bump_db.expect("bump_db must exist");
+    let bump_dc = ad_fns.bump_dc.expect("bump_dc must exist");
+    let ad_drop_id = ad_fns.ad_drop.expect("ad_drop must exist");
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let node = e.add_parameter(LLType::Ptr);
+
+        // Decrement RC
+        let rc_hdr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 0);
+        let rc_ptr = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+        let rc = e.ll_load(rc_ptr, LLType::i64());
+        let one = e.int_const(64, 1);
+        let new_rc = e.int_sub(rc, one);
+        e.ll_store(rc_ptr, new_rc);
+
+        // If RC hit zero, dispatch on tag and tear down
+        let zero = e.int_const(64, 0);
+        let dead = e.int_eq(new_rc, zero);
+        e.build_if_else(
+            dead,
+            vec![],
+            |e| {
+                // Read tag
+                let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                let tag = e.ll_load(tag_ptr, LLType::i32());
+
+                // CONST or WITNESS (tag < 2) → just free
+                let two = e.int_const(32, 2);
+                let is_simple = e.int_ult(tag, two);
+                e.build_if_else(
+                    is_simple,
+                    vec![],
+                    |e| {
+                        e.free(node);
+                        vec![]
+                    },
+                    |e| {
+                        // SUM or MUL_CONST
+                        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                        let tag = e.ll_load(tag_ptr, LLType::i32());
+                        let sum_tag = e.int_const(32, LLStruct::AD_TAG_SUM);
+                        let is_sum = e.int_eq(tag, sum_tag);
+                        e.build_if_else(
+                            is_sum,
+                            vec![],
+                            |e| {
+                                // SUM: propagate da/db/dc to both children
+                                let sum = LLStruct::ad_sum_node();
+                                let a_ptr = e.struct_field_ptr(node, sum.clone(), 2);
+                                let a = e.ll_load(a_ptr, LLType::Ptr);
+                                let b_ptr = e.struct_field_ptr(node, sum.clone(), 3);
+                                let b = e.ll_load(b_ptr, LLType::Ptr);
+
+                                let da_ptr = e.struct_field_ptr(node, sum.clone(), 4);
+                                let da = e.ll_load(da_ptr, field_type.clone());
+                                let db_ptr = e.struct_field_ptr(node, sum.clone(), 5);
+                                let db = e.ll_load(db_ptr, field_type.clone());
+                                let dc_ptr = e.struct_field_ptr(node, sum, 6);
+                                let dc = e.ll_load(dc_ptr, field_type.clone());
+
+                                e.call(bump_da, vec![a, da], 0);
+                                e.call(bump_db, vec![a, db], 0);
+                                e.call(bump_dc, vec![a, dc], 0);
+                                e.call(bump_da, vec![b, da], 0);
+                                e.call(bump_db, vec![b, db], 0);
+                                e.call(bump_dc, vec![b, dc], 0);
+                                e.call(ad_drop_id, vec![a], 0);
+                                e.call(ad_drop_id, vec![b], 0);
+                                e.free(node);
+                                vec![]
+                            },
+                            |e| {
+                                // MUL_CONST: scale sensitivities by coeff, propagate
+                                let mul = LLStruct::ad_mul_const_node();
+                                let coeff_ptr = e.struct_field_ptr(node, mul.clone(), 2);
+                                let coeff = e.ll_load(coeff_ptr, field_type.clone());
+                                let val_ptr = e.struct_field_ptr(node, mul.clone(), 3);
+                                let child = e.ll_load(val_ptr, LLType::Ptr);
+
+                                let da_ptr = e.struct_field_ptr(node, mul.clone(), 4);
+                                let da = e.ll_load(da_ptr, field_type.clone());
+                                let db_ptr = e.struct_field_ptr(node, mul.clone(), 5);
+                                let db = e.ll_load(db_ptr, field_type.clone());
+                                let dc_ptr = e.struct_field_ptr(node, mul, 6);
+                                let dc = e.ll_load(dc_ptr, field_type.clone());
+
+                                let scaled_da = e.field_arith(FieldArithOp::Mul, da, coeff);
+                                let scaled_db = e.field_arith(FieldArithOp::Mul, db, coeff);
+                                let scaled_dc = e.field_arith(FieldArithOp::Mul, dc, coeff);
+
+                                e.call(bump_da, vec![child, scaled_da], 0);
+                                e.call(bump_db, vec![child, scaled_db], 0);
+                                e.call(bump_dc, vec![child, scaled_dc], 0);
+                                e.call(ad_drop_id, vec![child], 0);
+                                e.free(node);
+                                vec![]
+                            },
+                        );
+                        vec![]
+                    },
+                );
+                vec![]
+            },
+            |_| vec![],
+        );
+
+        e.terminate_return(vec![]);
+    }
+
+    func
 }
 
 // =============================================================================

@@ -482,6 +482,76 @@ impl Driver {
         Ok(llvm_ir)
     }
 
+    #[tracing::instrument(skip_all)]
+    pub fn compile_ad_llvm_targets(
+        &mut self,
+        wasm_path: std::path::PathBuf,
+        r1cs: &R1CS,
+    ) -> Result<(), Error> {
+        use crate::compiler::hlssa_to_llssa;
+        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
+        use inkwell::OptimizationLevel;
+        use inkwell::context::Context;
+
+        // Prepare AD SSA: same pass pipeline as compile_ad()
+        let mut ssa = self.r1cs_ssa.clone().unwrap();
+        let mut ad_pm = PassManager::new(
+            "ad_wasm".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(WitnessLowering::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(RCInsertion::new()),
+                Box::new(FixDoubleJumps::new()),
+            ],
+        );
+        ad_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
+        ad_pm.run(&mut ssa);
+
+        let flow_analysis = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow_analysis);
+
+        // Lower HLSSA → LLSSA
+        let llssa = hlssa_to_llssa::lower(&ssa, &flow_analysis, &type_info);
+
+        // Compile LLSSA → LLVM
+        let ll_flow_analysis = FlowAnalysis::run(&llssa);
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "mavros_ad_module");
+        codegen.compile(&llssa, &ll_flow_analysis);
+
+        codegen.write_ir(&wasm_path.with_extension("ll"));
+        codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+        info!(message = %"AD WASM object generated", path = %wasm_path.display());
+        self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
+
+        Ok(())
+    }
+
+    /// Write AD WASM metadata JSON file
+    fn write_ad_wasm_metadata(
+        &self,
+        wasm_path: &std::path::PathBuf,
+        r1cs: &R1CS,
+    ) -> Result<(), Error> {
+        let metadata = serde_json::json!({
+            "witnessCount": r1cs.witness_layout.size(),
+            "constraintCount": r1cs.constraints.len(),
+        });
+
+        let metadata_path = format!("{}.meta.json", wasm_path.display());
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        info!(message = %"AD WASM metadata generated", path = %metadata_path);
+
+        Ok(())
+    }
+
     /// Write WASM metadata JSON file
     fn write_wasm_metadata(
         &self,

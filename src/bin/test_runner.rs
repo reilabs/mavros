@@ -289,34 +289,62 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 14. AD WASM Compile  (depends on R1CS, not yet implemented)
-    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|_r1cs| {
+    // 14. AD WASM Compile  (depends on R1CS)
+    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
         emit("START:AD_WASM_COMPILE");
-        panic!("AD WASM Compile is not yet implemented");
-        #[allow(unreachable_code)]
-        {
-            emit("END:AD_WASM_COMPILE:fail");
-            None
+        let tmpdir = tempfile::tempdir().ok()?;
+        let wasm_path = tmpdir.into_path().join("ad.wasm");
+        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs) {
+            Ok(_) if wasm_path.exists() => {
+                emit("END:AD_WASM_COMPILE:ok");
+                Some(wasm_path)
+            }
+            Ok(_) => {
+                eprintln!(
+                    "AD WASM compile succeeded but output file not found at {:?}",
+                    wasm_path
+                );
+                emit("END:AD_WASM_COMPILE:fail");
+                None
+            }
+            Err(e) => {
+                eprintln!("AD WASM compile error: {:?}", e);
+                emit("END:AD_WASM_COMPILE:fail");
+                None
+            }
         }
     });
 
-    // 15. AD WASM Run  (depends on AD_WASM_COMPILE, not yet implemented)
-    let ad_wasm_result: Option<()> = ad_wasm_path.as_ref().and_then(|_wasm_path| {
+    // 15. AD WASM Run  (depends on AD_WASM_COMPILE)
+    let ad_wasm_result = ad_wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
-        panic!("AD WASM Run is not yet implemented");
-        #[allow(unreachable_code)]
-        {
-            emit("END:AD_WASM_RUN:fail");
-            None
+        let r1cs = r1cs.as_ref().unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
+            .map(|_| ark_bn254::Fr::rand(&mut rng))
+            .collect();
+        match run_ad_wasm(wasm_path, r1cs, &ad_coeffs) {
+            Ok(result) => {
+                emit("END:AD_WASM_RUN:ok");
+                Some((ad_coeffs, result))
+            }
+            Err(e) => {
+                eprintln!("AD WASM run error: {:?}", e);
+                emit("END:AD_WASM_RUN:fail");
+                None
+            }
         }
     });
 
-    // 16. AD WASM Correct  (depends on AD_WASM_RUN, not yet implemented)
-    if let (Some(_result), Some(_r1cs)) = (&ad_wasm_result, &r1cs) {
+    // 16. AD WASM Correct  (depends on AD_WASM_RUN)
+    if let (Some((coeffs, result)), Some(r1cs)) = (&ad_wasm_result, &r1cs) {
         emit("START:AD_WASM_CORRECT");
-        panic!("AD WASM Correct is not yet implemented");
-        #[allow(unreachable_code)]
-        emit("END:AD_WASM_CORRECT:fail");
+        let correct = r1cs.check_ad_output(coeffs, &result.out_da, &result.out_db, &result.out_dc);
+        emit(if correct {
+            "END:AD_WASM_CORRECT:ok"
+        } else {
+            "END:AD_WASM_CORRECT:fail"
+        });
     }
 }
 
@@ -509,6 +537,162 @@ fn run_wasm(
         out_a,
         out_b,
         out_c,
+    })
+}
+
+// ── AD WASM Runner ───────────────────────────────────────────────────
+
+/// Output from running AD WASM
+struct AdWasmResult {
+    out_da: Vec<Field>,
+    out_db: Vec<Field>,
+    out_dc: Vec<Field>,
+}
+
+/// Write a field element to WASM memory at ptr
+fn write_field_to_memory(
+    memory: &Memory,
+    mut store: impl wasmtime::AsContextMut,
+    ptr: u32,
+    field: &Field,
+) {
+    let limbs = field.0.0;
+    let offset = ptr as usize;
+    let data = memory.data_mut(&mut store);
+    data[offset..offset + 8].copy_from_slice(&limbs[0].to_le_bytes());
+    data[offset + 8..offset + 16].copy_from_slice(&limbs[1].to_le_bytes());
+    data[offset + 16..offset + 24].copy_from_slice(&limbs[2].to_le_bytes());
+    data[offset + 24..offset + 32].copy_from_slice(&limbs[3].to_le_bytes());
+}
+
+fn run_ad_wasm(
+    wasm_path: &Path,
+    r1cs: &R1CS,
+    coeffs: &[Field],
+) -> Result<AdWasmResult, Box<dyn std::error::Error>> {
+    let witness_count = r1cs.witness_layout.size();
+    let constraint_count = r1cs.constraints.len();
+
+    // AD VM struct layout (wasm32, 5 fields × 4 bytes = 20 bytes):
+    //   offset 0:  out_da ptr
+    //   offset 4:  out_db ptr
+    //   offset 8:  out_dc ptr
+    //   offset 12: ad_coeffs ptr
+    //   offset 16: current_wit_off (i32)
+    let vm_struct_size: u32 = 20;
+    let da_bytes = (witness_count * FIELD_SIZE) as u32;
+    let db_bytes = da_bytes;
+    let dc_bytes = da_bytes;
+    let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
+    let our_data_size = vm_struct_size + da_bytes + db_bytes + dc_bytes + coeffs_bytes;
+
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+
+    let wasm_bytes = fs::read(wasm_path)?;
+    let module = Module::new(&engine, &wasm_bytes)?;
+
+    let initial_estimate = 65536 + 4096 + our_data_size;
+    let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
+    let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
+    let memory = Memory::new(&mut store, memory_type)?;
+
+    let mut linker = Linker::new(&engine);
+    linker.define(&store, "env", "memory", memory)?;
+    let instance = linker.instantiate(&mut store, &module)?;
+
+    let data_end_global = instance
+        .get_global(&mut store, "__data_end")
+        .ok_or("__data_end global not found in WASM module")?;
+    let data_end = data_end_global
+        .get(&mut store)
+        .i32()
+        .ok_or("__data_end is not i32")? as u32;
+    let data_offset = (data_end + 15) & !15;
+
+    // Layout buffers
+    let vm_struct_ptr = data_offset;
+    let da_ptr = vm_struct_ptr + vm_struct_size;
+    let db_ptr = da_ptr + da_bytes;
+    let dc_ptr = db_ptr + db_bytes;
+    let coeffs_ptr = dc_ptr + dc_bytes;
+    let total_bytes = coeffs_ptr + coeffs_bytes;
+
+    // Grow memory if needed
+    let needed_pages = ((total_bytes as usize + 65535) / 65536) as u32;
+    let current_pages = memory.size(&store) as u32;
+    if needed_pages > current_pages {
+        memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
+    }
+
+    // Zero out dA, dB, dC buffers
+    {
+        let data = memory.data_mut(&mut store);
+        let start = da_ptr as usize;
+        let end = (dc_ptr + dc_bytes) as usize;
+        for b in &mut data[start..end] {
+            *b = 0;
+        }
+    }
+
+    // Write coefficients into WASM memory
+    for (i, coeff) in coeffs.iter().enumerate() {
+        write_field_to_memory(
+            &memory,
+            &mut store,
+            coeffs_ptr + (i * FIELD_SIZE) as u32,
+            coeff,
+        );
+    }
+
+    // Initialize AD VM struct
+    {
+        let data = memory.data_mut(&mut store);
+        let off = vm_struct_ptr as usize;
+        data[off..off + 4].copy_from_slice(&da_ptr.to_le_bytes());
+        data[off + 4..off + 8].copy_from_slice(&db_ptr.to_le_bytes());
+        data[off + 8..off + 12].copy_from_slice(&dc_ptr.to_le_bytes());
+        data[off + 12..off + 16].copy_from_slice(&coeffs_ptr.to_le_bytes());
+        // current_wit_off = 0
+        data[off + 16..off + 20].copy_from_slice(&0u32.to_le_bytes());
+    }
+
+    let func = instance
+        .get_func(&mut store, "mavros_main")
+        .ok_or("mavros_main not found")?;
+
+    // AD main takes only vm_ptr (no input parameters)
+    let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
+    let mut results = vec![];
+    func.call(&mut store, &args, &mut results)?;
+
+    // Read dA, dB, dC from memory
+    let mut out_da = Vec::with_capacity(witness_count);
+    let mut out_db = Vec::with_capacity(witness_count);
+    let mut out_dc = Vec::with_capacity(witness_count);
+
+    for i in 0..witness_count {
+        out_da.push(read_field_from_memory(
+            &memory,
+            &store,
+            da_ptr + (i * FIELD_SIZE) as u32,
+        ));
+        out_db.push(read_field_from_memory(
+            &memory,
+            &store,
+            db_ptr + (i * FIELD_SIZE) as u32,
+        ));
+        out_dc.push(read_field_from_memory(
+            &memory,
+            &store,
+            dc_ptr + (i * FIELD_SIZE) as u32,
+        ));
+    }
+
+    Ok(AdWasmResult {
+        out_da,
+        out_db,
+        out_dc,
     })
 }
 

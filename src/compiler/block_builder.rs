@@ -735,6 +735,46 @@ pub trait LLEmitter {
     fn trap(&mut self) {
         self.emit_ll(LLOp::Trap);
     }
+
+    // -- AD (Automatic Differentiation) --
+
+    fn next_d_coeff(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::NextDCoeff { result: r });
+        r
+    }
+
+    fn ad_write_const(
+        &mut self,
+        matrix: crate::compiler::ssa::DMatrix,
+        const_value: ValueId,
+        sensitivity: ValueId,
+    ) {
+        self.emit_ll(LLOp::ADWriteConst {
+            matrix,
+            const_value,
+            sensitivity,
+        });
+    }
+
+    fn ad_write_witness(
+        &mut self,
+        matrix: crate::compiler::ssa::DMatrix,
+        witness_index: ValueId,
+        sensitivity: ValueId,
+    ) {
+        self.emit_ll(LLOp::ADWriteWitness {
+            matrix,
+            witness_index,
+            sensitivity,
+        });
+    }
+
+    fn ad_fresh_witness(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ADFreshWitness { result: r });
+        r
+    }
 }
 
 // ---------------------------------------------------------------------------
