@@ -417,7 +417,10 @@ fn run_wasm(
     let data_end_global = instance
         .get_global(&mut store, "__data_end")
         .ok_or("__data_end global not found in WASM module")?;
-    let data_end = data_end_global.get(&mut store).i32().ok_or("__data_end is not i32")? as u32;
+    let data_end = data_end_global
+        .get(&mut store)
+        .i32()
+        .ok_or("__data_end is not i32")? as u32;
     let data_offset = (data_end + 15) & !15; // align to 16 bytes
 
     // Calculate memory layout after the module's data
