@@ -387,13 +387,40 @@ fn run_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    // Calculate memory layout
-    // Reserve space at the start for the WASM module's stack (default 64KB from wasm-ld)
-    let data_offset: u32 = 65536; // Skip past WASM stack area
     let vm_struct_size: u32 = 16; // 4 x u32 pointers
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
+    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
 
+    // Create wasmtime engine and store
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+
+    // Load the WASM module
+    let wasm_bytes = fs::read(wasm_path)?;
+    let module = Module::new(&engine, &wasm_bytes)?;
+
+    // Estimate initial memory: stack (64KB) + module data + our buffers + heap headroom
+    let initial_estimate = 65536 + 4096 + our_data_size;
+    let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
+    let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
+    let memory = Memory::new(&mut store, memory_type)?;
+
+    // Create linker, register imported memory, and instantiate
+    let mut linker = Linker::new(&engine);
+    linker.define(&store, "env", "memory", memory)?;
+    let instance = linker.instantiate(&mut store, &module)?;
+
+    // Read __data_end from the WASM module to find where the module's static data ends.
+    // Our VM struct and buffers must be placed AFTER this to avoid colliding with the
+    // module's data segment (which contains allocator metadata, etc.).
+    let data_end_global = instance
+        .get_global(&mut store, "__data_end")
+        .ok_or("__data_end global not found in WASM module")?;
+    let data_end = data_end_global.get(&mut store).i32().ok_or("__data_end is not i32")? as u32;
+    let data_offset = (data_end + 15) & !15; // align to 16 bytes
+
+    // Calculate memory layout after the module's data
     let vm_struct_ptr = data_offset;
     let witness_ptr = vm_struct_ptr + vm_struct_size;
     let a_ptr = witness_ptr + witness_bytes;
@@ -401,14 +428,12 @@ fn run_wasm(
     let c_ptr = b_ptr + constraint_bytes;
     let total_bytes = c_ptr + constraint_bytes;
 
-    // Create wasmtime engine and store
-    let engine = Engine::default();
-    let mut store = Store::new(&engine, ());
-
-    // Create memory (enough pages for our data)
-    let pages = ((total_bytes as usize + 65535) / 65536) as u32;
-    let memory_type = wasmtime::MemoryType::new(pages, None);
-    let memory = Memory::new(&mut store, memory_type)?;
+    // Grow memory if needed
+    let needed_pages = ((total_bytes as usize + 65535) / 65536) as u32;
+    let current_pages = memory.size(&store) as u32;
+    if needed_pages > current_pages {
+        memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
+    }
 
     // Initialize VM struct with buffer pointers
     {
@@ -420,19 +445,6 @@ fn run_wasm(
         data[off + 12..off + 16].copy_from_slice(&c_ptr.to_le_bytes());
     }
 
-    // Create linker and register imported memory
-    let mut linker = Linker::new(&engine);
-    linker.define(&store, "env", "memory", memory)?;
-
-    // Load the WASM module (runtime functions are linked in, no host imports needed)
-    let wasm_bytes = fs::read(wasm_path)?;
-    let module = Module::new(&engine, &wasm_bytes)?;
-
-    // Instantiate and get the main function
-    let instance = linker.instantiate(&mut store, &module)?;
-
-    // Build the call arguments: vmPtr followed by flattened input limbs
-    // The function signature varies based on inputs, so we need dynamic dispatch
     let func = instance
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
