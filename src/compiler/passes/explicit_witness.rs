@@ -649,11 +649,7 @@ impl ExplicitWitness {
                 b.store(ptr, new_value);
             }
             inner => {
-                // All other ops (both pure and witness): strip Guard, process unconditionally.
-                // Witness computations run unconditionally even in tainted blocks — their
-                // constraints are tautological (res IS defined as op(args)). Only AssertEq
-                // and Store need conditioning (handled above).
-                self.process_instruction(b, function_type_info, inner);
+                panic!("unrecognized op inside Guard: {:?}", inner);
             }
         }
     }
