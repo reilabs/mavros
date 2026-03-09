@@ -129,42 +129,18 @@ impl UntaintControlFlow {
                     } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
-                    // AssertEq: use Select to condition (old approach)
-                    OpCode::AssertEq { lhs, rhs } => match block_taint {
-                        Some(taint) => {
-                            let new_rhs = function.fresh_value();
-                            new_instructions.push(OpCode::Select {
-                                result: new_rhs,
-                                cond: taint,
-                                if_t: rhs,
-                                if_f: lhs,
-                            });
-                            new_instructions.push(OpCode::AssertEq {
-                                lhs: lhs,
-                                rhs: new_rhs,
-                            });
-                        }
-                        None => {
-                            new_instructions.push(instruction);
-                        }
-                    },
-                    // Store: wrap in Guard for conditional execution
-                    OpCode::Store { .. } => match block_taint {
+                    // All non-Call ops: wrap in Guard when tainted
+                    other => match block_taint {
                         Some(taint) => {
                             new_instructions.push(OpCode::Guard {
                                 condition: taint,
-                                inner: Box::new(instruction),
+                                inner: Box::new(other),
                             });
                         }
                         None => {
-                            new_instructions.push(instruction);
+                            new_instructions.push(other);
                         }
                     },
-                    // All other ops run unconditionally (pure ops are always valid,
-                    // witness constraints are tautological)
-                    other => {
-                        new_instructions.push(other);
-                    }
                 }
             }
 
