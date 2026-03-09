@@ -541,17 +541,15 @@ fn lower_instruction(
             value,
             target,
         } => {
-            let val_type = fn_type_info.get_value_type(*value);
-            let result_type = fn_type_info.get_value_type(*result);
-            if matches!(target, CastTarget::WitnessOf) {
-                // Pure value → AD constant node
-                lower_ad_const_wrap(e, val_map, *result, *value);
-            } else if val_type.is_witness_of() && !result_type.is_witness_of() {
-                // WitnessOf → stripping cast (identity in AD path for pure operations)
-                val_map.insert(*result, val_map[value]);
-            } else {
-                // Normal cast: no-op aliasing
-                val_map.insert(*result, val_map[value]);
+            match target {
+                CastTarget::WitnessOf => {
+                    // Pure value → AD constant node
+                    lower_ad_const_wrap(e, val_map, *result, *value);
+                }
+                _ => panic!(
+                    "Unsupported cast target in HLSSA->LLSSA lowering: {:?}",
+                    target
+                ),
             }
         }
 
