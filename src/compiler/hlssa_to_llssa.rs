@@ -32,7 +32,6 @@ fn lower_type(ty: &Type) -> LLType {
         TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
         TypeExpr::U(bits) => LLType::Int(*bits as u32),
         TypeExpr::Array(..) => LLType::Ptr,
-        TypeExpr::Ref(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         TypeExpr::WitnessOf(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
