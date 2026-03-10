@@ -656,31 +656,30 @@ impl ExplicitWitness {
                 result,
                 value,
                 to_bits,
-                from_bits,
+                from_bits: _,
             } => {
-                // Truncate on a witness value is non-linear — R1CS can't evaluate it.
-                // Emit Truncate (for witgen computation) + WriteWitness (for R1CS fresh witness).
-                // R1CS pipeline: WitnessWriteToFresh makes Truncate dead, DCE removes it.
-                // Witgen pipeline: WitnessWriteToVoid removes WriteWitness, keeps Truncate.
-                let trunc_tmp = b.fresh_value();
-                b.push(OpCode::Truncate {
-                    result: trunc_tmp,
-                    value,
-                    to_bits,
-                    from_bits,
-                });
-                let trunc_field = b.cast_to_field(trunc_tmp);
-                // Strip any WitnessOf wrapper before WriteWitness (which adds its own)
-                let trunc_pure = b.value_of(trunc_field);
-                let wit = b.write_witness(trunc_pure);
+                // Witness truncate: full byte decomposition with canonical check.
+                // 1) Decompose value into 32 bytes, range-check each, constrain reconstruction
+                // 2) Prove decomposition is canonical (< field modulus) via 128-bit digital check
+                // 3) Recover truncated value from low bytes
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                let trunc_wit = self.gen_witness_truncate(b, value, to_bits, cond_field);
                 b.push(OpCode::Cast {
                     result,
-                    value: wit,
+                    value: trunc_wit,
                     target: CastTarget::U(to_bits),
                 });
             }
-            OpCode::Cast { .. } => {
-                // Pure type-level operation — no constraints. Emit unconditionally.
+            OpCode::Cast { .. }
+            | OpCode::Const { .. }
+            | OpCode::Cmp { .. }
+            | OpCode::BinaryArithOp { .. } => {
+                // Pure computations — no constraints. Emit unconditionally.
                 b.push(inner);
             }
             OpCode::Rangecheck { value, max_bits } => {
@@ -698,6 +697,134 @@ impl ExplicitWitness {
                 panic!("unrecognized op inside Guard: {:?}", inner);
             }
         }
+    }
+
+    /// Generates a canonical byte decomposition of a field element and returns
+    /// the truncated value recovered from the low bytes.
+    ///
+    /// Algorithm:
+    /// 1. Decompose `value` into 32 bytes (big-endian), range-check each byte
+    /// 2. Constrain reconstruction equals original value
+    /// 3. Reconstruct hi (upper 128 bits) and lo (lower 128 bits)
+    /// 4. Compute borrow hint: borrow = 1 if lo > modulusLoMinusOne
+    /// 5. Constrain borrow is boolean
+    /// 6. Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128 + 1
+    /// 7. Compute resultHi = modulusHi - hi - borrow
+    /// 8. Range-check resultHi and resultLo to 128 bits (proves value < modulus)
+    /// 9. Return truncated value from low `to_bits/8` bytes
+    fn gen_witness_truncate(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        to_bits: usize,
+        flag: ValueId,
+    ) -> ValueId {
+        assert!(to_bits % 8 == 0);
+        let to_bytes = to_bits / 8;
+        assert!(to_bytes <= 32);
+
+        // BN254 modulus: p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+        // modulusHi = upper 128 bits
+        let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
+        // modulusLoMinusOne = lower 128 bits - 1
+        let modulus_lo_m1 =
+            b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
+        let two_to_8 = b.field_const(Field::from(256u128));
+        let two_to_128 = b.field_const(Field::from(2u128).pow([128u64]));
+        let zero = b.field_const(Field::ZERO);
+        let one = b.field_const(Field::ONE);
+
+        // Step 1: Decompose value into 32 bytes (big-endian)
+        let pure_value = b.value_of(value);
+        let bytes_arr = b.fresh_value();
+        b.push(OpCode::ToRadix {
+            result: bytes_arr,
+            value: pure_value,
+            radix: Radix::Bytes,
+            endianness: Endianness::Big,
+            count: 32,
+        });
+
+        // Extract each byte, write as witness, range-check
+        let mut bytes = Vec::with_capacity(32);
+        for i in 0..32 {
+            let idx = b.u_const(32, i as u128);
+            let byte = b.array_get(bytes_arr, idx);
+            let byte_field = b.cast_to_field(byte);
+            let byte_wit = b.write_witness(byte_field);
+            b.lookup_rngchk_8(byte_wit, flag);
+            bytes.push(byte_wit);
+        }
+
+        // Step 2: Reconstruct full value and constrain == input value
+        let mut full_sum = zero;
+        for i in 0..32 {
+            let shifted = b.mul(full_sum, two_to_8);
+            full_sum = b.add(shifted, bytes[i]);
+        }
+        b.constrain(full_sum, one, value);
+
+        // Step 3: Reconstruct hi (bytes[0..16]) and lo (bytes[16..32])
+        let mut hi = zero;
+        for i in 0..16 {
+            let shifted = b.mul(hi, two_to_8);
+            hi = b.add(shifted, bytes[i]);
+        }
+        let mut lo = zero;
+        for i in 16..32 {
+            let shifted = b.mul(lo, two_to_8);
+            lo = b.add(shifted, bytes[i]);
+        }
+
+        // Step 4: Compute borrow hint (for witgen only; DCE'd in R1CS pipeline)
+        // borrow = 1 if lo > modulusLoMinusOne, else 0
+        // Strategy: compute (modulusLoMinusOne - lo) as field subtraction.
+        // If lo <= modulusLoMinusOne, result fits in 128 bits (byte[0] == 0).
+        // If lo > modulusLoMinusOne, result wraps to p + modulusLoMinusOne - lo (byte[0] != 0).
+        let diff_for_borrow = b.sub(modulus_lo_m1, lo);
+        let diff_pure = b.value_of(diff_for_borrow);
+        let diff_bytes_arr = b.fresh_value();
+        b.push(OpCode::ToRadix {
+            result: diff_bytes_arr,
+            value: diff_pure,
+            radix: Radix::Bytes,
+            endianness: Endianness::Big,
+            count: 32,
+        });
+        // If byte[0] > 0, the value wrapped (lo > modulusLoMinusOne), so borrow = 1
+        let idx_0 = b.u_const(32, 0);
+        let high_byte = b.array_get(diff_bytes_arr, idx_0);
+        let zero_u8 = b.u_const(8, 0);
+        let borrow_hint = b.lt(zero_u8, high_byte); // U(1): 1 if wrapped
+        let borrow_field = b.cast_to_field(borrow_hint);
+        let borrow_wit = b.write_witness(borrow_field);
+
+        // Step 5: Constrain borrow is boolean: borrow * borrow = borrow
+        b.constrain(borrow_wit, borrow_wit, borrow_wit);
+
+        // Step 6: Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128 + 1
+        let borrow_shift = b.mul(borrow_wit, two_to_128);
+        let tmp1 = b.sub(modulus_lo_m1, lo);
+        let tmp2 = b.add(tmp1, borrow_shift);
+        let result_lo = b.add(tmp2, one);
+
+        // Step 7: Compute resultHi = modulusHi - hi - borrow
+        let tmp3 = b.sub(modulus_hi, hi);
+        let result_hi = b.sub(tmp3, borrow_wit);
+
+        // Step 8: Range-check resultHi and resultLo to 128 bits
+        // This proves the decomposition is canonical (value < field modulus)
+        self.gen_witness_rangecheck(b, result_hi, 128, flag);
+        self.gen_witness_rangecheck(b, result_lo, 128, flag);
+
+        // Step 9: Recover truncated value from low bytes of the decomposition
+        // In big-endian, the low `to_bytes` bytes are bytes[32 - to_bytes .. 32]
+        let mut trunc_val = zero;
+        for i in (32 - to_bytes)..32 {
+            let shifted = b.mul(trunc_val, two_to_8);
+            trunc_val = b.add(shifted, bytes[i]);
+        }
+        trunc_val
     }
 
     fn gen_witness_rangecheck(

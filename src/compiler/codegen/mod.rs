@@ -803,7 +803,7 @@ impl CodeGen {
                         type_info.get_value_type(*v).is_field(),
                         "TODO: Implement toRadix for U-values"
                     );
-                    assert!(*c <= 8, "TODO: Implement toRadix for > 8 bytes");
+                    assert!(*c <= 32, "ToRadix byte count must be <= 32");
                     emitter.push_op(bytecode::OpCode::ToBytesBeLt8 {
                         val: layouter.get_value(*v),
                         count: *c as u64,
