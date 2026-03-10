@@ -1,9 +1,8 @@
 use crate::compiler::{
-    analysis::types::{FunctionTypeInfo, TypeInfo},
+    analysis::types::TypeInfo,
     block_builder::{HLBlockEmitter, HLEmitter},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator, ValueId},
+    ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator},
 };
 
 /// Lowers Guard and Select instructions to control flow (JmpIf).
@@ -46,7 +45,11 @@ impl LowerGuards {
         }
     }
 
-    fn run_function(&self, function: &mut HLFunction, type_info: &FunctionTypeInfo) {
+    fn run_function(
+        &self,
+        function: &mut HLFunction,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+    ) {
         // Process blocks iteratively. We collect block IDs upfront, but new blocks
         // created during lowering don't need processing (they contain no Guards/Selects).
         let block_ids: Vec<_> = function.get_blocks().map(|(bid, _)| *bid).collect();
@@ -60,7 +63,7 @@ impl LowerGuards {
         &self,
         function: &mut HLFunction,
         block_id: BlockId,
-        type_info: &FunctionTypeInfo,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
         // Extract instructions and terminator, then put the empty block back
         // so HLBlockEmitter can take it.
@@ -77,62 +80,22 @@ impl LowerGuards {
         for instruction in instructions {
             match instruction {
                 OpCode::Guard { condition, inner } => {
-                    let results: Vec<ValueId> = inner.get_results().copied().collect();
+                    let results: Vec<_> = inner.get_results().copied().collect();
+                    assert!(
+                        results.is_empty(),
+                        "ICE: Guard with results is not supported in LowerGuards"
+                    );
 
                     let (exec_block, _) = emitter.add_block();
                     let (continue_block, _) = emitter.add_block();
 
-                    if results.is_empty() {
-                        // No results: skip branch jumps directly to continue
-                        emitter.seal_and_switch(
-                            Terminator::JmpIf(condition, exec_block, continue_block),
-                            exec_block,
-                        );
-                        emitter.emit(*inner);
-                        emitter.seal_and_switch(
-                            Terminator::Jmp(continue_block, vec![]),
-                            continue_block,
-                        );
-                    } else {
-                        let (skip_block, _) = emitter.add_block();
-
-                        // Look up actual types for the results
-                        let result_types: Vec<Type> = results
-                            .iter()
-                            .map(|r| type_info.get_value_type(*r).clone())
-                            .collect();
-
-                        // Add phi params to continue block with correct types
-                        for (result, ty) in results.iter().zip(result_types.iter()) {
-                            emitter
-                                .function
-                                .get_block_mut(continue_block)
-                                .push_parameter(*result, ty.clone());
-                        }
-
-                        // Current → JmpIf(cond, exec, skip)
-                        emitter.seal_and_switch(
-                            Terminator::JmpIf(condition, exec_block, skip_block),
-                            exec_block,
-                        );
-
-                        // Exec: run inner instruction, jump to continue with results
-                        emitter.emit(*inner);
-                        emitter.seal_and_switch(
-                            Terminator::Jmp(continue_block, results),
-                            skip_block,
-                        );
-
-                        // Skip: emit type-appropriate default values, jump to continue
-                        let default_values: Vec<ValueId> = result_types
-                            .iter()
-                            .map(|ty| emit_dummy_value(ty, &mut emitter))
-                            .collect();
-                        emitter.seal_and_switch(
-                            Terminator::Jmp(continue_block, default_values),
-                            continue_block,
-                        );
-                    }
+                    emitter.seal_and_switch(
+                        Terminator::JmpIf(condition, exec_block, continue_block),
+                        exec_block,
+                    );
+                    emitter.emit(*inner);
+                    emitter
+                        .seal_and_switch(Terminator::Jmp(continue_block, vec![]), continue_block);
                 }
                 OpCode::Select {
                     result,
@@ -171,44 +134,5 @@ impl LowerGuards {
         if let Some(term) = terminator {
             emitter.set_terminator(term);
         }
-    }
-}
-
-/// Emit a sensible default value for the given type.
-fn emit_dummy_value(ty: &Type, emitter: &mut HLBlockEmitter) -> ValueId {
-    match &ty.expr {
-        TypeExpr::Field | TypeExpr::U(_) => emitter.field_const(ark_ff::AdditiveGroup::ZERO),
-        TypeExpr::WitnessOf(inner) => {
-            let dummy = emit_dummy_value(inner, emitter);
-            emitter.cast_to_witness_of(dummy)
-        }
-        TypeExpr::Ref(inner) => {
-            let dummy_inner = emit_dummy_value(inner, emitter);
-            let ptr = emitter.alloc((**inner).clone());
-            emitter.store(ptr, dummy_inner);
-            ptr
-        }
-        TypeExpr::Array(elem, len) => {
-            let dummy_elem = emit_dummy_value(elem, emitter);
-            let elems = vec![dummy_elem; *len];
-            emitter.mk_seq(elems, crate::compiler::ssa::SeqType::Array(*len), (**elem).clone())
-        }
-        TypeExpr::Slice(elem) => {
-            // Empty-ish slice: single dummy element
-            let dummy_elem = emit_dummy_value(elem, emitter);
-            emitter.mk_seq(
-                vec![dummy_elem],
-                crate::compiler::ssa::SeqType::Slice,
-                (**elem).clone(),
-            )
-        }
-        TypeExpr::Tuple(fields) => {
-            let dummy_elems: Vec<ValueId> = fields
-                .iter()
-                .map(|f| emit_dummy_value(f, emitter))
-                .collect();
-            emitter.mk_tuple(dummy_elems, fields.clone())
-        }
-        TypeExpr::Function => emitter.field_const(ark_ff::AdditiveGroup::ZERO),
     }
 }
