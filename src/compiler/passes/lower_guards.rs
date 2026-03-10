@@ -101,16 +101,12 @@ impl LowerGuards {
 
                         // Exec: run inner instruction, jump to continue with results
                         emitter.emit(*inner);
-                        emitter.seal_and_switch(
-                            Terminator::Jmp(continue_block, results),
-                            skip_block,
-                        );
+                        emitter
+                            .seal_and_switch(Terminator::Jmp(continue_block, results), skip_block);
 
                         // Skip: emit default Field(0) values, jump to continue
                         let default_values: Vec<ValueId> = (0..num_results)
-                            .map(|_| {
-                                emitter.field_const(ark_ff::AdditiveGroup::ZERO)
-                            })
+                            .map(|_| emitter.field_const(ark_ff::AdditiveGroup::ZERO))
                             .collect();
                         emitter.seal_and_switch(
                             Terminator::Jmp(continue_block, default_values),
@@ -135,22 +131,13 @@ impl LowerGuards {
                         .push_parameter(result, Type::field());
 
                     // Current → JmpIf(cond, t, f)
-                    emitter.seal_and_switch(
-                        Terminator::JmpIf(cond, t_block, f_block),
-                        t_block,
-                    );
+                    emitter.seal_and_switch(Terminator::JmpIf(cond, t_block, f_block), t_block);
 
                     // True → Jmp(merge, if_t)
-                    emitter.seal_and_switch(
-                        Terminator::Jmp(merge_block, vec![if_t]),
-                        f_block,
-                    );
+                    emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![if_t]), f_block);
 
                     // False → Jmp(merge, if_f)
-                    emitter.seal_and_switch(
-                        Terminator::Jmp(merge_block, vec![if_f]),
-                        merge_block,
-                    );
+                    emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![if_f]), merge_block);
                 }
                 other => {
                     emitter.emit(other);
