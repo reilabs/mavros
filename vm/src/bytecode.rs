@@ -730,7 +730,7 @@ mod def {
     }
 
     #[opcode]
-    fn rngchk_8_field(#[frame] val: Field, vm: &mut VM) {
+    fn rngchk_8_field(#[frame] val: Field, #[frame] flag: Field, vm: &mut VM) {
         if vm.rgchk_8.is_none() {
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
@@ -753,6 +753,17 @@ mod def {
                 vm.data.as_forward.elem_inverses_witness_section_offset += 256;
             }
         }
+        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        if flag_u64 == 0 {
+            // Conditional lookup disabled: skip multiplicity bump, write dummy data
+            unsafe {
+                *(vm.data.as_forward.lookups_a as *mut u64) = 0;
+                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+                *(vm.data.as_forward.lookups_b as *mut u64) = 0;
+                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            }
+            return;
+        }
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
         let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
@@ -767,7 +778,7 @@ mod def {
     }
 
     #[opcode]
-    fn drngchk_8_field(#[frame] val: BoxedValue, vm: &mut VM) {
+    fn drngchk_8_field(#[frame] val: BoxedValue, #[frame] flag: BoxedValue, vm: &mut VM) {
         if vm.rgchk_8.is_none() {
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
@@ -864,24 +875,29 @@ mod def {
             r
         };
 
+        // When flag=0, forward witnesses (y) are all zero, so all AD coefficients
+        // for this lookup are zero. We still advance the offset counters above.
+        // The constraint is y*(α-key)=flag; when flag=0 and y=0, all bumps vanish.
+        // We only need to do bumps when the lookup is active.
         unsafe {
             // bump for the RHS of the sum
             *vm.data.as_ad.out_dc.offset(current_inv_wit_offset as isize) += inv_sum_coeff;
 
-            // bumps for the inversion assert
+            // bumps for the inversion assert: y*(α-key) = flag
+            // da[y] += inv_coeff
             *vm.data.as_ad.out_da.offset(current_inv_wit_offset as isize) += inv_coeff;
 
+            // db[α] += inv_coeff
             *vm.data
                 .as_ad
                 .out_db
                 .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += inv_coeff;
+            // db[key] -= inv_coeff
             val.bump_db(-inv_coeff, vm);
 
-            *vm.data.as_ad.out_dc += inv_coeff;
+            // dc[flag] += inv_coeff  (RHS is flag, not constant 1)
+            flag.bump_dc(inv_coeff, vm);
         }
-
-        // unsafe {}
-        // panic!("TODO: implement drngchk_8_field");
     }
 
     #[opcode]

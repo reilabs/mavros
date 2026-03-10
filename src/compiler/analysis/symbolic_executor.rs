@@ -80,11 +80,11 @@ pub trait Context<V> {
 
     // TODO it looks odd that this is the only opcode implemented here.
     // This is the _new_ structure, so at some point we should migrate all other opcodes here.
-    fn lookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>) {
+    fn lookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement lookup");
     }
 
-    fn dlookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>) {
+    fn dlookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement dlookup");
     }
 
@@ -469,6 +469,7 @@ impl SymbolicExecutor {
                         target,
                         keys,
                         results,
+                        flag,
                     } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
@@ -487,12 +488,14 @@ impl SymbolicExecutor {
                             .iter()
                             .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
                             .collect::<Vec<_>>();
-                        ctx.lookup(target, keys, results);
+                        let flag_value = scope[flag.0 as usize].as_ref().unwrap().clone();
+                        ctx.lookup(target, keys, results, flag_value);
                     }
                     crate::compiler::ssa::OpCode::DLookup {
                         target,
                         keys,
                         results,
+                        flag,
                     } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
@@ -511,7 +514,8 @@ impl SymbolicExecutor {
                             .iter()
                             .map(|id| scope[id.0 as usize].as_ref().unwrap().clone())
                             .collect::<Vec<_>>();
-                        ctx.dlookup(target, keys, results);
+                        let flag_value = scope[flag.0 as usize].as_ref().unwrap().clone();
+                        ctx.dlookup(target, keys, results, flag_value);
                     }
                     crate::compiler::ssa::OpCode::TupleProj {
                         result: r,

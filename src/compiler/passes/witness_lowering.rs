@@ -149,6 +149,7 @@ impl WitnessLowering {
                             target,
                             keys,
                             results,
+                            flag,
                         } => {
                             let mut new_keys = vec![];
                             for key in keys.iter() {
@@ -176,10 +177,19 @@ impl WitnessLowering {
                                     new_results.push(*result);
                                 }
                             }
+                            let new_flag = {
+                                let flag_type = type_info.get_value_type(flag);
+                                if !flag_type.is_witness_of() {
+                                    emitter.cast_to_witness_of(flag)
+                                } else {
+                                    flag
+                                }
+                            };
                             emitter.emit(OpCode::DLookup {
                                 target,
                                 keys: new_keys,
                                 results: new_results,
+                                flag: new_flag,
                             });
                         }
                         OpCode::BinaryArithOp {

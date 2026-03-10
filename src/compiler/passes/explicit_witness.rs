@@ -174,7 +174,8 @@ impl ExplicitWitness {
                             let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
                             b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
-                            self.gen_witness_rangecheck(b, adjusted_diff_wit, s);
+                            let rc_flag = b.field_const(Field::from(1));
+                            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
                         }
                     }
                 } else {
@@ -359,7 +360,8 @@ impl ExplicitWitness {
                             value: r_wit,
                             target: back_cast_target,
                         });
-                        b.lookup_arr(arr, idx_field, r_wit);
+                        let one = b.field_const(Field::from(1));
+                        b.lookup_arr(arr, idx_field, r_wit, one);
                     }
                 }
             }
@@ -538,7 +540,8 @@ impl ExplicitWitness {
                         let byte = b.array_get(hint, idx);
                         let byte_field = b.cast_to_field(byte);
                         let byte_wit = b.write_witness(byte_field);
-                        b.lookup_rngchk(rangecheck_type, byte_wit);
+                        let one = b.field_const(Field::from(1));
+                        b.lookup_rngchk(rangecheck_type, byte_wit, one);
                         let shift_prev_res = b.mul(current_sum, radix_val);
                         current_sum = b.add(shift_prev_res, byte_wit);
                         witnesses[i] = byte_wit;
@@ -569,7 +572,8 @@ impl ExplicitWitness {
                 if !v_taint {
                     b.push(instruction);
                 } else {
-                    self.gen_witness_rangecheck(b, value, max_bits);
+                    let one = b.field_const(Field::from(1));
+                    self.gen_witness_rangecheck(b, value, max_bits, one);
                 }
             }
             OpCode::ReadGlobal {
@@ -648,13 +652,61 @@ impl ExplicitWitness {
                 let new_value = b.select(condition, v, old_value);
                 b.store(ptr, new_value);
             }
+            OpCode::Truncate {
+                result,
+                value,
+                to_bits,
+                from_bits,
+            } => {
+                // Truncate on a witness value is non-linear — R1CS can't evaluate it.
+                // Emit Truncate (for witgen computation) + WriteWitness (for R1CS fresh witness).
+                // R1CS pipeline: WitnessWriteToFresh makes Truncate dead, DCE removes it.
+                // Witgen pipeline: WitnessWriteToVoid removes WriteWitness, keeps Truncate.
+                let trunc_tmp = b.fresh_value();
+                b.push(OpCode::Truncate {
+                    result: trunc_tmp,
+                    value,
+                    to_bits,
+                    from_bits,
+                });
+                let trunc_field = b.cast_to_field(trunc_tmp);
+                // Strip any WitnessOf wrapper before WriteWitness (which adds its own)
+                let trunc_pure = b.value_of(trunc_field);
+                let wit = b.write_witness(trunc_pure);
+                b.push(OpCode::Cast {
+                    result,
+                    value: wit,
+                    target: CastTarget::U(to_bits),
+                });
+            }
+            OpCode::Cast { .. } => {
+                // Pure type-level operation — no constraints. Emit unconditionally.
+                b.push(inner);
+            }
+            OpCode::Rangecheck { value, max_bits } => {
+                // Guard(cond, Rangecheck(value, max_bits)) → conditional rangecheck
+                // The condition becomes the lookup flag
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                self.gen_witness_rangecheck(b, value, max_bits, cond_field);
+            }
             inner => {
                 panic!("unrecognized op inside Guard: {:?}", inner);
             }
         }
     }
 
-    fn gen_witness_rangecheck(&self, b: &mut HLInstrBuilder<'_>, value: ValueId, max_bits: usize) {
+    fn gen_witness_rangecheck(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        max_bits: usize,
+        flag: ValueId,
+    ) {
         assert!(max_bits % 8 == 0); // TODO
         let chunks = max_bits / 8;
         let pure_value = b.value_of(value);
@@ -674,7 +726,7 @@ impl ExplicitWitness {
             let byte = b.array_get(bytes_val, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
-            b.lookup_rngchk_8(byte_wit);
+            b.lookup_rngchk_8(byte_wit, flag);
             let shift_prev_res = b.mul(result, two_to_8);
             result = b.add(shift_prev_res, byte_wit);
         }

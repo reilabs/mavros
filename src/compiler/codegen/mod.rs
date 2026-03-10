@@ -868,24 +868,28 @@ impl CodeGen {
                     target: LookupTarget::Rangecheck(8),
                     keys,
                     results,
+                    flag,
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
                     assert!(type_info.get_value_type(keys[0]).is_field());
                     emitter.push_op(bytecode::OpCode::Rngchk8Field {
                         val: layouter.get_value(keys[0]),
+                        flag: layouter.get_value(*flag),
                     });
                 }
                 ssa::OpCode::DLookup {
                     target: LookupTarget::Rangecheck(8),
                     keys,
                     results,
+                    flag,
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
                     assert!(type_info.get_value_type(keys[0]).is_witness_of());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
                         val: layouter.get_value(keys[0]),
+                        flag: layouter.get_value(*flag),
                     });
                 }
                 ssa::OpCode::Todo { payload, .. } => {
