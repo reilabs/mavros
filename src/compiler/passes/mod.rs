@@ -6,6 +6,7 @@ pub mod deduplicate_phis;
 pub mod defunctionalize;
 pub mod explicit_witness;
 pub mod fix_double_jumps;
+pub mod lower_guards;
 pub mod mem2reg;
 pub mod prepare_entry_point;
 pub mod pull_into_assert;

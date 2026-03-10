@@ -389,6 +389,16 @@ impl symbolic_executor::Context<Value> for R1CGen {
         let array = slice.expect_array();
         Value::Const(ark_bn254::Fr::from(array.borrow().data.len() as u128))
     }
+
+    fn on_guard(
+        &mut self,
+        _inner: &crate::compiler::ssa::OpCode,
+        _condition: &Value,
+        _inputs: Vec<&Value>,
+        _result_types: Vec<&Type>,
+    ) -> Vec<Value> {
+        panic!("ICE: Guard should not appear in R1CS gen (should be lowered before)")
+    }
 }
 
 impl symbolic_executor::Value<R1CGen> for Value {

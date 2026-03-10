@@ -486,6 +486,9 @@ impl CSE {
                         }
                         ConstValue::FnPtr(_) => {}
                     }
+                    OpCode::Guard { .. } => {
+                        // Guards are opaque to CSE
+                    }
                 }
             }
         }

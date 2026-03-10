@@ -71,6 +71,9 @@ impl WitnessLowering {
                 for mut instruction in instructions.into_iter() {
                     replacements.replace_instruction(&mut instruction);
                     match instruction {
+                        OpCode::Guard { .. } => {
+                            panic!("ICE: Guard should be lowered before witness lowering");
+                        }
                         OpCode::Cast {
                             result: r,
                             value: v,

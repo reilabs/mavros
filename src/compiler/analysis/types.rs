@@ -537,6 +537,7 @@ impl Types {
                 function_info.values.insert(*result, ty);
                 Ok(())
             }
+            OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),
         }
     }
 }

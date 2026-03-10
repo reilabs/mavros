@@ -888,6 +888,10 @@ pub enum OpCode {
         result: ValueId,
         value: ConstValue,
     },
+    Guard {
+        condition: ValueId,
+        inner: Box<OpCode>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -904,6 +908,7 @@ impl Instruction for OpCode {
                 function: CallTarget::Static(id),
                 ..
             } => vec![*id],
+            OpCode::Guard { inner, .. } => inner.get_static_call_targets(),
             _ => vec![],
         }
     }
@@ -1359,6 +1364,13 @@ impl Instruction for OpCode {
                     )
                 }
             },
+            OpCode::Guard { condition, inner } => {
+                format!(
+                    "guard(v{}) {{ {} }}",
+                    condition.0,
+                    inner.display_instruction(func_name, annotate_value)
+                )
+            }
         }
     }
 
@@ -1550,6 +1562,11 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { condition, inner } => {
+                let mut ret_vec = vec![condition];
+                ret_vec.extend(inner.get_inputs());
+                ret_vec.into_iter()
+            }
         }
     }
 
@@ -1701,6 +1718,7 @@ impl Instruction for OpCode {
                 value: _,
             } => vec![].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { inner, .. } => inner.get_results().collect::<Vec<_>>().into_iter(),
         }
     }
 
@@ -1890,6 +1908,11 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { condition, inner } => {
+                let mut ret_vec = vec![condition];
+                ret_vec.extend(inner.get_inputs_mut());
+                ret_vec.into_iter()
+            }
         }
     }
 
@@ -2094,6 +2117,11 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { condition, inner } => {
+                let mut ret_vec = vec![condition];
+                ret_vec.extend(inner.get_operands_mut());
+                ret_vec.into_iter()
+            }
         }
     }
 }
