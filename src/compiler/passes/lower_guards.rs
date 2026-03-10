@@ -1,7 +1,7 @@
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    block_builder::{HLBlockEmitter, HLEmitter},
     ir::r#type::Type,
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass},
     ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator, ValueId},
 };
 
@@ -41,7 +41,7 @@ impl LowerGuards {
     fn run_function(&self, function: &mut HLFunction) {
         // Process blocks iteratively. We collect block IDs upfront, but new blocks
         // created during lowering don't need processing (they contain no Guards/Selects).
-        let block_ids: Vec<BlockId> = function.get_blocks().map(|(bid, _)| *bid).collect();
+        let block_ids: Vec<_> = function.get_blocks().map(|(bid, _)| *bid).collect();
 
         for block_id in block_ids {
             self.lower_block(function, block_id);
@@ -49,74 +49,74 @@ impl LowerGuards {
     }
 
     fn lower_block(&self, function: &mut HLFunction, block_id: BlockId) {
-        let mut block = function.take_block(block_id);
-        let instructions = block.take_instructions();
-        let terminator = block.take_terminator();
+        // Extract instructions and terminator, then put the empty block back
+        // so HLBlockEmitter can take it.
+        let (instructions, terminator) = {
+            let mut block = function.take_block(block_id);
+            let instructions = block.take_instructions();
+            let terminator = block.take_terminator();
+            function.put_block(block_id, block);
+            (instructions, terminator)
+        };
 
-        let mut current_block_id = block_id;
-        let mut current_instructions: Vec<OpCode> = Vec::new();
+        let mut emitter = HLBlockEmitter::new(function, block_id);
 
         for instruction in instructions {
             match instruction {
                 OpCode::Guard { condition, inner } => {
                     let results: Vec<ValueId> = inner.get_results().copied().collect();
-                    let has_results = !results.is_empty();
 
-                    // Create blocks for the conditional execution
-                    let exec_block_id = function.add_block();
-                    let continue_block_id = function.add_block();
-                    let skip_block_id = if has_results {
-                        Some(function.add_block())
+                    let (exec_block, _) = emitter.add_block();
+                    let (continue_block, _) = emitter.add_block();
+
+                    if results.is_empty() {
+                        // No results: skip branch jumps directly to continue
+                        emitter.seal_and_switch(
+                            Terminator::JmpIf(condition, exec_block, continue_block),
+                            exec_block,
+                        );
+                        emitter.emit(*inner);
+                        emitter.seal_and_switch(
+                            Terminator::Jmp(continue_block, vec![]),
+                            continue_block,
+                        );
                     } else {
-                        None
-                    };
+                        let (skip_block, _) = emitter.add_block();
 
-                    let false_target = skip_block_id.unwrap_or(continue_block_id);
-
-                    // Terminate current block with JmpIf
-                    block.put_instructions(current_instructions);
-                    block.set_terminator(Terminator::JmpIf(condition, exec_block_id, false_target));
-                    function.put_block(current_block_id, block);
-
-                    // Build exec block: run the inner instruction, then jump to continue
-                    function
-                        .get_block_mut(exec_block_id)
-                        .push_instruction(*inner);
-                    function
-                        .get_block_mut(exec_block_id)
-                        .set_terminator(Terminator::Jmp(continue_block_id, results.clone()));
-
-                    if let Some(skip_block_id) = skip_block_id {
-                        // Allocate default values upfront, then build the skip block
-                        let default_values: Vec<ValueId> =
-                            results.iter().map(|_| function.fresh_value()).collect();
-
-                        for default_val in &default_values {
-                            function
-                                .get_block_mut(skip_block_id)
-                                .push_instruction(OpCode::Const {
-                                    result: *default_val,
-                                    value: crate::compiler::ssa::ConstValue::Field(
-                                        ark_ff::AdditiveGroup::ZERO,
-                                    ),
-                                });
-                        }
-                        function
-                            .get_block_mut(skip_block_id)
-                            .set_terminator(Terminator::Jmp(continue_block_id, default_values));
-
-                        // Add phi parameters to continue block
+                        // Add phi params to continue block
                         for result in &results {
-                            function
-                                .get_block_mut(continue_block_id)
+                            emitter
+                                .function
+                                .get_block_mut(continue_block)
                                 .push_parameter(*result, Type::field());
                         }
-                    }
 
-                    // Continue building instructions in the new continue block
-                    current_block_id = continue_block_id;
-                    block = function.take_block(continue_block_id);
-                    current_instructions = Vec::new();
+                        let num_results = results.len();
+
+                        // Current → JmpIf(cond, exec, skip)
+                        emitter.seal_and_switch(
+                            Terminator::JmpIf(condition, exec_block, skip_block),
+                            exec_block,
+                        );
+
+                        // Exec: run inner instruction, jump to continue with results
+                        emitter.emit(*inner);
+                        emitter.seal_and_switch(
+                            Terminator::Jmp(continue_block, results),
+                            skip_block,
+                        );
+
+                        // Skip: emit default Field(0) values, jump to continue
+                        let default_values: Vec<ValueId> = (0..num_results)
+                            .map(|_| {
+                                emitter.field_const(ark_ff::AdditiveGroup::ZERO)
+                            })
+                            .collect();
+                        emitter.seal_and_switch(
+                            Terminator::Jmp(continue_block, default_values),
+                            continue_block,
+                        );
+                    }
                 }
                 OpCode::Select {
                     result,
@@ -124,47 +124,43 @@ impl LowerGuards {
                     if_t,
                     if_f,
                 } => {
-                    // Select(cond, l, r) → JmpIf(cond, t_block, f_block) → merge
-                    let t_block_id = function.add_block();
-                    let f_block_id = function.add_block();
-                    let merge_block_id = function.add_block();
+                    let (t_block, _) = emitter.add_block();
+                    let (f_block, _) = emitter.add_block();
+                    let (merge_block, _) = emitter.add_block();
 
-                    // Terminate current block with JmpIf
-                    block.put_instructions(current_instructions);
-                    block.set_terminator(Terminator::JmpIf(cond, t_block_id, f_block_id));
-                    function.put_block(current_block_id, block);
-
-                    // True branch: jump to merge with if_t
-                    function
-                        .get_block_mut(t_block_id)
-                        .set_terminator(Terminator::Jmp(merge_block_id, vec![if_t]));
-
-                    // False branch: jump to merge with if_f
-                    function
-                        .get_block_mut(f_block_id)
-                        .set_terminator(Terminator::Jmp(merge_block_id, vec![if_f]));
-
-                    // Merge block: result is a phi parameter
-                    function
-                        .get_block_mut(merge_block_id)
+                    // Add phi param to merge block
+                    emitter
+                        .function
+                        .get_block_mut(merge_block)
                         .push_parameter(result, Type::field());
 
-                    // Continue in merge block
-                    current_block_id = merge_block_id;
-                    block = function.take_block(merge_block_id);
-                    current_instructions = Vec::new();
+                    // Current → JmpIf(cond, t, f)
+                    emitter.seal_and_switch(
+                        Terminator::JmpIf(cond, t_block, f_block),
+                        t_block,
+                    );
+
+                    // True → Jmp(merge, if_t)
+                    emitter.seal_and_switch(
+                        Terminator::Jmp(merge_block, vec![if_t]),
+                        f_block,
+                    );
+
+                    // False → Jmp(merge, if_f)
+                    emitter.seal_and_switch(
+                        Terminator::Jmp(merge_block, vec![if_f]),
+                        merge_block,
+                    );
                 }
                 other => {
-                    current_instructions.push(other);
+                    emitter.emit(other);
                 }
             }
         }
 
-        // Put remaining instructions and terminator into the final block
-        block.put_instructions(current_instructions);
+        // Apply the original terminator to the final block
         if let Some(term) = terminator {
-            block.set_terminator(term);
+            emitter.set_terminator(term);
         }
-        function.put_block(current_block_id, block);
     }
 }
