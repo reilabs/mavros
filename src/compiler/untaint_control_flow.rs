@@ -101,7 +101,6 @@ impl UntaintControlFlow {
 
             for instruction in old_instructions {
                 match instruction {
-                    // Call keeps current taint-threading approach (not wrapped in Guard)
                     OpCode::Call {
                         results: ret,
                         function: CallTarget::Static(tgt),

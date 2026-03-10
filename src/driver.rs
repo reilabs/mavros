@@ -329,12 +329,6 @@ impl Driver {
         r1cs_phase_1.set_debug_output_dir(self.get_debug_output_dir().clone());
         r1cs_phase_1.run(&mut r1cs_ssa);
 
-        fs::write(
-            self.get_debug_output_dir().join("r1cs_input_ssa.txt"),
-            r1cs_ssa.to_string(&DefaultSsaAnnotator),
-        )
-        .unwrap();
-
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
