@@ -105,6 +105,7 @@ pub struct FwdArrays {
     pub multiplicities_witness: *mut Field,
     pub lookups_a: *mut Field,
     pub lookups_b: *mut Field,
+    pub lookups_c: *mut Field,
     pub elem_inverses_constraint_section_offset: usize,
     pub elem_inverses_witness_section_offset: usize,
 }
@@ -147,6 +148,7 @@ impl VM {
         multiplicities_witness: *mut Field,
         lookups_a: *mut Field,
         lookups_b: *mut Field,
+        lookups_c: *mut Field,
         elem_inverses_constraint_section_offset: usize,
         elem_inverses_witness_section_offset: usize,
         globals: *mut u64,
@@ -161,6 +163,7 @@ impl VM {
                     multiplicities_witness,
                     lookups_b,
                     lookups_a,
+                    lookups_c,
                     elem_inverses_constraint_section_offset,
                     elem_inverses_witness_section_offset,
                 },
@@ -762,19 +765,21 @@ mod def {
             }
         }
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         if flag_u64 == 0 {
-            // Conditional lookup disabled: skip multiplicity bump, write dummy data
+            // Conditional lookup disabled: skip multiplicity bump, write key for B matching
             unsafe {
                 *(vm.data.as_forward.lookups_a as *mut u64) = 0;
                 vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-                *(vm.data.as_forward.lookups_b as *mut u64) = 0;
+                *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
                 vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+                *(vm.data.as_forward.lookups_c as *mut u64) = 0;
+                vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
             }
             return;
         }
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
-        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         unsafe {
             let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
             *(ptr as *mut u64) += 1; // Use u64 for counting, convert to field later
@@ -782,6 +787,8 @@ mod def {
             vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
             *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
             vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            *(vm.data.as_forward.lookups_c as *mut u64) = 1;
+            vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
         }
     }
 

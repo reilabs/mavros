@@ -226,6 +226,11 @@ pub fn run_phase1(
                 .as_mut_ptr()
                 .offset(constraints_layout.lookups_data_start() as isize)
         },
+        unsafe {
+            out_c
+                .as_mut_ptr()
+                .offset(constraints_layout.lookups_data_start() as isize)
+        },
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
         global_frame.as_mut_ptr(),
@@ -325,20 +330,35 @@ pub fn run_phase2(
         let wit_off = witness_layout.lookups_data_start() - witness_layout.challenges_start()
             + current_lookup_off;
 
-        let table_ix = phase1.out_a[cnst_off].0.0[0];
-        let table = &phase1.tables[table_ix as usize];
-        if table.num_indices != 1 || table.num_values != 0 {
-            todo!("wide tables");
+        // Flag was written as u64 (0 or 1) into out_c[cnst_off] by the VM
+        let flag_u64 = phase1.out_c[cnst_off].0.0[0];
+
+        let alpha = phase1.out_wit_post_comm[0];
+
+        if flag_u64 == 0 {
+            // Disabled lookup: y=0, constraint is 0 * (α - key) = 0
+            let key_raw = phase1.out_b[cnst_off].0.0[0];
+            let b_val = alpha - Field::from(key_raw);
+            phase1.out_a[cnst_off] = Field::ZERO;
+            phase1.out_b[cnst_off] = b_val;
+            phase1.out_c[cnst_off] = Field::ZERO;
+            phase1.out_wit_post_comm[wit_off] = Field::ZERO;
+        } else {
+            let table_ix = phase1.out_a[cnst_off].0.0[0];
+            let table = &phase1.tables[table_ix as usize];
+            if table.num_indices != 1 || table.num_values != 0 {
+                todo!("wide tables");
+            }
+            let ix_in_table = phase1.out_b[cnst_off].0.0[0];
+            phase1.out_a[cnst_off] =
+                phase1.out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+            phase1.out_b[cnst_off] =
+                phase1.out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+            phase1.out_c[cnst_off] = Field::from(flag_u64);
+            phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
+            phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
+                phase1.out_a[cnst_off];
         }
-        let ix_in_table = phase1.out_b[cnst_off].0.0[0];
-        phase1.out_a[cnst_off] =
-            phase1.out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-        phase1.out_b[cnst_off] =
-            phase1.out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-        phase1.out_c[cnst_off] = Field::ONE;
-        phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
-        phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
-            phase1.out_a[cnst_off];
 
         current_lookup_off += 1;
     }

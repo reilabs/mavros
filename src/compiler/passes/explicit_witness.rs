@@ -121,7 +121,8 @@ impl ExplicitWitness {
                             };
                             let lr_diff = b.sub(l_field, r_field);
 
-                            let div_hint = b.div(lr_diff, lr_diff);
+                            let field_one_for_div = b.field_const(Field::ONE);
+                            let div_hint = b.div(field_one_for_div, lr_diff);
                             let div_hint_plain = b.value_of(div_hint);
                             let div_hint_witness = b.write_witness(div_hint_plain);
 
@@ -756,13 +757,15 @@ impl ExplicitWitness {
             bytes.push(byte_wit);
         }
 
-        // Step 2: Reconstruct full value and constrain == input value
+        // Step 2: Reconstruct full value and constrain == input value (conditional)
         let mut full_sum = zero;
         for i in 0..32 {
             let shifted = b.mul(full_sum, two_to_8);
             full_sum = b.add(shifted, bytes[i]);
         }
-        b.constrain(full_sum, one, value);
+        // flag * (full_sum - value) = 0
+        let recon_diff = b.sub(full_sum, value);
+        b.constrain(flag, recon_diff, zero);
 
         // Step 3: Reconstruct hi (bytes[0..16]) and lo (bytes[16..32])
         let mut hi = zero;
@@ -857,6 +860,9 @@ impl ExplicitWitness {
             let shift_prev_res = b.mul(result, two_to_8);
             result = b.add(shift_prev_res, byte_wit);
         }
-        b.constrain(result, one, value);
+        // Conditional reconstruction constraint: flag * (result - value) = 0
+        let diff = b.sub(result, value);
+        let zero = b.field_const(Field::ZERO);
+        b.constrain(flag, diff, zero);
     }
 }
