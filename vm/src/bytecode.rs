@@ -105,6 +105,7 @@ pub struct FwdArrays {
     pub multiplicities_witness: *mut Field,
     pub lookups_a: *mut Field,
     pub lookups_b: *mut Field,
+    pub lookups_c: *mut Field,
     pub elem_inverses_constraint_section_offset: usize,
     pub elem_inverses_witness_section_offset: usize,
 }
@@ -147,6 +148,7 @@ impl VM {
         multiplicities_witness: *mut Field,
         lookups_a: *mut Field,
         lookups_b: *mut Field,
+        lookups_c: *mut Field,
         elem_inverses_constraint_section_offset: usize,
         elem_inverses_witness_section_offset: usize,
         globals: *mut u64,
@@ -161,6 +163,7 @@ impl VM {
                     multiplicities_witness,
                     lookups_b,
                     lookups_a,
+                    lookups_c,
                     elem_inverses_constraint_section_offset,
                     elem_inverses_witness_section_offset,
                 },
@@ -712,13 +715,21 @@ mod def {
     }
 
     #[opcode]
-    fn to_bytes_be_lt_8(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
+    fn to_bytes_be(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
         let val = ark_ff::PrimeField::into_bigint(val);
-        let low = val.0[0];
         let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
         unsafe {
             for i in 0..count {
-                *r.array_idx((count - i - 1) as usize, 1) = (low >> (i * 8)) & 0xFF;
+                // Each limb in val.0 is a u64 (8 bytes), little-endian limb order
+                let byte_idx = i as usize; // byte index from LSB
+                let limb_idx = byte_idx / 8;
+                let byte_in_limb = byte_idx % 8;
+                let byte_val = if limb_idx < val.0.len() {
+                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xFF
+                } else {
+                    0
+                };
+                *r.array_idx((count - i - 1) as usize, 1) = byte_val;
             }
             *res = r;
         }
@@ -730,7 +741,7 @@ mod def {
     }
 
     #[opcode]
-    fn rngchk_8_field(#[frame] val: Field, vm: &mut VM) {
+    fn rngchk_8_field(#[frame] val: Field, #[frame] flag: Field, vm: &mut VM) {
         if vm.rgchk_8.is_none() {
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
@@ -753,21 +764,24 @@ mod def {
                 vm.data.as_forward.elem_inverses_witness_section_offset += 256;
             }
         }
+        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
-        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         unsafe {
             let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
-            *(ptr as *mut u64) += 1; // Use u64 for counting, convert to field later
+            *(ptr as *mut u64) += flag_u64;
             *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
             vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
             *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
             vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
+            vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
         }
     }
 
     #[opcode]
-    fn drngchk_8_field(#[frame] val: BoxedValue, vm: &mut VM) {
+    fn drngchk_8_field(#[frame] val: BoxedValue, #[frame] flag: BoxedValue, vm: &mut VM) {
         if vm.rgchk_8.is_none() {
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
@@ -868,20 +882,21 @@ mod def {
             // bump for the RHS of the sum
             *vm.data.as_ad.out_dc.offset(current_inv_wit_offset as isize) += inv_sum_coeff;
 
-            // bumps for the inversion assert
+            // bumps for the inversion assert: y*(α-key) = flag
+            // da[y] += inv_coeff
             *vm.data.as_ad.out_da.offset(current_inv_wit_offset as isize) += inv_coeff;
 
+            // db[α] += inv_coeff
             *vm.data
                 .as_ad
                 .out_db
                 .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += inv_coeff;
+            // db[key] -= inv_coeff
             val.bump_db(-inv_coeff, vm);
 
-            *vm.data.as_ad.out_dc += inv_coeff;
+            // dc[flag] += inv_coeff  (RHS is flag, not constant 1)
+            flag.bump_dc(inv_coeff, vm);
         }
-
-        // unsafe {}
-        // panic!("TODO: implement drngchk_8_field");
     }
 
     #[opcode]

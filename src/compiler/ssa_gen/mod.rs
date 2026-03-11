@@ -50,7 +50,8 @@ impl SsaConverter {
     }
 
     /// Convert an entire program to SSA.
-    pub fn convert_program(&mut self, program: &Program) -> HLSSA {
+    /// Returns the SSA and whether main is unconstrained.
+    pub fn convert_program(&mut self, program: &Program) -> (HLSSA, bool) {
         let mut ssa = HLSSA::new();
 
         // Phase 1: Register all functions to handle mutual recursion.
@@ -100,7 +101,14 @@ impl SsaConverter {
             }
         }
 
-        ssa
+        let main_is_unconstrained = program
+            .functions
+            .iter()
+            .find(|f| f.id == Program::main_id())
+            .map(|f| f.unconstrained)
+            .unwrap_or(false);
+
+        (ssa, main_is_unconstrained)
     }
 
     /// Collect all GlobalIds referenced transitively by an expression.
@@ -344,7 +352,7 @@ impl HLSSA {
     pub fn from_program(
         program: &Program,
         lowlevel_replacements: HashMap<String, LowLevelReplacement>,
-    ) -> HLSSA {
+    ) -> (HLSSA, bool) {
         let mut converter = SsaConverter::new(lowlevel_replacements);
         converter.convert_program(program)
     }

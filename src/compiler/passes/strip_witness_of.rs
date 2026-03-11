@@ -138,6 +138,9 @@ impl StripWitnessOf {
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
             | OpCode::Const { .. } => {}
+            OpCode::Guard { inner, .. } => {
+                Self::strip_instruction(inner);
+            }
         }
     }
 }

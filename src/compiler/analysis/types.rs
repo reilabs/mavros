@@ -448,6 +448,7 @@ impl Types {
                 target: _,
                 keys: _,
                 results: _,
+                flag: _,
             } => Ok(()),
             OpCode::MulConst {
                 result,
@@ -483,6 +484,7 @@ impl Types {
                 target: _,
                 keys: _,
                 results: _,
+                flag: _,
             } => Ok(()),
             OpCode::TupleProj { result, tuple, idx } => {
                 if let TupleIdx::Static(sz) = idx {
@@ -537,6 +539,7 @@ impl Types {
                 function_info.values.insert(*result, ty);
                 Ok(())
             }
+            OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),
         }
     }
 }

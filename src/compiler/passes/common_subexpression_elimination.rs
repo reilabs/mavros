@@ -429,8 +429,8 @@ impl CSE {
                     | OpCode::Rangecheck { value: _, max_bits: _ }
                     | OpCode::ToBits { .. }
                     | OpCode::ToRadix { .. }
-                    | OpCode::Lookup { target: _, keys: _, results: _ }
-                    | OpCode::DLookup { target: _, keys: _, results: _ }
+                    | OpCode::Lookup { target: _, keys: _, results: _, flag: _ }
+                    | OpCode::DLookup { target: _, keys: _, results: _, flag: _ }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
@@ -485,6 +485,9 @@ impl CSE {
                                 .push((block_id, instruction_idx, *r));
                         }
                         ConstValue::FnPtr(_) => {}
+                    }
+                    OpCode::Guard { .. } => {
+                        // Guards are opaque to CSE
                     }
                 }
             }

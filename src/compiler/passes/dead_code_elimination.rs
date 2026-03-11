@@ -76,6 +76,51 @@ impl DCE {
         Self { config }
     }
 
+    fn is_initially_live(&self, instruction: &OpCode) -> bool {
+        match instruction {
+            OpCode::Call {
+                unconstrained: true,
+                ..
+            } => false,
+            OpCode::Call { .. } | OpCode::Store { .. } => true,
+            OpCode::AssertEq { lhs, rhs } => lhs != rhs,
+            OpCode::AssertR1C { .. }
+            | OpCode::Constrain { .. }
+            | OpCode::Lookup { .. }
+            | OpCode::DLookup { .. }
+            | OpCode::NextDCoeff { .. }
+            | OpCode::BumpD { .. }
+            | OpCode::MemOp { .. }
+            | OpCode::Rangecheck { .. }
+            | OpCode::Todo { .. }
+            | OpCode::InitGlobal { .. }
+            | OpCode::DropGlobal { .. } => true,
+            OpCode::WriteWitness { pinned, .. } => self.config.witness_shape_frozen || *pinned,
+            OpCode::FreshWitness { .. } => self.config.witness_shape_frozen,
+            OpCode::ToBits { .. } | OpCode::ToRadix { .. } => !self.config.witness_shape_frozen,
+            OpCode::Load { .. }
+            | OpCode::BinaryArithOp { .. }
+            | OpCode::Cmp { .. }
+            | OpCode::Alloc { .. }
+            | OpCode::Select { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
+            | OpCode::TupleProj { .. }
+            | OpCode::SlicePush { .. }
+            | OpCode::SliceLen { .. }
+            | OpCode::MkSeq { .. }
+            | OpCode::Cast { .. }
+            | OpCode::Truncate { .. }
+            | OpCode::Not { .. }
+            | OpCode::MulConst { .. }
+            | OpCode::ReadGlobal { .. }
+            | OpCode::MkTuple { .. }
+            | OpCode::ValueOf { .. }
+            | OpCode::Const { .. } => false,
+            OpCode::Guard { inner, .. } => self.is_initially_live(inner.as_ref()),
+        }
+    }
+
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         let main_id = ssa.get_main_id();
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
@@ -129,84 +174,8 @@ impl DCE {
 
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
-                    match instruction {
-                        OpCode::Call {
-                            unconstrained: true,
-                            ..
-                        } => {
-                            // Unconstrained calls are NOT initially live — DCE'd when results unused
-                        }
-                        OpCode::Call { .. } | OpCode::Store { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
-                        }
-                        OpCode::AssertEq { lhs, rhs } => {
-                            if lhs != rhs {
-                                worklist.push(WorkItem::LiveInstruction(
-                                    *function_id,
-                                    *block_id,
-                                    i,
-                                ));
-                            }
-                        }
-                        OpCode::AssertR1C { .. }
-                        | OpCode::Constrain { .. }
-                        | OpCode::Lookup { .. }
-                        | OpCode::DLookup { .. }
-                        | OpCode::NextDCoeff { .. }
-                        | OpCode::BumpD { .. }
-                        | OpCode::MemOp { .. }
-                        | OpCode::Rangecheck { .. }
-                        | OpCode::Todo { .. }
-                        | OpCode::InitGlobal { .. }
-                        | OpCode::DropGlobal { .. } => {
-                            worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
-                        }
-                        OpCode::WriteWitness { pinned, .. } => {
-                            if self.config.witness_shape_frozen || *pinned {
-                                worklist.push(WorkItem::LiveInstruction(
-                                    *function_id,
-                                    *block_id,
-                                    i,
-                                ));
-                            }
-                        }
-                        OpCode::FreshWitness { .. } => {
-                            if self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(
-                                    *function_id,
-                                    *block_id,
-                                    i,
-                                ));
-                            }
-                        }
-                        OpCode::ToBits { .. } | OpCode::ToRadix { .. } => {
-                            if !self.config.witness_shape_frozen {
-                                worklist.push(WorkItem::LiveInstruction(
-                                    *function_id,
-                                    *block_id,
-                                    i,
-                                ));
-                            }
-                        }
-                        OpCode::Load { .. }
-                        | OpCode::BinaryArithOp { .. }
-                        | OpCode::Cmp { .. }
-                        | OpCode::Alloc { .. }
-                        | OpCode::Select { .. }
-                        | OpCode::ArrayGet { .. }
-                        | OpCode::ArraySet { .. }
-                        | OpCode::TupleProj { .. }
-                        | OpCode::SlicePush { .. }
-                        | OpCode::SliceLen { .. }
-                        | OpCode::MkSeq { .. }
-                        | OpCode::Cast { .. }
-                        | OpCode::Truncate { .. }
-                        | OpCode::Not { .. }
-                        | OpCode::MulConst { .. }
-                        | OpCode::ReadGlobal { .. }
-                        | OpCode::MkTuple { .. }
-                        | OpCode::ValueOf { .. }
-                        | OpCode::Const { .. } => {}
+                    if self.is_initially_live(instruction) {
+                        worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                     }
                 }
 

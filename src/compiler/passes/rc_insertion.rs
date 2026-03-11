@@ -248,11 +248,13 @@ impl RCInsertion {
                         target: _,
                         keys: _,
                         results: _,
+                        flag: _,
                     }
                     | OpCode::DLookup {
                         target: _,
                         keys: _,
                         results: _,
+                        flag: _,
                     }
                     | OpCode::Not {
                         result: _,
@@ -629,6 +631,9 @@ impl RCInsertion {
                     }
                     OpCode::Const { .. } => {
                         new_instructions.push(instruction);
+                    }
+                    OpCode::Guard { .. } => {
+                        panic!("ICE: Guard should be lowered before RC insertion");
                     }
                     OpCode::MkTuple {
                         result,

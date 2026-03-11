@@ -250,6 +250,7 @@ impl Value {
 pub struct LookupConstraint {
     pub table_id: usize,
     pub elements: Vec<LC>,
+    pub flag: LC,
 }
 
 #[derive(Clone, Debug)]
@@ -291,7 +292,9 @@ impl symbolic_executor::Context<Value> for R1CGen {
         target: super::ssa::LookupTarget<Value>,
         keys: Vec<Value>,
         results: Vec<Value>,
+        flag: Value,
     ) {
+        let flag_lc = flag.expect_linear_combination();
         match target {
             super::ssa::LookupTarget::Rangecheck(i) => {
                 // TODO this will become table resolution logic eventually
@@ -312,6 +315,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
+                    flag: flag_lc.clone(),
                 });
             }
             super::ssa::LookupTarget::DynRangecheck(v) => {
@@ -335,6 +339,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
+                    flag: flag_lc.clone(),
                 });
             }
             super::ssa::LookupTarget::Array(arr) => {
@@ -361,6 +366,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,
+                    flag: flag_lc,
                 });
             }
         }
@@ -388,6 +394,16 @@ impl symbolic_executor::Context<Value> for R1CGen {
     fn slice_len(&mut self, slice: &Value) -> Value {
         let array = slice.expect_array();
         Value::Const(ark_bn254::Fr::from(array.borrow().data.len() as u128))
+    }
+
+    fn on_guard(
+        &mut self,
+        _inner: &crate::compiler::ssa::OpCode,
+        _condition: &Value,
+        _inputs: Vec<&Value>,
+        _result_types: Vec<&Type>,
+    ) -> Vec<Value> {
+        panic!("ICE: Guard should not appear in R1CS gen (should be lowered before)")
     }
 }
 
@@ -885,27 +901,25 @@ impl R1CGen {
                     for (w, coeff) in lookup.elements[0].iter() {
                         b.push((*w, -*coeff));
                     }
+                    // y * (α - key) = flag
                     result.push(R1C {
                         a: vec![(y, ark_bn254::Fr::ONE)],
                         b,
-                        c: vec![(0, ark_bn254::Fr::ONE)],
+                        c: lookup.flag.clone(),
                     });
                     y
                 }
                 2 => {
                     let x = witness_layout.next_lookups_data();
                     let y = witness_layout.next_lookups_data();
+                    // β * value = -x  (defines x = -β*value)
                     result.push(R1C {
                         a: vec![(beta, crate::compiler::Field::ONE)],
                         b: lookup.elements[1].clone(),
                         c: vec![(x, -crate::compiler::Field::ONE)],
                     });
 
-                    result.push(R1C {
-                        a: vec![(y, ark_bn254::Fr::ONE)],
-                        b: lookup.elements[0].clone(),
-                        c: vec![(x, -crate::compiler::Field::ONE)],
-                    });
+                    // y * (α - x - key) = flag
                     let mut b = vec![
                         (alpha, ark_bn254::Fr::ONE),
                         (x, -crate::compiler::Field::ONE),
@@ -916,7 +930,7 @@ impl R1CGen {
                     result.push(R1C {
                         a: vec![(y, ark_bn254::Fr::ONE)],
                         b,
-                        c: vec![(0, ark_bn254::Fr::ONE)],
+                        c: lookup.flag.clone(),
                     });
                     y
                 }

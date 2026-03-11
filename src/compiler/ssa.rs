@@ -842,11 +842,13 @@ pub enum OpCode {
         target: LookupTarget<ValueId>,
         keys: Vec<ValueId>,
         results: Vec<ValueId>,
+        flag: ValueId,
     },
     DLookup {
         target: LookupTarget<ValueId>,
         keys: Vec<ValueId>,
         results: Vec<ValueId>,
+        flag: ValueId,
     },
     MulConst {
         result: ValueId,
@@ -888,6 +890,10 @@ pub enum OpCode {
         result: ValueId,
         value: ConstValue,
     },
+    Guard {
+        condition: ValueId,
+        inner: Box<OpCode>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -904,6 +910,7 @@ impl Instruction for OpCode {
                 function: CallTarget::Static(id),
                 ..
             } => vec![*id],
+            OpCode::Guard { inner, .. } => inner.get_static_call_targets(),
             _ => vec![],
         }
     }
@@ -1110,6 +1117,7 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
@@ -1119,8 +1127,8 @@ impl Instruction for OpCode {
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                 };
                 format!(
-                    "constrain_lookup({}, ({}) => ({}))",
-                    target_str, keys_str, results_str
+                    "constrain_lookup({}, ({}) => ({}), flag=v{})",
+                    target_str, keys_str, results_str, flag.0
                 )
             }
             OpCode::NextDCoeff { result } => {
@@ -1142,6 +1150,7 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
@@ -1151,8 +1160,8 @@ impl Instruction for OpCode {
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                 };
                 format!(
-                    "∂lookup({}, ({}) => ({}))",
-                    target_str, keys_str, results_str
+                    "∂lookup({}, ({}) => ({}), flag=v{})",
+                    target_str, keys_str, results_str, flag.0
                 )
             }
             OpCode::MkSeq {
@@ -1359,6 +1368,13 @@ impl Instruction for OpCode {
                     )
                 }
             },
+            OpCode::Guard { condition, inner } => {
+                format!(
+                    "guard(v{}) {{ {} }}",
+                    condition.0,
+                    inner.display_instruction(func_name, annotate_value)
+                )
+            }
         }
     }
 
@@ -1511,11 +1527,13 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             }
             | Self::DLookup {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let mut ret_vec = vec![];
                 match target {
@@ -1529,6 +1547,7 @@ impl Instruction for OpCode {
                 }
                 ret_vec.extend(keys);
                 ret_vec.extend(results);
+                ret_vec.push(flag);
                 ret_vec.into_iter()
             }
             Self::TupleProj {
@@ -1550,6 +1569,11 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { condition, inner } => {
+                let mut ret_vec = vec![condition];
+                ret_vec.extend(inner.get_inputs());
+                ret_vec.into_iter()
+            }
         }
     }
 
@@ -1701,6 +1725,7 @@ impl Instruction for OpCode {
                 value: _,
             } => vec![].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { inner, .. } => inner.get_results().collect::<Vec<_>>().into_iter(),
         }
     }
 
@@ -1859,11 +1884,13 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             }
             | Self::DLookup {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let mut ret_vec = vec![];
                 match target {
@@ -1877,6 +1904,7 @@ impl Instruction for OpCode {
                 }
                 ret_vec.extend(keys);
                 ret_vec.extend(results);
+                ret_vec.push(flag);
                 ret_vec.into_iter()
             }
             Self::TupleProj {
@@ -1890,6 +1918,11 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { condition, inner } => {
+                let mut ret_vec = vec![condition];
+                ret_vec.extend(inner.get_inputs_mut());
+                ret_vec.into_iter()
+            }
         }
     }
 
@@ -1996,11 +2029,13 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             }
             | Self::DLookup {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let mut ret_vec = vec![];
                 match target {
@@ -2014,6 +2049,7 @@ impl Instruction for OpCode {
                 }
                 ret_vec.extend(keys);
                 ret_vec.extend(results);
+                ret_vec.push(flag);
                 ret_vec.into_iter()
             }
             Self::MkSeq {
@@ -2094,6 +2130,11 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { condition, inner } => {
+                let mut ret_vec = vec![condition];
+                ret_vec.extend(inner.get_operands_mut());
+                ret_vec.into_iter()
+            }
         }
     }
 }

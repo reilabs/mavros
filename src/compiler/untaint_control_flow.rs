@@ -6,8 +6,8 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA,
-        OpCode, Terminator, ValueId,
+        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
+        Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
@@ -101,151 +101,6 @@ impl UntaintControlFlow {
 
             for instruction in old_instructions {
                 match instruction {
-                    OpCode::BinaryArithOp { .. }
-                    | OpCode::Cmp { .. }
-                    | OpCode::MkSeq { .. }
-                    | OpCode::MkTuple { .. }
-                    | OpCode::Cast { .. }
-                    | OpCode::Truncate { .. }
-                    | OpCode::Not { .. }
-                    | OpCode::ToBits { .. }
-                    | OpCode::ToRadix { .. }
-                    | OpCode::ReadGlobal { .. }
-                    | OpCode::Select { .. }
-                    | OpCode::WriteWitness { .. }
-                    | OpCode::FreshWitness { .. }
-                    | OpCode::Constrain { .. }
-                    | OpCode::NextDCoeff { .. }
-                    | OpCode::BumpD { .. }
-                    | OpCode::MemOp { .. }
-                    | OpCode::MulConst { .. }
-                    | OpCode::Lookup { .. }
-                    | OpCode::DLookup { .. }
-                    | OpCode::TupleProj { .. }
-                    | OpCode::AssertR1C { .. } => {
-                        new_instructions.push(instruction);
-                    }
-                    OpCode::AssertEq { lhs, rhs } => match block_taint {
-                        Some(taint) => {
-                            let new_rhs = function.fresh_value();
-                            new_instructions.push(OpCode::Select {
-                                result: new_rhs,
-                                cond: taint,
-                                if_t: rhs,
-                                if_f: lhs,
-                            });
-                            new_instructions.push(OpCode::AssertEq {
-                                lhs: lhs,
-                                rhs: new_rhs,
-                            })
-                        }
-                        None => new_instructions.push(instruction),
-                    },
-                    OpCode::Rangecheck { value, max_bits } => match block_taint {
-                        Some(taint) => {
-                            // On dead paths (taint=false), substitute 0 which
-                            // trivially passes any rangecheck.
-                            let zero = function.fresh_value();
-                            new_instructions.push(OpCode::Const {
-                                result: zero,
-                                value: ConstValue::Field(ark_bn254::Fr::from(0u64)),
-                            });
-                            let safe = function.fresh_value();
-                            new_instructions.push(OpCode::Select {
-                                result: safe,
-                                cond: taint,
-                                if_t: value,
-                                if_f: zero,
-                            });
-                            new_instructions.push(OpCode::Rangecheck {
-                                value: safe,
-                                max_bits,
-                            });
-                        }
-                        None => new_instructions.push(instruction),
-                    },
-                    OpCode::Store { ptr, value: v } => {
-                        let ptr_wt = get_witness_or_pure(function_wt, ptr);
-                        // writes to dynamic ptr not supported
-                        assert_eq!(ptr_wt, ConstantWitness::Pure);
-
-                        match block_taint {
-                            Some(taint) => {
-                                let old_value = function.fresh_value();
-                                new_instructions.push(OpCode::Load {
-                                    result: old_value,
-                                    ptr,
-                                });
-
-                                let new_value = function.fresh_value();
-                                new_instructions.push(OpCode::Select {
-                                    result: new_value,
-                                    cond: taint,
-                                    if_t: v,
-                                    if_f: old_value,
-                                });
-
-                                new_instructions.push(OpCode::Store {
-                                    ptr,
-                                    value: new_value,
-                                });
-                            }
-                            None => new_instructions.push(instruction),
-                        }
-                    }
-                    OpCode::Load { result: _, ptr } => {
-                        let ptr_wt = get_witness_or_pure(function_wt, ptr);
-                        // reads from dynamic ptr not supported
-                        assert_eq!(ptr_wt, ConstantWitness::Pure);
-                        new_instructions.push(instruction);
-                    }
-                    OpCode::ArrayGet {
-                        result: _,
-                        array: arr,
-                        index: _,
-                    } => {
-                        let arr_wt = get_witness_or_pure(function_wt, arr);
-                        // dynamic array access not supported
-                        assert_eq!(arr_wt, ConstantWitness::Pure);
-                        new_instructions.push(instruction);
-                    }
-                    OpCode::ArraySet {
-                        result: _,
-                        array: arr,
-                        index: idx,
-                        value: _,
-                    } => {
-                        let arr_wt = get_witness_or_pure(function_wt, arr);
-                        let idx_wt = get_witness_or_pure(function_wt, idx);
-                        // dynamic array access not supported
-                        assert_eq!(arr_wt, ConstantWitness::Pure);
-                        assert_eq!(idx_wt, ConstantWitness::Pure);
-                        new_instructions.push(instruction);
-                    }
-                    OpCode::SlicePush {
-                        dir: _,
-                        result: _,
-                        slice: sl,
-                        values: _,
-                    } => {
-                        let slice_wt = get_witness_or_pure(function_wt, sl);
-                        // Slice must always be Pure witness
-                        assert_eq!(slice_wt, ConstantWitness::Pure);
-                        new_instructions.push(instruction);
-                    }
-                    OpCode::SliceLen {
-                        result: _,
-                        slice: sl,
-                    } => {
-                        let slice_wt = get_witness_or_pure(function_wt, sl);
-                        // Slice must always be Pure witness
-                        assert_eq!(slice_wt, ConstantWitness::Pure);
-                        new_instructions.push(instruction);
-                    }
-                    OpCode::Alloc { .. } => {
-                        new_instructions.push(instruction);
-                    }
-
                     OpCode::Call {
                         results: ret,
                         function: CallTarget::Static(tgt),
@@ -273,28 +128,18 @@ impl UntaintControlFlow {
                     } => {
                         panic!("Dynamic call targets are not supported in untaint_control_flow")
                     }
-
-                    OpCode::Todo {
-                        payload,
-                        results,
-                        result_types,
-                    } => {
-                        new_instructions.push(OpCode::Todo {
-                            payload,
-                            results,
-                            result_types,
-                        });
-                    }
-
-                    OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. }
-                    | OpCode::Const { .. }
-                    | OpCode::ValueOf { .. } => {
-                        new_instructions.push(instruction);
-                    }
-                    _ => {
-                        panic!("Unhandled instruction {:?}", instruction);
-                    }
+                    // All non-Call ops: wrap in Guard when tainted
+                    other => match block_taint {
+                        Some(taint) => {
+                            new_instructions.push(OpCode::Guard {
+                                condition: taint,
+                                inner: Box::new(other),
+                            });
+                        }
+                        None => {
+                            new_instructions.push(other);
+                        }
+                    },
                 }
             }
 

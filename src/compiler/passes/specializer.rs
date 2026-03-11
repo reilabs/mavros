@@ -543,6 +543,41 @@ impl symbolic_executor::Context<Val> for SpecializationState {
             Val(val)
         }
     }
+
+    fn on_guard(
+        &mut self,
+        inner: &crate::compiler::ssa::OpCode,
+        condition: &Val,
+        inputs: Vec<&Val>,
+        _result_types: Vec<&crate::compiler::ir::r#type::Type>,
+    ) -> Vec<Val> {
+        use crate::compiler::ssa::Instruction;
+        // Build a mapping from old ValueIds to new ValueIds
+        let orig_inputs: Vec<_> = inner.get_inputs().cloned().collect();
+        let orig_results: Vec<_> = inner.get_results().cloned().collect();
+        let mut id_map: HashMap<ValueId, ValueId> = HashMap::new();
+        for (orig, new_val) in orig_inputs.iter().zip(inputs.iter()) {
+            id_map.insert(*orig, new_val.0);
+        }
+        let mut result_vals = Vec::new();
+        for orig_result in &orig_results {
+            let fresh = self.fresh_value();
+            id_map.insert(*orig_result, fresh);
+            result_vals.push(Val(fresh));
+        }
+        // Clone and remap all operands
+        let mut new_inner = inner.clone();
+        for op in new_inner.get_operands_mut() {
+            if let Some(new_id) = id_map.get(op) {
+                *op = *new_id;
+            }
+        }
+        self.emit(OpCode::Guard {
+            condition: condition.0,
+            inner: Box::new(new_inner),
+        });
+        result_vals
+    }
 }
 
 impl Pass for Specializer {

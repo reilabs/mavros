@@ -27,6 +27,7 @@ use crate::{
             defunctionalize::Defunctionalize,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
+            lower_guards::LowerGuards,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             pull_into_assert::PullIntoAssert,
@@ -63,6 +64,7 @@ pub struct Driver {
     base_witgen_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
+    main_is_unconstrained: bool,
 }
 
 #[derive(Debug)]
@@ -99,6 +101,7 @@ impl Driver {
             base_witgen_ssa: None,
             abi: None,
             draw_cfg,
+            main_is_unconstrained: false,
         }
     }
 
@@ -164,7 +167,9 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        self.initial_ssa = Some(HLSSA::from_program(&program, lowlevel_replacements));
+        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program, lowlevel_replacements);
+        self.initial_ssa = Some(ssa);
+        self.main_is_unconstrained = main_is_unconstrained;
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
@@ -185,7 +190,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(PrepareEntryPoint::new()),
+                Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 Box::new(MakeStructAccessStatic::new()),
@@ -240,6 +245,16 @@ impl Driver {
         )
         .unwrap();
 
+        // Run Mem2Reg before UntaintControlFlow so that Guard never wraps Store/Load
+        // that could be promoted to SSA values. Mem2Reg doesn't need to understand Guard.
+        let mut ssa = ssa;
+        PassManager::new(
+            "pre_untaint_mem2reg".to_string(),
+            self.draw_cfg,
+            vec![Box::new(Mem2Reg::new())],
+        )
+        .run(&mut ssa);
+
         let flow_analysis = FlowAnalysis::run(&ssa);
 
         if self.draw_cfg {
@@ -272,7 +287,6 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(FixDoubleJumps::new()),
-                Box::new(Mem2Reg::new()),
                 Box::new(ArithmeticSimplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(ConditionPropagation::new()),
@@ -424,6 +438,7 @@ impl Driver {
             "base_witgen".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(LowerGuards::new()),
                 Box::new(WitnessWriteToVoid::new()),
                 Box::new(StripWitnessOf::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
@@ -480,6 +495,76 @@ impl Driver {
         }
 
         Ok(llvm_ir)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn compile_ad_llvm_targets(
+        &mut self,
+        wasm_path: std::path::PathBuf,
+        r1cs: &R1CS,
+    ) -> Result<(), Error> {
+        use crate::compiler::hlssa_to_llssa;
+        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
+        use inkwell::OptimizationLevel;
+        use inkwell::context::Context;
+
+        // Prepare AD SSA: same pass pipeline as compile_ad()
+        let mut ssa = self.r1cs_ssa.clone().unwrap();
+        let mut ad_pm = PassManager::new(
+            "ad_wasm".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(WitnessLowering::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(RCInsertion::new()),
+                Box::new(FixDoubleJumps::new()),
+            ],
+        );
+        ad_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
+        ad_pm.run(&mut ssa);
+
+        let flow_analysis = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow_analysis);
+
+        // Lower HLSSA → LLSSA
+        let llssa = hlssa_to_llssa::lower(&ssa, &flow_analysis, &type_info);
+
+        // Compile LLSSA → LLVM
+        let ll_flow_analysis = FlowAnalysis::run(&llssa);
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "mavros_ad_module");
+        codegen.compile(&llssa, &ll_flow_analysis);
+
+        codegen.write_ir(&wasm_path.with_extension("ll"));
+        codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+        info!(message = %"AD WASM object generated", path = %wasm_path.display());
+        self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
+
+        Ok(())
+    }
+
+    /// Write AD WASM metadata JSON file
+    fn write_ad_wasm_metadata(
+        &self,
+        wasm_path: &std::path::PathBuf,
+        r1cs: &R1CS,
+    ) -> Result<(), Error> {
+        let metadata = serde_json::json!({
+            "witnessCount": r1cs.witness_layout.size(),
+            "constraintCount": r1cs.constraints.len(),
+        });
+
+        let metadata_path = format!("{}.meta.json", wasm_path.display());
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        info!(message = %"AD WASM metadata generated", path = %metadata_path);
+
+        Ok(())
     }
 
     /// Write WASM metadata JSON file
