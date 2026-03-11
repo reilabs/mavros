@@ -728,6 +728,7 @@ impl ExplicitWitness {
         // modulusLoMinusOne = lower 128 bits - 1
         let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
         let two_to_8 = b.field_const(Field::from(256u128));
+        let two_to_64 = b.field_const(Field::from(2u128).pow([64u64]));
         let two_to_128 = b.field_const(Field::from(2u128).pow([128u64]));
         let zero = b.field_const(Field::ZERO);
         let one = b.field_const(Field::ONE);
@@ -743,8 +744,11 @@ impl ExplicitWitness {
             count: 32,
         });
 
-        // Extract each byte, write as witness, range-check
+        // Extract each byte, write as witness, range-check.
+        // Simultaneously accumulate 4 x 64-bit limbs and the full 256-bit sum.
         let mut bytes = Vec::with_capacity(32);
+        let mut limbs = [zero; 4]; // 64-bit limbs, big-endian
+        let mut full_sum = zero;
         for i in 0..32 {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_arr, idx);
@@ -752,52 +756,43 @@ impl ExplicitWitness {
             let byte_wit = b.write_witness(byte_field);
             b.lookup_rngchk_8(byte_wit, flag);
             bytes.push(byte_wit);
+
+            let limb_idx = i / 8;
+            let shifted_limb = b.mul(limbs[limb_idx], two_to_8);
+            limbs[limb_idx] = b.add(shifted_limb, byte_wit);
+
+            let shifted_full = b.mul(full_sum, two_to_8);
+            full_sum = b.add(shifted_full, byte_wit);
         }
 
-        // Step 2: Reconstruct full value and constrain == input value (conditional)
-        let mut full_sum = zero;
-        for i in 0..32 {
-            let shifted = b.mul(full_sum, two_to_8);
-            full_sum = b.add(shifted, bytes[i]);
-        }
+        // Step 2: Constrain reconstruction == input value (conditional)
         // flag * (full_sum - value) = 0
         let recon_diff = b.sub(full_sum, value);
         b.constrain(flag, recon_diff, zero);
 
-        // Step 3: Reconstruct hi (bytes[0..16]) and lo (bytes[16..32])
-        let mut hi = zero;
-        for i in 0..16 {
-            let shifted = b.mul(hi, two_to_8);
-            hi = b.add(shifted, bytes[i]);
-        }
-        let mut lo = zero;
-        for i in 16..32 {
-            let shifted = b.mul(lo, two_to_8);
-            lo = b.add(shifted, bytes[i]);
-        }
+        // Step 3: Reconstruct hi (limbs[0..2]) and lo (limbs[2..4]) as 128-bit values
+        let hi_upper = b.mul(limbs[0], two_to_64);
+        let hi = b.add(hi_upper, limbs[1]);
+        let lo_upper = b.mul(limbs[2], two_to_64);
+        let lo = b.add(lo_upper, limbs[3]);
 
-        // Step 4: Compute borrow hint (for witgen only; DCE'd in R1CS pipeline)
-        // borrow = 1 if lo > modulusLoMinusOne, else 0
-        // Strategy: compute (modulusLoMinusOne - lo) as field subtraction.
-        // If lo <= modulusLoMinusOne, result fits in 128 bits (byte[0] == 0).
-        // If lo > modulusLoMinusOne, result wraps to p + modulusLoMinusOne - lo (byte[0] != 0).
-        let diff_for_borrow = b.sub(modulus_lo_m1, lo);
-        let diff_pure = b.value_of(diff_for_borrow);
-        let diff_bytes_arr = b.fresh_value();
-        b.push(OpCode::ToRadix {
-            result: diff_bytes_arr,
-            value: diff_pure,
-            radix: Radix::Bytes,
-            endianness: Endianness::Big,
-            count: 32,
-        });
-        // If byte[0] > 0, the value wrapped (lo > modulusLoMinusOne), so borrow = 1
-        let idx_0 = b.u_const(32, 0);
-        let high_byte = b.array_get(diff_bytes_arr, idx_0);
-        let zero_u8 = b.u_const(8, 0);
-        let borrow_hint = b.lt(zero_u8, high_byte); // U(1): 1 if wrapped
-        let borrow_field = b.cast_to_field(borrow_hint);
-        let borrow_wit = b.write_witness(borrow_field);
+        // Step 4: Compute borrow hint via 2-limb comparison
+        // borrow = 1 if lo > modulusLoMinusOne, i.e. (limb2, limb3) > (mod_limb2, mod_limb3)
+        // = mod_limb2 < limb2 || (mod_limb2 == limb2 && mod_limb3 < limb3)
+        let limb2_u64 = b.cast_to(CastTarget::U(64), limbs[2]);
+        let limb3_u64 = b.cast_to(CastTarget::U(64), limbs[3]);
+        let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
+        let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
+        let hi_lt = b.lt(mod_limb2, limb2_u64);
+        let hi_eq = b.eq(mod_limb2, limb2_u64);
+        let lo_lt = b.lt(mod_limb3, limb3_u64);
+        let hi_eq_f = b.cast_to_field(hi_eq);
+        let lo_lt_f = b.cast_to_field(lo_lt);
+        let hi_eq_and_lo_lt = b.mul(hi_eq_f, lo_lt_f);
+        let hi_lt_f = b.cast_to_field(hi_lt);
+        let borrow_hint = b.add(hi_lt_f, hi_eq_and_lo_lt);
+        let borrow_pure = b.value_of(borrow_hint);
+        let borrow_wit = b.write_witness(borrow_pure);
 
         // Step 5: Constrain borrow is boolean: borrow * borrow = borrow
         b.constrain(borrow_wit, borrow_wit, borrow_wit);
