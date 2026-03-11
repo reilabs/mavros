@@ -793,11 +793,10 @@ impl ExplicitWitness {
         // Step 5: Constrain borrow is boolean: borrow * borrow = borrow
         b.constrain(borrow_wit, borrow_wit, borrow_wit);
 
-        // Step 6: Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128 + 1
+        // Step 6: Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128
         let borrow_shift = b.mul(borrow_wit, two_to_128);
         let tmp1 = b.sub(modulus_lo_m1, lo);
-        let tmp2 = b.add(tmp1, borrow_shift);
-        let result_lo = b.add(tmp2, one);
+        let result_lo = b.add(tmp1, borrow_shift);
 
         // Step 7: Compute resultHi = modulusHi - hi - borrow
         let tmp3 = b.sub(modulus_hi, hi);
