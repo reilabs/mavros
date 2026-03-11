@@ -470,14 +470,18 @@ impl ExplicitWitness {
                 b.push(instruction);
             }
             OpCode::Truncate {
-                result: _,
-                value: i,
-                to_bits: _,
+                result,
+                value,
+                to_bits,
                 from_bits: _,
             } => {
-                let i_taint = function_type_info.get_value_type(i).is_witness_of();
-                assert!(!i_taint); // TODO: witness versions
-                b.push(instruction);
+                let i_taint = function_type_info.get_value_type(value).is_witness_of();
+                if !i_taint {
+                    b.push(instruction);
+                } else {
+                    let one = b.field_const(Field::ONE);
+                    self.gen_witness_truncate(b, value, to_bits, one, result);
+                }
             }
             OpCode::Not { result, value } => {
                 let value_type = function_type_info.get_value_type(value);
@@ -669,12 +673,7 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(condition)
                 };
-                let trunc_wit = self.gen_witness_truncate(b, value, to_bits, cond_field);
-                b.push(OpCode::Cast {
-                    result,
-                    value: trunc_wit,
-                    target: CastTarget::U(to_bits),
-                });
+                self.gen_witness_truncate(b, value, to_bits, cond_field, result);
             }
             OpCode::Cast { .. }
             | OpCode::Const { .. }
@@ -719,7 +718,8 @@ impl ExplicitWitness {
         value: ValueId,
         to_bits: usize,
         flag: ValueId,
-    ) -> ValueId {
+        result: ValueId,
+    ) {
         assert!(to_bits % 8 == 0);
         let to_bytes = to_bits / 8;
         assert!(to_bytes <= 32);
@@ -823,11 +823,21 @@ impl ExplicitWitness {
         // Step 9: Recover truncated value from low bytes of the decomposition
         // In big-endian, the low `to_bytes` bytes are bytes[32 - to_bytes .. 32]
         let mut trunc_val = zero;
-        for i in (32 - to_bytes)..32 {
+        let start = 32 - to_bytes;
+        for i in start..32 {
             let shifted = b.mul(trunc_val, two_to_8);
-            trunc_val = b.add(shifted, bytes[i]);
+            if i == 31 {
+                // Last iteration: use the caller's result ValueId
+                b.push(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Add,
+                    result,
+                    lhs: shifted,
+                    rhs: bytes[i],
+                });
+            } else {
+                trunc_val = b.add(shifted, bytes[i]);
+            }
         }
-        trunc_val
     }
 
     fn gen_witness_rangecheck(

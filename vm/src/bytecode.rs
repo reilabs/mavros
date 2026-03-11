@@ -715,7 +715,7 @@ mod def {
     }
 
     #[opcode]
-    fn to_bytes_be_lt_8(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
+    fn to_bytes_be(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
         let val = ark_ff::PrimeField::into_bigint(val);
         let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
         unsafe {
