@@ -663,10 +663,6 @@ impl ExplicitWitness {
                 to_bits,
                 from_bits: _,
             } => {
-                // Witness truncate: full byte decomposition with canonical check.
-                // 1) Decompose value into 32 bytes, range-check each, constrain reconstruction
-                // 2) Prove decomposition is canonical (< field modulus) via 128-bit digital check
-                // 3) Recover truncated value from low bytes
                 let cond_type = function_type_info.get_value_type(condition);
                 let cond_field = if cond_type.strip_witness().is_field() {
                     condition
@@ -778,8 +774,10 @@ impl ExplicitWitness {
         // Step 4: Compute borrow hint via 2-limb comparison
         // borrow = 1 if lo > modulusLoMinusOne, i.e. (limb2, limb3) > (mod_limb2, mod_limb3)
         // = mod_limb2 < limb2 || (mod_limb2 == limb2 && mod_limb3 < limb3)
-        let limb2_u64 = b.cast_to(CastTarget::U(64), limbs[2]);
-        let limb3_u64 = b.cast_to(CastTarget::U(64), limbs[3]);
+        let limb2_pure = b.value_of(limbs[2]);
+        let limb3_pure = b.value_of(limbs[3]);
+        let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
+        let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
         let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
         let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
         let hi_lt = b.lt(mod_limb2, limb2_u64);
@@ -790,8 +788,7 @@ impl ExplicitWitness {
         let hi_eq_and_lo_lt = b.mul(hi_eq_f, lo_lt_f);
         let hi_lt_f = b.cast_to_field(hi_lt);
         let borrow_hint = b.add(hi_lt_f, hi_eq_and_lo_lt);
-        let borrow_pure = b.value_of(borrow_hint);
-        let borrow_wit = b.write_witness(borrow_pure);
+        let borrow_wit = b.write_witness(borrow_hint);
 
         // Step 5: Constrain borrow is boolean: borrow * borrow = borrow
         b.constrain(borrow_wit, borrow_wit, borrow_wit);
