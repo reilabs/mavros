@@ -728,8 +728,7 @@ impl ExplicitWitness {
         // modulusHi = upper 128 bits
         let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
         // modulusLoMinusOne = lower 128 bits - 1
-        let modulus_lo_m1 =
-            b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
+        let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
         let two_to_8 = b.field_const(Field::from(256u128));
         let two_to_128 = b.field_const(Field::from(2u128).pow([128u64]));
         let zero = b.field_const(Field::ZERO);
