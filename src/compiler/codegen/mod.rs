@@ -803,8 +803,8 @@ impl CodeGen {
                         type_info.get_value_type(*v).is_field(),
                         "TODO: Implement toRadix for U-values"
                     );
-                    assert!(*c <= 8, "TODO: Implement toRadix for > 8 bytes");
-                    emitter.push_op(bytecode::OpCode::ToBytesBeLt8 {
+                    assert!(*c <= 32, "ToRadix byte count must be <= 32");
+                    emitter.push_op(bytecode::OpCode::ToBytesBe {
                         val: layouter.get_value(*v),
                         count: *c as u64,
                         res: layouter.alloc_value(*r, &type_info.get_value_type(*r)),
@@ -868,24 +868,28 @@ impl CodeGen {
                     target: LookupTarget::Rangecheck(8),
                     keys,
                     results,
+                    flag,
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
                     assert!(type_info.get_value_type(keys[0]).is_field());
                     emitter.push_op(bytecode::OpCode::Rngchk8Field {
                         val: layouter.get_value(keys[0]),
+                        flag: layouter.get_value(*flag),
                     });
                 }
                 ssa::OpCode::DLookup {
                     target: LookupTarget::Rangecheck(8),
                     keys,
                     results,
+                    flag,
                 } => {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 0);
                     assert!(type_info.get_value_type(keys[0]).is_witness_of());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
                         val: layouter.get_value(keys[0]),
+                        flag: layouter.get_value(*flag),
                     });
                 }
                 ssa::OpCode::Todo { payload, .. } => {

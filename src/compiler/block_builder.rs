@@ -357,27 +357,30 @@ pub trait HLEmitter {
         self.emit(OpCode::MemOp { kind, value });
     }
 
-    fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId) {
+    fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target,
             keys: vec![value],
             results: vec![],
+            flag,
         });
     }
 
-    fn lookup_rngchk_8(&mut self, value: ValueId) {
+    fn lookup_rngchk_8(&mut self, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Rangecheck(8),
             keys: vec![value],
             results: vec![],
+            flag,
         });
     }
 
-    fn lookup_arr(&mut self, array: ValueId, index: ValueId, result: ValueId) {
+    fn lookup_arr(&mut self, array: ValueId, index: ValueId, result: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Array(array),
             keys: vec![index],
             results: vec![result],
+            flag,
         });
     }
 

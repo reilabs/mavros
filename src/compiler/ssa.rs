@@ -842,11 +842,13 @@ pub enum OpCode {
         target: LookupTarget<ValueId>,
         keys: Vec<ValueId>,
         results: Vec<ValueId>,
+        flag: ValueId,
     },
     DLookup {
         target: LookupTarget<ValueId>,
         keys: Vec<ValueId>,
         results: Vec<ValueId>,
+        flag: ValueId,
     },
     MulConst {
         result: ValueId,
@@ -1115,6 +1117,7 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
@@ -1124,8 +1127,8 @@ impl Instruction for OpCode {
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                 };
                 format!(
-                    "constrain_lookup({}, ({}) => ({}))",
-                    target_str, keys_str, results_str
+                    "constrain_lookup({}, ({}) => ({}), flag=v{})",
+                    target_str, keys_str, results_str, flag.0
                 )
             }
             OpCode::NextDCoeff { result } => {
@@ -1147,6 +1150,7 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
@@ -1156,8 +1160,8 @@ impl Instruction for OpCode {
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                 };
                 format!(
-                    "∂lookup({}, ({}) => ({}))",
-                    target_str, keys_str, results_str
+                    "∂lookup({}, ({}) => ({}), flag=v{})",
+                    target_str, keys_str, results_str, flag.0
                 )
             }
             OpCode::MkSeq {
@@ -1523,11 +1527,13 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             }
             | Self::DLookup {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let mut ret_vec = vec![];
                 match target {
@@ -1541,6 +1547,7 @@ impl Instruction for OpCode {
                 }
                 ret_vec.extend(keys);
                 ret_vec.extend(results);
+                ret_vec.push(flag);
                 ret_vec.into_iter()
             }
             Self::TupleProj {
@@ -1877,11 +1884,13 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             }
             | Self::DLookup {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let mut ret_vec = vec![];
                 match target {
@@ -1895,6 +1904,7 @@ impl Instruction for OpCode {
                 }
                 ret_vec.extend(keys);
                 ret_vec.extend(results);
+                ret_vec.push(flag);
                 ret_vec.into_iter()
             }
             Self::TupleProj {
@@ -2019,11 +2029,13 @@ impl Instruction for OpCode {
                 target,
                 keys,
                 results,
+                flag,
             }
             | Self::DLookup {
                 target,
                 keys,
                 results,
+                flag,
             } => {
                 let mut ret_vec = vec![];
                 match target {
@@ -2037,6 +2049,7 @@ impl Instruction for OpCode {
                 }
                 ret_vec.extend(keys);
                 ret_vec.extend(results);
+                ret_vec.push(flag);
                 ret_vec.into_iter()
             }
             Self::MkSeq {

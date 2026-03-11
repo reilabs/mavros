@@ -121,7 +121,8 @@ impl ExplicitWitness {
                             };
                             let lr_diff = b.sub(l_field, r_field);
 
-                            let div_hint = b.div(lr_diff, lr_diff);
+                            let field_one_for_div = b.field_const(Field::ONE);
+                            let div_hint = b.div(field_one_for_div, lr_diff);
                             let div_hint_plain = b.value_of(div_hint);
                             let div_hint_witness = b.write_witness(div_hint_plain);
 
@@ -174,7 +175,8 @@ impl ExplicitWitness {
                             let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
                             b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
-                            self.gen_witness_rangecheck(b, adjusted_diff_wit, s);
+                            let rc_flag = b.field_const(Field::from(1));
+                            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
                         }
                     }
                 } else {
@@ -359,7 +361,8 @@ impl ExplicitWitness {
                             value: r_wit,
                             target: back_cast_target,
                         });
-                        b.lookup_arr(arr, idx_field, r_wit);
+                        let one = b.field_const(Field::from(1));
+                        b.lookup_arr(arr, idx_field, r_wit, one);
                     }
                 }
             }
@@ -467,14 +470,18 @@ impl ExplicitWitness {
                 b.push(instruction);
             }
             OpCode::Truncate {
-                result: _,
-                value: i,
-                to_bits: _,
+                result,
+                value,
+                to_bits,
                 from_bits: _,
             } => {
-                let i_taint = function_type_info.get_value_type(i).is_witness_of();
-                assert!(!i_taint); // TODO: witness versions
-                b.push(instruction);
+                let i_taint = function_type_info.get_value_type(value).is_witness_of();
+                if !i_taint {
+                    b.push(instruction);
+                } else {
+                    let one = b.field_const(Field::ONE);
+                    self.gen_witness_truncate(b, value, to_bits, one, result);
+                }
             }
             OpCode::Not { result, value } => {
                 let value_type = function_type_info.get_value_type(value);
@@ -538,7 +545,8 @@ impl ExplicitWitness {
                         let byte = b.array_get(hint, idx);
                         let byte_field = b.cast_to_field(byte);
                         let byte_wit = b.write_witness(byte_field);
-                        b.lookup_rngchk(rangecheck_type, byte_wit);
+                        let one = b.field_const(Field::from(1));
+                        b.lookup_rngchk(rangecheck_type, byte_wit, one);
                         let shift_prev_res = b.mul(current_sum, radix_val);
                         current_sum = b.add(shift_prev_res, byte_wit);
                         witnesses[i] = byte_wit;
@@ -569,7 +577,8 @@ impl ExplicitWitness {
                 if !v_taint {
                     b.push(instruction);
                 } else {
-                    self.gen_witness_rangecheck(b, value, max_bits);
+                    let one = b.field_const(Field::from(1));
+                    self.gen_witness_rangecheck(b, value, max_bits, one);
                 }
             }
             OpCode::ReadGlobal {
@@ -648,13 +657,183 @@ impl ExplicitWitness {
                 let new_value = b.select(condition, v, old_value);
                 b.store(ptr, new_value);
             }
+            OpCode::Truncate {
+                result,
+                value,
+                to_bits,
+                from_bits: _,
+            } => {
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                self.gen_witness_truncate(b, value, to_bits, cond_field, result);
+            }
+            OpCode::Cast { .. } | OpCode::Const { .. } => {
+                // Pure computations — no constraints. Emit unconditionally.
+                b.push(inner);
+            }
+            OpCode::Rangecheck { value, max_bits } => {
+                // Guard(cond, Rangecheck(value, max_bits)) → conditional rangecheck
+                // The condition becomes the lookup flag
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                self.gen_witness_rangecheck(b, value, max_bits, cond_field);
+            }
             inner => {
                 panic!("unrecognized op inside Guard: {:?}", inner);
             }
         }
     }
 
-    fn gen_witness_rangecheck(&self, b: &mut HLInstrBuilder<'_>, value: ValueId, max_bits: usize) {
+    /// Generates a canonical byte decomposition of a field element and returns
+    /// the truncated value recovered from the low bytes.
+    ///
+    /// Algorithm:
+    /// 1. Decompose `value` into 32 bytes (big-endian), range-check each byte
+    /// 2. Constrain reconstruction equals original value
+    /// 3. Reconstruct hi (upper 128 bits) and lo (lower 128 bits)
+    /// 4. Compute borrow hint: borrow = 1 if lo > modulusLoMinusOne
+    /// 5. Constrain borrow is boolean
+    /// 6. Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128 + 1
+    /// 7. Compute resultHi = modulusHi - hi - borrow
+    /// 8. Range-check resultHi and resultLo to 128 bits (proves value < modulus)
+    /// 9. Return truncated value from low `to_bits/8` bytes
+    fn gen_witness_truncate(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        to_bits: usize,
+        flag: ValueId,
+        result: ValueId,
+    ) {
+        assert!(to_bits % 8 == 0);
+        let to_bytes = to_bits / 8;
+        assert!(to_bytes <= 32);
+
+        // BN254 modulus: p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+        // modulusHi = upper 128 bits
+        let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
+        // modulusLoMinusOne = lower 128 bits - 1
+        let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
+        let two_to_8 = b.field_const(Field::from(256u128));
+        let two_to_64 = b.field_const(Field::from(2u128).pow([64u64]));
+        let two_to_128 = b.field_const(Field::from(2u128).pow([128u64]));
+        let zero = b.field_const(Field::ZERO);
+        let one = b.field_const(Field::ONE);
+
+        // Step 1: Decompose value into 32 bytes (big-endian)
+        let pure_value = b.value_of(value);
+        let bytes_arr = b.fresh_value();
+        b.push(OpCode::ToRadix {
+            result: bytes_arr,
+            value: pure_value,
+            radix: Radix::Bytes,
+            endianness: Endianness::Big,
+            count: 32,
+        });
+
+        // Extract each byte, write as witness, range-check.
+        // Simultaneously accumulate 4 x 64-bit limbs and the full 256-bit sum.
+        let mut bytes = Vec::with_capacity(32);
+        let mut limbs = [zero; 4]; // 64-bit limbs, big-endian
+        let mut full_sum = zero;
+        for i in 0..32 {
+            let idx = b.u_const(32, i as u128);
+            let byte = b.array_get(bytes_arr, idx);
+            let byte_field = b.cast_to_field(byte);
+            let byte_wit = b.write_witness(byte_field);
+            b.lookup_rngchk_8(byte_wit, flag);
+            bytes.push(byte_wit);
+
+            let limb_idx = i / 8;
+            let shifted_limb = b.mul(limbs[limb_idx], two_to_8);
+            limbs[limb_idx] = b.add(shifted_limb, byte_wit);
+
+            let shifted_full = b.mul(full_sum, two_to_8);
+            full_sum = b.add(shifted_full, byte_wit);
+        }
+
+        // Step 2: Constrain reconstruction == input value (conditional)
+        // flag * (full_sum - value) = 0
+        let recon_diff = b.sub(full_sum, value);
+        b.constrain(flag, recon_diff, zero);
+
+        // Step 3: Reconstruct hi (limbs[0..2]) and lo (limbs[2..4]) as 128-bit values
+        let hi_upper = b.mul(limbs[0], two_to_64);
+        let hi = b.add(hi_upper, limbs[1]);
+        let lo_upper = b.mul(limbs[2], two_to_64);
+        let lo = b.add(lo_upper, limbs[3]);
+
+        // Step 4: Compute borrow hint via 2-limb comparison
+        // borrow = 1 if lo > modulusLoMinusOne, i.e. (limb2, limb3) > (mod_limb2, mod_limb3)
+        // = mod_limb2 < limb2 || (mod_limb2 == limb2 && mod_limb3 < limb3)
+        let limb2_pure = b.value_of(limbs[2]);
+        let limb3_pure = b.value_of(limbs[3]);
+        let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
+        let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
+        let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
+        let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
+        let hi_lt = b.lt(mod_limb2, limb2_u64);
+        let hi_eq = b.eq(mod_limb2, limb2_u64);
+        let lo_lt = b.lt(mod_limb3, limb3_u64);
+        let hi_eq_f = b.cast_to_field(hi_eq);
+        let lo_lt_f = b.cast_to_field(lo_lt);
+        let hi_eq_and_lo_lt = b.mul(hi_eq_f, lo_lt_f);
+        let hi_lt_f = b.cast_to_field(hi_lt);
+        let borrow_hint = b.add(hi_lt_f, hi_eq_and_lo_lt);
+        let borrow_wit = b.write_witness(borrow_hint);
+
+        // Step 5: Constrain borrow is boolean: borrow * borrow = borrow
+        b.constrain(borrow_wit, borrow_wit, borrow_wit);
+
+        // Step 6: Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128
+        let borrow_shift = b.mul(borrow_wit, two_to_128);
+        let tmp1 = b.sub(modulus_lo_m1, lo);
+        let result_lo = b.add(tmp1, borrow_shift);
+
+        // Step 7: Compute resultHi = modulusHi - hi - borrow
+        let tmp3 = b.sub(modulus_hi, hi);
+        let result_hi = b.sub(tmp3, borrow_wit);
+
+        // Step 8: Range-check resultHi and resultLo to 128 bits
+        // This proves the decomposition is canonical (value < field modulus)
+        self.gen_witness_rangecheck(b, result_hi, 128, flag);
+        self.gen_witness_rangecheck(b, result_lo, 128, flag);
+
+        // Step 9: Recover truncated value from low bytes of the decomposition
+        // In big-endian, the low `to_bytes` bytes are bytes[32 - to_bytes .. 32]
+        let mut trunc_val = zero;
+        let start = 32 - to_bytes;
+        for i in start..32 {
+            let shifted = b.mul(trunc_val, two_to_8);
+            if i == 31 {
+                // Last iteration: use the caller's result ValueId
+                b.push(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Add,
+                    result,
+                    lhs: shifted,
+                    rhs: bytes[i],
+                });
+            } else {
+                trunc_val = b.add(shifted, bytes[i]);
+            }
+        }
+    }
+
+    fn gen_witness_rangecheck(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        max_bits: usize,
+        flag: ValueId,
+    ) {
         assert!(max_bits % 8 == 0); // TODO
         let chunks = max_bits / 8;
         let pure_value = b.value_of(value);
@@ -674,10 +853,13 @@ impl ExplicitWitness {
             let byte = b.array_get(bytes_val, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
-            b.lookup_rngchk_8(byte_wit);
+            b.lookup_rngchk_8(byte_wit, flag);
             let shift_prev_res = b.mul(result, two_to_8);
             result = b.add(shift_prev_res, byte_wit);
         }
-        b.constrain(result, one, value);
+        // Conditional reconstruction constraint: flag * (result - value) = 0
+        let diff = b.sub(result, value);
+        let zero = b.field_const(Field::ZERO);
+        b.constrain(flag, diff, zero);
     }
 }
