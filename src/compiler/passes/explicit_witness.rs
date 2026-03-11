@@ -65,16 +65,41 @@ impl ExplicitWitness {
     ) {
         match instruction {
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                ..
+                kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
+                result,
+                lhs: l,
+                rhs: r,
             } => {
-                b.push(instruction);
-            }
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Sub,
-                ..
-            } => {
-                b.push(instruction);
+                let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                if !l_taint && !r_taint {
+                    b.push(instruction);
+                    return;
+                }
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(bits) => {
+                        // Uint add/sub: linear, but needs rangecheck
+                        let l_field = b.cast_to_field(l);
+                        let r_field = b.cast_to_field(r);
+                        let arith_result = match kind {
+                            BinaryArithOpKind::Add => b.add(l_field, r_field),
+                            BinaryArithOpKind::Sub => b.sub(l_field, r_field),
+                            _ => unreachable!(),
+                        };
+                        let one = b.field_const(Field::ONE);
+                        self.gen_witness_rangecheck(b, arith_result, bits, one);
+                        b.push(OpCode::Cast {
+                            result,
+                            value: arith_result,
+                            target: CastTarget::U(bits),
+                        });
+                    }
+                    _ => {
+                        // Field add/sub: linear, pass through
+                        b.push(instruction);
+                    }
+                }
             }
             OpCode::Alloc { .. }
             | OpCode::Call { .. }
@@ -192,20 +217,54 @@ impl ExplicitWitness {
                 let l_taint = function_type_info.get_value_type(l).is_witness_of();
                 let r_taint = function_type_info.get_value_type(r).is_witness_of();
 
-                if !l_taint || !r_taint {
+                if !l_taint && !r_taint {
                     b.push(instruction);
                     return;
                 }
 
-                // witness-witness mul
-                let mul_witness = b.mul(l, r);
-                let mul_plain = b.value_of(mul_witness);
-                b.push(OpCode::WriteWitness {
-                    result: Some(res),
-                    value: mul_plain,
-                    pinned: false,
-                });
-                b.constrain(l, r, res);
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(bits) => {
+                        let l_field = b.cast_to_field(l);
+                        let r_field = b.cast_to_field(r);
+                        let arith_result = if l_taint && r_taint {
+                            // witness * witness: non-linear
+                            let l_pure = b.value_of(l_field);
+                            let r_pure = b.value_of(r_field);
+                            let hint = b.mul(l_pure, r_pure);
+                            let w = b.write_witness(hint);
+                            b.constrain(l_field, r_field, w);
+                            w
+                        } else {
+                            // witness * pure: linear
+                            b.mul(l_field, r_field)
+                        };
+                        let one = b.field_const(Field::ONE);
+                        self.gen_witness_rangecheck(b, arith_result, bits, one);
+                        b.push(OpCode::Cast {
+                            result: res,
+                            value: arith_result,
+                            target: CastTarget::U(bits),
+                        });
+                    }
+                    _ => {
+                        if l_taint && r_taint {
+                            // Field witness*witness: non-linear
+                            let l_plain = b.value_of(l);
+                            let r_plain = b.value_of(r);
+                            let mul_hint = b.mul(l_plain, r_plain);
+                            b.push(OpCode::WriteWitness {
+                                result: Some(res),
+                                value: mul_hint,
+                                pinned: false,
+                            });
+                            b.constrain(l, r, res);
+                        } else {
+                            // Field witness*pure: linear, pass through
+                            b.push(instruction);
+                        }
+                    }
+                }
             }
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Div,
@@ -671,6 +730,87 @@ impl ExplicitWitness {
                 };
                 self.gen_witness_truncate(b, value, to_bits, cond_field, result);
             }
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
+                result,
+                lhs: l,
+                rhs: r,
+            } => {
+                let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(bits) if l_taint || r_taint => {
+                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let l_field = b.cast_to_field(l);
+                        let r_field = b.cast_to_field(r);
+                        let arith_result = match kind {
+                            BinaryArithOpKind::Add => b.add(l_field, r_field),
+                            BinaryArithOpKind::Sub => b.sub(l_field, r_field),
+                            _ => unreachable!(),
+                        };
+                        self.gen_witness_rangecheck(b, arith_result, bits, cond_field);
+                        b.push(OpCode::Cast {
+                            result,
+                            value: arith_result,
+                            target: CastTarget::U(bits),
+                        });
+                    }
+                    _ => {
+                        // Pure or field: linear, emit unconditionally
+                        b.push(inner);
+                    }
+                }
+            }
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Mul,
+                result: res,
+                lhs: l,
+                rhs: r,
+            } => {
+                let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(bits) if l_taint || r_taint => {
+                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let l_field = b.cast_to_field(l);
+                        let r_field = b.cast_to_field(r);
+                        let arith_result = if l_taint && r_taint {
+                            let l_pure = b.value_of(l_field);
+                            let r_pure = b.value_of(r_field);
+                            let hint = b.mul(l_pure, r_pure);
+                            let w = b.write_witness(hint);
+                            b.constrain(l_field, r_field, w);
+                            w
+                        } else {
+                            b.mul(l_field, r_field)
+                        };
+                        self.gen_witness_rangecheck(b, arith_result, bits, cond_field);
+                        b.push(OpCode::Cast {
+                            result: res,
+                            value: arith_result,
+                            target: CastTarget::U(bits),
+                        });
+                    }
+                    _ if l_taint && r_taint => {
+                        // Field witness*witness under guard: non-linear, lower it
+                        let l_plain = b.value_of(l);
+                        let r_plain = b.value_of(r);
+                        let mul_hint = b.mul(l_plain, r_plain);
+                        b.push(OpCode::WriteWitness {
+                            result: Some(res),
+                            value: mul_hint,
+                            pinned: false,
+                        });
+                        b.constrain(l, r, res);
+                    }
+                    _ => {
+                        // Pure or field witness*pure: linear, emit unconditionally
+                        b.push(inner);
+                    }
+                }
+            }
             OpCode::Cast { .. } | OpCode::Const { .. } => {
                 // Pure computations — no constraints. Emit unconditionally.
                 b.push(inner);
@@ -834,6 +974,18 @@ impl ExplicitWitness {
         max_bits: usize,
         flag: ValueId,
     ) {
+        if max_bits == 1 {
+            // Boolean check: flag * (value² - value) = 0
+            // Split into: t = value * value (constrained), then flag * (t - value) = 0
+            let v_plain = b.value_of(value);
+            let t_hint = b.mul(v_plain, v_plain);
+            let t = b.write_witness(t_hint);
+            b.constrain(value, value, t);
+            let diff = b.sub(t, value);
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(flag, diff, zero);
+            return;
+        }
         assert!(max_bits % 8 == 0); // TODO
         let chunks = max_bits / 8;
         let pure_value = b.value_of(value);
@@ -861,5 +1013,22 @@ impl ExplicitWitness {
         let diff = b.sub(result, value);
         let zero = b.field_const(Field::ZERO);
         b.constrain(flag, diff, zero);
+    }
+
+    fn ensure_field(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        value: ValueId,
+    ) -> ValueId {
+        if function_type_info
+            .get_value_type(value)
+            .strip_witness()
+            .is_field()
+        {
+            value
+        } else {
+            b.cast_to_field(value)
+        }
     }
 }
