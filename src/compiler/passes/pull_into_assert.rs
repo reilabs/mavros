@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::types::TypeInfo,
+    analysis::types::{FunctionTypeInfo, TypeInfo},
     flow_analysis::FlowAnalysis,
+    ir::r#type::TypeExpr,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BinaryArithOpKind, HLSSA, Instruction, OpCode, ValueId},
 };
@@ -18,8 +19,11 @@ impl Pass for PullIntoAssert {
     fn name(&self) -> &'static str {
         "pull_into_assert"
     }
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        self.do_run(ssa);
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
+    }
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
     }
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id(), TypeInfo::id()]
@@ -31,8 +35,9 @@ impl PullIntoAssert {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut HLSSA) {
-        for (_, function) in ssa.iter_functions_mut() {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
+        for (function_id, function) in ssa.iter_functions_mut() {
+            let function_type_info = type_info.get_function(*function_id);
             let mut uses: HashMap<ValueId, usize> = HashMap::new();
             let mut defs: HashMap<ValueId, OpCode> = HashMap::new();
 
@@ -54,10 +59,10 @@ impl PullIntoAssert {
                 for instruction in block.take_instructions().into_iter() {
                     match instruction {
                         OpCode::AssertEq { lhs, rhs } => {
-                            let mut pull = self.try_pull(lhs, &uses, &defs);
+                            let mut pull = self.try_pull(lhs, &uses, &defs, function_type_info);
                             let mut other_op = rhs;
                             if pull.is_none() {
-                                pull = self.try_pull(rhs, &uses, &defs);
+                                pull = self.try_pull(rhs, &uses, &defs, function_type_info);
                                 other_op = lhs;
                             }
 
@@ -93,6 +98,7 @@ impl PullIntoAssert {
         value: ValueId,
         uses: &HashMap<ValueId, usize>,
         defs: &HashMap<ValueId, OpCode>,
+        function_type_info: &FunctionTypeInfo,
     ) -> Option<PulledProduct> {
         if *uses.get(&value).unwrap_or(&0) > 1 {
             return None;
@@ -103,13 +109,21 @@ impl PullIntoAssert {
             // them into the constants or R1CS constraints
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
-                result: _,
+                result,
                 lhs,
                 rhs,
-            } => Some(PulledProduct {
-                lhs: *lhs,
-                rhs: *rhs,
-            }),
+            } => {
+                // Only pull field-typed muls into AssertR1C; uint muls
+                // need range-checking and can't be directly constrained.
+                let result_type = function_type_info.get_value_type(*result);
+                match result_type.strip_witness().expr {
+                    TypeExpr::Field => Some(PulledProduct {
+                        lhs: *lhs,
+                        rhs: *rhs,
+                    }),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
