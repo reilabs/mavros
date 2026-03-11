@@ -675,8 +675,7 @@ impl ExplicitWitness {
                 };
                 self.gen_witness_truncate(b, value, to_bits, cond_field, result);
             }
-            OpCode::Cast { .. }
-            | OpCode::Const { .. } => {
+            OpCode::Cast { .. } | OpCode::Const { .. } => {
                 // Pure computations — no constraints. Emit unconditionally.
                 b.push(inner);
             }
