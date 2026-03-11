@@ -896,6 +896,19 @@ impl ExplicitWitness {
         max_bits: usize,
         flag: ValueId,
     ) {
+        if max_bits == 1 {
+            // Boolean check: flag * value * (1 - value) = 0
+            // Split into: flag_v = flag * value, then flag_v * (1 - value) = 0
+            let flag_v_hint = b.mul(flag, value);
+            let flag_v_plain = b.value_of(flag_v_hint);
+            let flag_v = b.write_witness(flag_v_plain);
+            b.constrain(flag, value, flag_v);
+            let one = b.field_const(Field::ONE);
+            let one_minus_v = b.sub(one, value);
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(flag_v, one_minus_v, zero);
+            return;
+        }
         assert!(max_bits % 8 == 0); // TODO
         let chunks = max_bits / 8;
         let pure_value = b.value_of(value);
