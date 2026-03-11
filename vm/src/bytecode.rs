@@ -766,28 +766,16 @@ mod def {
         }
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
         let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
-        if flag_u64 == 0 {
-            // Conditional lookup disabled: skip multiplicity bump, write key for B matching
-            unsafe {
-                *(vm.data.as_forward.lookups_a as *mut u64) = 0;
-                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-                *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
-                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-                *(vm.data.as_forward.lookups_c as *mut u64) = 0;
-                vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
-            }
-            return;
-        }
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
         unsafe {
             let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
-            *(ptr as *mut u64) += 1; // Use u64 for counting, convert to field later
+            *(ptr as *mut u64) += flag_u64;
             *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
             vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
             *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
             vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-            *(vm.data.as_forward.lookups_c as *mut u64) = 1;
+            *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
             vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
         }
     }
@@ -890,10 +878,6 @@ mod def {
             r
         };
 
-        // When flag=0, forward witnesses (y) are all zero, so all AD coefficients
-        // for this lookup are zero. We still advance the offset counters above.
-        // The constraint is y*(α-key)=flag; when flag=0 and y=0, all bumps vanish.
-        // We only need to do bumps when the lookup is active.
         unsafe {
             // bump for the RHS of the sum
             *vm.data.as_ad.out_dc.offset(current_inv_wit_offset as isize) += inv_sum_coeff;
