@@ -1389,5 +1389,4 @@ impl<'a> ExpressionConverter<'a> {
             Some(results[0])
         }
     }
-
 }

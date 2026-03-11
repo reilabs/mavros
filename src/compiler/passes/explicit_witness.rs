@@ -704,7 +704,8 @@ impl ExplicitWitness {
                 self.gen_witness_truncate(b, value, to_bits, cond_field, result);
             }
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub | BinaryArithOpKind::Mul),
+                kind:
+                    kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub | BinaryArithOpKind::Mul),
                 result,
                 lhs: l,
                 rhs: r,
