@@ -17,6 +17,7 @@ noirc_frontend = { git = "https://github.com/noir-lang/noir.git", branch = "mast
 noirc_abi = { git = "https://github.com/noir-lang/noir.git", branch = "master", package = "noirc_abi" }
 
 clap = { version = "4.5.17", features = ["unstable-v5", "derive"] }
+itertools = "0.14.0"
 thiserror = "2.0.12"
 tempfile = "3.19.1"
 petgraph = "0.6.5" # Cannot bump as it is currently required to be this version by a dependency
