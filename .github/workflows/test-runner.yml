@@ -18,6 +18,14 @@ jobs:
       - name: Check code formatting
         run: cargo fmt --all --check
 
+  unused_deps:
+    name: check for unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: machete
+        uses: bnjbvr/cargo-machete@main
+
   test:
     runs-on: ubuntu-latest
     steps:
