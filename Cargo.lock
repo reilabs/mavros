@@ -1868,15 +1868,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indoc"
-version = "2.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "inkwell"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2174,7 +2165,6 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "fm",
- "indoc",
  "inkwell",
  "mavros-artifacts",
  "mavros-vm",
@@ -2184,7 +2174,6 @@ dependencies = [
  "noirc_driver",
  "noirc_errors",
  "noirc_frontend",
- "opcode-gen",
  "petgraph 0.6.5",
  "plotters",
  "rand 0.8.5",
