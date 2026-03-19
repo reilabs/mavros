@@ -19,7 +19,7 @@ use crate::compiler::llssa::{
 };
 use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
-    ValueId,
+    TupleIdx, ValueId,
 };
 
 // =============================================================================
@@ -34,6 +34,7 @@ fn lower_type(ty: &Type) -> LLType {
         TypeExpr::Array(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         TypeExpr::WitnessOf(_) => LLType::Ptr,
+        TypeExpr::Tuple(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
@@ -45,6 +46,7 @@ fn elem_struct(ty: &Type) -> LLStruct {
         TypeExpr::Field => LLStruct::field_elem(),
         TypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        TypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
     }
@@ -53,6 +55,37 @@ fn elem_struct(ty: &Type) -> LLStruct {
 /// Get the RC'd array struct for an Array<T, N> type.
 fn rc_array_struct(elem_type: &Type, count: usize) -> LLStruct {
     LLStruct::rc_array(elem_struct(elem_type), count)
+}
+
+/// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
+fn tuple_field_type(ty: &Type) -> LLFieldType {
+    match &ty.expr {
+        TypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
+        TypeExpr::U(bits) => LLFieldType::Int(*bits as u32),
+        TypeExpr::Array(..) => LLFieldType::Ptr,
+        TypeExpr::Tuple(_) => LLFieldType::Ptr,
+        TypeExpr::WitnessOf(_) => LLFieldType::Ptr,
+        _ => panic!("Unsupported tuple element type: {}", ty),
+    }
+}
+
+/// Build the LLStruct layout for a heap-allocated RC'd tuple.
+/// Layout: { Inline(RcHeader), field0, field1, ... }
+fn rc_tuple_struct(element_types: &[Type]) -> LLStruct {
+    let mut fields = vec![LLFieldType::Inline(LLStruct::rc_header())];
+    for elem_ty in element_types {
+        fields.push(tuple_field_type(elem_ty));
+    }
+    LLStruct::new(fields)
+}
+
+/// Check if a type needs a regular (non-AD) drop function.
+fn needs_regular_drop(ty: &Type) -> bool {
+    match &ty.expr {
+        TypeExpr::Array(..) | TypeExpr::Tuple(_) => true,
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessOf(_) => false,
+        _ => panic!("needs_regular_drop: unsupported type {}", ty),
+    }
 }
 
 /// Extract (element_type, count) from an HLSSA array type.
@@ -72,8 +105,8 @@ struct DropFnEntry {
     fn_id: FunctionId,
 }
 
-/// Get or create a drop function for the given array type.
-/// Recursively creates drop functions for inner array elements.
+/// Get or create a drop function for the given heap-allocated type.
+/// Recursively creates drop functions for inner heap-allocated elements.
 fn get_or_create_drop_fn(
     ty: &Type,
     llssa: &mut LLSSA,
@@ -86,11 +119,21 @@ fn get_or_create_drop_fn(
         }
     }
 
-    // Recursively create drop fn for inner array elements first
-    if let TypeExpr::Array(inner, _) = &ty.expr {
-        if matches!(inner.expr, TypeExpr::Array(..)) {
-            get_or_create_drop_fn(inner, llssa, drop_fns);
+    // Recursively create drop fns for inner heap-allocated elements first
+    match &ty.expr {
+        TypeExpr::Array(inner, _) => {
+            if needs_regular_drop(inner) {
+                get_or_create_drop_fn(inner, llssa, drop_fns);
+            }
         }
+        TypeExpr::Tuple(elements) => {
+            for elem in elements {
+                if needs_regular_drop(elem) {
+                    get_or_create_drop_fn(elem, llssa, drop_fns);
+                }
+            }
+        }
+        _ => {}
     }
 
     let fn_id = llssa.add_function(format!("drop_{}", ty));
@@ -553,6 +596,31 @@ fn lower_instruction(
             }
         }
 
+        OpCode::MkTuple {
+            result,
+            elems,
+            element_types,
+        } => {
+            lower_mk_tuple(e, val_map, *result, elems, element_types);
+        }
+
+        OpCode::TupleProj {
+            result,
+            tuple,
+            idx: TupleIdx::Static(field_idx),
+        } => {
+            lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *field_idx);
+        }
+
+        OpCode::TupleProj {
+            idx: TupleIdx::Dynamic(..),
+            ..
+        } => {
+            panic!(
+                "Dynamic TupleProj should have been lowered to static by struct_access_simplifier"
+            );
+        }
+
         _ => panic!(
             "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
@@ -595,6 +663,60 @@ fn lower_mk_array(
     }
 
     val_map.insert(result, arr);
+}
+
+/// Lower MkTuple to heap allocation + RC init + field stores.
+fn lower_mk_tuple(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    elems: &[ValueId],
+    element_types: &[Type],
+) {
+    let rc_struct = rc_tuple_struct(element_types);
+
+    // Allocate
+    let tuple_ptr = e.heap_alloc(rc_struct.clone(), None);
+
+    // Init RC to 1
+    let rc_hdr = e.struct_field_ptr(tuple_ptr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // Store each element into its field (fields are at index 1, 2, 3, ...)
+    for (i, elem) in elems.iter().enumerate() {
+        let field_ptr = e.struct_field_ptr(tuple_ptr, rc_struct.clone(), i + 1);
+        let ll_elem = val_map[elem];
+        e.ll_store(field_ptr, ll_elem);
+    }
+
+    val_map.insert(result, tuple_ptr);
+}
+
+/// Lower TupleProj(Static) to StructFieldPtr + Load.
+fn lower_tuple_proj(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    result: ValueId,
+    tuple: ValueId,
+    field_idx: usize,
+) {
+    let tuple_type = fn_type_info.get_value_type(tuple);
+    let element_types = tuple_type.get_tuple_elements();
+    let rc_struct = rc_tuple_struct(&element_types);
+
+    let ll_tuple = val_map[&tuple];
+
+    // Field is at index field_idx + 1 (field 0 is RC header)
+    let field_ptr = e.struct_field_ptr(ll_tuple, rc_struct, field_idx + 1);
+
+    // Load the field value
+    let field_ll_type = lower_type(&element_types[field_idx]);
+    let val = e.ll_load(field_ptr, field_ll_type);
+
+    val_map.insert(result, val);
 }
 
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
@@ -647,7 +769,7 @@ fn lower_array_set(
     let (et, count) = array_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
-    let elem_is_rc = matches!(et.expr, TypeExpr::Array(..));
+    let elem_is_rc = needs_regular_drop(et);
 
     let inner_drop_fn = if elem_is_rc {
         Some(get_or_create_drop_fn(et, llssa, drop_fns))
@@ -655,8 +777,11 @@ fn lower_array_set(
         None
     };
     let inner_rc_struct = if elem_is_rc {
-        let (inner_et, inner_count) = array_info(et);
-        Some(rc_array_struct(inner_et, inner_count))
+        Some(match &et.expr {
+            TypeExpr::Array(inner_et, inner_count) => rc_array_struct(inner_et, *inner_count),
+            TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+            _ => panic!("inner_rc_struct: unexpected heap type {}", et),
+        })
     } else {
         None
     };
@@ -758,13 +883,17 @@ fn lower_rc_bump(
     n: usize,
     value: ValueId,
 ) {
-    let arr_type = fn_type_info.get_value_type(value);
-    let (et, count) = array_info(arr_type);
-    let rc_struct = rc_array_struct(et, count);
+    let val_type = fn_type_info.get_value_type(value);
 
-    let ll_arr = val_map[&value];
+    let rc_struct = match &val_type.expr {
+        TypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
+        TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+        _ => panic!("lower_rc_bump: unexpected type {}", val_type),
+    };
 
-    let hdr = e.struct_field_ptr(ll_arr, rc_struct, 0);
+    let ll_val = val_map[&value];
+
+    let hdr = e.struct_field_ptr(ll_val, rc_struct, 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
     let rc = e.ll_load(rc_ptr, LLType::i64());
     let n_val = e.int_const(64, n as u64);
@@ -1236,7 +1365,16 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     }
 }
 
-/// Generate a type-specific drop function.
+/// Generate a type-specific drop function for arrays or tuples.
+fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
+    match &ty.expr {
+        TypeExpr::Array(..) => generate_array_drop_function(ty, drop_fns),
+        TypeExpr::Tuple(elements) => generate_tuple_drop_function(elements, ty, drop_fns),
+        _ => panic!("generate_drop_function: unexpected type {}", ty),
+    }
+}
+
+/// Generate a drop function for an RC'd array.
 ///
 /// Pseudocode:
 ///   fn drop(ptr):
@@ -1246,11 +1384,11 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
 ///         drop(ptr.data[i])
 ///       free(ptr)
 ///     return
-fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
+fn generate_array_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
     let (et, count) = array_info(ty);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
-    let elem_is_rc = matches!(et.expr, TypeExpr::Array(..));
+    let elem_is_rc = needs_regular_drop(et);
 
     let mut func = LLFunction::empty(format!("drop_{}", ty));
     let entry = func.get_entry_id();
@@ -1289,6 +1427,71 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
                         e.call(inner_drop_fn, vec![elem_val], 0);
                         vec![]
                     });
+                }
+                e.free(ptr);
+                vec![]
+            },
+            |_| vec![],
+        );
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate a drop function for an RC'd tuple.
+///
+/// Pseudocode:
+///   fn drop(ptr):
+///     rc = --ptr.header.rc
+///     if rc == 0:
+///       for each heap-allocated field i:
+///         drop_FieldType(ptr.field[i+1])
+///       free(ptr)
+///     return
+fn generate_tuple_drop_function(
+    element_types: &[Type],
+    ty: &Type,
+    drop_fns: &[DropFnEntry],
+) -> LLFunction {
+    let rc_struct = rc_tuple_struct(element_types);
+
+    let mut func = LLFunction::empty(format!("drop_{}", ty));
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let ptr = e.add_parameter(LLType::Ptr);
+
+        // Decrement RC
+        let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
+        let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+        let rc = e.ll_load(rc_ptr, LLType::i64());
+        let one = e.int_const(64, 1);
+        let new_rc = e.int_sub(rc, one);
+        e.ll_store(rc_ptr, new_rc);
+
+        // If RC hit zero, drop inner heap-allocated elements and free
+        let zero = e.int_const(64, 0);
+        let dead = e.int_eq(new_rc, zero);
+        e.build_if_else(
+            dead,
+            vec![],
+            |e| {
+                for (i, elem_ty) in element_types.iter().enumerate() {
+                    if needs_regular_drop(elem_ty) {
+                        let inner_drop_fn = drop_fns
+                            .iter()
+                            .find(|entry| entry.hlssa_type == *elem_ty)
+                            .expect("inner drop fn should exist for tuple element")
+                            .fn_id;
+
+                        // Field is at index i + 1 (field 0 is RC header)
+                        let field_ptr = e.struct_field_ptr(ptr, rc_struct.clone(), i + 1);
+                        let field_val = e.ll_load(field_ptr, LLType::Ptr);
+                        e.call(inner_drop_fn, vec![field_val], 0);
+                    }
                 }
                 e.free(ptr);
                 vec![]
