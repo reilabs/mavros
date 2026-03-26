@@ -287,7 +287,10 @@ impl ExplicitWitness {
                         self.gen_witness_divmod(b, l, r, bits, kind, one, res, l_taint, r_taint);
                     }
                     _ => {
-                        assert!(kind == BinaryArithOpKind::Div, "Modulo is not defined on field elements");
+                        assert!(
+                            kind == BinaryArithOpKind::Div,
+                            "Modulo is not defined on field elements"
+                        );
                         self.gen_witness_field_div(b, l, r, l_taint, r_taint, res);
                     }
                 }
@@ -837,14 +840,19 @@ impl ExplicitWitness {
                 match l_type.strip_witness().expr {
                     TypeExpr::U(bits) if l_taint || r_taint => {
                         let cond_field = self.ensure_field(b, function_type_info, condition);
-                        self.gen_witness_divmod(b, l, r, bits, kind, cond_field, res, l_taint, r_taint);
+                        self.gen_witness_divmod(
+                            b, l, r, bits, kind, cond_field, res, l_taint, r_taint,
+                        );
                     }
                     TypeExpr::U(_) => {
                         // Both pure: emit unconditionally
                         b.push(inner);
                     }
                     _ => {
-                        assert!(kind == BinaryArithOpKind::Div, "Modulo is not defined on field elements");
+                        assert!(
+                            kind == BinaryArithOpKind::Div,
+                            "Modulo is not defined on field elements"
+                        );
                         if l_taint || r_taint {
                             // Field div under guard with witnesses — not yet supported
                             panic!("Guarded field division with witnesses not yet supported");
@@ -1080,7 +1088,11 @@ impl ExplicitWitness {
     ) {
         // Get pure (non-witness) versions for hint computation — integer arithmetic
         let a_pure = if l_taint { b.value_of(a) } else { a };
-        let b_pure = if r_taint { b.value_of(divisor) } else { divisor };
+        let b_pure = if r_taint {
+            b.value_of(divisor)
+        } else {
+            divisor
+        };
         let q_hint = b.div(a_pure, b_pure);
         let qb = b.mul(q_hint, b_pure);
         let r_hint = b.sub(a_pure, qb);

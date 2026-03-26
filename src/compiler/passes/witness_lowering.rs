@@ -243,7 +243,9 @@ impl WitnessLowering {
                                         });
                                     }
                                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
-                                        panic!("Div/Mod is not supported for witness-pure arithmetic")
+                                        panic!(
+                                            "Div/Mod is not supported for witness-pure arithmetic"
+                                        )
                                     }
                                     BinaryArithOpKind::Sub => {
                                         let pure_refed = emitter.cast_to_witness_of(pure);
