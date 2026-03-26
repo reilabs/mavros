@@ -596,13 +596,14 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryArithOpKind {
     Add,
     Mul,
     Div,
     Sub,
     And,
+    Mod,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -952,6 +953,7 @@ impl Instruction for OpCode {
                     BinaryArithOpKind::Mul => "*",
                     BinaryArithOpKind::Div => "/",
                     BinaryArithOpKind::And => "&",
+                    BinaryArithOpKind::Mod => "%",
                 };
                 format!(
                     "v{}{} = v{} {} v{}",

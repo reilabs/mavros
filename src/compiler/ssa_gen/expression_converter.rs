@@ -304,9 +304,7 @@ impl<'a> ExpressionConverter<'a> {
                 let not_and = e.not(and_result);
                 e.and(or_result, not_and)
             }
-            BinaryOpKind::Modulo => {
-                todo!("Modulo operator not yet supported")
-            }
+            BinaryOpKind::Modulo => e.modulo(lhs, rhs),
             BinaryOpKind::ShiftLeft | BinaryOpKind::ShiftRight => {
                 todo!("Shift operators not yet supported")
             }

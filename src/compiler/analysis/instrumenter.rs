@@ -210,7 +210,7 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Div => match (self, b) {
+            BinaryArithOpKind::Div | BinaryArithOpKind::Mod => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a / b),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
                 (_, Value::WitnessOf(b)) => match b.as_ref() {

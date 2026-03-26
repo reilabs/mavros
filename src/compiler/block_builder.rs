@@ -62,6 +62,17 @@ pub trait HLEmitter {
         r
     }
 
+    fn modulo(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mod,
+            result: r,
+            lhs,
+            rhs,
+        });
+        r
+    }
+
     fn and(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::BinaryArithOp {

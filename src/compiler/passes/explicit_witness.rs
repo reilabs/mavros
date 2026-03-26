@@ -267,16 +267,30 @@ impl ExplicitWitness {
                 }
             }
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
-                result: _,
+                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
+                result: res,
                 lhs: l,
                 rhs: r,
             } => {
                 let l_taint = function_type_info.get_value_type(l).is_witness_of();
                 let r_taint = function_type_info.get_value_type(r).is_witness_of();
-                assert!(!l_taint);
-                assert!(!r_taint);
-                b.push(instruction);
+
+                if !l_taint && !r_taint {
+                    b.push(instruction);
+                    return;
+                }
+
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(bits) => {
+                        let one = b.field_const(Field::ONE);
+                        self.gen_witness_divmod(b, l, r, bits, kind, one, res, l_taint, r_taint);
+                    }
+                    _ => {
+                        assert!(kind == BinaryArithOpKind::Div, "Modulo is not defined on field elements");
+                        self.gen_witness_field_div(b, l, r, l_taint, r_taint, res);
+                    }
+                }
             }
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And,
@@ -811,6 +825,34 @@ impl ExplicitWitness {
                     }
                 }
             }
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
+                result: res,
+                lhs: l,
+                rhs: r,
+            } => {
+                let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(bits) if l_taint || r_taint => {
+                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        self.gen_witness_divmod(b, l, r, bits, kind, cond_field, res, l_taint, r_taint);
+                    }
+                    TypeExpr::U(_) => {
+                        // Both pure: emit unconditionally
+                        b.push(inner);
+                    }
+                    _ => {
+                        assert!(kind == BinaryArithOpKind::Div, "Modulo is not defined on field elements");
+                        if l_taint || r_taint {
+                            // Field div under guard with witnesses — not yet supported
+                            panic!("Guarded field division with witnesses not yet supported");
+                        }
+                        b.push(inner);
+                    }
+                }
+            }
             OpCode::Cast { .. } | OpCode::Const { .. } => {
                 // Pure computations — no constraints. Emit unconditionally.
                 b.push(inner);
@@ -1013,6 +1055,116 @@ impl ExplicitWitness {
         let diff = b.sub(result, value);
         let zero = b.field_const(Field::ZERO);
         b.constrain(flag, diff, zero);
+    }
+
+    /// Integer div/mod gadget for witness variables.
+    ///
+    /// Given `a / b` or `a % b` on U(bits) with at least one witness operand:
+    /// - Compute q and r as hints (pure VM ops)
+    /// - Write q and r as witnesses
+    /// - Constrain: q * b = a - r
+    /// - Rangecheck q, r to `bits`
+    /// - Rangecheck (b - r - 1) to `bits` (proves r < b)
+    /// - Return q (for Div) or r (for Mod)
+    fn gen_witness_divmod(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        a: ValueId,
+        divisor: ValueId,
+        bits: usize,
+        kind: BinaryArithOpKind,
+        flag: ValueId,
+        result: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+    ) {
+        // Get pure (non-witness) versions for hint computation — integer arithmetic
+        let a_pure = if l_taint { b.value_of(a) } else { a };
+        let b_pure = if r_taint { b.value_of(divisor) } else { divisor };
+        let q_hint = b.div(a_pure, b_pure);
+        let qb = b.mul(q_hint, b_pure);
+        let r_hint = b.sub(a_pure, qb);
+
+        // Write witnesses (cast to field first)
+        let q_hint_field = b.cast_to_field(q_hint);
+        let r_hint_field = b.cast_to_field(r_hint);
+        let q_wit = b.write_witness(q_hint_field);
+        let r_wit = b.write_witness(r_hint_field);
+
+        // Cast operands to field for constraints
+        let a_field = b.cast_to_field(a);
+        let b_field = b.cast_to_field(divisor);
+
+        // Constraint: q * b = a - r
+        let a_minus_r = b.sub(a_field, r_wit);
+        b.constrain(q_wit, b_field, a_minus_r);
+
+        // Rangecheck q and r
+        self.gen_witness_rangecheck(b, q_wit, bits, flag);
+        self.gen_witness_rangecheck(b, r_wit, bits, flag);
+
+        // Assert r < b via rangecheck(b - r - 1, bits)
+        let one = b.field_const(Field::ONE);
+        let b_minus_r = b.sub(b_field, r_wit);
+        let b_minus_r_minus_1 = b.sub(b_minus_r, one);
+        self.gen_witness_rangecheck(b, b_minus_r_minus_1, bits, flag);
+
+        // Cast result
+        let wit_val = match kind {
+            BinaryArithOpKind::Div => q_wit,
+            BinaryArithOpKind::Mod => r_wit,
+            _ => unreachable!(),
+        };
+        b.push(OpCode::Cast {
+            result,
+            value: wit_val,
+            target: CastTarget::U(bits),
+        });
+    }
+
+    /// Field division with witnesses: q * b = a
+    fn gen_witness_field_div(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        a: ValueId,
+        divisor: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+        result: ValueId,
+    ) {
+        if !l_taint && r_taint {
+            // Only rhs is witness: q = a / b is non-linear
+            let a_pure = b.value_of(a);
+            let b_pure = b.value_of(divisor);
+            let q_hint = b.div(a_pure, b_pure);
+            let q_hint_field = b.cast_to_field(q_hint);
+            b.push(OpCode::WriteWitness {
+                result: Some(result),
+                value: q_hint_field,
+                pinned: false,
+            });
+            b.constrain(result, divisor, a);
+        } else if l_taint && !r_taint {
+            // Only lhs is witness: q = a * (1/b) is linear, pass through
+            b.push(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Div,
+                result,
+                lhs: a,
+                rhs: divisor,
+            });
+        } else {
+            // Both witness: q * b = a
+            let a_pure = b.value_of(a);
+            let b_pure = b.value_of(divisor);
+            let q_hint = b.div(a_pure, b_pure);
+            let q_hint_field = b.cast_to_field(q_hint);
+            b.push(OpCode::WriteWitness {
+                result: Some(result),
+                value: q_hint_field,
+                pinned: false,
+            });
+            b.constrain(result, divisor, a);
+        }
     }
 
     fn ensure_field(

@@ -408,6 +408,25 @@ impl CodeGen {
                     t => panic!("Unsupported type for division: {:?}", t),
                 },
                 ssa::OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Mod,
+                    result: val,
+                    lhs: op1,
+                    rhs: op2,
+                } => match &type_info.get_value_type(*val).expr {
+                    TypeExpr::Field => {
+                        panic!("Modulo is not defined on field elements")
+                    }
+                    TypeExpr::U(bits) => {
+                        let result = layouter.alloc_u64(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::ModU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
+                    t => panic!("Unsupported type for modulo: {:?}", t),
+                },
+                ssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Mul,
                     result: val,
                     lhs: op1,
