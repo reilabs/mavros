@@ -6,10 +6,7 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
-    ssa::{
-        CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, TupleIdx,
-        ValueId,
-    },
+    ssa::{CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, ValueId},
 };
 
 pub struct TypeInfo {
@@ -487,16 +484,12 @@ impl Types {
                 flag: _,
             } => Ok(()),
             OpCode::TupleProj { result, tuple, idx } => {
-                if let TupleIdx::Static(sz) = idx {
-                    let tuple_type = function_info.values.get(tuple).ok_or_else(|| {
-                        format!("Tuple value {:?} not found in type assignments", tuple)
-                    })?;
-                    let element_type = tuple_type.get_tuple_element(*sz);
-                    function_info.values.insert(*result, element_type);
-                    Ok(())
-                } else {
-                    panic!("Dynamic TupleProj should not appear here")
-                }
+                let tuple_type = function_info.values.get(tuple).ok_or_else(|| {
+                    format!("Tuple value {:?} not found in type assignments", tuple)
+                })?;
+                let element_type = tuple_type.get_tuple_element(*idx);
+                function_info.values.insert(*result, element_type);
+                Ok(())
             }
             OpCode::MkTuple {
                 result,

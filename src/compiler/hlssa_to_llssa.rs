@@ -19,7 +19,7 @@ use crate::compiler::llssa::{
 };
 use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
-    TupleIdx, ValueId,
+    ValueId,
 };
 
 // =============================================================================
@@ -604,21 +604,8 @@ fn lower_instruction(
             lower_mk_tuple(e, val_map, *result, elems, element_types);
         }
 
-        OpCode::TupleProj {
-            result,
-            tuple,
-            idx: TupleIdx::Static(field_idx),
-        } => {
-            lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *field_idx);
-        }
-
-        OpCode::TupleProj {
-            idx: TupleIdx::Dynamic(..),
-            ..
-        } => {
-            panic!(
-                "Dynamic TupleProj should have been lowered to static by struct_access_simplifier"
-            );
+        OpCode::TupleProj { result, tuple, idx } => {
+            lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
         _ => panic!(

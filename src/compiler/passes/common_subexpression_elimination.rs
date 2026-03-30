@@ -5,10 +5,7 @@ use std::{
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{
-        BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, TupleIdx,
-        ValueId,
-    },
+    ssa::{BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, ValueId},
 };
 use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -452,10 +449,7 @@ impl CSE {
                         idx,
                     } => {
                         let tuple_expr = get_expr(&exprs, tuple);
-                        let index_expr = match idx {
-                            TupleIdx::Static(i) => Expr::UConst(64, *i as u128),
-                            TupleIdx::Dynamic(idx_value, _) => get_expr(&exprs, idx_value),
-                        };
+                        let index_expr = Expr::UConst(64, *idx as u128);
                         let result_expr = tuple_expr.tuple_get(&index_expr);
                         exprs.insert(*r, result_expr.clone());
                         result.entry(result_expr).or_default().push((

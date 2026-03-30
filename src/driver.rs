@@ -36,7 +36,6 @@ use crate::{
             remove_unreachable_functions::RemoveUnreachableFunctions,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
-            struct_access_simplifier::MakeStructAccessStatic,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -193,7 +192,6 @@ impl Driver {
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
-                Box::new(MakeStructAccessStatic::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
                 // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
