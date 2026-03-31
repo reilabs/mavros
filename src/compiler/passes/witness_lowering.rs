@@ -6,7 +6,7 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, BlockId, DMatrix, OpCode, SeqType, Terminator, TupleIdx, ValueId},
+    ssa::{BinaryArithOpKind, BlockId, DMatrix, OpCode, SeqType, Terminator, ValueId},
 };
 
 pub struct WitnessLowering {}
@@ -470,7 +470,7 @@ impl WitnessLowering {
                 );
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = emitter.tuple_proj(value, TupleIdx::Static(i));
+                    let proj = emitter.tuple_proj(value, i);
                     let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, emitter);
                     converted_elems.push(converted);
                 }

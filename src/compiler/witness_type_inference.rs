@@ -1,7 +1,7 @@
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
-    BlockId, CallTarget, FunctionId, HLSSA, OpCode, SsaAnnotator, Terminator, TupleIdx, ValueId,
+    BlockId, CallTarget, FunctionId, HLSSA, OpCode, SsaAnnotator, Terminator, ValueId,
 };
 use crate::compiler::witness_info::{ConstantWitness, FunctionWitnessType, WitnessType};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -716,21 +716,17 @@ impl WitnessTypeInference {
                         );
                     }
                     OpCode::TupleProj { result, tuple, idx } => {
-                        if let TupleIdx::Static(child_index) = idx {
-                            let tuple_wt = value_wt.get(tuple).unwrap();
-                            match tuple_wt {
-                                WitnessType::Tuple(top, children) => {
-                                    let elem_wt = &children[*child_index];
-                                    let result_wt = elem_wt
-                                        .with_toplevel_info((*top).join(elem_wt.toplevel_info()));
-                                    value_wt.insert(*result, result_wt);
-                                }
-                                _ => {
-                                    panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
-                                }
+                        let tuple_wt = value_wt.get(tuple).unwrap();
+                        match tuple_wt {
+                            WitnessType::Tuple(top, children) => {
+                                let elem_wt = &children[*idx];
+                                let result_wt = elem_wt
+                                    .with_toplevel_info((*top).join(elem_wt.toplevel_info()));
+                                value_wt.insert(*result, result_wt);
                             }
-                        } else {
-                            panic!("Tuple index should be static at this stage");
+                            _ => {
+                                panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
+                            }
                         }
                     }
                     OpCode::MkTuple {

@@ -4,9 +4,7 @@ use crate::compiler::{
     block_builder::{HLEmitter, HLFunctionBuilder},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
-    ssa::{
-        BlockId, CallTarget, ConstValue, FunctionId, HLSSA, OpCode, Terminator, TupleIdx, ValueId,
-    },
+    ssa::{BlockId, CallTarget, ConstValue, FunctionId, HLSSA, OpCode, Terminator, ValueId},
 };
 
 pub struct Defunctionalize {}
@@ -625,11 +623,6 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
         }
         OpCode::FreshWitness { result_type, .. } => replace_function_type(result_type),
         OpCode::ReadGlobal { result_type, .. } => replace_function_type(result_type),
-        OpCode::TupleProj { idx, .. } => {
-            if let TupleIdx::Dynamic(_, typ) = idx {
-                replace_function_type(typ);
-            }
-        }
         OpCode::Todo { result_types, .. } => {
             for t in result_types.iter_mut() {
                 replace_function_type(t);
