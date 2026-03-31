@@ -268,7 +268,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_to_u64_type,
             Some(Linkage::External),
         ));
-
     }
 
     fn define_write_functions(&mut self) {
@@ -712,7 +711,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .build_extract_value(limbs_val, 0, "limb0")
                     .unwrap()
                     .into_int_value();
-                let from_fn = self.field_from_u64_fn.expect("__field_from_u64 not declared");
+                let from_fn = self
+                    .field_from_u64_fn
+                    .expect("__field_from_u64 not declared");
                 let call = self
                     .builder
                     .build_call(from_fn, &[limb0.into()], "from_u64")
