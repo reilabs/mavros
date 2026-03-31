@@ -456,6 +456,17 @@ fn lower_instruction(
             }
         }
 
+        OpCode::Truncate {
+            result,
+            value,
+            to_bits,
+            ..
+        } => {
+            let ll_value = val_map[value];
+            let ll_result = e.truncate(ll_value, *to_bits as u32);
+            val_map.insert(*result, ll_result);
+        }
+
         OpCode::Not { result, value } => {
             let ll_value = val_map[value];
             let ll_result = e.not(ll_value);
