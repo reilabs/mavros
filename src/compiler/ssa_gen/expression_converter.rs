@@ -11,8 +11,7 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::block_builder::{HLEmitter, HLFunctionBuilder};
 use crate::compiler::ir::r#type::Type;
 use crate::compiler::ssa::{
-    BlockId, CastTarget, ConstValue, Endianness, FunctionId, OpCode, Radix, SeqType, TupleIdx,
-    ValueId,
+    BlockId, CastTarget, ConstValue, Endianness, FunctionId, OpCode, Radix, SeqType, ValueId,
 };
 
 use super::type_converter::TypeConverter;
@@ -387,9 +386,7 @@ impl<'a> ExpressionConverter<'a> {
                 let parent = *values.last().unwrap();
                 let child = match step {
                     AccessStep::Index(idx) => e.array_get(parent, *idx),
-                    AccessStep::Field(field_idx) => {
-                        e.tuple_proj(parent, TupleIdx::Static(*field_idx))
-                    }
+                    AccessStep::Field(field_idx) => e.tuple_proj(parent, *field_idx),
                 };
                 let child_type = match (step, types.last().unwrap()) {
                     (AccessStep::Index(_), AstType::Array(_, elem))
@@ -454,7 +451,7 @@ impl<'a> ExpressionConverter<'a> {
             let elem = if i == target_field {
                 new_value
             } else {
-                e.tuple_proj(tuple, TupleIdx::Static(i))
+                e.tuple_proj(tuple, i)
             };
             elements.push(elem);
             element_types.push(self.type_converter.convert_type(field_type));
@@ -849,9 +846,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         // Expressions always return materialized tuples, so just use projection
         let tuple = self.convert_expression(tuple_expr, b).unwrap();
-        let result = b
-            .block(self.current_block)
-            .tuple_proj(tuple, TupleIdx::Static(idx));
+        let result = b.block(self.current_block).tuple_proj(tuple, idx);
         Some(result)
     }
 

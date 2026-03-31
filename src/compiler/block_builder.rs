@@ -4,7 +4,7 @@ use crate::compiler::{
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
         Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
-        Terminator, TupleIdx, ValueId,
+        Terminator, ValueId,
     },
 };
 
@@ -228,7 +228,7 @@ pub trait HLEmitter {
         r
     }
 
-    fn tuple_proj(&mut self, tuple: ValueId, idx: TupleIdx) -> ValueId {
+    fn tuple_proj(&mut self, tuple: ValueId, idx: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::TupleProj {
             result: r,

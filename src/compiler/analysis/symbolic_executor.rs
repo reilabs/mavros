@@ -520,15 +520,11 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::OpCode::TupleProj {
                         result: r,
                         tuple: a,
-                        idx: i,
+                        idx,
                     } => {
-                        if let crate::compiler::ssa::TupleIdx::Static(index) = i {
-                            let a = scope[a.0 as usize].as_ref().unwrap();
-                            scope[r.0 as usize] =
-                                Some(a.tuple_get(*index, &fn_type_info.get_value_type(*r), ctx));
-                        } else {
-                            panic!("Dynamic tuple indexing should not appear here");
-                        }
+                        let a = scope[a.0 as usize].as_ref().unwrap();
+                        scope[r.0 as usize] =
+                            Some(a.tuple_get(*idx, &fn_type_info.get_value_type(*r), ctx));
                     }
                     crate::compiler::ssa::OpCode::MkTuple {
                         result,

@@ -7,7 +7,7 @@ use crate::{
         ir::r#type::{Type, TypeExpr},
         ssa::{
             self, BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId, HLBlock,
-            HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, TupleIdx, ValueId,
+            HLFunction, HLSSA, LookupTarget, MemOp, Radix, Terminator, ValueId,
         },
     },
     vm::{self, bytecode},
@@ -614,22 +614,18 @@ impl CodeGen {
                     tuple: t,
                     idx,
                 } => {
-                    if let TupleIdx::Static(i) = idx {
-                        let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                        emitter.push_op(bytecode::OpCode::TupleProj {
-                            res,
-                            tuple: layouter.get_value(*t),
-                            index: *i as u64,
-                            child_sizes: type_info
-                                .get_value_type(*t)
-                                .get_tuple_elements()
-                                .iter()
-                                .map(|elem_type| layouter.type_size(elem_type))
-                                .collect(),
-                        });
-                    } else {
-                        panic!("Dynamic tuple indexing should not appear here");
-                    }
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    emitter.push_op(bytecode::OpCode::TupleProj {
+                        res,
+                        tuple: layouter.get_value(*t),
+                        index: *idx as u64,
+                        child_sizes: type_info
+                            .get_value_type(*t)
+                            .get_tuple_elements()
+                            .iter()
+                            .map(|elem_type| layouter.type_size(elem_type))
+                            .collect(),
+                    });
                 }
                 ssa::OpCode::ArraySet {
                     result: r,

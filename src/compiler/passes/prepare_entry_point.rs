@@ -7,7 +7,7 @@ use crate::compiler::{
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BinaryArithOpKind, BlockId, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction,
-        HLSSA, OpCode, SeqType, TupleIdx, ValueId,
+        HLSSA, OpCode, SeqType, ValueId,
     },
 };
 
@@ -109,8 +109,8 @@ impl PrepareEntryPoint {
             }
             TypeExpr::Tuple(element_types) => {
                 for (i, elem_type) in element_types.iter().enumerate() {
-                    let result_elem = b.tuple_proj(result, TupleIdx::Static(i));
-                    let input_elem = b.tuple_proj(public_input, TupleIdx::Static(i));
+                    let result_elem = b.tuple_proj(result, i);
+                    let input_elem = b.tuple_proj(public_input, i);
                     Self::assert_eq_deep(b, result_elem, input_elem, elem_type);
                 }
             }
@@ -370,7 +370,7 @@ impl PrepareEntryPoint {
                     instructions.push(OpCode::TupleProj {
                         result: proj,
                         tuple: *value_id,
-                        idx: TupleIdx::Static(i),
+                        idx: i,
                     });
                     let (reconstructed_elem, child_instructions) =
                         Self::flatten_witness_reconstruct(&proj, elem_type, function);

@@ -205,12 +205,6 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum TupleIdx {
-    Static(usize),
-    Dynamic(ValueId, Type),
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CallTarget {
     Static(FunctionId),
     Dynamic(ValueId),
@@ -867,7 +861,7 @@ pub enum OpCode {
     TupleProj {
         result: ValueId,
         tuple: ValueId,
-        idx: TupleIdx,
+        idx: usize,
     },
     MkTuple {
         result: ValueId,
@@ -1294,26 +1288,15 @@ impl Instruction for OpCode {
                     typ
                 )
             }
-            OpCode::TupleProj { result, tuple, idx } => match idx {
-                TupleIdx::Dynamic(idx, _tp) => {
-                    format!(
-                        "v{}{} = v{}.v{}",
-                        result.0,
-                        annotate_value(*result),
-                        tuple.0,
-                        idx.0
-                    )
-                }
-                TupleIdx::Static(val) => {
-                    format!(
-                        "v{}{} = v{}.{}",
-                        result.0,
-                        annotate_value(*result),
-                        tuple.0,
-                        val
-                    )
-                }
-            },
+            OpCode::TupleProj { result, tuple, idx } => {
+                format!(
+                    "v{}{} = v{}.{}",
+                    result.0,
+                    annotate_value(*result),
+                    tuple.0,
+                    idx
+                )
+            }
             OpCode::MkTuple {
                 result,
                 elems,
@@ -1553,11 +1536,8 @@ impl Instruction for OpCode {
             Self::TupleProj {
                 result: _,
                 tuple,
-                idx,
-            } => match idx {
-                TupleIdx::Static(_size) => vec![tuple].into_iter(),
-                TupleIdx::Dynamic(idx, _tp) => vec![tuple, idx].into_iter(),
-            },
+                idx: _,
+            } => vec![tuple].into_iter(),
             OpCode::MkTuple {
                 result: _,
                 elems: e,

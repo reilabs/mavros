@@ -7,7 +7,7 @@ use crate::compiler::{
     block_builder::{HLBlockEmitter, HLEmitter},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    ssa::{BlockId, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, TupleIdx, ValueId},
+    ssa::{BlockId, HLBlock, HLFunction, HLSSA, OpCode, SeqType, Terminator, ValueId},
     witness_info::{FunctionWitnessType, WitnessType},
     witness_type_inference::WitnessTypeInference,
 };
@@ -544,7 +544,7 @@ impl WitnessCastInsertion {
                 );
                 let mut converted_elems = vec![];
                 for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = emitter.tuple_proj(value, TupleIdx::Static(i));
+                    let proj = emitter.tuple_proj(value, i);
                     let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, emitter);
                     converted_elems.push(converted);
                 }
@@ -644,7 +644,7 @@ impl WitnessCastInsertion {
                 assert_eq!(src_fields.len(), tgt_fields.len());
                 let mut converted_elems = vec![];
                 for (i, (sf, tf)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = emitter.tuple_proj(value, TupleIdx::Static(i));
+                    let proj = emitter.tuple_proj(value, i);
                     let converted = self.emit_strip_witness(proj, sf, tf, emitter);
                     converted_elems.push(converted);
                 }
