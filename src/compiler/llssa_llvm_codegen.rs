@@ -49,6 +49,7 @@ pub struct LLVMCodeGen<'ctx> {
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
+    field_sub_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     write_witness_fn: Option<FunctionValue<'ctx>>,
@@ -64,6 +65,8 @@ pub struct LLVMCodeGen<'ctx> {
     ad_accum_at_da_fn: Option<FunctionValue<'ctx>>,
     ad_accum_at_db_fn: Option<FunctionValue<'ctx>>,
     ad_accum_at_dc_fn: Option<FunctionValue<'ctx>>,
+    field_from_u64_fn: Option<FunctionValue<'ctx>>,
+    field_to_u64_fn: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -81,6 +84,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             vm_ptr: None,
             field_mul_fn: None,
             field_add_fn: None,
+            field_sub_fn: None,
             malloc_fn: None,
             free_fn: None,
             write_witness_fn: None,
@@ -95,6 +99,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ad_accum_at_da_fn: None,
             ad_accum_at_db_fn: None,
             ad_accum_at_dc_fn: None,
+            field_from_u64_fn: None,
+            field_to_u64_fn: None,
         };
 
         codegen.declare_runtime_functions();
@@ -181,6 +187,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .add_function("__field_add", field_add_type, None),
         );
 
+        // __field_sub(FieldElem, FieldElem) -> FieldElem
+        let field_sub_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_sub_fn = Some(
+            self.module
+                .add_function("__field_sub", field_sub_type, None),
+        );
+
         // __ad_next_d_coeff(vm*) -> FieldElem
         let ad_next_d_coeff_type = field_type.fn_type(&[ptr_type.into()], false);
         self.ad_next_d_coeff_fn = Some(self.module.add_function(
@@ -236,6 +249,23 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.ad_accum_at_dc_fn = Some(self.module.add_function(
             "__ad_accum_at_dc",
             ad_accum_at_type,
+            Some(Linkage::External),
+        ));
+
+        // __field_from_u64(i64) -> FieldElem
+        let i64_type = self.context.i64_type();
+        let field_from_u64_type = field_type.fn_type(&[i64_type.into()], false);
+        self.field_from_u64_fn = Some(self.module.add_function(
+            "__field_from_u64",
+            field_from_u64_type,
+            Some(Linkage::External),
+        ));
+
+        // __field_to_u64(FieldElem) -> i64
+        let field_to_u64_type = i64_type.fn_type(&[field_type.into()], false);
+        self.field_to_u64_fn = Some(self.module.add_function(
+            "__field_to_u64",
+            field_to_u64_type,
             Some(Linkage::External),
         ));
     }
@@ -538,6 +568,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .left()
                             .expect("field_add should return a value")
                     }
+                    FieldArithOp::Sub => {
+                        let sub_fn = self.field_sub_fn.expect("__field_sub not declared");
+                        let call_site = self
+                            .builder
+                            .build_call(sub_fn, &[lhs.into(), rhs.into()], "field_sub")
+                            .unwrap();
+                        call_site
+                            .try_as_basic_value()
+                            .left()
+                            .expect("field_sub should return a value")
+                    }
                     _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val);
@@ -659,6 +700,69 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
                 }
                 self.value_map.insert(*result, eq_acc.into());
+            }
+
+            LLOp::FieldFromLimbs { result, limbs } => {
+                // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_u64.
+                // We extract limb 0 (the low 64 bits) and call __field_from_u64.
+                let limbs_val = self.value_map[limbs].into_struct_value();
+                let limb0 = self
+                    .builder
+                    .build_extract_value(limbs_val, 0, "limb0")
+                    .unwrap()
+                    .into_int_value();
+                let from_fn = self
+                    .field_from_u64_fn
+                    .expect("__field_from_u64 not declared");
+                let call = self
+                    .builder
+                    .build_call(from_fn, &[limb0.into()], "from_u64")
+                    .unwrap();
+                let val = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__field_from_u64 should return a value");
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::FieldToLimbs { result, src } => {
+                // Convert Montgomery form to raw u64 via __field_to_u64.
+                let field_val = self.value_map[src];
+                let to_fn = self.field_to_u64_fn.expect("__field_to_u64 not declared");
+                let call = self
+                    .builder
+                    .build_call(to_fn, &[field_val.into()], "to_u64")
+                    .unwrap();
+                let u64_val = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__field_to_u64 should return a value")
+                    .into_int_value();
+                // Build a {i64, i64, i64, i64} struct with the value in limb 0 and zeros elsewhere
+                let field_struct_type = self.field_llvm_type().into_struct_type();
+                let zero = self.context.i64_type().const_zero();
+                let mut agg = field_struct_type.get_undef();
+                agg = self
+                    .builder
+                    .build_insert_value(agg, u64_val, 0, "l0")
+                    .unwrap()
+                    .into_struct_value();
+                agg = self
+                    .builder
+                    .build_insert_value(agg, zero, 1, "l1")
+                    .unwrap()
+                    .into_struct_value();
+                agg = self
+                    .builder
+                    .build_insert_value(agg, zero, 2, "l2")
+                    .unwrap()
+                    .into_struct_value();
+                agg = self
+                    .builder
+                    .build_insert_value(agg, zero, 3, "l3")
+                    .unwrap()
+                    .into_struct_value();
+                self.value_map.insert(*result, agg.into());
             }
 
             // ── Memory operations ───────────────────────────────────────

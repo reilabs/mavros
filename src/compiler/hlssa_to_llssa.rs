@@ -541,10 +541,35 @@ fn lower_instruction(
             value,
             target,
         } => {
+            let ll_value = val_map[value];
+            let source_type = fn_type_info.get_value_type(*value);
             match target {
                 CastTarget::WitnessOf => {
                     // Pure value → AD constant node
                     lower_ad_const_wrap(e, val_map, *result, *value);
+                }
+                CastTarget::Field => {
+                    // U(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
+                    let val64 = match &source_type.expr {
+                        TypeExpr::U(bits) if *bits < 64 => e.zext(ll_value, 64),
+                        TypeExpr::U(64) => ll_value,
+                        _ => panic!("Cast to Field from unsupported type: {}", source_type),
+                    };
+                    let zero = e.int_const(64, 0);
+                    let limbs = e.mk_struct(LLStruct::field_elem(), vec![val64, zero, zero, zero]);
+                    let field_val = e.field_from_limbs(limbs);
+                    val_map.insert(*result, field_val);
+                }
+                CastTarget::U(target_bits) => {
+                    // Field → U(n): FieldToLimbs, extract limb 0, truncate
+                    let limbs = e.field_to_limbs(ll_value);
+                    let limb0 = e.extract_field(limbs, LLStruct::field_elem(), 0);
+                    let ll_result = if *target_bits < 64 {
+                        e.truncate(limb0, *target_bits as u32)
+                    } else {
+                        limb0
+                    };
+                    val_map.insert(*result, ll_result);
                 }
                 _ => panic!(
                     "Unsupported cast target in HLSSA->LLSSA lowering: {:?}",
