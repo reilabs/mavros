@@ -427,6 +427,13 @@ fn lower_instruction(
             e.constrain(ll_a, ll_b, ll_c);
         }
 
+        OpCode::AssertEq { lhs, rhs } => {
+            let ll_lhs = val_map[lhs];
+            let ll_rhs = val_map[rhs];
+            let ll_one = make_field_one(e);
+            e.constrain(ll_lhs, ll_one, ll_rhs);
+        }
+
         OpCode::WriteWitness { result, value, .. } => {
             let ll_value = val_map[value];
             e.write_witness(ll_value);
@@ -1116,6 +1123,17 @@ fn lower_ad_rc_drop(
 fn make_field_zero(e: &mut LLBlockEmitter<'_>) -> ValueId {
     let z = e.int_const(64, 0);
     e.mk_struct(LLStruct::field_elem(), vec![z, z, z, z])
+}
+
+/// Construct a one field element as a struct value (Montgomery representation).
+fn make_field_one(e: &mut LLBlockEmitter<'_>) -> ValueId {
+    let one: ark_bn254::Fr = ark_ff::Field::ONE;
+    let limbs = one.0.0;
+    let l0 = e.int_const(64, limbs[0]);
+    let l1 = e.int_const(64, limbs[1]);
+    let l2 = e.int_const(64, limbs[2]);
+    let l3 = e.int_const(64, limbs[3]);
+    e.mk_struct(LLStruct::field_elem(), vec![l0, l1, l2, l3])
 }
 
 // =============================================================================
