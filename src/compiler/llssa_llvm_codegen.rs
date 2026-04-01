@@ -65,8 +65,8 @@ pub struct LLVMCodeGen<'ctx> {
     ad_accum_at_da_fn: Option<FunctionValue<'ctx>>,
     ad_accum_at_db_fn: Option<FunctionValue<'ctx>>,
     ad_accum_at_dc_fn: Option<FunctionValue<'ctx>>,
-    field_from_u64_fn: Option<FunctionValue<'ctx>>,
-    field_to_u64_fn: Option<FunctionValue<'ctx>>,
+    field_from_limbs_fn: Option<FunctionValue<'ctx>>,
+    field_to_limbs_fn: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -99,8 +99,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ad_accum_at_da_fn: None,
             ad_accum_at_db_fn: None,
             ad_accum_at_dc_fn: None,
-            field_from_u64_fn: None,
-            field_to_u64_fn: None,
+            field_from_limbs_fn: None,
+            field_to_limbs_fn: None,
         };
 
         codegen.declare_runtime_functions();
@@ -252,20 +252,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Some(Linkage::External),
         ));
 
-        // __field_from_u64(i64) -> FieldElem
-        let i64_type = self.context.i64_type();
-        let field_from_u64_type = field_type.fn_type(&[i64_type.into()], false);
-        self.field_from_u64_fn = Some(self.module.add_function(
-            "__field_from_u64",
-            field_from_u64_type,
+        // __field_from_limbs(FieldElem) -> FieldElem  (raw limbs → Montgomery)
+        let field_from_limbs_type = field_type.fn_type(&[field_type.into()], false);
+        self.field_from_limbs_fn = Some(self.module.add_function(
+            "__field_from_limbs",
+            field_from_limbs_type,
             Some(Linkage::External),
         ));
 
-        // __field_to_u64(FieldElem) -> i64
-        let field_to_u64_type = i64_type.fn_type(&[field_type.into()], false);
-        self.field_to_u64_fn = Some(self.module.add_function(
-            "__field_to_u64",
-            field_to_u64_type,
+        // __field_to_limbs(FieldElem) -> FieldElem  (Montgomery → raw limbs)
+        let field_to_limbs_type = field_type.fn_type(&[field_type.into()], false);
+        self.field_to_limbs_fn = Some(self.module.add_function(
+            "__field_to_limbs",
+            field_to_limbs_type,
             Some(Linkage::External),
         ));
     }
@@ -703,66 +702,37 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldFromLimbs { result, limbs } => {
-                // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_u64.
-                // We extract limb 0 (the low 64 bits) and call __field_from_u64.
-                let limbs_val = self.value_map[limbs].into_struct_value();
-                let limb0 = self
-                    .builder
-                    .build_extract_value(limbs_val, 0, "limb0")
-                    .unwrap()
-                    .into_int_value();
+                // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
+                let limbs_val = self.value_map[limbs];
                 let from_fn = self
-                    .field_from_u64_fn
-                    .expect("__field_from_u64 not declared");
+                    .field_from_limbs_fn
+                    .expect("__field_from_limbs not declared");
                 let call = self
                     .builder
-                    .build_call(from_fn, &[limb0.into()], "from_u64")
+                    .build_call(from_fn, &[limbs_val.into()], "from_limbs")
                     .unwrap();
                 let val = call
                     .try_as_basic_value()
                     .left()
-                    .expect("__field_from_u64 should return a value");
+                    .expect("__field_from_limbs should return a value");
                 self.value_map.insert(*result, val);
             }
 
             LLOp::FieldToLimbs { result, src } => {
-                // Convert Montgomery form to raw u64 via __field_to_u64.
+                // Convert Montgomery form to raw limbs via __field_to_limbs.
                 let field_val = self.value_map[src];
-                let to_fn = self.field_to_u64_fn.expect("__field_to_u64 not declared");
+                let to_fn = self
+                    .field_to_limbs_fn
+                    .expect("__field_to_limbs not declared");
                 let call = self
                     .builder
-                    .build_call(to_fn, &[field_val.into()], "to_u64")
+                    .build_call(to_fn, &[field_val.into()], "to_limbs")
                     .unwrap();
-                let u64_val = call
+                let val = call
                     .try_as_basic_value()
                     .left()
-                    .expect("__field_to_u64 should return a value")
-                    .into_int_value();
-                // Build a {i64, i64, i64, i64} struct with the value in limb 0 and zeros elsewhere
-                let field_struct_type = self.field_llvm_type().into_struct_type();
-                let zero = self.context.i64_type().const_zero();
-                let mut agg = field_struct_type.get_undef();
-                agg = self
-                    .builder
-                    .build_insert_value(agg, u64_val, 0, "l0")
-                    .unwrap()
-                    .into_struct_value();
-                agg = self
-                    .builder
-                    .build_insert_value(agg, zero, 1, "l1")
-                    .unwrap()
-                    .into_struct_value();
-                agg = self
-                    .builder
-                    .build_insert_value(agg, zero, 2, "l2")
-                    .unwrap()
-                    .into_struct_value();
-                agg = self
-                    .builder
-                    .build_insert_value(agg, zero, 3, "l3")
-                    .unwrap()
-                    .into_struct_value();
-                self.value_map.insert(*result, agg.into());
+                    .expect("__field_to_limbs should return a value");
+                self.value_map.insert(*result, val);
             }
 
             // ── Memory operations ───────────────────────────────────────
