@@ -1,0 +1,6 @@
+[package]
+name = "int_divmod"
+type = "bin"
+authors = [""]
+
+[dependencies]

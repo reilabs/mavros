@@ -361,6 +361,13 @@ mod def {
     }
 
     #[opcode]
+    fn mod_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+        unsafe {
+            *res = a % b;
+        }
+    }
+
+    #[opcode]
     fn mul_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a * b;

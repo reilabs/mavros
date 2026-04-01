@@ -17,6 +17,7 @@ enum Expr {
     Add(Vec<Expr>),
     Mul(Vec<Expr>),
     Div(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     FConst(ark_bn254::Fr),
     UConst(usize, u128),
@@ -73,6 +74,10 @@ impl Expr {
 
     pub fn div(&self, other: &Self) -> Self {
         Self::Div(Box::new(self.clone()), Box::new(other.clone()))
+    }
+
+    pub fn modulo(&self, other: &Self) -> Self {
+        Self::Mod(Box::new(self.clone()), Box::new(other.clone()))
     }
 
     pub fn sub(&self, other: &Self) -> Self {
@@ -141,6 +146,7 @@ impl Display for Expr {
                     .join(" * ")
             ),
             Self::Div(lhs, rhs) => write!(f, "({} / {})", lhs, rhs),
+            Self::Mod(lhs, rhs) => write!(f, "({} % {})", lhs, rhs),
             Self::Sub(lhs, rhs) => write!(f, "({} - {})", lhs, rhs),
             Self::FConst(value) => write!(f, "{}", value),
             Self::UConst(size, value) => write!(f, "u{}({})", size, value),
@@ -354,6 +360,17 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.lt(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    }
+                    OpCode::BinaryArithOp { kind: BinaryArithOpKind::Mod, result: r, lhs, rhs } => {
+                        let lhs_expr = get_expr(&exprs, lhs);
+                        let rhs_expr = get_expr(&exprs, rhs);
+                        let result_expr = lhs_expr.modulo(&rhs_expr);
                         exprs.insert(*r, result_expr.clone());
                         result.entry(result_expr).or_default().push((
                             block_id,

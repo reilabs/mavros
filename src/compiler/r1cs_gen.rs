@@ -431,6 +431,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => (a as u32) - (b as u32),
                     BinaryArithOpKind::Mul => (a as u32) * (b as u32),
                     BinaryArithOpKind::Div => (a as u32) / (b as u32),
+                    BinaryArithOpKind::Mod => (a as u32) % (b as u32),
                     BinaryArithOpKind::And => (a & b) as u32,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
@@ -443,6 +444,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => (a - b) as u32,
                     BinaryArithOpKind::Mul => (a * b) as u32,
                     BinaryArithOpKind::Div => (a / b) as u32,
+                    BinaryArithOpKind::Mod => (a % b) as u32,
                     BinaryArithOpKind::And => (a & b) as u32,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
@@ -455,6 +457,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => a - b,
                     BinaryArithOpKind::Mul => a * b,
                     BinaryArithOpKind::Div => a / b,
+                    BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
@@ -467,6 +470,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => a - b,
                     BinaryArithOpKind::Mul => a * b,
                     BinaryArithOpKind::Div => a / b,
+                    BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
@@ -479,6 +483,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => a - b,
                     BinaryArithOpKind::Mul => a * b,
                     BinaryArithOpKind::Div => a / b,
+                    BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
@@ -491,6 +496,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 BinaryArithOpKind::Sub => self.sub(b),
                 BinaryArithOpKind::Mul => self.mul(b),
                 BinaryArithOpKind::Div => self.div(b),
+                BinaryArithOpKind::Mod => {
+                    panic!("Modulo is not defined on field elements")
+                }
                 BinaryArithOpKind::And => {
                     panic!("Bitwise AND is not supported on field elements")
                 }

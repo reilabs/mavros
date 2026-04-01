@@ -144,6 +144,12 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *b,
             (BinaryArithOpKind::Add, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *self,
 
+            (BinaryArithOpKind::Mod, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
+                let res = a_val % b_val;
+                let res_v = ctx.u_const(s, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(s, res));
+                Self(res_v)
+            }
             (BinaryArithOpKind::And, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val & b_val;
                 let res_v = ctx.u_const(s, res);
