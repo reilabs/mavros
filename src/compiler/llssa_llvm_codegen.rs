@@ -150,6 +150,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.convert_struct_type(&LLStruct::field_elem())
     }
 
+    /// The LLVM type for raw (non-Montgomery) limbs: [4 x i64].
+    fn limbs_llvm_type(&self) -> BasicTypeEnum<'ctx> {
+        self.context.i64_type().array_type(4).into()
+    }
+
     // ── Runtime functions ───────────────────────────────────────────────
 
     fn declare_runtime_functions(&mut self) {
@@ -157,6 +162,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
         let void_type = self.context.void_type();
+        let limbs_type = self.limbs_llvm_type();
 
         // __field_mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
@@ -252,16 +258,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Some(Linkage::External),
         ));
 
-        // __field_from_limbs(FieldElem) -> FieldElem  (raw limbs → Montgomery)
-        let field_from_limbs_type = field_type.fn_type(&[field_type.into()], false);
+        // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
+        let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
         self.field_from_limbs_fn = Some(self.module.add_function(
             "__field_from_limbs",
             field_from_limbs_type,
             Some(Linkage::External),
         ));
 
-        // __field_to_limbs(FieldElem) -> FieldElem  (Montgomery → raw limbs)
-        let field_to_limbs_type = field_type.fn_type(&[field_type.into()], false);
+        // __field_to_limbs(FieldElem) -> [4 x i64]  (Montgomery → raw limbs)
+        let field_to_limbs_type = limbs_type.fn_type(&[field_type.into()], false);
         self.field_to_limbs_fn = Some(self.module.add_function(
             "__field_to_limbs",
             field_to_limbs_type,
@@ -703,13 +709,52 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldFromLimbs { result, limbs } => {
                 // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
-                let limbs_val = self.value_map[limbs];
+                // The value in the map is a struct {i64,i64,i64,i64}; convert to [4 x i64].
+                let struct_val = self.value_map[limbs].into_struct_value();
+                let l0 = self
+                    .builder
+                    .build_extract_value(struct_val, 0, "l0")
+                    .unwrap();
+                let l1 = self
+                    .builder
+                    .build_extract_value(struct_val, 1, "l1")
+                    .unwrap();
+                let l2 = self
+                    .builder
+                    .build_extract_value(struct_val, 2, "l2")
+                    .unwrap();
+                let l3 = self
+                    .builder
+                    .build_extract_value(struct_val, 3, "l3")
+                    .unwrap();
+                let arr_type = self.limbs_llvm_type().into_array_type();
+                let arr = arr_type.get_undef();
+                let arr = self
+                    .builder
+                    .build_insert_value(arr, l0, 0, "arr")
+                    .unwrap()
+                    .into_array_value();
+                let arr = self
+                    .builder
+                    .build_insert_value(arr, l1, 1, "arr")
+                    .unwrap()
+                    .into_array_value();
+                let arr = self
+                    .builder
+                    .build_insert_value(arr, l2, 2, "arr")
+                    .unwrap()
+                    .into_array_value();
+                let arr = self
+                    .builder
+                    .build_insert_value(arr, l3, 3, "arr")
+                    .unwrap()
+                    .into_array_value();
                 let from_fn = self
                     .field_from_limbs_fn
                     .expect("__field_from_limbs not declared");
                 let call = self
                     .builder
-                    .build_call(from_fn, &[limbs_val.into()], "from_limbs")
+                    .build_call(from_fn, &[arr.into()], "from_limbs")
                     .unwrap();
                 let val = call
                     .try_as_basic_value()
@@ -728,11 +773,38 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .builder
                     .build_call(to_fn, &[field_val.into()], "to_limbs")
                     .unwrap();
-                let val = call
+                let arr = call
                     .try_as_basic_value()
                     .left()
-                    .expect("__field_to_limbs should return a value");
-                self.value_map.insert(*result, val);
+                    .expect("__field_to_limbs should return a value")
+                    .into_array_value();
+                let l0 = self.builder.build_extract_value(arr, 0, "l0").unwrap();
+                let l1 = self.builder.build_extract_value(arr, 1, "l1").unwrap();
+                let l2 = self.builder.build_extract_value(arr, 2, "l2").unwrap();
+                let l3 = self.builder.build_extract_value(arr, 3, "l3").unwrap();
+                let field_struct = self.field_llvm_type().into_struct_type();
+                let s = field_struct.get_undef();
+                let s = self
+                    .builder
+                    .build_insert_value(s, l0, 0, "s")
+                    .unwrap()
+                    .into_struct_value();
+                let s = self
+                    .builder
+                    .build_insert_value(s, l1, 1, "s")
+                    .unwrap()
+                    .into_struct_value();
+                let s = self
+                    .builder
+                    .build_insert_value(s, l2, 2, "s")
+                    .unwrap()
+                    .into_struct_value();
+                let s = self
+                    .builder
+                    .build_insert_value(s, l3, 3, "s")
+                    .unwrap()
+                    .into_struct_value();
+                self.value_map.insert(*result, s.into());
             }
 
             // ── Memory operations ───────────────────────────────────────

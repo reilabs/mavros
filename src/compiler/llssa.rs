@@ -68,6 +68,16 @@ impl LLStruct {
         ])
     }
 
+    /// 4×i64 struct representing raw (non-Montgomery) limbs.
+    pub fn limbs() -> Self {
+        Self::new(vec![
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+        ])
+    }
+
     /// RC header: { Int(64) } — just a refcount.
     pub fn rc_header() -> Self {
         Self::new(vec![LLFieldType::Int(64)])

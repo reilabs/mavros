@@ -556,14 +556,14 @@ fn lower_instruction(
                         _ => panic!("Cast to Field from unsupported type: {}", source_type),
                     };
                     let zero = e.int_const(64, 0);
-                    let limbs = e.mk_struct(LLStruct::field_elem(), vec![val64, zero, zero, zero]);
+                    let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
                     let field_val = e.field_from_limbs(limbs);
                     val_map.insert(*result, field_val);
                 }
                 CastTarget::U(target_bits) => {
                     // Field → U(n): FieldToLimbs, extract limb 0, truncate
                     let limbs = e.field_to_limbs(ll_value);
-                    let limb0 = e.extract_field(limbs, LLStruct::field_elem(), 0);
+                    let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
                     let ll_result = if *target_bits < 64 {
                         e.truncate(limb0, *target_bits as u32)
                     } else {
