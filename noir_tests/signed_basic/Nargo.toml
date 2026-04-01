@@ -1,0 +1,6 @@
+[package]
+name = "signed_basic"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -63,7 +63,7 @@ impl FrameLayouter {
     fn type_size(&self, tp: &Type) -> usize {
         match tp.expr {
             TypeExpr::Field => bytecode::LIMBS,
-            TypeExpr::U(bits) => {
+            TypeExpr::U(bits) | TypeExpr::I(bits) => {
                 assert!(bits <= 64);
                 1
             }
@@ -142,7 +142,7 @@ impl GlobalFrameLayouter {
         use crate::compiler::ir::r#type::TypeExpr;
         match &typ.expr {
             TypeExpr::Field => bytecode::LIMBS,
-            TypeExpr::U(bits) => {
+            TypeExpr::U(bits) | TypeExpr::I(bits) => {
                 assert!(*bits <= 64);
                 1
             }
@@ -341,7 +341,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) => {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::AddU64 {
                             res: result,
@@ -373,7 +373,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) => {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::SubU64 {
                             res: result,
@@ -405,6 +405,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
+                    TypeExpr::I(_) => panic!("Signed div not yet implemented"),
                     t => panic!("Unsupported type for division: {:?}", t),
                 },
                 ssa::OpCode::BinaryArithOp {
@@ -424,6 +425,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
+                    TypeExpr::I(_) => panic!("Signed mod not yet implemented"),
                     t => panic!("Unsupported type for modulo: {:?}", t),
                 },
                 ssa::OpCode::BinaryArithOp {
@@ -440,7 +442,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) => {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::MulU64 {
                             res: result,
@@ -466,7 +468,7 @@ impl CodeGen {
                             //     layouter.get_value(*op2),
                             // ));
                         }
-                        TypeExpr::U(bits) => {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
                             let result = layouter.alloc_u64(*val, *bits);
                             emitter.push_op(bytecode::OpCode::AndU64 {
                                 res: result,
@@ -491,6 +493,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
+                    TypeExpr::I(_) => panic!("Signed Lt not yet implemented"),
                     t => panic!("Unsupported type for comparison: {:?}", t),
                 },
                 ssa::OpCode::Cmp {
@@ -499,7 +502,7 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) => {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::EqU64 {
                             res: result,
@@ -515,16 +518,18 @@ impl CodeGen {
                     to_bits,
                     from_bits,
                 } => {
-                    let result = layouter.alloc_u64(*val, 64);
                     assert!(*to_bits <= 64);
                     let in_type = type_info.get_value_type(*op);
                     if in_type.is_field() {
+                        // TruncateFToU writes a full Field (4 limbs), so allocate Field-sized output
+                        let result = layouter.alloc_field(*val);
                         emitter.push_op(bytecode::OpCode::TruncateFToU {
                             res: result,
                             a: layouter.get_value(*op),
                             to_bits: *to_bits as u64,
                         });
                     } else {
+                        let result = layouter.alloc_u64(*val, 64);
                         assert!(*from_bits <= 64);
                         emitter.push_op(bytecode::OpCode::TruncateU64 {
                             res: result,
@@ -557,20 +562,20 @@ impl CodeGen {
                     }
                     let result = layouter.alloc_value(*r, &r_type);
                     match (&l_type.expr, &r_type.expr) {
-                        (TypeExpr::U(_), TypeExpr::U(_)) => {
+                        (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::U(_) | TypeExpr::I(_)) => {
                             emitter.push_op(bytecode::OpCode::MovFrame {
                                 target: result,
                                 source: layouter.get_value(*v),
                                 size: layouter.type_size(&l_type),
                             })
                         }
-                        (TypeExpr::Field, TypeExpr::U(_)) => {
+                        (TypeExpr::Field, TypeExpr::U(_) | TypeExpr::I(_)) => {
                             emitter.push_op(bytecode::OpCode::CastFieldToU64 {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
                         }
-                        (TypeExpr::U(_), TypeExpr::Field) => {
+                        (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::Field) => {
                             emitter.push_op(bytecode::OpCode::CastU64ToField {
                                 res: result,
                                 a: layouter.get_value(*v),

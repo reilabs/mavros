@@ -617,6 +617,7 @@ pub enum SeqType {
 pub enum CastTarget {
     Field,
     U(usize),
+    I(usize),
     WitnessOf,
     Nop,
     ArrayToSlice,
@@ -639,6 +640,7 @@ impl Display for CastTarget {
         match self {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::U(size) => write!(f, "u{}", size),
+            CastTarget::I(size) => write!(f, "i{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),

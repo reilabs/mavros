@@ -286,7 +286,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         let self_const = ctx.const_vals.get(&self.0).cloned();
         match self_const {
             Some(ConstVal::U(_, v)) => match cast_target {
-                CastTarget::U(s) => {
+                CastTarget::U(s) | CastTarget::I(s) => {
                     let res = v & ((1 << *s) - 1);
                     let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
@@ -301,7 +301,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => self.clone(),
             },
             Some(ConstVal::Field(f)) => match cast_target {
-                CastTarget::U(s) => {
+                CastTarget::U(s) | CastTarget::I(s) => {
                     let v: u128 = f.into_bigint().as_ref()[0] as u128;
                     let res = v & ((1 << *s) - 1);
                     let res_v = ctx.u_const(*s, res);

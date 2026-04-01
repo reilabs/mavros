@@ -448,7 +448,8 @@ impl WitnessLowering {
 
         match (&source_type.expr, &target_type.expr) {
             (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
+            | (TypeExpr::U(_), TypeExpr::WitnessOf(_))
+            | (TypeExpr::I(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
                 assert_eq!(
                     src_size, tgt_size,
@@ -546,7 +547,7 @@ impl WitnessLowering {
                 }
                 b.mk_tuple(dummy_elems, fields.clone())
             }
-            TypeExpr::Field | TypeExpr::U(_) => b.field_const(ark_bn254::Fr::from(0u64)),
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => b.field_const(ark_bn254::Fr::from(0u64)),
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
     }
@@ -584,7 +585,7 @@ impl WitnessLowering {
 
     fn witness_lowering_in_type(&self, tp: &Type) -> Type {
         match &tp.expr {
-            TypeExpr::Field | TypeExpr::U(_) => {
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
                 if tp.is_witness_of() {
                     Type::witness_of(tp.clone())
                 } else {

@@ -183,6 +183,14 @@ impl WitnessCastInsertion {
                     base
                 }
             }
+            (TypeExpr::I(size), WitnessType::Scalar(info)) => {
+                let base = Type::i(size);
+                if info.is_witness() {
+                    Type::witness_of(base)
+                } else {
+                    base
+                }
+            }
             (TypeExpr::Array(inner, size), WitnessType::Array(top, inner_wt)) => {
                 let base = self
                     .apply_witness_type(*inner, inner_wt.as_ref())
@@ -519,7 +527,8 @@ impl WitnessCastInsertion {
         match (&source_type.expr, &target_type.expr) {
             // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
             (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
+            | (TypeExpr::U(_), TypeExpr::WitnessOf(_))
+            | (TypeExpr::I(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
             // Array element conversion
             (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
                 assert_eq!(
@@ -672,7 +681,7 @@ impl WitnessCastInsertion {
                 }
                 b.mk_tuple(dummy_elems, fields.clone())
             }
-            TypeExpr::Field | TypeExpr::U(_) => b.field_const(ark_bn254::Fr::from(0u64)),
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => b.field_const(ark_bn254::Fr::from(0u64)),
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
     }

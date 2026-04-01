@@ -21,6 +21,7 @@ use crate::compiler::{
 pub enum ScalarKind {
     Field,
     U(usize),
+    I(usize),
 }
 
 impl ScalarKind {
@@ -28,6 +29,7 @@ impl ScalarKind {
         match &tp.strip_witness().expr {
             TypeExpr::Field => ScalarKind::Field,
             TypeExpr::U(s) => ScalarKind::U(*s),
+            TypeExpr::I(s) => ScalarKind::I(*s),
             TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
             _ => panic!("Not a scalar type: {:?}", tp),
         }
@@ -476,9 +478,10 @@ impl Value {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
             (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v),
+            (Value::U(_, v), CastTarget::I(s2)) => Value::U(*s2, *v),
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
             (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
-            (Value::Field(f), CastTarget::U(s)) => {
+            (Value::Field(f), CastTarget::U(s) | CastTarget::I(s)) => {
                 let bigint = f.into_bigint();
                 Value::U(*s, bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64))
             }
@@ -1200,6 +1203,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 match &ty.expr {
                     TypeExpr::Field => Value::Unknown(ScalarKind::Field),
                     TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+                    TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
                     TypeExpr::Array(elem, size) => {
                         Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
                     }
@@ -1588,6 +1592,7 @@ impl CostEstimator {
         match &tp.expr {
             TypeExpr::Field => ValueSignature::Unknown(ScalarKind::Field),
             TypeExpr::U(s) => ValueSignature::Unknown(ScalarKind::U(*s)),
+            TypeExpr::I(s) => ValueSignature::Unknown(ScalarKind::I(*s)),
             TypeExpr::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(self.type_to_unknown_sig(inner)))
             }

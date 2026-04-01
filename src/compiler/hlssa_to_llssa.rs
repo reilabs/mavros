@@ -30,7 +30,7 @@ use crate::compiler::ssa::{
 fn lower_type(ty: &Type) -> LLType {
     match &ty.expr {
         TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
-        TypeExpr::U(bits) => LLType::Int(*bits as u32),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => LLType::Int(*bits as u32),
         TypeExpr::Array(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         TypeExpr::WitnessOf(_) => LLType::Ptr,
@@ -43,7 +43,7 @@ fn lower_type(ty: &Type) -> LLType {
 fn elem_struct(ty: &Type) -> LLStruct {
     match &ty.expr {
         TypeExpr::Field => LLStruct::field_elem(),
-        TypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
@@ -322,7 +322,7 @@ fn lower_instruction(
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::U(_) => {
+                TypeExpr::U(_) | TypeExpr::I(_) => {
                     let op = match kind {
                         BinaryArithOpKind::Add => IntArithOp::Add,
                         BinaryArithOpKind::Sub => IntArithOp::Sub,
@@ -361,7 +361,7 @@ fn lower_instruction(
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
             let ll_result = match &lhs_type.expr {
-                TypeExpr::U(_) => {
+                TypeExpr::U(_) | TypeExpr::I(_) => {
                     let op = match kind {
                         CmpKind::Lt => IntCmpOp::ULt,
                         CmpKind::Eq => IntCmpOp::Eq,

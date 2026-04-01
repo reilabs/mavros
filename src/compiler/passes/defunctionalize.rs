@@ -240,7 +240,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                 contains_function(inner)
             }
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessOf(_) => false,
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => false,
         }
     }
 
@@ -607,7 +607,7 @@ fn replace_function_type(typ: &mut Type) {
                 replace_function_type(elem);
             }
         }
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::WitnessOf(_) => {}
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {}
     }
 }
 

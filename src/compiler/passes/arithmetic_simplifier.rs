@@ -74,7 +74,7 @@ impl ArithmeticSimplifier {
                                         panic!("Rangecheck on impure value");
                                     }
                                     match &v_type.expr {
-                                        TypeExpr::U(s) => {
+                                        TypeExpr::U(s) | TypeExpr::I(s) => {
                                             let cst = function.fresh_value();
                                             new_instructions.push(OpCode::Const {
                                                 result: cst,

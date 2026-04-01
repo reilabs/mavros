@@ -355,6 +355,13 @@ impl Types {
                             Type::u(*size)
                         }
                     }
+                    CastTarget::I(size) => {
+                        if value_type.is_witness_of() {
+                            Type::witness_of(Type::i(*size))
+                        } else {
+                            Type::i(*size)
+                        }
+                    }
                     CastTarget::Nop => value_type.clone(),
                     CastTarget::ArrayToSlice => match &value_type.expr {
                         crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {

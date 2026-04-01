@@ -759,6 +759,7 @@ impl RCInsertion {
             TypeExpr::Slice(_) => true,
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
+            TypeExpr::I(_) => false,
             TypeExpr::WitnessOf(_) => true,
             TypeExpr::Tuple(_) => true,
             TypeExpr::Function => false,
