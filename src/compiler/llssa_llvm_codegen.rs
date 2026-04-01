@@ -150,9 +150,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.convert_struct_type(&LLStruct::field_elem())
     }
 
-    /// The LLVM type for raw (non-Montgomery) limbs: [4 x i64].
+    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::field_elem()`.
     fn limbs_llvm_type(&self) -> BasicTypeEnum<'ctx> {
-        self.context.i64_type().array_type(4).into()
+        self.convert_struct_type(&LLStruct::limbs())
     }
 
     // ── Runtime functions ───────────────────────────────────────────────
@@ -709,102 +709,36 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldFromLimbs { result, limbs } => {
                 // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
-                // The value in the map is a struct {i64,i64,i64,i64}; convert to [4 x i64].
-                let struct_val = self.value_map[limbs].into_struct_value();
-                let l0 = self
-                    .builder
-                    .build_extract_value(struct_val, 0, "l0")
-                    .unwrap();
-                let l1 = self
-                    .builder
-                    .build_extract_value(struct_val, 1, "l1")
-                    .unwrap();
-                let l2 = self
-                    .builder
-                    .build_extract_value(struct_val, 2, "l2")
-                    .unwrap();
-                let l3 = self
-                    .builder
-                    .build_extract_value(struct_val, 3, "l3")
-                    .unwrap();
-                let arr_type = self.limbs_llvm_type().into_array_type();
-                let arr = arr_type.get_undef();
-                let arr = self
-                    .builder
-                    .build_insert_value(arr, l0, 0, "arr")
-                    .unwrap()
-                    .into_array_value();
-                let arr = self
-                    .builder
-                    .build_insert_value(arr, l1, 1, "arr")
-                    .unwrap()
-                    .into_array_value();
-                let arr = self
-                    .builder
-                    .build_insert_value(arr, l2, 2, "arr")
-                    .unwrap()
-                    .into_array_value();
-                let arr = self
-                    .builder
-                    .build_insert_value(arr, l3, 3, "arr")
-                    .unwrap()
-                    .into_array_value();
+                let limb_vals = self.value_map[limbs];
                 let from_fn = self
                     .field_from_limbs_fn
                     .expect("__field_from_limbs not declared");
                 let call = self
                     .builder
-                    .build_call(from_fn, &[arr.into()], "from_limbs")
+                    .build_call(from_fn, &[limb_vals.into()], "from_limbs")
                     .unwrap();
-                let val = call
+                let field = call
                     .try_as_basic_value()
                     .left()
                     .expect("__field_from_limbs should return a value");
-                self.value_map.insert(*result, val);
+                self.value_map.insert(*result, field);
             }
 
             LLOp::FieldToLimbs { result, src } => {
                 // Convert Montgomery form to raw limbs via __field_to_limbs.
-                let field_val = self.value_map[src];
+                let field = self.value_map[src];
                 let to_fn = self
                     .field_to_limbs_fn
                     .expect("__field_to_limbs not declared");
                 let call = self
                     .builder
-                    .build_call(to_fn, &[field_val.into()], "to_limbs")
+                    .build_call(to_fn, &[field.into()], "to_limbs")
                     .unwrap();
-                let arr = call
+                let limb_vals = call
                     .try_as_basic_value()
                     .left()
-                    .expect("__field_to_limbs should return a value")
-                    .into_array_value();
-                let l0 = self.builder.build_extract_value(arr, 0, "l0").unwrap();
-                let l1 = self.builder.build_extract_value(arr, 1, "l1").unwrap();
-                let l2 = self.builder.build_extract_value(arr, 2, "l2").unwrap();
-                let l3 = self.builder.build_extract_value(arr, 3, "l3").unwrap();
-                let field_struct = self.field_llvm_type().into_struct_type();
-                let s = field_struct.get_undef();
-                let s = self
-                    .builder
-                    .build_insert_value(s, l0, 0, "s")
-                    .unwrap()
-                    .into_struct_value();
-                let s = self
-                    .builder
-                    .build_insert_value(s, l1, 1, "s")
-                    .unwrap()
-                    .into_struct_value();
-                let s = self
-                    .builder
-                    .build_insert_value(s, l2, 2, "s")
-                    .unwrap()
-                    .into_struct_value();
-                let s = self
-                    .builder
-                    .build_insert_value(s, l3, 3, "s")
-                    .unwrap()
-                    .into_struct_value();
-                self.value_map.insert(*result, s.into());
+                    .expect("__field_to_limbs should return a value");
+                self.value_map.insert(*result, limb_vals);
             }
 
             // ── Memory operations ───────────────────────────────────────
