@@ -286,13 +286,14 @@ impl ExplicitWitness {
                         let one = b.field_const(Field::ONE);
                         self.gen_witness_divmod(b, l, r, bits, kind, one, res, l_taint, r_taint);
                     }
-                    _ => {
+                    TypeExpr::Field => {
                         assert!(
                             kind == BinaryArithOpKind::Div,
                             "Modulo is not defined on field elements"
                         );
                         self.gen_witness_field_div(b, l, r, l_taint, r_taint, res);
                     }
+                    _ => unreachable!("DivMod on non-numeric type: {:?}", l_type),
                 }
             }
             OpCode::BinaryArithOp {
@@ -848,7 +849,7 @@ impl ExplicitWitness {
                         // Both pure: emit unconditionally
                         b.push(inner);
                     }
-                    _ => {
+                    TypeExpr::Field => {
                         assert!(
                             kind == BinaryArithOpKind::Div,
                             "Modulo is not defined on field elements"
@@ -859,6 +860,7 @@ impl ExplicitWitness {
                         }
                         b.push(inner);
                     }
+                    _ => unreachable!("DivMod on non-numeric type: {:?}", l_type),
                 }
             }
             OpCode::Cast { .. } | OpCode::Const { .. } => {
