@@ -210,9 +210,34 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Div | BinaryArithOpKind::Mod => match (self, b) {
+            BinaryArithOpKind::Div => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a / b),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
+                (_, Value::WitnessOf(b)) => match b.as_ref() {
+                    Value::Unknown(_) => {
+                        instrumenter.record_constraints(1);
+                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                            b,
+                            binary_arith_op_kind,
+                            instrumenter,
+                        )))
+                    }
+                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b,
+                        binary_arith_op_kind,
+                        instrumenter,
+                    ))),
+                },
+                (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
+                    b,
+                    binary_arith_op_kind,
+                    instrumenter,
+                ))),
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::Mod => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a % b),
                 (_, Value::WitnessOf(b)) => match b.as_ref() {
                     Value::Unknown(_) => {
                         instrumenter.record_constraints(1);
