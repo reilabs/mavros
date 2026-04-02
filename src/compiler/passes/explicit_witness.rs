@@ -234,15 +234,10 @@ impl ExplicitWitness {
 
                 let l_type = function_type_info.get_value_type(l);
                 match l_type.strip_witness().expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let cast_target = match l_type.strip_witness().expr {
-                            TypeExpr::I(s) => CastTarget::I(s),
-                            _ => CastTarget::U(bits),
-                        };
+                    TypeExpr::U(bits) => {
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let arith_result = if l_taint && r_taint {
-                            // witness * witness: non-linear
                             let l_pure = b.value_of(l_field);
                             let r_pure = b.value_of(r_field);
                             let hint = b.mul(l_pure, r_pure);
@@ -250,18 +245,23 @@ impl ExplicitWitness {
                             b.constrain(l_field, r_field, w);
                             w
                         } else {
-                            // witness * pure: linear
                             b.mul(l_field, r_field)
                         };
-                        // Mul of two n-bit values: result is at most 2n bits, always non-negative
-                        // (2's complement stored as unsigned), so standard rangecheck works
                         let one = b.field_const(Field::ONE);
                         self.gen_witness_rangecheck(b, arith_result, bits, one);
                         b.push(OpCode::Cast {
                             result: res,
                             value: arith_result,
-                            target: cast_target,
+                            target: CastTarget::U(bits),
                         });
+                    }
+                    TypeExpr::I(bits) => {
+                        let l_field = b.cast_to_field(l);
+                        let r_field = b.cast_to_field(r);
+                        let one = b.field_const(Field::ONE);
+                        self.gen_witness_signed_mul(
+                            b, l_field, r_field, bits, one, res, l_taint, r_taint,
+                        );
                     }
                     _ => {
                         if l_taint && r_taint {
@@ -817,11 +817,7 @@ impl ExplicitWitness {
                 let r_taint = function_type_info.get_value_type(r).is_witness_of();
                 let l_type = function_type_info.get_value_type(l);
                 match l_type.strip_witness().expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) if l_taint || r_taint => {
-                        let cast_target = match l_type.strip_witness().expr {
-                            TypeExpr::I(s) => CastTarget::I(s),
-                            _ => CastTarget::U(bits),
-                        };
+                    TypeExpr::U(bits) if l_taint || r_taint => {
                         let cond_field = self.ensure_field(b, function_type_info, condition);
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
@@ -839,8 +835,16 @@ impl ExplicitWitness {
                         b.push(OpCode::Cast {
                             result: res,
                             value: arith_result,
-                            target: cast_target,
+                            target: CastTarget::U(bits),
                         });
+                    }
+                    TypeExpr::I(bits) if l_taint || r_taint => {
+                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let l_field = b.cast_to_field(l);
+                        let r_field = b.cast_to_field(r);
+                        self.gen_witness_signed_mul(
+                            b, l_field, r_field, bits, cond_field, res, l_taint, r_taint,
+                        );
                     }
                     _ if l_taint && r_taint => {
                         // Field witness*witness under guard: non-linear, lower it
@@ -1183,6 +1187,75 @@ impl ExplicitWitness {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// Signed multiplication gadget.
+    ///
+    /// For n-bit signed values stored as 2's complement in [0, 2^n):
+    /// a_f * b_f can be up to ~2^(2n), so we decompose:
+    ///   a_f * b_f = result + q * 2^n
+    /// with result ∈ [0, 2^n) and q ∈ [0, 2^n).
+    fn gen_witness_signed_mul(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        l_field: ValueId,
+        r_field: ValueId,
+        bits: usize,
+        flag: ValueId,
+        result: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+    ) {
+        let two_n = b.field_const(Field::from(1u128 << bits));
+
+        let result_wit = if l_taint && r_taint {
+            // Non-linear: compute hint from pure values
+            let l_pure = b.value_of(l_field);
+            let r_pure = b.value_of(r_field);
+            let raw_product = b.mul(l_pure, r_pure);
+            let hint_result = b.truncate(raw_product, bits, 254);
+            let hint_rem = b.sub(raw_product, hint_result);
+            let hint_q = b.div(hint_rem, two_n);
+
+            let result_wit = b.write_witness(hint_result);
+            let q_wit = b.write_witness(hint_q);
+
+            self.gen_witness_rangecheck(b, result_wit, bits, flag);
+            self.gen_witness_rangecheck(b, q_wit, bits, flag);
+
+            // Constrain: l * r = result + q * 2^n
+            let q_shifted = b.mul(q_wit, two_n);
+            let rhs = b.add(result_wit, q_shifted);
+            b.constrain(l_field, r_field, rhs);
+            result_wit
+        } else {
+            // Linear: one operand is pure
+            let raw_product = b.mul(l_field, r_field);
+            let raw_pure = b.value_of(raw_product);
+            let hint_result = b.truncate(raw_pure, bits, 254);
+            let hint_rem = b.sub(raw_pure, hint_result);
+            let hint_q = b.div(hint_rem, two_n);
+
+            let result_wit = b.write_witness(hint_result);
+            let q_wit = b.write_witness(hint_q);
+
+            self.gen_witness_rangecheck(b, result_wit, bits, flag);
+            self.gen_witness_rangecheck(b, q_wit, bits, flag);
+
+            // Constrain: l * r = result + q * 2^n
+            let q_shifted = b.mul(q_wit, two_n);
+            let rhs = b.add(result_wit, q_shifted);
+            let diff = b.sub(raw_product, rhs);
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(flag, diff, zero);
+            result_wit
+        };
+
+        b.push(OpCode::Cast {
+            result,
+            value: result_wit,
+            target: CastTarget::I(bits),
+        });
     }
 
     /// Integer div/mod gadget for witness variables.
