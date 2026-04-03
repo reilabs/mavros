@@ -681,7 +681,9 @@ impl WitnessCastInsertion {
                 }
                 b.mk_tuple(dummy_elems, fields.clone())
             }
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => b.field_const(ark_bn254::Fr::from(0u64)),
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+                b.field_const(ark_bn254::Fr::from(0u64))
+            }
             _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
         }
     }

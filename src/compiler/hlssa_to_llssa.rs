@@ -43,7 +43,9 @@ fn lower_type(ty: &Type) -> LLType {
 fn elem_struct(ty: &Type) -> LLStruct {
     match &ty.expr {
         TypeExpr::Field => LLStruct::field_elem(),
-        TypeExpr::U(bits) | TypeExpr::I(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+            LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
+        }
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),

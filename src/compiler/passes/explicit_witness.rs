@@ -179,7 +179,8 @@ impl ExplicitWitness {
                             b.constrain(lr_diff, result_field, field_zero);
                         }
                         CmpKind::Lt => {
-                            let rhs_stripped = function_type_info.get_value_type(rhs).strip_witness().expr;
+                            let rhs_stripped =
+                                function_type_info.get_value_type(rhs).strip_witness().expr;
                             let s = match rhs_stripped {
                                 TypeExpr::U(s) => s,
                                 TypeExpr::I(_) => panic!("Signed Lt not yet implemented"),

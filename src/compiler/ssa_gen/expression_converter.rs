@@ -820,12 +820,14 @@ impl<'a> ExpressionConverter<'a> {
                     noirc_frontend::ast::UnaryOp::Minus => {
                         use noirc_frontend::monomorphization::ast::Type as AstType;
                         let zero_const = match unary.rhs.return_type().as_deref() {
-                            Some(AstType::Integer(noirc_frontend::shared::Signedness::Signed, bit_size)) => {
-                                ConstValue::U(bit_size.bit_size() as usize, 0)
-                            }
-                            Some(AstType::Integer(noirc_frontend::shared::Signedness::Unsigned, bit_size)) => {
-                                ConstValue::U(bit_size.bit_size() as usize, 0)
-                            }
+                            Some(AstType::Integer(
+                                noirc_frontend::shared::Signedness::Signed,
+                                bit_size,
+                            )) => ConstValue::U(bit_size.bit_size() as usize, 0),
+                            Some(AstType::Integer(
+                                noirc_frontend::shared::Signedness::Unsigned,
+                                bit_size,
+                            )) => ConstValue::U(bit_size.bit_size() as usize, 0),
                             _ => ConstValue::Field(ark_bn254::Fr::from(0u64)),
                         };
                         let zero = self.get_or_create_const(b, zero_const);
@@ -955,9 +957,12 @@ impl<'a> ExpressionConverter<'a> {
                             // 2's complement: get the signed value, mask to n bits
                             let signed_val = signed_field.to_i128();
                             let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
-                            let unsigned_val = self.get_or_create_const(b, ConstValue::U(bits, twos_complement));
+                            let unsigned_val =
+                                self.get_or_create_const(b, ConstValue::U(bits, twos_complement));
                             // Cast to I(bits) so type inference sees this as signed
-                            let result = b.block(self.current_block).cast_to(CastTarget::I(bits), unsigned_val);
+                            let result = b
+                                .block(self.current_block)
+                                .cast_to(CastTarget::I(bits), unsigned_val);
                             Some(result)
                         } else {
                             // Get the value as u128

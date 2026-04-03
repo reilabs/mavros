@@ -343,7 +343,11 @@ mod def {
     fn add_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let sum = a.wrapping_add(b);
-            *res = if bits >= 64 { sum } else { sum & ((1u64 << bits) - 1) };
+            *res = if bits >= 64 {
+                sum
+            } else {
+                sum & ((1u64 << bits) - 1)
+            };
         }
     }
 
@@ -351,7 +355,11 @@ mod def {
     fn sub_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let diff = a.wrapping_sub(b);
-            *res = if bits >= 64 { diff } else { diff & ((1u64 << bits) - 1) };
+            *res = if bits >= 64 {
+                diff
+            } else {
+                diff & ((1u64 << bits) - 1)
+            };
         }
     }
 
@@ -359,7 +367,11 @@ mod def {
     fn mul_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let prod = a.wrapping_mul(b);
-            *res = if bits >= 64 { prod } else { prod & ((1u64 << bits) - 1) };
+            *res = if bits >= 64 {
+                prod
+            } else {
+                prod & ((1u64 << bits) - 1)
+            };
         }
     }
 
