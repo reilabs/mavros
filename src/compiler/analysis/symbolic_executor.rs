@@ -47,6 +47,7 @@ where
     ) -> Self;
     fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
+    fn of_i(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_field(f: Field, ctx: &mut Context) -> Self;
     fn mk_array(a: Vec<Self>, ctx: &mut Context, seq_type: SeqType, elem_type: &Type) -> Self;
     fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type]) -> Self;
@@ -560,9 +561,11 @@ impl SymbolicExecutor {
                         scope[result.0 as usize] = Some(val.value_of(ctx));
                     }
                     crate::compiler::ssa::OpCode::Const { result, value } => match value {
-                        crate::compiler::ssa::ConstValue::U(size, val)
-                        | crate::compiler::ssa::ConstValue::I(size, val) => {
+                        crate::compiler::ssa::ConstValue::U(size, val) => {
                             scope[result.0 as usize] = Some(V::of_u(*size, *val, ctx));
+                        }
+                        crate::compiler::ssa::ConstValue::I(size, val) => {
+                            scope[result.0 as usize] = Some(V::of_i(*size, *val, ctx));
                         }
                         crate::compiler::ssa::ConstValue::Field(val) => {
                             scope[result.0 as usize] = Some(V::of_field(*val, ctx));

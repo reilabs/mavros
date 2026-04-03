@@ -368,6 +368,12 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         Self(val)
     }
 
+    fn of_i(s: usize, v: u128, ctx: &mut SpecializationState) -> Self {
+        let val = ctx.i_const(s, v);
+        ctx.const_vals.insert(val, ConstVal::U(s, v));
+        Self(val)
+    }
+
     fn of_field(f: Field, ctx: &mut SpecializationState) -> Self {
         let val = ctx.field_const(f);
         ctx.const_vals.insert(val, ConstVal::Field(f));
@@ -670,6 +676,11 @@ impl Specializer {
                     call_params.push(Val(val));
                     state.const_vals.insert(val, ConstVal::U(*size, *v));
                 }
+                ValueSignature::I(size, v) => {
+                    let val = state.i_const(*size, *v);
+                    call_params.push(Val(val));
+                    state.const_vals.insert(val, ConstVal::U(*size, *v));
+                }
                 ValueSignature::Tuple(_) => {
                     info!("TODO: Aborting specialization on a tuple value");
                     return;
@@ -768,6 +779,11 @@ impl Specializer {
                     }
                     ValueSignature::U(s, v) => {
                         let cst = entry.u_const(*s, *v);
+                        let is_eq = entry.eq(*pval, cst);
+                        cond = entry.and(cond, is_eq);
+                    }
+                    ValueSignature::I(s, v) => {
+                        let cst = entry.i_const(*s, *v);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
                     }

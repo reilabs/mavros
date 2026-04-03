@@ -188,6 +188,15 @@ pub trait HLEmitter {
         r
     }
 
+    fn i_const(&mut self, bits: usize, value: u128) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::Const {
+            result: r,
+            value: ConstValue::I(bits, value),
+        });
+        r
+    }
+
     // -- Witness --
 
     fn value_of(&mut self, value: ValueId) -> ValueId {

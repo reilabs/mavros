@@ -39,6 +39,7 @@ impl ScalarKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
     U(usize, u128),
+    I(usize, u128),
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
@@ -51,6 +52,7 @@ impl ValueSignature {
     pub fn to_value(&self) -> Value {
         match self {
             ValueSignature::U(size, val) => Value::U(*size, *val),
+            ValueSignature::I(size, val) => Value::I(*size, *val),
             ValueSignature::Field(field) => Value::Field(field.clone()),
             ValueSignature::Array(vals) => {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
@@ -66,7 +68,7 @@ impl ValueSignature {
 
     pub fn pretty_print(&self, full: bool) -> String {
         match self {
-            ValueSignature::U(_, v) => format!("{v}"),
+            ValueSignature::U(_, v) | ValueSignature::I(_, v) => format!("{v}"),
             ValueSignature::Field(f) => format!("{}", f),
             ValueSignature::Array(items) => {
                 if full {
@@ -94,6 +96,7 @@ impl ValueSignature {
 #[derive(Debug, Clone)]
 pub enum Value {
     U(usize, u128),
+    I(usize, u128),
     Field(Field),
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
@@ -285,7 +288,7 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Unknown(_) => {}
-            Value::U(_, _) | Value::Field(_) => {}
+            Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in vals {
                     val.blind();
@@ -305,6 +308,7 @@ impl Value {
     fn forget_concrete(&mut self) {
         match self {
             Value::U(s, _) => *self = Value::Unknown(ScalarKind::U(*s)),
+            Value::I(s, _) => *self = Value::Unknown(ScalarKind::I(*s)),
             Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
             Value::Unknown(_) => {}
             Value::WitnessOf(inner) => {
@@ -333,6 +337,7 @@ impl Value {
                 ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
             Value::U(s, v) => ValueSignature::U(*s, *v),
+            Value::I(s, v) => ValueSignature::I(*s, *v),
             Value::Field(f) => ValueSignature::Field(f.clone()),
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
@@ -1019,6 +1024,13 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         Self {
             unspecialized: Value::U(s, v),
             specialized: Value::U(s, v),
+        }
+    }
+
+    fn of_i(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: Value::I(s, v),
+            specialized: Value::I(s, v),
         }
     }
 

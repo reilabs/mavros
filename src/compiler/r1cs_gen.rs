@@ -665,6 +665,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from(v))
     }
 
+    fn of_i(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
+        Value::Const(ark_bn254::Fr::from(v))
+    }
+
     fn of_field(f: super::Field, _ctx: &mut R1CGen) -> Self {
         Value::Const(ark_bn254::Fr::from(f))
     }
