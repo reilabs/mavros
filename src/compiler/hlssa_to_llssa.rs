@@ -428,7 +428,7 @@ fn lower_instruction(
         }
 
         OpCode::Const { result, value } => match value {
-            ConstValue::U(bits, val) => {
+            ConstValue::U(bits, val) | ConstValue::I(bits, val) => {
                 let ll_val = e.int_const(*bits as u32, *val as u64);
                 val_map.insert(*result, ll_val);
             }

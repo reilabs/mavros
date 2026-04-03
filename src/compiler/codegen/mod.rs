@@ -944,7 +944,7 @@ impl CodeGen {
                     });
                 }
                 ssa::OpCode::Const { result, value } => match value {
-                    ssa::ConstValue::U(size, val) => {
+                    ssa::ConstValue::U(size, val) | ssa::ConstValue::I(size, val) => {
                         emitter.push_op(bytecode::OpCode::MovConst {
                             res: layouter.alloc_u64(*result, *size),
                             val: *val as u64,

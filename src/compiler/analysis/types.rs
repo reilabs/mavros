@@ -533,6 +533,7 @@ impl Types {
             OpCode::Const { result, value } => {
                 let ty = match value {
                     ConstValue::U(size, _) => Type::u(*size),
+                    ConstValue::I(size, _) => Type::i(*size),
                     ConstValue::Field(_) => Type::field(),
                     ConstValue::FnPtr(_) => Type::function(),
                 };

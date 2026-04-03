@@ -823,7 +823,7 @@ impl<'a> ExpressionConverter<'a> {
                             Some(AstType::Integer(
                                 noirc_frontend::shared::Signedness::Signed,
                                 bit_size,
-                            )) => ConstValue::U(bit_size.bit_size() as usize, 0),
+                            )) => ConstValue::I(bit_size.bit_size() as usize, 0),
                             Some(AstType::Integer(
                                 noirc_frontend::shared::Signedness::Unsigned,
                                 bit_size,
@@ -954,16 +954,9 @@ impl<'a> ExpressionConverter<'a> {
                         use noirc_frontend::shared::Signedness;
                         let bits: usize = bit_size.bit_size() as usize;
                         if *signedness == Signedness::Signed {
-                            // 2's complement: get the signed value, mask to n bits
                             let signed_val = signed_field.to_i128();
                             let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
-                            let unsigned_val =
-                                self.get_or_create_const(b, ConstValue::U(bits, twos_complement));
-                            // Cast to I(bits) so type inference sees this as signed
-                            let result = b
-                                .block(self.current_block)
-                                .cast_to(CastTarget::I(bits), unsigned_val);
-                            Some(result)
+                            Some(self.get_or_create_const(b, ConstValue::I(bits, twos_complement)))
                         } else {
                             // Get the value as u128
                             let value = signed_field.to_u128();

@@ -560,7 +560,8 @@ impl SymbolicExecutor {
                         scope[result.0 as usize] = Some(val.value_of(ctx));
                     }
                     crate::compiler::ssa::OpCode::Const { result, value } => match value {
-                        crate::compiler::ssa::ConstValue::U(size, val) => {
+                        crate::compiler::ssa::ConstValue::U(size, val)
+                        | crate::compiler::ssa::ConstValue::I(size, val) => {
                             scope[result.0 as usize] = Some(V::of_u(*size, *val, ctx));
                         }
                         crate::compiler::ssa::ConstValue::Field(val) => {

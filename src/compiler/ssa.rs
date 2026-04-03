@@ -896,6 +896,7 @@ pub enum OpCode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
     U(usize, u128),
+    I(usize, u128),
     Field(ark_bn254::Fr),
     FnPtr(FunctionId),
 }
@@ -1331,6 +1332,15 @@ impl Instruction for OpCode {
                 ConstValue::U(size, val) => {
                     format!(
                         "v{}{} = u_const({}, {})",
+                        result.0,
+                        annotate_value(*result),
+                        size,
+                        val
+                    )
+                }
+                ConstValue::I(size, val) => {
+                    format!(
+                        "v{}{} = i_const({}, {})",
                         result.0,
                         annotate_value(*result),
                         size,
