@@ -324,13 +324,25 @@ fn lower_instruction(
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::U(_) | TypeExpr::I(_) => {
+                TypeExpr::U(_) => {
                     let op = match kind {
                         BinaryArithOpKind::Add => IntArithOp::Add,
                         BinaryArithOpKind::Sub => IntArithOp::Sub,
                         BinaryArithOpKind::Mul => IntArithOp::Mul,
                         BinaryArithOpKind::And => IntArithOp::And,
                         _ => panic!("Unsupported int arith op: {:?}", kind),
+                    };
+                    e.int_arith(op, ll_lhs, ll_rhs)
+                }
+                TypeExpr::I(_) => {
+                    let op = match kind {
+                        BinaryArithOpKind::Add => IntArithOp::Add,
+                        BinaryArithOpKind::Sub => IntArithOp::Sub,
+                        BinaryArithOpKind::Mul => IntArithOp::Mul,
+                        BinaryArithOpKind::And => IntArithOp::And,
+                        BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
+                        BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
+                        _ => panic!("Unsupported signed int arith op: {:?}", kind),
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
                 }
@@ -363,12 +375,16 @@ fn lower_instruction(
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
             let ll_result = match &lhs_type.expr {
-                TypeExpr::U(_) | TypeExpr::I(_) => {
+                TypeExpr::U(_) => {
                     let op = match kind {
                         CmpKind::Lt => IntCmpOp::ULt,
                         CmpKind::Eq => IntCmpOp::Eq,
                     };
                     e.int_cmp(op, ll_lhs, ll_rhs)
+                }
+                TypeExpr::I(_) => match kind {
+                    CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
+                    CmpKind::Lt => panic!("Signed Lt not yet implemented in LLSSA"),
                 }
                 TypeExpr::Field => match kind {
                     CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
