@@ -1103,14 +1103,17 @@ impl ExplicitWitness {
         b.constrain(flag, diff, zero);
     }
 
-    /// Extract the sign bit (MSB) of an n-bit value as a witness.
+    /// Extract the sign bit (MSB) of an n-bit value.
     /// Requires: `value` is already rangechecked to n bits.
     /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
     ///
-    /// Two rangechecks on low enforce this:
-    ///   1. low ∈ [0, 2^n)  — excludes field-wrapped values (e.g. p - 2^(n-1) + 5)
-    ///   2. (2^(n-1) - 1 - low) ∈ [0, 2^n)  — tightens to low < 2^(n-1)
-    /// We can't rangecheck low to n-1 bits directly because n-1 isn't byte-aligned.
+    /// For witness inputs: writes sign and low as independent witnesses, then constrains
+    ///   sign * 2^(n-1) + low = value
+    /// with sign ∈ {0,1}, low ∈ [0, 2^n), and (2^(n-1) - 1 - low) ∈ [0, 2^n).
+    /// The two rangechecks on low together prove low < 2^(n-1) (can't rangecheck
+    /// n-1 bits directly because it isn't byte-aligned).
+    ///
+    /// For pure inputs: computes sign as a pure hint (no witnesses or constraints).
     fn extract_sign_bit(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1120,19 +1123,34 @@ impl ExplicitWitness {
         is_witness: bool,
     ) -> ValueId {
         let two_n_minus_1 = b.field_const(Field::from(1u128 << (bits - 1)));
-        // Hint: compute sign = value >= 2^(n-1)
         let pure_val = if is_witness { b.value_of(value) } else { value };
         let low_hint = b.truncate(pure_val, bits - 1, 254);
         let high_hint = b.sub(pure_val, low_hint);
         let sign_hint = b.div(high_hint, two_n_minus_1);
+
+        if !is_witness {
+            return sign_hint;
+        }
+
         let sign_wit = b.write_witness(sign_hint);
-        self.gen_witness_rangecheck(b, sign_wit, 1, flag); // sign ∈ {0, 1}
-        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
-        let low = b.sub(value, sign_shifted); // low = value - sign * 2^(n-1)
-        self.gen_witness_rangecheck(b, low, bits, flag); // low ∈ [0, 2^n)
+        let low_wit = b.write_witness(low_hint);
+
+        // sign ∈ {0, 1}
+        self.gen_witness_rangecheck(b, sign_wit, 1, flag);
+        // low ∈ [0, 2^n) — excludes field-wrapped values
+        self.gen_witness_rangecheck(b, low_wit, bits, flag);
+        // low < 2^(n-1)
         let bound = b.field_const(Field::from((1u128 << (bits - 1)) - 1));
-        let gap = b.sub(bound, low); // 2^(n-1) - 1 - low
-        self.gen_witness_rangecheck(b, gap, bits, flag); // low < 2^(n-1)
+        let gap = b.sub(bound, low_wit);
+        self.gen_witness_rangecheck(b, gap, bits, flag);
+
+        // Constrain decomposition: sign * 2^(n-1) + low = value
+        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
+        let reconstructed = b.add(sign_shifted, low_wit);
+        let diff = b.sub(reconstructed, value);
+        let zero = b.field_const(Field::ZERO);
+        b.constrain(flag, diff, zero);
+
         sign_wit
     }
 
@@ -1313,9 +1331,9 @@ impl ExplicitWitness {
         let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
 
         // sa_sb = sign_a * sign_b (R1CS multiplication)
-        let sa_sb_hint = b.value_of(sign_a);
-        let sb_hint = b.value_of(sign_b);
-        let sa_sb_val = b.mul(sa_sb_hint, sb_hint);
+        let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
+        let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
+        let sa_sb_val = b.mul(sa_pure, sb_pure);
         let sa_sb = b.write_witness(sa_sb_val);
         b.constrain(sign_a, sign_b, sa_sb);
         // xor = sign_a + sign_b - 2*sa_sb (linear combination)
@@ -1325,9 +1343,9 @@ impl ExplicitWitness {
         let xor_val = b.sub(xor_val, two_sa_sb);
         let expected_diff = b.sub(xor_val, sign_r);
         // result * expected_diff = 0 (degree-2, needs auxiliary witness h)
-        let h_pure = b.value_of(result_wit);
+        let r_pure = b.value_of(result_wit);
         let ed_pure = b.value_of(expected_diff);
-        let h_val = b.mul(h_pure, ed_pure);
+        let h_val = b.mul(r_pure, ed_pure);
         let h_wit = b.write_witness(h_val);
         b.constrain(result_wit, expected_diff, h_wit); // h = result * expected_diff
         b.constrain(flag, h_wit, zero); // flag * h = 0
