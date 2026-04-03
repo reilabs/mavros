@@ -49,6 +49,7 @@ pub struct LLVMCodeGen<'ctx> {
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
+    field_sub_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     write_witness_fn: Option<FunctionValue<'ctx>>,
@@ -64,6 +65,8 @@ pub struct LLVMCodeGen<'ctx> {
     ad_accum_at_da_fn: Option<FunctionValue<'ctx>>,
     ad_accum_at_db_fn: Option<FunctionValue<'ctx>>,
     ad_accum_at_dc_fn: Option<FunctionValue<'ctx>>,
+    field_from_limbs_fn: Option<FunctionValue<'ctx>>,
+    field_to_limbs_fn: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -81,6 +84,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             vm_ptr: None,
             field_mul_fn: None,
             field_add_fn: None,
+            field_sub_fn: None,
             malloc_fn: None,
             free_fn: None,
             write_witness_fn: None,
@@ -95,6 +99,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ad_accum_at_da_fn: None,
             ad_accum_at_db_fn: None,
             ad_accum_at_dc_fn: None,
+            field_from_limbs_fn: None,
+            field_to_limbs_fn: None,
         };
 
         codegen.declare_runtime_functions();
@@ -144,6 +150,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.convert_struct_type(&LLStruct::field_elem())
     }
 
+    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::field_elem()`.
+    fn limbs_llvm_type(&self) -> BasicTypeEnum<'ctx> {
+        self.convert_struct_type(&LLStruct::limbs())
+    }
+
     // ── Runtime functions ───────────────────────────────────────────────
 
     fn declare_runtime_functions(&mut self) {
@@ -151,6 +162,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
         let void_type = self.context.void_type();
+        let limbs_type = self.limbs_llvm_type();
 
         // __field_mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
@@ -179,6 +191,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.field_add_fn = Some(
             self.module
                 .add_function("__field_add", field_add_type, None),
+        );
+
+        // __field_sub(FieldElem, FieldElem) -> FieldElem
+        let field_sub_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_sub_fn = Some(
+            self.module
+                .add_function("__field_sub", field_sub_type, None),
         );
 
         // __ad_next_d_coeff(vm*) -> FieldElem
@@ -236,6 +255,22 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.ad_accum_at_dc_fn = Some(self.module.add_function(
             "__ad_accum_at_dc",
             ad_accum_at_type,
+            Some(Linkage::External),
+        ));
+
+        // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
+        let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
+        self.field_from_limbs_fn = Some(self.module.add_function(
+            "__field_from_limbs",
+            field_from_limbs_type,
+            Some(Linkage::External),
+        ));
+
+        // __field_to_limbs(FieldElem) -> [4 x i64]  (Montgomery → raw limbs)
+        let field_to_limbs_type = limbs_type.fn_type(&[field_type.into()], false);
+        self.field_to_limbs_fn = Some(self.module.add_function(
+            "__field_to_limbs",
+            field_to_limbs_type,
             Some(Linkage::External),
         ));
     }
@@ -538,6 +573,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .left()
                             .expect("field_add should return a value")
                     }
+                    FieldArithOp::Sub => {
+                        let sub_fn = self.field_sub_fn.expect("__field_sub not declared");
+                        let call_site = self
+                            .builder
+                            .build_call(sub_fn, &[lhs.into(), rhs.into()], "field_sub")
+                            .unwrap();
+                        call_site
+                            .try_as_basic_value()
+                            .left()
+                            .expect("field_sub should return a value")
+                    }
                     _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val);
@@ -659,6 +705,40 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
                 }
                 self.value_map.insert(*result, eq_acc.into());
+            }
+
+            LLOp::FieldFromLimbs { result, limbs } => {
+                // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
+                let limb_vals = self.value_map[limbs];
+                let from_fn = self
+                    .field_from_limbs_fn
+                    .expect("__field_from_limbs not declared");
+                let call = self
+                    .builder
+                    .build_call(from_fn, &[limb_vals.into()], "from_limbs")
+                    .unwrap();
+                let field = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__field_from_limbs should return a value");
+                self.value_map.insert(*result, field);
+            }
+
+            LLOp::FieldToLimbs { result, src } => {
+                // Convert Montgomery form to raw limbs via __field_to_limbs.
+                let field = self.value_map[src];
+                let to_fn = self
+                    .field_to_limbs_fn
+                    .expect("__field_to_limbs not declared");
+                let call = self
+                    .builder
+                    .build_call(to_fn, &[field.into()], "to_limbs")
+                    .unwrap();
+                let limb_vals = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__field_to_limbs should return a value");
+                self.value_map.insert(*result, limb_vals);
             }
 
             // ── Memory operations ───────────────────────────────────────

@@ -123,6 +123,62 @@ pub unsafe extern "C" fn __write_c(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Field conversion
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[no_mangle]
+pub unsafe extern "C" fn __field_from_limbs(
+    result_ptr: *mut u64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+) {
+    use ark_ff::PrimeField;
+    let bigint = BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
+    let fr = Fr::from_bigint(bigint).expect("Constructing a field from limbs failed");
+    write_field(result_ptr, fr);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __field_to_limbs(
+    result_ptr: *mut u64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+) {
+    use ark_ff::PrimeField;
+    let fr = limbs_to_fr(a0, a1, a2, a3);
+    let bigint = fr.into_bigint();
+    *result_ptr = bigint.0[0];
+    *result_ptr.add(1) = bigint.0[1];
+    *result_ptr.add(2) = bigint.0[2];
+    *result_ptr.add(3) = bigint.0[3];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Field subtraction
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[no_mangle]
+pub unsafe extern "C" fn __field_sub(
+    result_ptr: *mut u64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    b0: i64,
+    b1: i64,
+    b2: i64,
+    b3: i64,
+) {
+    let a = limbs_to_fr(a0, a1, a2, a3);
+    let b = limbs_to_fr(b0, b1, b2, b3);
+    write_field(result_ptr, a - b);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Field addition
 // ═══════════════════════════════════════════════════════════════════════════════
 
