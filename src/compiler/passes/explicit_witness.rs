@@ -1107,11 +1107,10 @@ impl ExplicitWitness {
     /// Requires: `value` is already rangechecked to n bits.
     /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
     ///
-    /// Proves low < 2^(n-1) by rangechecking (2^(n-1) - 1 - low) to n bits:
-    /// this quantity is non-negative iff low ≤ 2^(n-1) - 1, and since
-    /// value ∈ [0, 2^n) and sign ∈ {0,1}, low is a bounded integer so the
-    /// subtraction cannot accidentally produce a small field element.
-    /// (We can't rangecheck low directly because n-1 isn't byte-aligned.)
+    /// Two rangechecks on low enforce this:
+    ///   1. low ∈ [0, 2^n)  — excludes field-wrapped values (e.g. p - 2^(n-1) + 5)
+    ///   2. (2^(n-1) - 1 - low) ∈ [0, 2^n)  — tightens to low < 2^(n-1)
+    /// We can't rangecheck low to n-1 bits directly because n-1 isn't byte-aligned.
     fn extract_sign_bit(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1130,10 +1129,10 @@ impl ExplicitWitness {
         self.gen_witness_rangecheck(b, sign_wit, 1, flag); // sign ∈ {0, 1}
         let sign_shifted = b.mul(sign_wit, two_n_minus_1);
         let low = b.sub(value, sign_shifted); // low = value - sign * 2^(n-1)
-        // Rangecheck (2^(n-1) - 1 - low) to n bits to prove low < 2^(n-1)
+        self.gen_witness_rangecheck(b, low, bits, flag); // low ∈ [0, 2^n)
         let bound = b.field_const(Field::from((1u128 << (bits - 1)) - 1));
-        let gap = b.sub(bound, low);
-        self.gen_witness_rangecheck(b, gap, bits, flag);
+        let gap = b.sub(bound, low); // 2^(n-1) - 1 - low
+        self.gen_witness_rangecheck(b, gap, bits, flag); // low < 2^(n-1)
         sign_wit
     }
 

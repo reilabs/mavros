@@ -26,6 +26,7 @@ pub struct Specializer {
 #[derive(Debug, Clone)]
 enum ConstVal {
     U(usize, u128),
+    I(usize, u128),
     Field(Field),
     Array(Vec<ValueId>),
     Tuple(Vec<ValueId>),
@@ -370,7 +371,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 
     fn of_i(s: usize, v: u128, ctx: &mut SpecializationState) -> Self {
         let val = ctx.i_const(s, v);
-        ctx.const_vals.insert(val, ConstVal::U(s, v));
+        ctx.const_vals.insert(val, ConstVal::I(s, v));
         Self(val)
     }
 
@@ -679,7 +680,7 @@ impl Specializer {
                 ValueSignature::I(size, v) => {
                     let val = state.i_const(*size, *v);
                     call_params.push(Val(val));
-                    state.const_vals.insert(val, ConstVal::U(*size, *v));
+                    state.const_vals.insert(val, ConstVal::I(*size, *v));
                 }
                 ValueSignature::Tuple(_) => {
                     info!("TODO: Aborting specialization on a tuple value");
