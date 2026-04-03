@@ -1104,14 +1104,14 @@ impl ExplicitWitness {
     }
 
     /// Extract the sign bit (MSB) of an n-bit value as a witness.
-    /// Returns a witness value that is 0 or 1.
-    /// Constrains: value = sign * 2^(n-1) + low, with sign ∈ {0,1}, low ∈ [0, 2^(n-1)).
+    /// Requires: `value` is already rangechecked to n bits.
+    /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
     ///
-    /// To prove low < 2^(n-1) soundly (n-1 isn't byte-aligned), we rangecheck
-    /// low + 2^(n-1) to n bits. Since low is already constrained to equal
-    /// value - sign * 2^(n-1) where value ∈ [0, 2^n) and sign ∈ {0,1},
-    /// low is a real integer (not an arbitrary field element), so
-    /// low + 2^(n-1) < 2^n ⟺ low < 2^(n-1).
+    /// Proves low < 2^(n-1) by rangechecking (2^(n-1) - 1 - low) to n bits:
+    /// this quantity is non-negative iff low ≤ 2^(n-1) - 1, and since
+    /// value ∈ [0, 2^n) and sign ∈ {0,1}, low is a bounded integer so the
+    /// subtraction cannot accidentally produce a small field element.
+    /// (We can't rangecheck low directly because n-1 isn't byte-aligned.)
     fn extract_sign_bit(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1121,37 +1121,31 @@ impl ExplicitWitness {
         is_witness: bool,
     ) -> ValueId {
         let two_n_minus_1 = b.field_const(Field::from(1u128 << (bits - 1)));
-        // Hint: sign = value >= 2^(n-1)
+        // Hint: compute sign = value >= 2^(n-1)
         let pure_val = if is_witness { b.value_of(value) } else { value };
         let low_hint = b.truncate(pure_val, bits - 1, 254);
         let high_hint = b.sub(pure_val, low_hint);
         let sign_hint = b.div(high_hint, two_n_minus_1);
         let sign_wit = b.write_witness(sign_hint);
-        // sign ∈ {0, 1}
-        self.gen_witness_rangecheck(b, sign_wit, 1, flag);
-        // low = value - sign * 2^(n-1)
+        self.gen_witness_rangecheck(b, sign_wit, 1, flag); // sign ∈ {0, 1}
         let sign_shifted = b.mul(sign_wit, two_n_minus_1);
-        let low = b.sub(value, sign_shifted);
-        // Prove low < 2^(n-1) soundly: rangecheck (2^(n-1) - 1 - low) to n bits.
-        // Given value ∈ [0, 2^n) and sign ∈ {0,1}:
-        //   sign=0 ⇒ low=value; rangecheck forces value ≤ 2^(n-1)-1 (positive)
-        //   sign=1 ⇒ low=value-2^(n-1); if value<2^(n-1), low wraps to ~p, check fails
-        // This avoids the unsound 2*low trick (field inverse of 2 breaks it)
-        // and the unsound low+2^(n-1) trick (field addition cancels the subtraction).
+        let low = b.sub(value, sign_shifted); // low = value - sign * 2^(n-1)
+        // Rangecheck (2^(n-1) - 1 - low) to n bits to prove low < 2^(n-1)
         let bound = b.field_const(Field::from((1u128 << (bits - 1)) - 1));
         let gap = b.sub(bound, low);
         self.gen_witness_rangecheck(b, gap, bits, flag);
         sign_wit
     }
 
-    /// Signed integer add/sub gadget for witness variables.
+    /// Signed n-bit add/sub gadget for witness variables.
     ///
-    /// Uses carry/borrow decomposition with overflow detection:
-    ///   ADD: a + b = result + carry * 2^n,  carry ∈ {0,1}, result ∈ [0,2^n)
-    ///   SUB: a - b + 2^n = result + borrow * 2^n, borrow ∈ {0,1}, result ∈ [0,2^n)
-    /// Overflow check (no silent wrapping):
-    ///   ADD: carry + sign_r = sign_a + sign_b
-    ///   SUB: borrow + sign_r + sign_b = 1 + sign_a
+    /// Modular reduction:
+    ///   ADD: a + b = result + carry * 2^n      (carry ∈ {0,1}, result ∈ [0, 2^n))
+    ///   SUB: a - b + 2^n = result + borrow * 2^n  (borrow ∈ {0,1}, result ∈ [0, 2^n))
+    ///
+    /// Overflow rejection (Noir arithmetic is non-wrapping):
+    ///   ADD: carry + sign(result) = sign(a) + sign(b)
+    ///   SUB: borrow + sign(result) + sign(b) = 1 + sign(a)
     fn gen_witness_signed_addsub(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1248,16 +1242,15 @@ impl ExplicitWitness {
         }
     }
 
-    /// Signed multiplication gadget.
+    /// Signed n-bit multiplication gadget for witness variables.
     ///
-    /// For n-bit signed values stored as 2's complement in [0, 2^n):
-    /// a_f * b_f can be up to ~2^(2n), so we decompose:
-    ///   a_f * b_f = result + q * 2^n
-    /// with result ∈ [0, 2^n) and q ∈ [0, 2^n).
+    /// Modular reduction (field product can be up to ~2^(2n)):
+    ///   a * b = result + q * 2^n   (result ∈ [0, 2^n), q ∈ [0, 2^n))
     ///
-    /// Overflow check: result * (sign_a XOR sign_b - sign_r) = 0
-    /// where XOR is computed as sign_a + sign_b - 2*sign_a*sign_b.
-    /// This ensures non-zero results have the correct sign.
+    /// Overflow rejection:
+    ///   result * (sign(a) ⊕ sign(b) − sign(result)) = 0
+    /// Non-zero results must have sign matching XOR of input signs.
+    /// Zero results satisfy the constraint trivially.
     fn gen_witness_signed_mul(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1318,36 +1311,27 @@ impl ExplicitWitness {
             result_wit
         };
 
-        // Extract sign bit of result for overflow check
         let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
 
-        // Overflow check: result * (sign_a XOR sign_b - sign_r) = 0
-        // XOR = sign_a + sign_b - 2*sign_a*sign_b
-        // When result != 0: forces sign_r = sign_a XOR sign_b
-        // When result == 0: constraint is trivially satisfied (0 * anything = 0)
-        //
-        // Constrain sa_sb = sign_a * sign_b as R1CS multiplication first,
-        // then expected_diff = sign_a + sign_b - 2*sa_sb - sign_r is a linear combination,
-        // and result_wit * expected_diff = 0 is a single R1CS constraint.
+        // sa_sb = sign_a * sign_b (R1CS multiplication)
         let sa_sb_hint = b.value_of(sign_a);
         let sb_hint = b.value_of(sign_b);
         let sa_sb_val = b.mul(sa_sb_hint, sb_hint);
         let sa_sb = b.write_witness(sa_sb_val);
         b.constrain(sign_a, sign_b, sa_sb);
-        // expected_diff = sign_a + sign_b - 2*sa_sb - sign_r (linear combination)
+        // xor = sign_a + sign_b - 2*sa_sb (linear combination)
         let two = b.field_const(Field::from(2u64));
         let two_sa_sb = b.mul(two, sa_sb);
         let xor_val = b.add(sign_a, sign_b);
         let xor_val = b.sub(xor_val, two_sa_sb);
         let expected_diff = b.sub(xor_val, sign_r);
-        // result_wit * expected_diff = 0, conditional on flag
-        // Encode as: h = result_wit * expected_diff, then flag * h = 0
+        // result * expected_diff = 0 (degree-2, needs auxiliary witness h)
         let h_pure = b.value_of(result_wit);
         let ed_pure = b.value_of(expected_diff);
         let h_val = b.mul(h_pure, ed_pure);
         let h_wit = b.write_witness(h_val);
-        b.constrain(result_wit, expected_diff, h_wit);
-        b.constrain(flag, h_wit, zero);
+        b.constrain(result_wit, expected_diff, h_wit); // h = result * expected_diff
+        b.constrain(flag, h_wit, zero); // flag * h = 0
 
         b.push(OpCode::Cast {
             result,
