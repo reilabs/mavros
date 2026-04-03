@@ -343,10 +343,11 @@ impl CodeGen {
                     }
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::AddU64 {
+                        emitter.push_op(bytecode::OpCode::AddInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
+                            bits: *bits as u64,
                         });
                     }
                     TypeExpr::WitnessOf(_) => {
@@ -375,10 +376,11 @@ impl CodeGen {
                     }
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::SubU64 {
+                        emitter.push_op(bytecode::OpCode::SubInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
+                            bits: *bits as u64,
                         });
                     }
                     t => panic!("Unsupported type for subtraction: {:?}", t),
@@ -397,8 +399,8 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(_bits) => {
+                        let result = layouter.alloc_u64(*val, *_bits);
                         emitter.push_op(bytecode::OpCode::DivU64 {
                             res: result,
                             a: layouter.get_value(*op1),
@@ -417,8 +419,8 @@ impl CodeGen {
                     TypeExpr::Field => {
                         panic!("Modulo is not defined on field elements")
                     }
-                    TypeExpr::U(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(_bits) => {
+                        let result = layouter.alloc_u64(*val, *_bits);
                         emitter.push_op(bytecode::OpCode::ModU64 {
                             res: result,
                             a: layouter.get_value(*op1),
@@ -444,10 +446,11 @@ impl CodeGen {
                     }
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::MulU64 {
+                        emitter.push_op(bytecode::OpCode::MulInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
+                            bits: *bits as u64,
                         });
                     }
                     t => panic!("Unsupported type for multiplication: {:?}", t),
