@@ -871,9 +871,10 @@ impl<'a> ExpressionConverter<'a> {
 
         let (src_bits, src_signed) = match cast.lhs.return_type().as_deref() {
             Some(AstType::Field) => (254, false),
-            Some(AstType::Integer(signedness, bit_size)) => {
-                (bit_size.bit_size() as usize, *signedness == Signedness::Signed)
-            }
+            Some(AstType::Integer(signedness, bit_size)) => (
+                bit_size.bit_size() as usize,
+                *signedness == Signedness::Signed,
+            ),
             Some(AstType::Bool) => (1, false),
             _ => (0, false),
         };

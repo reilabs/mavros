@@ -471,12 +471,7 @@ impl Value {
         }
     }
 
-    fn sext_op(
-        &self,
-        from: usize,
-        to: usize,
-        _instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
+    fn sext_op(&self, from: usize, to: usize, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {

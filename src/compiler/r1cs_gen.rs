@@ -604,8 +604,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
             false
         };
         if sign_bit {
-            let extension =
-                ark_bn254::Fr::from(1u128 << _to) - ark_bn254::Fr::from(1u128 << from);
+            let extension = ark_bn254::Fr::from(1u128 << _to) - ark_bn254::Fr::from(1u128 << from);
             Value::Const(val + extension)
         } else {
             self.clone()
