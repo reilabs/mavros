@@ -575,7 +575,12 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let one = b.field_const(Field::ONE);
-                    let value_field = b.cast_to_field(value);
+                    let value_type = function_type_info.get_value_type(value);
+                    let value_field = if value_type.strip_witness().is_field() {
+                        value
+                    } else {
+                        b.cast_to_field(value)
+                    };
                     self.gen_witness_truncate(b, value_field, to_bits, one, result);
                 }
             }
@@ -585,9 +590,15 @@ impl ExplicitWitness {
                 from_bits,
                 to_bits,
             } => {
-                let i_taint = function_type_info.get_value_type(value).is_witness_of();
+                let value_type = function_type_info.get_value_type(value);
+                let i_taint = value_type.is_witness_of();
                 let one = b.field_const(Field::ONE);
-                self.gen_sext(b, value, from_bits, to_bits, one, i_taint, result);
+                let value_field = if value_type.strip_witness().is_field() {
+                    value
+                } else {
+                    b.cast_to_field(value)
+                };
+                self.gen_sext(b, value_field, from_bits, to_bits, one, i_taint, result);
             }
             OpCode::Not { result, value } => {
                 let value_type = function_type_info.get_value_type(value);
@@ -790,7 +801,13 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(condition)
                 };
-                self.gen_sext(b, value, from_bits, to_bits, cond_field, true, result);
+                let value_type = function_type_info.get_value_type(value);
+                let value_field = if value_type.strip_witness().is_field() {
+                    value
+                } else {
+                    b.cast_to_field(value)
+                };
+                self.gen_sext(b, value_field, from_bits, to_bits, cond_field, true, result);
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
@@ -1192,17 +1209,11 @@ impl ExplicitWitness {
         is_witness: bool,
         result: ValueId,
     ) {
-        // Cast to Field for arithmetic (extract_sign_bit expects Field-typed input)
-        let value_field = b.cast_to_field(value);
-        let sign_bit = self.extract_sign_bit(b, value_field, from_bits, flag, is_witness);
+        let sign_bit = self.extract_sign_bit(b, value, from_bits, flag, is_witness);
         let extension =
             b.field_const(Field::from(1u128 << to_bits) - Field::from(1u128 << from_bits));
         let offset = b.mul(sign_bit, extension);
-        let extended = b.add(value_field, offset);
-
-        if is_witness {
-            self.gen_witness_rangecheck(b, extended, to_bits, flag);
-        }
+        let extended = b.add(value, offset);
 
         // Cast back to target integer type
         b.push(OpCode::Cast {
