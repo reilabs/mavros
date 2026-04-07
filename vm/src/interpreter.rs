@@ -386,10 +386,10 @@ pub fn run_phase2(
                 phase1.out_wit_post_comm[wit_off] = Field::ZERO;
             } else {
                 let ix_in_table = phase1.out_b[cnst_off].0.0[0];
-                phase1.out_a[cnst_off] =
-                    phase1.out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-                phase1.out_b[cnst_off] =
-                    phase1.out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+                phase1.out_a[cnst_off] = phase1.out_a
+                    [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+                phase1.out_b[cnst_off] = phase1.out_b
+                    [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
                 phase1.out_c[cnst_off] = Field::from(flag_u64);
                 phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
                 phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
@@ -427,10 +427,8 @@ pub fn run_phase2(
                 let ix_in_table = phase1.out_b[y_cnst_off].0.0[0];
                 let tbl_base = table.elem_inverses_constraint_section_offset;
                 // Copy precomputed inverse from table's y-slot (odd offset)
-                phase1.out_a[y_cnst_off] =
-                    phase1.out_a[tbl_base + 2 * ix_in_table as usize + 1];
-                phase1.out_b[y_cnst_off] =
-                    phase1.out_b[tbl_base + 2 * ix_in_table as usize + 1];
+                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + 2 * ix_in_table as usize + 1];
+                phase1.out_b[y_cnst_off] = phase1.out_b[tbl_base + 2 * ix_in_table as usize + 1];
                 phase1.out_c[y_cnst_off] = Field::from(flag_u64);
                 phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
                 // Add to sum constraint (at offset 2*n in wide table)

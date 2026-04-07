@@ -151,7 +151,8 @@ impl WitnessLowering {
                             results,
                             flag,
                         } => {
-                            let is_array_lookup = matches!(&target, crate::compiler::ssa::LookupTarget::Array(_));
+                            let is_array_lookup =
+                                matches!(&target, crate::compiler::ssa::LookupTarget::Array(_));
                             let mut new_keys = vec![];
                             for key in keys.iter() {
                                 let key_type = type_info.get_value_type(*key);
