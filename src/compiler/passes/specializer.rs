@@ -26,6 +26,7 @@ pub struct Specializer {
 #[derive(Debug, Clone)]
 enum ConstVal {
     U(usize, u128),
+    I(usize, u128),
     Field(Field),
     Array(Vec<ValueId>),
     Tuple(Vec<ValueId>),
@@ -286,7 +287,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         let self_const = ctx.const_vals.get(&self.0).cloned();
         match self_const {
             Some(ConstVal::U(_, v)) => match cast_target {
-                CastTarget::U(s) => {
+                CastTarget::U(s) | CastTarget::I(s) => {
                     let res = v & ((1 << *s) - 1);
                     let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
@@ -301,7 +302,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => self.clone(),
             },
             Some(ConstVal::Field(f)) => match cast_target {
-                CastTarget::U(s) => {
+                CastTarget::U(s) | CastTarget::I(s) => {
                     let v: u128 = f.into_bigint().as_ref()[0] as u128;
                     let res = v & ((1 << *s) - 1);
                     let res_v = ctx.u_const(*s, res);
@@ -365,6 +366,12 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     fn of_u(s: usize, v: u128, ctx: &mut SpecializationState) -> Self {
         let val = ctx.u_const(s, v);
         ctx.const_vals.insert(val, ConstVal::U(s, v));
+        Self(val)
+    }
+
+    fn of_i(s: usize, v: u128, ctx: &mut SpecializationState) -> Self {
+        let val = ctx.i_const(s, v);
+        ctx.const_vals.insert(val, ConstVal::I(s, v));
         Self(val)
     }
 
@@ -670,6 +677,11 @@ impl Specializer {
                     call_params.push(Val(val));
                     state.const_vals.insert(val, ConstVal::U(*size, *v));
                 }
+                ValueSignature::I(size, v) => {
+                    let val = state.i_const(*size, *v);
+                    call_params.push(Val(val));
+                    state.const_vals.insert(val, ConstVal::I(*size, *v));
+                }
                 ValueSignature::Tuple(_) => {
                     info!("TODO: Aborting specialization on a tuple value");
                     return;
@@ -768,6 +780,11 @@ impl Specializer {
                     }
                     ValueSignature::U(s, v) => {
                         let cst = entry.u_const(*s, *v);
+                        let is_eq = entry.eq(*pval, cst);
+                        cond = entry.and(cond, is_eq);
+                    }
+                    ValueSignature::I(s, v) => {
+                        let cst = entry.i_const(*s, *v);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
                     }

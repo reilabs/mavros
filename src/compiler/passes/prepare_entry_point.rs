@@ -96,7 +96,7 @@ impl PrepareEntryPoint {
         typ: &Type,
     ) {
         match &typ.expr {
-            TypeExpr::Field | TypeExpr::U(_) => {
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
                 b.assert_eq(result, public_input);
             }
             TypeExpr::Array(inner, size) => {
@@ -274,7 +274,12 @@ impl PrepareEntryPoint {
                 });
                 (ww_result, instructions)
             }
-            TypeExpr::U(size) => {
+            TypeExpr::U(size) | TypeExpr::I(size) => {
+                let cast_back = match &typ.expr {
+                    TypeExpr::U(s) => CastTarget::U(*s),
+                    TypeExpr::I(s) => CastTarget::I(*s),
+                    _ => unreachable!(),
+                };
                 // Cast to Field, WriteWitness, rangecheck, cast back
                 let as_field = function.fresh_value();
                 instructions.push(OpCode::Cast {
@@ -330,7 +335,7 @@ impl PrepareEntryPoint {
                 instructions.push(OpCode::Cast {
                     result: casted,
                     value: ww_result,
-                    target: CastTarget::U(*size),
+                    target: cast_back,
                 });
                 (casted, instructions)
             }
@@ -438,7 +443,12 @@ impl PrepareEntryPoint {
 
         match &typ.expr {
             TypeExpr::Field => new_parameters.push((*value_id, typ.clone())),
-            TypeExpr::U(size) => {
+            TypeExpr::U(size) | TypeExpr::I(size) => {
+                let cast_back = match &typ.expr {
+                    TypeExpr::U(s) => CastTarget::U(*s),
+                    TypeExpr::I(s) => CastTarget::I(*s),
+                    _ => unreachable!(),
+                };
                 let new_field_id = function.fresh_value();
                 new_parameters.push((new_field_id, Type::field()));
 
@@ -482,7 +492,7 @@ impl PrepareEntryPoint {
                 new_instructions.push(OpCode::Cast {
                     result: *value_id,
                     value: new_field_id,
-                    target: CastTarget::U(*size),
+                    target: cast_back,
                 });
             }
             TypeExpr::Array(inner, size) => {

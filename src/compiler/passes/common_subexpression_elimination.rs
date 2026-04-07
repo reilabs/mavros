@@ -21,6 +21,7 @@ enum Expr {
     Sub(Box<Expr>, Box<Expr>),
     FConst(ark_bn254::Fr),
     UConst(usize, u128),
+    IConst(usize, u128),
     Variable(u64),
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
@@ -150,6 +151,7 @@ impl Display for Expr {
             Self::Sub(lhs, rhs) => write!(f, "({} - {})", lhs, rhs),
             Self::FConst(value) => write!(f, "{}", value),
             Self::UConst(size, value) => write!(f, "u{}({})", size, value),
+            Self::IConst(size, value) => write!(f, "i{}({})", size, value),
             Self::Variable(value) => write!(f, "v{}", value),
             Self::Eq(lhs, rhs) => write!(f, "({} == {})", lhs, rhs),
             Self::Lt(lhs, rhs) => write!(f, "({} < {})", lhs, rhs),
@@ -481,6 +483,14 @@ impl CSE {
                     } => match cv {
                         ConstValue::U(size, val) => {
                             let expr = Expr::UConst(*size, *val);
+                            exprs.insert(*r, expr.clone());
+                            result
+                                .entry(expr)
+                                .or_default()
+                                .push((block_id, instruction_idx, *r));
+                        }
+                        ConstValue::I(size, val) => {
+                            let expr = Expr::IConst(*size, *val);
                             exprs.insert(*r, expr.clone());
                             result
                                 .entry(expr)

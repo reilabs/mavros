@@ -617,6 +617,7 @@ pub enum SeqType {
 pub enum CastTarget {
     Field,
     U(usize),
+    I(usize),
     WitnessOf,
     Nop,
     ArrayToSlice,
@@ -639,6 +640,7 @@ impl Display for CastTarget {
         match self {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::U(size) => write!(f, "u{}", size),
+            CastTarget::I(size) => write!(f, "i{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
@@ -894,6 +896,7 @@ pub enum OpCode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
     U(usize, u128),
+    I(usize, u128),
     Field(ark_bn254::Fr),
     FnPtr(FunctionId),
 }
@@ -1329,6 +1332,15 @@ impl Instruction for OpCode {
                 ConstValue::U(size, val) => {
                     format!(
                         "v{}{} = u_const({}, {})",
+                        result.0,
+                        annotate_value(*result),
+                        size,
+                        val
+                    )
+                }
+                ConstValue::I(size, val) => {
+                    format!(
+                        "v{}{} = i_const({}, {})",
                         result.0,
                         annotate_value(*result),
                         size,

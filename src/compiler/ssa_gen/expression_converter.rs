@@ -818,8 +818,19 @@ impl<'a> ExpressionConverter<'a> {
                     }
                     noirc_frontend::ast::UnaryOp::Not => b.block(self.current_block).not(value),
                     noirc_frontend::ast::UnaryOp::Minus => {
-                        let zero = self
-                            .get_or_create_const(b, ConstValue::Field(ark_bn254::Fr::from(0u64)));
+                        use noirc_frontend::monomorphization::ast::Type as AstType;
+                        let zero_const = match unary.rhs.return_type().as_deref() {
+                            Some(AstType::Integer(
+                                noirc_frontend::shared::Signedness::Signed,
+                                bit_size,
+                            )) => ConstValue::I(bit_size.bit_size() as usize, 0),
+                            Some(AstType::Integer(
+                                noirc_frontend::shared::Signedness::Unsigned,
+                                bit_size,
+                            )) => ConstValue::U(bit_size.bit_size() as usize, 0),
+                            _ => ConstValue::Field(ark_bn254::Fr::from(0u64)),
+                        };
+                        let zero = self.get_or_create_const(b, zero_const);
                         b.block(self.current_block).sub(zero, value)
                     }
                     _ => unreachable!(),
@@ -866,9 +877,18 @@ impl<'a> ExpressionConverter<'a> {
 
         let (target, target_bits) = match &cast.r#type {
             AstType::Field => (CastTarget::Field, 254),
-            AstType::Integer(_, bit_size) => {
+            AstType::Integer(signedness, bit_size) => {
+                use noirc_frontend::shared::Signedness;
                 let bits = bit_size.bit_size() as usize;
-                (CastTarget::U(bits), bits)
+                match signedness {
+                    Signedness::Unsigned => (CastTarget::U(bits), bits),
+                    Signedness::Signed => {
+                        if src_bits > 0 && bits > src_bits {
+                            panic!("Signed widening casts not yet implemented");
+                        }
+                        (CastTarget::I(bits), bits)
+                    }
+                }
             }
             AstType::Bool => (CastTarget::U(1), 1),
             _ => panic!("Unsupported cast target type: {:?}", cast.r#type),
@@ -932,13 +952,16 @@ impl<'a> ExpressionConverter<'a> {
                     }
                     AstType::Integer(signedness, bit_size) => {
                         use noirc_frontend::shared::Signedness;
-                        if *signedness == Signedness::Signed {
-                            todo!("Signed integer literals not yet supported");
-                        }
                         let bits: usize = bit_size.bit_size() as usize;
-                        // Get the value as u128
-                        let value = signed_field.to_u128();
-                        Some(self.get_or_create_const(b, ConstValue::U(bits, value)))
+                        if *signedness == Signedness::Signed {
+                            let signed_val = signed_field.to_i128();
+                            let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
+                            Some(self.get_or_create_const(b, ConstValue::I(bits, twos_complement)))
+                        } else {
+                            // Get the value as u128
+                            let value = signed_field.to_u128();
+                            Some(self.get_or_create_const(b, ConstValue::U(bits, value)))
+                        }
                     }
                     AstType::Bool => {
                         let value = signed_field.to_u128();

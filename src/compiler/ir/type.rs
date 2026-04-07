@@ -4,6 +4,7 @@ use std::fmt::{Debug, Display, Formatter};
 pub enum TypeExpr {
     Field,
     U(usize),
+    I(usize),
     WitnessOf(Box<Type>),
     Array(Box<Type>, usize),
     Slice(Box<Type>),
@@ -22,6 +23,7 @@ impl Display for Type {
         match &self.expr {
             TypeExpr::Field => write!(f, "Field"),
             TypeExpr::U(size) => write!(f, "u{}", size),
+            TypeExpr::I(size) => write!(f, "i{}", size),
             TypeExpr::WitnessOf(inner) => write!(f, "WitnessOf({})", inner),
             TypeExpr::Array(inner, size) => write!(f, "Array<{}, {}>", inner, size),
             TypeExpr::Slice(inner) => write!(f, "Slice<{}>", inner),
@@ -52,6 +54,12 @@ impl Type {
     pub fn u(size: usize) -> Self {
         Type {
             expr: TypeExpr::U(size),
+        }
+    }
+
+    pub fn i(size: usize) -> Self {
+        Type {
+            expr: TypeExpr::I(size),
         }
     }
 
@@ -110,7 +118,7 @@ impl Type {
 
     pub fn is_numeric(&self) -> bool {
         match &self.expr {
-            TypeExpr::U(_) | TypeExpr::Field => true,
+            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field => true,
             TypeExpr::WitnessOf(inner) => inner.is_numeric(),
             _ => false,
         }
@@ -140,6 +148,14 @@ impl Type {
         matches!(self.expr, TypeExpr::U(_))
     }
 
+    pub fn is_i(&self) -> bool {
+        matches!(self.expr, TypeExpr::I(_))
+    }
+
+    pub fn is_integer(&self) -> bool {
+        matches!(self.expr, TypeExpr::U(_) | TypeExpr::I(_))
+    }
+
     pub fn is_u32(&self) -> bool {
         matches!(self.expr, TypeExpr::U(32))
     }
@@ -160,7 +176,7 @@ impl Type {
     }
 
     pub fn has_eq(&self) -> bool {
-        matches!(self.expr, TypeExpr::Field | TypeExpr::U(_))
+        matches!(self.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
     }
 
     pub fn is_ref(&self) -> bool {
@@ -224,10 +240,10 @@ impl Type {
 
     pub fn get_bit_size(&self) -> usize {
         match &self.expr {
-            TypeExpr::U(size) => *size,
+            TypeExpr::U(size) | TypeExpr::I(size) => *size,
             TypeExpr::Field => 254, // TODO: parametrize
             TypeExpr::WitnessOf(inner) => inner.get_bit_size(),
-            _ => panic!("Type is not a u: {}", self),
+            _ => panic!("Type is not numeric: {}", self),
         }
     }
 
@@ -300,6 +316,7 @@ impl Type {
             // Structural (neither is WitnessOf)
             (TypeExpr::Field, TypeExpr::Field) => true,
             (TypeExpr::U(n), TypeExpr::U(m)) => n == m,
+            (TypeExpr::I(n), TypeExpr::I(m)) => n == m,
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => n == m && x.is_subtype_of(y),
             (TypeExpr::Slice(x), TypeExpr::Slice(y)) => x.is_subtype_of(y),
             (TypeExpr::Tuple(xs), TypeExpr::Tuple(ys)) => {
@@ -337,6 +354,10 @@ impl Type {
             (TypeExpr::U(n), TypeExpr::U(m)) => {
                 assert_eq!(n, m, "Cannot join U({}) and U({})", n, m);
                 Type::u(*n)
+            }
+            (TypeExpr::I(n), TypeExpr::I(m)) => {
+                assert_eq!(n, m, "Cannot join I({}) and I({})", n, m);
+                Type::i(*n)
             }
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => {
                 assert_eq!(
@@ -392,6 +413,7 @@ impl Type {
             }
             (TypeExpr::Field, _) | (_, TypeExpr::Field) => Type::field(),
             (TypeExpr::U(size1), TypeExpr::U(size2)) => Type::u(*size1.max(size2)),
+            (TypeExpr::I(size1), TypeExpr::I(size2)) => Type::i(*size1.max(size2)),
             _ => panic!("Cannot perform arithmetic on types {} and {}", self, other),
         }
     }
@@ -406,6 +428,7 @@ impl Type {
             TypeExpr::WitnessOf(inner) => inner.contains_ptrs(),
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
+            TypeExpr::I(_) => false,
             TypeExpr::Function => false,
             TypeExpr::Tuple(elements) => elements.iter().any(|e| e.contains_ptrs()),
         }
@@ -420,6 +443,7 @@ impl Type {
             }
             TypeExpr::Function => 1,
             TypeExpr::U(_) => 1,
+            TypeExpr::I(_) => 1,
             TypeExpr::WitnessOf(_) => 1, // pointer-sized (witness tape reference)
             _ => panic!("Cannot currently calculate size for type {}", self),
         }

@@ -20,7 +20,7 @@ impl TypeConverter {
             AstType::Bool => Type::bool(),
             AstType::Integer(signedness, bit_size) => match signedness {
                 Signedness::Unsigned => Type::u(bit_size.bit_size() as usize),
-                Signedness::Signed => panic!("Signed integers not supported"),
+                Signedness::Signed => Type::i(bit_size.bit_size() as usize),
             },
             AstType::Unit => {
                 // Unit type is represented as an empty tuple

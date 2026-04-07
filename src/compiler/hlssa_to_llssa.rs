@@ -30,7 +30,7 @@ use crate::compiler::ssa::{
 fn lower_type(ty: &Type) -> LLType {
     match &ty.expr {
         TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
-        TypeExpr::U(bits) => LLType::Int(*bits as u32),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => LLType::Int(*bits as u32),
         TypeExpr::Array(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         TypeExpr::WitnessOf(_) => LLType::Ptr,
@@ -43,7 +43,9 @@ fn lower_type(ty: &Type) -> LLType {
 fn elem_struct(ty: &Type) -> LLStruct {
     match &ty.expr {
         TypeExpr::Field => LLStruct::field_elem(),
-        TypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+            LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
+        }
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
@@ -332,6 +334,18 @@ fn lower_instruction(
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
                 }
+                TypeExpr::I(_) => {
+                    let op = match kind {
+                        BinaryArithOpKind::Add => IntArithOp::Add,
+                        BinaryArithOpKind::Sub => IntArithOp::Sub,
+                        BinaryArithOpKind::Mul => IntArithOp::Mul,
+                        BinaryArithOpKind::And => IntArithOp::And,
+                        BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
+                        BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
+                        _ => panic!("Unsupported signed int arith op: {:?}", kind),
+                    };
+                    e.int_arith(op, ll_lhs, ll_rhs)
+                }
                 TypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind {
@@ -368,6 +382,10 @@ fn lower_instruction(
                     };
                     e.int_cmp(op, ll_lhs, ll_rhs)
                 }
+                TypeExpr::I(_) => match kind {
+                    CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
+                    CmpKind::Lt => panic!("Signed Lt not yet implemented in LLSSA"),
+                },
                 TypeExpr::Field => match kind {
                     CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
                     _ => panic!("Unsupported field comparison: {:?}", kind),
@@ -426,7 +444,7 @@ fn lower_instruction(
         }
 
         OpCode::Const { result, value } => match value {
-            ConstValue::U(bits, val) => {
+            ConstValue::U(bits, val) | ConstValue::I(bits, val) => {
                 let ll_val = e.int_const(*bits as u32, *val as u64);
                 val_map.insert(*result, ll_val);
             }

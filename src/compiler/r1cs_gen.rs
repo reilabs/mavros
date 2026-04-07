@@ -491,6 +491,51 @@ impl symbolic_executor::Value<R1CGen> for Value {
             TypeExpr::U(size) => {
                 panic!("Unsupported unsigned integer size in R1CS arith: u{size}")
             }
+            TypeExpr::I(8) => {
+                let a = self.expect_u8() as i8;
+                let b_val = b.expect_u8() as i8;
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => (a.wrapping_add(b_val) as u8) as u32,
+                    BinaryArithOpKind::Sub => (a.wrapping_sub(b_val) as u8) as u32,
+                    BinaryArithOpKind::Mul => (a.wrapping_mul(b_val) as u8) as u32,
+                    BinaryArithOpKind::And => ((a as u8) & (b_val as u8)) as u32,
+                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
+                        panic!("Signed div/mod not yet implemented")
+                    }
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::I(32) => {
+                let a = self.expect_u32() as i32;
+                let b_val = b.expect_u32() as i32;
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => a.wrapping_add(b_val) as u32,
+                    BinaryArithOpKind::Sub => a.wrapping_sub(b_val) as u32,
+                    BinaryArithOpKind::Mul => a.wrapping_mul(b_val) as u32,
+                    BinaryArithOpKind::And => (a as u32) & (b_val as u32),
+                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
+                        panic!("Signed div/mod not yet implemented")
+                    }
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::I(64) => {
+                let a = self.expect_u64() as i64;
+                let b_val = b.expect_u64() as i64;
+                let result = match binary_arith_op_kind {
+                    BinaryArithOpKind::Add => a.wrapping_add(b_val) as u64,
+                    BinaryArithOpKind::Sub => a.wrapping_sub(b_val) as u64,
+                    BinaryArithOpKind::Mul => a.wrapping_mul(b_val) as u64,
+                    BinaryArithOpKind::And => (a as u64) & (b_val as u64),
+                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
+                        panic!("Signed div/mod not yet implemented")
+                    }
+                };
+                Value::Const(ark_bn254::Fr::from(result))
+            }
+            TypeExpr::I(size) => {
+                panic!("Unsupported signed integer size in R1CS arith: i{size}")
+            }
             TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind {
                 BinaryArithOpKind::Add => self.add(b),
                 BinaryArithOpKind::Sub => self.sub(b),
@@ -617,6 +662,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     fn of_u(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
+        Value::Const(ark_bn254::Fr::from(v))
+    }
+
+    fn of_i(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
         Value::Const(ark_bn254::Fr::from(v))
     }
 

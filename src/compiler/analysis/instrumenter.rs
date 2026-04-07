@@ -21,6 +21,7 @@ use crate::compiler::{
 pub enum ScalarKind {
     Field,
     U(usize),
+    I(usize),
 }
 
 impl ScalarKind {
@@ -28,6 +29,7 @@ impl ScalarKind {
         match &tp.strip_witness().expr {
             TypeExpr::Field => ScalarKind::Field,
             TypeExpr::U(s) => ScalarKind::U(*s),
+            TypeExpr::I(s) => ScalarKind::I(*s),
             TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
             _ => panic!("Not a scalar type: {:?}", tp),
         }
@@ -37,6 +39,7 @@ impl ScalarKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
     U(usize, u128),
+    I(usize, u128),
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
@@ -49,6 +52,7 @@ impl ValueSignature {
     pub fn to_value(&self) -> Value {
         match self {
             ValueSignature::U(size, val) => Value::U(*size, *val),
+            ValueSignature::I(size, val) => Value::I(*size, *val),
             ValueSignature::Field(field) => Value::Field(field.clone()),
             ValueSignature::Array(vals) => {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
@@ -64,7 +68,7 @@ impl ValueSignature {
 
     pub fn pretty_print(&self, full: bool) -> String {
         match self {
-            ValueSignature::U(_, v) => format!("{v}"),
+            ValueSignature::U(_, v) | ValueSignature::I(_, v) => format!("{v}"),
             ValueSignature::Field(f) => format!("{}", f),
             ValueSignature::Array(items) => {
                 if full {
@@ -92,6 +96,7 @@ impl ValueSignature {
 #[derive(Debug, Clone)]
 pub enum Value {
     U(usize, u128),
+    I(usize, u128),
     Field(Field),
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
@@ -283,7 +288,7 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Unknown(_) => {}
-            Value::U(_, _) | Value::Field(_) => {}
+            Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in vals {
                     val.blind();
@@ -303,6 +308,7 @@ impl Value {
     fn forget_concrete(&mut self) {
         match self {
             Value::U(s, _) => *self = Value::Unknown(ScalarKind::U(*s)),
+            Value::I(s, _) => *self = Value::Unknown(ScalarKind::I(*s)),
             Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
             Value::Unknown(_) => {}
             Value::WitnessOf(inner) => {
@@ -331,6 +337,7 @@ impl Value {
                 ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
             Value::U(s, v) => ValueSignature::U(*s, *v),
+            Value::I(s, v) => ValueSignature::I(*s, *v),
             Value::Field(f) => ValueSignature::Field(f.clone()),
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
@@ -476,9 +483,10 @@ impl Value {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
             (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v),
+            (Value::U(_, v), CastTarget::I(s2)) => Value::U(*s2, *v),
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
             (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
-            (Value::Field(f), CastTarget::U(s)) => {
+            (Value::Field(f), CastTarget::U(s) | CastTarget::I(s)) => {
                 let bigint = f.into_bigint();
                 Value::U(*s, bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64))
             }
@@ -1019,6 +1027,13 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
+    fn of_i(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: Value::I(s, v),
+            specialized: Value::I(s, v),
+        }
+    }
+
     fn of_field(f: Field, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::Field(f),
@@ -1200,6 +1215,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 match &ty.expr {
                     TypeExpr::Field => Value::Unknown(ScalarKind::Field),
                     TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+                    TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
                     TypeExpr::Array(elem, size) => {
                         Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
                     }
@@ -1588,6 +1604,7 @@ impl CostEstimator {
         match &tp.expr {
             TypeExpr::Field => ValueSignature::Unknown(ScalarKind::Field),
             TypeExpr::U(s) => ValueSignature::Unknown(ScalarKind::U(*s)),
+            TypeExpr::I(s) => ValueSignature::Unknown(ScalarKind::I(*s)),
             TypeExpr::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(self.type_to_unknown_sig(inner)))
             }

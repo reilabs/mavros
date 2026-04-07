@@ -869,7 +869,9 @@ impl WitnessTypeInference {
 
     fn construct_pure_witness_for_type(typ: &Type) -> WitnessType {
         match &typ.expr {
-            TypeExpr::U(_) | TypeExpr::Field => WitnessType::Scalar(ConstantWitness::Pure),
+            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field => {
+                WitnessType::Scalar(ConstantWitness::Pure)
+            }
             TypeExpr::Array(i, _) => WitnessType::Array(
                 ConstantWitness::Pure,
                 Box::new(Self::construct_pure_witness_for_type(i)),
