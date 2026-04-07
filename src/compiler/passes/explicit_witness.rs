@@ -578,6 +578,16 @@ impl ExplicitWitness {
                     self.gen_witness_truncate(b, value, to_bits, one, result);
                 }
             }
+            OpCode::SExt {
+                result,
+                value,
+                from_bits,
+                to_bits,
+            } => {
+                let i_taint = function_type_info.get_value_type(value).is_witness_of();
+                let one = b.field_const(Field::ONE);
+                self.gen_sext(b, value, from_bits, to_bits, one, i_taint, result);
+            }
             OpCode::Not { result, value } => {
                 let value_type = function_type_info.get_value_type(value);
                 let (s, cast_target) = match &value_type.strip_witness().expr {
@@ -766,6 +776,20 @@ impl ExplicitWitness {
                     b.cast_to_field(condition)
                 };
                 self.gen_witness_truncate(b, value, to_bits, cond_field, result);
+            }
+            OpCode::SExt {
+                result,
+                value,
+                from_bits,
+                to_bits,
+            } => {
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                self.gen_sext(b, value, from_bits, to_bits, cond_field, true, result);
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
@@ -1152,6 +1176,39 @@ impl ExplicitWitness {
         b.constrain(flag, diff, zero);
 
         sign_wit
+    }
+
+    /// Sign-extend a value from `from_bits` to `to_bits`.
+    ///
+    /// result = value + sign_bit * (2^to_bits - 2^from_bits)
+    fn gen_sext(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        from_bits: usize,
+        to_bits: usize,
+        flag: ValueId,
+        is_witness: bool,
+        result: ValueId,
+    ) {
+        // Cast to Field for arithmetic (extract_sign_bit expects Field-typed input)
+        let value_field = b.cast_to_field(value);
+        let sign_bit = self.extract_sign_bit(b, value_field, from_bits, flag, is_witness);
+        let extension =
+            b.field_const(Field::from(1u128 << to_bits) - Field::from(1u128 << from_bits));
+        let offset = b.mul(sign_bit, extension);
+        let extended = b.add(value_field, offset);
+
+        if is_witness {
+            self.gen_witness_rangecheck(b, extended, to_bits, flag);
+        }
+
+        // Cast back to target integer type
+        b.push(OpCode::Cast {
+            result,
+            value: extended,
+            target: CastTarget::I(to_bits),
+        });
     }
 
     /// Signed n-bit add/sub gadget for witness variables.

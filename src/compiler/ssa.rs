@@ -728,6 +728,12 @@ pub enum OpCode {
         to_bits: usize,
         from_bits: usize,
     },
+    SExt {
+        result: ValueId,
+        value: ValueId,
+        from_bits: usize,
+        to_bits: usize,
+    },
     Not {
         result: ValueId,
         value: ValueId,
@@ -1207,6 +1213,21 @@ impl Instruction for OpCode {
                     out_bits
                 )
             }
+            OpCode::SExt {
+                result,
+                value,
+                from_bits: in_bits,
+                to_bits: out_bits,
+            } => {
+                format!(
+                    "v{}{} = sext v{} from {} bits to {} bits",
+                    result.0,
+                    annotate_value(*result),
+                    value.0,
+                    in_bits,
+                    out_bits
+                )
+            }
             OpCode::Not { result, value } => {
                 format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
@@ -1452,6 +1473,12 @@ impl Instruction for OpCode {
                 value: c,
                 to_bits: _,
                 from_bits: _,
+            }
+            | Self::SExt {
+                result: _,
+                value: c,
+                from_bits: _,
+                to_bits: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1639,6 +1666,12 @@ impl Instruction for OpCode {
                 to_bits: _,
                 from_bits: _,
             }
+            | Self::SExt {
+                result: r,
+                value: _,
+                from_bits: _,
+                to_bits: _,
+            }
             | Self::MulConst {
                 result: r,
                 const_val: _,
@@ -1801,6 +1834,12 @@ impl Instruction for OpCode {
                 value: c,
                 to_bits: _,
                 from_bits: _,
+            }
+            | Self::SExt {
+                result: _,
+                value: c,
+                from_bits: _,
+                to_bits: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1965,6 +2004,12 @@ impl Instruction for OpCode {
                 value: b,
                 to_bits: _,
                 from_bits: _,
+            } => vec![a, b].into_iter(),
+            Self::SExt {
+                result: a,
+                value: b,
+                from_bits: _,
+                to_bits: _,
             } => vec![a, b].into_iter(),
             Self::ArraySet {
                 result: a,

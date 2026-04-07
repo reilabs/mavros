@@ -471,6 +471,31 @@ impl Value {
         }
     }
 
+    fn sext_op(
+        &self,
+        from: usize,
+        to: usize,
+        _instrumenter: &mut dyn OpInstrumenter,
+    ) -> Value {
+        match self {
+            Value::Unknown(kind) => Value::Unknown(*kind),
+            Value::WitnessOf(inner) => {
+                Value::WitnessOf(Box::new(inner.sext_op(from, to, _instrumenter)))
+            }
+            Value::U(_, v) => {
+                // Sign-extend: check sign bit at position from-1
+                let sign_bit = if from > 0 { (v >> (from - 1)) & 1 } else { 0 };
+                if sign_bit == 1 {
+                    let mask = ((1u128 << to) - 1) ^ ((1u128 << from) - 1);
+                    Value::U(to, v | mask)
+                } else {
+                    Value::U(to, *v)
+                }
+            }
+            _ => panic!("Cannot sext {:?}", self),
+        }
+    }
+
     fn cast_op(
         &self,
         cast_target: &crate::compiler::ssa::CastTarget,
@@ -755,6 +780,23 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             specialized: self
                 .specialized
                 .truncate_op(from, to, instrumenter.get_specialized()),
+        }
+    }
+
+    fn sext(
+        &self,
+        from: usize,
+        to: usize,
+        _tp: &Type,
+        instrumenter: &mut CostAnalysis,
+    ) -> SpecSplitValue {
+        SpecSplitValue {
+            unspecialized: self
+                .unspecialized
+                .sext_op(from, to, instrumenter.get_unspecialized()),
+            specialized: self
+                .specialized
+                .sext_op(from, to, instrumenter.get_specialized()),
         }
     }
 

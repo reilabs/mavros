@@ -389,6 +389,32 @@ impl Types {
                 function_info.values.insert(*result, value_type.clone());
                 Ok(())
             }
+            OpCode::SExt {
+                result,
+                value,
+                from_bits: _,
+                to_bits,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+
+                // Widen to target bits, preserving signedness and witness wrapper
+                let inner = value_type.strip_witness();
+                let widened = match &inner.expr {
+                    TypeExpr::I(_) => Type::i(*to_bits),
+                    TypeExpr::U(_) => Type::u(*to_bits),
+                    _ => panic!("SExt on non-integer type: {:?}", value_type),
+                };
+                let result_type = if value_type.is_witness_of() {
+                    Type::witness_of(widened)
+                } else {
+                    widened
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
             OpCode::Not { result, value } => {
                 let value_type = function_info
                     .values

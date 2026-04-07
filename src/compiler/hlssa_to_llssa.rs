@@ -567,10 +567,12 @@ fn lower_instruction(
                     lower_ad_const_wrap(e, val_map, *result, *value);
                 }
                 CastTarget::Field => {
-                    // U(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
+                    // U(n)/I(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
                     let val64 = match &source_type.expr {
-                        TypeExpr::U(bits) if *bits < 64 => e.zext(ll_value, 64),
-                        TypeExpr::U(64) => ll_value,
+                        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => {
+                            e.zext(ll_value, 64)
+                        }
+                        TypeExpr::U(64) | TypeExpr::I(64) => ll_value,
                         _ => panic!("Cast to Field from unsupported type: {}", source_type),
                     };
                     let zero = e.int_const(64, 0);
@@ -578,8 +580,8 @@ fn lower_instruction(
                     let field_val = e.field_from_limbs(limbs);
                     val_map.insert(*result, field_val);
                 }
-                CastTarget::U(target_bits) => {
-                    // Field → U(n): FieldToLimbs, extract limb 0, truncate
+                CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
+                    // Field → U(n)/I(n): FieldToLimbs, extract limb 0, truncate
                     let limbs = e.field_to_limbs(ll_value);
                     let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
                     let ll_result = if *target_bits < 64 {

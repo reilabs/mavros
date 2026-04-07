@@ -168,6 +168,17 @@ pub trait HLEmitter {
         r
     }
 
+    fn sext(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::SExt {
+            result: r,
+            value,
+            from_bits,
+            to_bits,
+        });
+        r
+    }
+
     // -- Constants --
 
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
