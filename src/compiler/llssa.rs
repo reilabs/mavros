@@ -83,10 +83,11 @@ impl LLStruct {
         Self::new(vec![LLFieldType::Int(64)])
     }
 
-    /// RC'd fixed-size array: { Inline(RcHeader), InlineArray(elem_struct, count) }
+    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
     pub fn rc_array(elem: LLStruct, count: usize) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(64),
             LLFieldType::InlineArray(elem, count),
         ])
     }

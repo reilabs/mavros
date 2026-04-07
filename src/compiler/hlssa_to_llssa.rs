@@ -567,16 +567,21 @@ fn lower_instruction(
                     lower_ad_const_wrap(e, val_map, *result, *value);
                 }
                 CastTarget::Field => {
-                    // U(n)/I(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
-                    let val64 = match &source_type.expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => e.zext(ll_value, 64),
-                        TypeExpr::U(64) | TypeExpr::I(64) => ll_value,
-                        _ => panic!("Cast to Field from unsupported type: {}", source_type),
-                    };
-                    let zero = e.int_const(64, 0);
-                    let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
-                    let field_val = e.field_from_limbs(limbs);
-                    val_map.insert(*result, field_val);
+                    if source_type.is_field() {
+                        // Field → Field: identity cast (no-op)
+                        val_map.insert(*result, ll_value);
+                    } else {
+                        // U(n)/I(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
+                        let val64 = match &source_type.expr {
+                            TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => e.zext(ll_value, 64),
+                            TypeExpr::U(64) | TypeExpr::I(64) => ll_value,
+                            _ => panic!("Cast to Field from unsupported type: {}", source_type),
+                        };
+                        let zero = e.int_const(64, 0);
+                        let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
+                        let field_val = e.field_from_limbs(limbs);
+                        val_map.insert(*result, field_val);
+                    }
                 }
                 CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
                     // Field → U(n)/I(n): FieldToLimbs, extract limb 0, truncate
@@ -629,7 +634,7 @@ fn lower_mk_array(
     e.ll_store(rc_word, one);
 
     // Store elements
-    let data = e.struct_field_ptr(arr, rc_struct, 1);
+    let data = e.struct_field_ptr(arr, rc_struct, 2);
     for (i, elem) in elems.iter().enumerate() {
         let idx = e.int_const(64, i as u64);
         let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
@@ -661,7 +666,7 @@ fn lower_array_get(
     // ZExt index from u32 to i64 for pointer arithmetic
     let idx64 = e.zext(ll_idx, 64);
 
-    let data = e.struct_field_ptr(ll_arr, rc_struct, 1);
+    let data = e.struct_field_ptr(ll_arr, rc_struct, 2);
     let elem_ptr = e.array_elem_ptr(data, es, idx64);
     let val = e.ll_load(elem_ptr, ll_elem_type);
 
@@ -723,7 +728,7 @@ fn lower_array_set(
         vec![LLType::Ptr],
         // -- Mutate in place --
         |me| {
-            let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
+            let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 2);
             let slot = me.array_elem_ptr(data, es.clone(), idx64);
 
             // Drop old element's RC before overwriting
@@ -750,8 +755,8 @@ fn lower_array_set(
             ce.ll_store(new_rc_ptr, one);
 
             // Copy all data
-            let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
-            let new_data = ce.struct_field_ptr(new_arr, rc_struct.clone(), 1);
+            let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 2);
+            let new_data = ce.struct_field_ptr(new_arr, rc_struct.clone(), 2);
             let count_val = ce.int_const(64, count as u64);
             ce.memcpy(new_data, old_data, es.clone(), Some(count_val));
 
@@ -1325,7 +1330,7 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
                         .expect("inner drop fn should exist")
                         .fn_id;
 
-                    let data = e.struct_field_ptr(ptr, rc_struct, 1);
+                    let data = e.struct_field_ptr(ptr, rc_struct, 2);
                     e.build_counted_loop(count, vec![], |e, i_val, _| {
                         let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
                         let elem_val = e.ll_load(elem_ptr, LLType::Ptr);

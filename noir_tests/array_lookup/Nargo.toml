@@ -1,0 +1,6 @@
+[package]
+name = "array_lookup"
+type = "bin"
+authors = [""]
+
+[dependencies]

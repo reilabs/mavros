@@ -901,6 +901,24 @@ impl CodeGen {
                         flag: layouter.get_value(*flag),
                     });
                 }
+                ssa::OpCode::Lookup {
+                    target: LookupTarget::Array(arr),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    let arr_type = type_info.get_value_type(*arr);
+                    let stride = layouter.type_size(&arr_type.get_array_element());
+                    emitter.push_op(bytecode::OpCode::ArrayLookupField {
+                        array: layouter.get_value(*arr),
+                        index: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        stride,
+                    });
+                }
                 ssa::OpCode::DLookup {
                     target: LookupTarget::Rangecheck(8),
                     keys,
@@ -914,6 +932,34 @@ impl CodeGen {
                         val: layouter.get_value(keys[0]),
                         flag: layouter.get_value(*flag),
                     });
+                }
+                ssa::OpCode::DLookup {
+                    target: LookupTarget::Array(arr),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    let arr_type = type_info.get_value_type(*arr);
+                    let elem_type = arr_type.get_array_element();
+                    if elem_type.is_witness_of() {
+                        emitter.push_op(bytecode::OpCode::DarrayLookupFieldWit {
+                            array: layouter.get_value(*arr),
+                            index: layouter.get_value(keys[0]),
+                            result: layouter.get_value(results[0]),
+                            flag: layouter.get_value(*flag),
+                        });
+                    } else {
+                        let stride = layouter.type_size(&elem_type);
+                        emitter.push_op(bytecode::OpCode::DarrayLookupField {
+                            array: layouter.get_value(*arr),
+                            index: layouter.get_value(keys[0]),
+                            result: layouter.get_value(results[0]),
+                            flag: layouter.get_value(*flag),
+                            stride,
+                        });
+                    }
                 }
                 ssa::OpCode::Todo { payload, .. } => {
                     panic!("Todo opcode encountered in Codegen: {}", payload);
