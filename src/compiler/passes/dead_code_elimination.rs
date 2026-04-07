@@ -111,6 +111,7 @@ impl DCE {
             | OpCode::MkSeq { .. }
             | OpCode::Cast { .. }
             | OpCode::Truncate { .. }
+            | OpCode::SExt { .. }
             | OpCode::Not { .. }
             | OpCode::MulConst { .. }
             | OpCode::ReadGlobal { .. }

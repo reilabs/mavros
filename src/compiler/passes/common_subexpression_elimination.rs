@@ -441,6 +441,7 @@ impl CSE {
                     | OpCode::SliceLen { .. }
                     | OpCode::Cast { .. }
                     | OpCode::Truncate { .. }
+                    | OpCode::SExt { .. }
                     | OpCode::MemOp { kind: _, value: _ }
                     | OpCode::Rangecheck { value: _, max_bits: _ }
                     | OpCode::ToBits { .. }

@@ -865,29 +865,27 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         use noirc_frontend::monomorphization::ast::Type as AstType;
+        use noirc_frontend::shared::Signedness;
 
         let value = self.convert_expression(&cast.lhs, b).unwrap();
 
-        let src_bits = match cast.lhs.return_type().as_deref() {
-            Some(AstType::Field) => 254,
-            Some(AstType::Integer(_, bit_size)) => bit_size.bit_size() as usize,
-            Some(AstType::Bool) => 1,
-            _ => 0,
+        let (src_bits, src_signed) = match cast.lhs.return_type().as_deref() {
+            Some(AstType::Field) => (254, false),
+            Some(AstType::Integer(signedness, bit_size)) => (
+                bit_size.bit_size() as usize,
+                *signedness == Signedness::Signed,
+            ),
+            Some(AstType::Bool) => (1, false),
+            _ => (0, false),
         };
 
         let (target, target_bits) = match &cast.r#type {
             AstType::Field => (CastTarget::Field, 254),
             AstType::Integer(signedness, bit_size) => {
-                use noirc_frontend::shared::Signedness;
                 let bits = bit_size.bit_size() as usize;
                 match signedness {
                     Signedness::Unsigned => (CastTarget::U(bits), bits),
-                    Signedness::Signed => {
-                        if src_bits > 0 && bits > src_bits {
-                            panic!("Signed widening casts not yet implemented");
-                        }
-                        (CastTarget::I(bits), bits)
-                    }
+                    Signedness::Signed => (CastTarget::I(bits), bits),
                 }
             }
             AstType::Bool => (CastTarget::U(1), 1),
@@ -895,9 +893,17 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let mut e = b.block(self.current_block);
+
         // Narrowing cast: truncate first, then cast
         let value = if src_bits > 0 && target_bits < src_bits {
             e.truncate(value, target_bits, src_bits)
+        } else {
+            value
+        };
+
+        // Signed widening: sign-extend before casting
+        let value = if src_signed && src_bits > 0 && target_bits > src_bits {
+            e.sext(value, src_bits, target_bits)
         } else {
             value
         };

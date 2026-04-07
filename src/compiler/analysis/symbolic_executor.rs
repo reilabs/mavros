@@ -28,6 +28,7 @@ where
     fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn truncate(&self, _from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
+    fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn to_bits(
@@ -222,6 +223,16 @@ impl SymbolicExecutor {
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         scope[r.0 as usize] =
                             Some(a.truncate(*from, *to, &fn_type_info.get_value_type(*r), ctx));
+                    }
+                    crate::compiler::ssa::OpCode::SExt {
+                        result: r,
+                        value: a,
+                        from_bits: from,
+                        to_bits: to,
+                    } => {
+                        let a = scope[a.0 as usize].as_ref().unwrap();
+                        scope[r.0 as usize] =
+                            Some(a.sext(*from, *to, &fn_type_info.get_value_type(*r), ctx));
                     }
                     crate::compiler::ssa::OpCode::Not {
                         result: r,

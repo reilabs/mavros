@@ -594,6 +594,23 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
     }
 
+    fn sext(&self, from: usize, _to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+        // Sign-extend: if sign bit is set, add (2^to - 2^from) to the value
+        let val = self.expect_constant();
+        let bits = val.into_bigint().to_bits_le();
+        let sign_bit = if from > 0 && from - 1 < bits.len() {
+            bits[from - 1]
+        } else {
+            false
+        };
+        if sign_bit {
+            let extension = ark_bn254::Fr::from(1u128 << _to) - ark_bn254::Fr::from(1u128 << from);
+            Value::Const(val + extension)
+        } else {
+            self.clone()
+        }
+    }
+
     fn cast(
         &self,
         _cast_target: &super::ssa::CastTarget,

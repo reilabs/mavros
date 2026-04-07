@@ -423,6 +423,7 @@ impl WitnessCastInsertion {
                     | OpCode::BinaryArithOp { .. }
                     | OpCode::Cast { .. }
                     | OpCode::Truncate { .. }
+                    | OpCode::SExt { .. }
                     | OpCode::Not { .. }
                     | OpCode::Alloc { .. }
                     | OpCode::Load { .. }

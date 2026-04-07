@@ -278,6 +278,34 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         }
     }
 
+    fn sext(
+        &self,
+        from: usize,
+        to: usize,
+        _out_type: &crate::compiler::ir::r#type::Type,
+        ctx: &mut SpecializationState,
+    ) -> Self {
+        let self_const = ctx.const_vals.get(&self.0).cloned();
+        match self_const {
+            Some(ConstVal::U(_, v)) => {
+                let sign_bit = if from > 0 { (v >> (from - 1)) & 1 } else { 0 };
+                let res = if sign_bit == 1 {
+                    let mask = ((1u128 << to) - 1) ^ ((1u128 << from) - 1);
+                    v | mask
+                } else {
+                    v
+                };
+                let res_v = ctx.u_const(to, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
+                Self(res_v)
+            }
+            _ => {
+                let res = ctx.sext(self.0, from, to);
+                Self(res)
+            }
+        }
+    }
+
     fn cast(
         &self,
         cast_target: &crate::compiler::ssa::CastTarget,
