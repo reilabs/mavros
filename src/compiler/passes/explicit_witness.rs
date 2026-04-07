@@ -1205,7 +1205,10 @@ impl ExplicitWitness {
                 // Extract sign bit of result for overflow check
                 let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
 
-                // Overflow check: carry + sign_r = sign_a + sign_b
+                // Signed overflow iff carry_into_MSB != carry_out_of_MSB.
+                // The MSB full-adder gives: s_a + s_b + carry_in = s_r + 2*carry_out.
+                // So carry_in = carry_out is equivalent to: s_a + s_b = s_r + carry_out,
+                // i.e. carry_out + s_r = s_a + s_b.
                 let lhs_ov = b.add(carry_wit, sign_r);
                 let rhs_ov = b.add(sign_a, sign_b);
                 let diff_ov = b.sub(lhs_ov, rhs_ov);
@@ -1241,7 +1244,15 @@ impl ExplicitWitness {
                 // Extract sign bit of result for overflow check
                 let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
 
-                // Overflow check: borrow + sign_r + sign_b = 1 + sign_a
+                // Subtraction a - b is computed as a + ~b + 1 (two's complement).
+                // At the MSB column the full-adder sees:
+                //   s_a + ~s_b + carry_in = s_r + 2*borrow
+                // where ~s_b = 1 - s_b (bitwise NOT), carry_in is whatever
+                // rippled up from the lower bits, and borrow is the carry out.
+                // Signed overflow iff carry_in != borrow. Substituting
+                // carry_in = borrow into the equation eliminates carry_in:
+                //   s_a + 1 - s_b = s_r + borrow
+                // i.e. borrow + s_r + s_b = 1 + s_a.
                 let one = b.field_const(Field::ONE);
                 let lhs_ov = b.add(borrow_wit, sign_r);
                 let lhs_ov = b.add(lhs_ov, sign_b);
