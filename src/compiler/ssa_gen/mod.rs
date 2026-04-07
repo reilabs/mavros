@@ -127,9 +127,6 @@ impl SsaConverter {
                             Self::collect_global_deps(e, deps);
                         }
                     }
-                    Literal::Repeated { element, .. } => {
-                        Self::collect_global_deps(element, deps);
-                    }
                     _ => {}
                 }
             }

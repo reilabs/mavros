@@ -974,35 +974,6 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
                 self.convert_array_literal(array_lit, b)
             }
-            Literal::Repeated {
-                element,
-                length,
-                is_vector,
-                typ,
-            } => {
-                use noirc_frontend::monomorphization::ast::Type as AstType;
-                let elem_val = self.convert_expression(element, b).unwrap();
-                let elements: Vec<ValueId> =
-                    std::iter::repeat(elem_val).take(*length as usize).collect();
-                let elem_ast_type = match typ {
-                    AstType::Array(_, elem_type) => elem_type.as_ref(),
-                    AstType::Vector(elem_type) => elem_type.as_ref(),
-                    _ => panic!(
-                        "Expected array/vector type for repeated literal, got {:?}",
-                        typ
-                    ),
-                };
-                let seq_type = if *is_vector {
-                    SeqType::Slice
-                } else {
-                    SeqType::Array(*length as usize)
-                };
-                let elem_type = self.type_converter.convert_type(elem_ast_type);
-                let result = b
-                    .block(self.current_block)
-                    .mk_seq(elements, seq_type, elem_type);
-                Some(result)
-            }
             Literal::Str(s) => {
                 // str<N>: array of u8 (UTF-8 bytes)
                 let elem_type = Type::u(8);
