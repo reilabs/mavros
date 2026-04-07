@@ -385,7 +385,7 @@ fn lower_instruction(
                 TypeExpr::I(_) => match kind {
                     CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
                     CmpKind::Lt => panic!("Signed Lt not yet implemented in LLSSA"),
-                }
+                },
                 TypeExpr::Field => match kind {
                     CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
                     _ => panic!("Unsupported field comparison: {:?}", kind),
