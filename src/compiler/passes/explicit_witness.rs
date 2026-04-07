@@ -575,7 +575,8 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let one = b.field_const(Field::ONE);
-                    self.gen_witness_truncate(b, value, to_bits, one, result);
+                    let value_field = b.cast_to_field(value);
+                    self.gen_witness_truncate(b, value_field, to_bits, one, result);
                 }
             }
             OpCode::SExt {
