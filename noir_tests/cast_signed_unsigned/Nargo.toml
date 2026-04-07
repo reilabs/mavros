@@ -1,0 +1,6 @@
+[package]
+name = "cast_signed_unsigned"
+type = "bin"
+authors = [""]
+
+[dependencies]
