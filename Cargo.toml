@@ -39,18 +39,6 @@ mavros-artifacts = { path = "mavros-artifacts" }
 mavros-vm = { path = "vm" }
 cargo_metadata = "0.23.1"
 
-# Pin transitive deps to match noir beta.18's lockfile
-k256 = "=0.14.0-rc.1"
-p256 = "=0.14.0-rc.1"
-keccak = "=0.2.0-rc.0"
-elliptic-curve = "=0.14.0-rc.17"
-ecdsa = "=0.17.0-rc.9"
-primeorder = "=0.14.0-rc.1"
-sec1 = "=0.8.0-rc.10"
-crypto-bigint = "=0.7.0-rc.10"
-rustcrypto-ff = "=0.14.0-pre.0"
-rand_core_0_10 = { package = "rand_core", version = "=0.10.0-rc-2" }
-
 [dev-dependencies]
 anyhow = "1.0.87"
 tempfile = "3.8.1"
