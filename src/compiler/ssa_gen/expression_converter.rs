@@ -388,7 +388,7 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 let child_type = match (step, types.last().unwrap()) {
                     (AccessStep::Index(_), AstType::Array(_, elem))
-                    | (AccessStep::Index(_), AstType::Vector(elem)) => elem.as_ref().clone(),
+                    | (AccessStep::Index(_), AstType::Slice(elem)) => elem.as_ref().clone(),
                     (AccessStep::Field(idx), AstType::Tuple(fields)) => fields[*idx].clone(),
                     (step, ty) => {
                         panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty)
@@ -971,7 +971,7 @@ impl<'a> ExpressionConverter<'a> {
                 }
             }
             Literal::Unit => None,
-            Literal::Array(array_lit) | Literal::Vector(array_lit) => {
+            Literal::Array(array_lit) | Literal::Slice(array_lit) => {
                 self.convert_array_literal(array_lit, b)
             }
             Literal::Repeated {
@@ -986,7 +986,7 @@ impl<'a> ExpressionConverter<'a> {
                     std::iter::repeat(elem_val).take(*length as usize).collect();
                 let elem_ast_type = match typ {
                     AstType::Array(_, elem_type) => elem_type.as_ref(),
-                    AstType::Vector(elem_type) => elem_type.as_ref(),
+                    AstType::Slice(elem_type) => elem_type.as_ref(),
                     _ => panic!(
                         "Expected array/vector type for repeated literal, got {:?}",
                         typ
@@ -1068,7 +1068,7 @@ impl<'a> ExpressionConverter<'a> {
             noirc_frontend::monomorphization::ast::Type::Array(len, elem_type) => {
                 (Some(*len), elem_type.as_ref())
             }
-            noirc_frontend::monomorphization::ast::Type::Vector(elem_type) => {
+            noirc_frontend::monomorphization::ast::Type::Slice(elem_type) => {
                 (None, elem_type.as_ref())
             }
             _ => panic!(
@@ -1248,7 +1248,7 @@ impl<'a> ExpressionConverter<'a> {
                         let value = self.get_or_create_const(b, ConstValue::U(32, *len as u128));
                         Some(value)
                     }
-                    noirc_frontend::monomorphization::ast::Type::Vector(_) => {
+                    noirc_frontend::monomorphization::ast::Type::Slice(_) => {
                         let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                         let value = b.block(self.current_block).slice_len(slice);
                         Some(value)
