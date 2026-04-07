@@ -1,0 +1,9 @@
+[package]
+name = "compare_age_lib"
+type = "lib"
+authors = ["Theo Madzou", "Michael Elliot"]
+compiler_version = ">=1.0.0"
+
+[dependencies]
+date = { path = "../../../vendor/noir-date" }
+utils = { path = "../../utils" }
