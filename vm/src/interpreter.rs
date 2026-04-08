@@ -286,19 +286,49 @@ pub fn run_phase2(
 
     let mut running_prod = Field::from(1);
     for tbl in phase1.tables.iter() {
-        if tbl.num_indices != 1 || tbl.num_values != 0 {
-            todo!("wide tables");
-        }
-
         let alpha = phase1.out_wit_post_comm[0];
-        for i in 0..tbl.length {
-            let multiplicity = unsafe { *tbl.multiplicities_wit.offset(i as isize) };
-            let denom = alpha - Field::from(i as u64);
-            phase1.out_b[tbl.elem_inverses_constraint_section_offset + i] = denom;
-            phase1.out_c[tbl.elem_inverses_constraint_section_offset + i] = multiplicity;
-            if multiplicity != Field::ZERO {
-                phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = running_prod;
-                running_prod *= denom;
+        let base = tbl.elem_inverses_constraint_section_offset;
+
+        if tbl.num_values == 0 {
+            // Width-1 table (rangecheck): denom_i = α - i
+            for i in 0..tbl.length {
+                let multiplicity = unsafe { *tbl.multiplicities_wit.offset(i as isize) };
+                let denom = alpha - Field::from(i as u64);
+                phase1.out_b[base + i] = denom;
+                phase1.out_c[base + i] = multiplicity;
+                if multiplicity != Field::ZERO {
+                    phase1.out_a[base + i] = running_prod;
+                    running_prod *= denom;
+                }
+            }
+        } else {
+            assert_eq!(
+                tbl.num_values, 1,
+                "expected width-2 table, got num_values={}",
+                tbl.num_values
+            );
+            // Width-2 table (array): x_i = -β*v_i, denom_i = α - i - x_i
+            let beta = phase1.out_wit_post_comm[1];
+            for i in 0..tbl.length {
+                let multiplicity = unsafe { *tbl.multiplicities_wit.offset(i as isize) };
+
+                // Read v_i from the x-slot where the VM dumped it
+                let v_i = phase1.out_a[base + 2 * i];
+                let x_i = -beta * v_i;
+
+                // Fill x-constraint: β * v_i = -x_i
+                phase1.out_a[base + 2 * i] = beta;
+                phase1.out_b[base + 2 * i] = v_i;
+                phase1.out_c[base + 2 * i] = -x_i;
+
+                // Fill y-constraint slots (will be overwritten by batch inversion)
+                let denom = alpha - Field::from(i as u64) - x_i;
+                phase1.out_b[base + 2 * i + 1] = denom;
+                phase1.out_c[base + 2 * i + 1] = multiplicity;
+                if multiplicity != Field::ZERO {
+                    phase1.out_a[base + 2 * i + 1] = running_prod;
+                    running_prod *= denom;
+                }
             }
         }
     }
@@ -306,19 +336,36 @@ pub fn run_phase2(
     let mut running_inv = running_prod.inverse().unwrap();
 
     for tbl in phase1.tables.iter().rev() {
-        if tbl.num_indices != 1 || tbl.num_values != 0 {
-            todo!("wide tables");
-        }
+        let base = tbl.elem_inverses_constraint_section_offset;
 
-        for i in (0..tbl.length).rev() {
-            let multiplicity = phase1.out_c[tbl.elem_inverses_constraint_section_offset + i];
-            let denom = phase1.out_b[tbl.elem_inverses_constraint_section_offset + i];
-            let running_prod = phase1.out_a[tbl.elem_inverses_constraint_section_offset + i];
-
-            if multiplicity != Field::ZERO {
-                let elem = running_prod * running_inv;
-                phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
-                running_inv *= denom;
+        if tbl.num_values == 0 {
+            // Width-1: y-values at consecutive offsets
+            for i in (0..tbl.length).rev() {
+                let multiplicity = phase1.out_c[base + i];
+                let denom = phase1.out_b[base + i];
+                let running_prod = phase1.out_a[base + i];
+                if multiplicity != Field::ZERO {
+                    let elem = running_prod * running_inv;
+                    phase1.out_a[base + i] = elem;
+                    running_inv *= denom;
+                }
+            }
+        } else {
+            assert_eq!(
+                tbl.num_values, 1,
+                "expected width-2 table, got num_values={}",
+                tbl.num_values
+            );
+            // Width-2: y-values at odd offsets
+            for i in (0..tbl.length).rev() {
+                let multiplicity = phase1.out_c[base + 2 * i + 1];
+                let denom = phase1.out_b[base + 2 * i + 1];
+                let running_prod = phase1.out_a[base + 2 * i + 1];
+                if multiplicity != Field::ZERO {
+                    let elem = running_prod * running_inv;
+                    phase1.out_a[base + 2 * i + 1] = elem;
+                    running_inv *= denom;
+                }
             }
         }
     }
@@ -330,54 +377,121 @@ pub fn run_phase2(
         let wit_off = witness_layout.lookups_data_start() - witness_layout.challenges_start()
             + current_lookup_off;
 
-        // Flag was written as u64 (0 or 1) into out_c[cnst_off] by the VM
-        let flag_u64 = phase1.out_c[cnst_off].0.0[0];
+        // Peek at which table this lookup belongs to, to determine width
+        let table_ix = phase1.out_a[cnst_off].0.0[0];
+        let table = &phase1.tables[table_ix as usize];
 
         let alpha = phase1.out_wit_post_comm[0];
 
-        if flag_u64 == 0 {
-            // Disabled lookup: y=0, constraint is 0 * (α - key) = 0
-            let key_raw = phase1.out_b[cnst_off].0.0[0];
-            let b_val = alpha - Field::from(key_raw);
-            phase1.out_a[cnst_off] = Field::ZERO;
-            phase1.out_b[cnst_off] = b_val;
-            phase1.out_c[cnst_off] = Field::ZERO;
-            phase1.out_wit_post_comm[wit_off] = Field::ZERO;
-        } else {
-            let table_ix = phase1.out_a[cnst_off].0.0[0];
-            let table = &phase1.tables[table_ix as usize];
-            if table.num_indices != 1 || table.num_values != 0 {
-                todo!("wide tables");
-            }
-            let ix_in_table = phase1.out_b[cnst_off].0.0[0];
-            phase1.out_a[cnst_off] =
-                phase1.out_a[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-            phase1.out_b[cnst_off] =
-                phase1.out_b[table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-            phase1.out_c[cnst_off] = Field::from(flag_u64);
-            phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
-            phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
-                phase1.out_a[cnst_off];
-        }
+        if table.num_values == 0 {
+            // Width-1 lookup (rangecheck): 1 constraint per lookup
+            let flag_u64 = phase1.out_c[cnst_off].0.0[0];
 
-        current_lookup_off += 1;
+            if flag_u64 == 0 {
+                let key_raw = phase1.out_b[cnst_off].0.0[0];
+                let b_val = alpha - Field::from(key_raw);
+                phase1.out_a[cnst_off] = Field::ZERO;
+                phase1.out_b[cnst_off] = b_val;
+                phase1.out_c[cnst_off] = Field::ZERO;
+                phase1.out_wit_post_comm[wit_off] = Field::ZERO;
+            } else {
+                let ix_in_table = phase1.out_b[cnst_off].0.0[0];
+                phase1.out_a[cnst_off] = phase1.out_a
+                    [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+                phase1.out_b[cnst_off] = phase1.out_b
+                    [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+                phase1.out_c[cnst_off] = Field::from(flag_u64);
+                phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
+                phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
+                    phase1.out_a[cnst_off];
+            }
+
+            current_lookup_off += 1;
+        } else {
+            assert_eq!(
+                table.num_values, 1,
+                "expected width-2 table, got num_values={}",
+                table.num_values
+            );
+            // Width-2 lookup (array): 2 constraints per lookup
+            // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
+            // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
+            let beta = phase1.out_wit_post_comm[1];
+            let result_value = phase1.out_b[cnst_off];
+            let flag_u64 = phase1.out_c[cnst_off + 1].0.0[0];
+
+            // x-constraint: β * value = -x → x = -β * value
+            let x = -beta * result_value;
+            phase1.out_a[cnst_off] = beta;
+            phase1.out_b[cnst_off] = result_value;
+            phase1.out_c[cnst_off] = -x;
+            phase1.out_wit_post_comm[wit_off] = x;
+
+            // y-constraint: y * (α - key - x) = flag
+            let y_cnst_off = cnst_off + 1;
+            let y_wit_off = wit_off + 1;
+
+            if flag_u64 == 0 {
+                let key_raw = phase1.out_b[y_cnst_off].0.0[0];
+                let b_val = alpha - Field::from(key_raw) - x;
+                phase1.out_a[y_cnst_off] = Field::ZERO;
+                phase1.out_b[y_cnst_off] = b_val;
+                phase1.out_c[y_cnst_off] = Field::ZERO;
+                phase1.out_wit_post_comm[y_wit_off] = Field::ZERO;
+            } else {
+                let ix_in_table = phase1.out_b[y_cnst_off].0.0[0];
+                let tbl_base = table.elem_inverses_constraint_section_offset;
+                // Copy precomputed inverse from table's y-slot (odd offset)
+                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + 2 * ix_in_table as usize + 1];
+                phase1.out_b[y_cnst_off] = phase1.out_b[tbl_base + 2 * ix_in_table as usize + 1];
+                phase1.out_c[y_cnst_off] = Field::from(flag_u64);
+                phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
+                // Add to sum constraint (at offset 2*n in wide table)
+                let sum_off = tbl_base + 2 * table.length;
+                phase1.out_c[sum_off] += phase1.out_a[y_cnst_off];
+            }
+
+            current_lookup_off += 2;
+        }
     }
 
     for tbl in phase1.tables.iter() {
-        if tbl.num_indices != 1 || tbl.num_values != 0 {
-            todo!("wide tables");
-        }
-        for i in 0..tbl.length {
-            let multiplicity = phase1.out_c[tbl.elem_inverses_constraint_section_offset + i];
-            if multiplicity != Field::ZERO {
-                let elem =
-                    phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] * multiplicity;
-                phase1.out_a[tbl.elem_inverses_constraint_section_offset + i] = elem;
-                phase1.out_wit_post_comm[tbl.elem_inverses_witness_section_offset + i] = elem;
-                phase1.out_a[tbl.elem_inverses_constraint_section_offset + tbl.length] += elem;
+        let base = tbl.elem_inverses_constraint_section_offset;
+        let wit_base = tbl.elem_inverses_witness_section_offset;
+
+        if tbl.num_values == 0 {
+            // Width-1: y-values at consecutive offsets, sum constraint at offset length
+            for i in 0..tbl.length {
+                let multiplicity = phase1.out_c[base + i];
+                if multiplicity != Field::ZERO {
+                    let elem = phase1.out_a[base + i] * multiplicity;
+                    phase1.out_a[base + i] = elem;
+                    phase1.out_wit_post_comm[wit_base + i] = elem;
+                    phase1.out_a[base + tbl.length] += elem;
+                }
             }
+            phase1.out_b[base + tbl.length] = Field::ONE;
+        } else {
+            assert_eq!(
+                tbl.num_values, 1,
+                "expected width-2 table, got num_values={}",
+                tbl.num_values
+            );
+            // Width-2: y-values at odd offsets, sum constraint at offset 2*length
+            for i in 0..tbl.length {
+                let multiplicity = phase1.out_c[base + 2 * i + 1];
+                if multiplicity != Field::ZERO {
+                    let elem = phase1.out_a[base + 2 * i + 1] * multiplicity;
+                    phase1.out_a[base + 2 * i + 1] = elem;
+                    // x witness at even offset, y witness at odd offset
+                    phase1.out_wit_post_comm[wit_base + 2 * i + 1] = elem;
+                    phase1.out_a[base + 2 * tbl.length] += elem;
+                }
+                // x witness: x_i = -β * v_i; out_c stores -x_i = β*v_i, so negate
+                phase1.out_wit_post_comm[wit_base + 2 * i] = -phase1.out_c[base + 2 * i];
+            }
+            phase1.out_b[base + 2 * tbl.length] = Field::ONE;
         }
-        phase1.out_b[tbl.elem_inverses_constraint_section_offset + tbl.length] = Field::ONE;
     }
 
     WitgenResult {

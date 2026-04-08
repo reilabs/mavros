@@ -140,7 +140,7 @@ impl BoxedLayout {
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
             DataType::Struct => 8 * self.struct_size(),
         };
-        let arr_size = ((base_byte_size + 7) / 8) + 2;
+        let arr_size = ((base_byte_size + 7) / 8) + 3;
         arr_size
     }
 }
@@ -185,6 +185,7 @@ impl BoxedValue {
         unsafe {
             *ptr = layout.0;
             *ptr.offset(1) = 1;
+            *ptr.offset(2) = u64::MAX; // table_id sentinel: no table assigned
         }
         // println!("allocing {:?} of size {} ({:?})", ptr, arr_size, layout.data_type());
         Self(ptr)
@@ -198,8 +199,12 @@ impl BoxedValue {
         unsafe { *(self.0 as *mut BoxedLayout) }
     }
 
-    fn data(&self) -> *mut u64 {
+    pub fn table_id(&self) -> *mut u64 {
         unsafe { self.0.offset(2) }
+    }
+
+    fn data(&self) -> *mut u64 {
+        unsafe { self.0.offset(3) }
     }
 
     pub fn as_ad_const(&self) -> *mut ADConst {

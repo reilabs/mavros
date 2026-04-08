@@ -13,6 +13,29 @@ use crate::{
     vm::{self, bytecode},
 };
 
+/// Returns (stride, elem_kind) for an array element type in a lookup opcode.
+fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
+    match &elem_type.expr {
+        TypeExpr::Field => (bytecode::LIMBS, bytecode::ELEM_FIELD),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+            assert!(
+                *bits <= 64,
+                "Array lookup unsupported for {elem_type} (>64 bits)"
+            );
+            (1, bytecode::ELEM_WORD)
+        }
+        TypeExpr::WitnessOf(inner) => {
+            let inner_kind = lookup_elem_kind(inner);
+            assert!(
+                inner_kind.1 != bytecode::ELEM_WITNESS,
+                "Nested WitnessOf in array lookup element type: {elem_type}"
+            );
+            (1, bytecode::ELEM_WITNESS)
+        }
+        _ => panic!("Unsupported array element type in lookup: {elem_type}"),
+    }
+}
+
 struct FrameLayouter {
     next_free: usize,
     variables: HashMap<ValueId, usize>,
@@ -901,6 +924,26 @@ impl CodeGen {
                         flag: layouter.get_value(*flag),
                     });
                 }
+                ssa::OpCode::Lookup {
+                    target: LookupTarget::Array(arr),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    let arr_type = type_info.get_value_type(*arr);
+                    let elem_type = arr_type.get_array_element();
+                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
+                    emitter.push_op(bytecode::OpCode::ArrayLookupField {
+                        array: layouter.get_value(*arr),
+                        index: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        stride,
+                        elem_kind,
+                    });
+                }
                 ssa::OpCode::DLookup {
                     target: LookupTarget::Rangecheck(8),
                     keys,
@@ -913,6 +956,26 @@ impl CodeGen {
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
                         val: layouter.get_value(keys[0]),
                         flag: layouter.get_value(*flag),
+                    });
+                }
+                ssa::OpCode::DLookup {
+                    target: LookupTarget::Array(arr),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    let arr_type = type_info.get_value_type(*arr);
+                    let elem_type = arr_type.get_array_element();
+                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
+                    emitter.push_op(bytecode::OpCode::DarrayLookupField {
+                        array: layouter.get_value(*arr),
+                        index: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        stride,
+                        elem_kind,
                     });
                 }
                 ssa::OpCode::Todo { payload, .. } => {
