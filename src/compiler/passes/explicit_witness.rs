@@ -315,40 +315,126 @@ impl ExplicitWitness {
                 }
             }
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::And,
+                kind:
+                    kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
                 result,
                 lhs: l,
                 rhs: r,
             } => {
                 let l_taint = function_type_info.get_value_type(l).is_witness_of();
                 let r_taint = function_type_info.get_value_type(r).is_witness_of();
-                match (l_taint, r_taint) {
-                    (false, false) => {
-                        b.push(instruction);
-                    }
-                    (true, true) => {
+                if !l_taint && !r_taint {
+                    b.push(instruction);
+                    return;
+                }
+                let l_type = function_type_info.get_value_type(l);
+                match l_type.strip_witness().expr {
+                    TypeExpr::U(1) => {
+                        // Bool (u1) witness case: And = mul, Or = a+b - a*b, Xor = a+b - 2*a*b
                         let u1 = CastTarget::U(1);
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
-                        let res_hint = b.and(l, r);
-                        let res_hint_field = b.cast_to_field(res_hint);
-                        let res_hint_plain = b.value_of(res_hint_field);
-                        let res_witness = b.write_witness(res_hint_plain);
-                        b.constrain(l_field, r_field, res_witness);
-                        b.push(OpCode::Cast {
-                            result,
-                            value: res_witness,
-                            target: u1,
-                        });
+                        match kind {
+                            BinaryArithOpKind::And => {
+                                // a AND b = a * b
+                                if l_taint && r_taint {
+                                    let res_hint = b.and(l, r);
+                                    let res_hint_field = b.cast_to_field(res_hint);
+                                    let res_hint_plain = b.value_of(res_hint_field);
+                                    let res_witness = b.write_witness(res_hint_plain);
+                                    b.constrain(l_field, r_field, res_witness);
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: res_witness,
+                                        target: u1,
+                                    });
+                                } else {
+                                    // One pure, one witness: a * b is linear
+                                    let product = b.mul(l_field, r_field);
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: product,
+                                        target: u1,
+                                    });
+                                }
+                            }
+                            BinaryArithOpKind::Or => {
+                                // a OR b = a + b - a*b
+                                let sum = b.add(l_field, r_field);
+                                if l_taint && r_taint {
+                                    let l_pure = b.value_of(l_field);
+                                    let r_pure = b.value_of(r_field);
+                                    let prod_hint = b.mul(l_pure, r_pure);
+                                    let prod_wit = b.write_witness(prod_hint);
+                                    b.constrain(l_field, r_field, prod_wit);
+                                    let res = b.sub(sum, prod_wit);
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: res,
+                                        target: u1,
+                                    });
+                                } else {
+                                    let prod = b.mul(l_field, r_field);
+                                    let res = b.sub(sum, prod);
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: res,
+                                        target: u1,
+                                    });
+                                }
+                            }
+                            BinaryArithOpKind::Xor => {
+                                // a XOR b = a + b - 2*a*b
+                                let sum = b.add(l_field, r_field);
+                                let two = b.field_const(Field::from(2));
+                                if l_taint && r_taint {
+                                    let l_pure = b.value_of(l_field);
+                                    let r_pure = b.value_of(r_field);
+                                    let prod_hint = b.mul(l_pure, r_pure);
+                                    let prod_wit = b.write_witness(prod_hint);
+                                    b.constrain(l_field, r_field, prod_wit);
+                                    let two_prod = b.mul(two, prod_wit);
+                                    let res = b.sub(sum, two_prod);
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: res,
+                                        target: u1,
+                                    });
+                                } else {
+                                    let prod = b.mul(l_field, r_field);
+                                    let two_prod = b.mul(two, prod);
+                                    let res = b.sub(sum, two_prod);
+                                    b.push(OpCode::Cast {
+                                        result,
+                                        value: res,
+                                        target: u1,
+                                    });
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
                     }
                     _ => {
-                        b.push(OpCode::Todo {
-                            payload: format!("witness AND {} {}", l_taint, r_taint),
-                            results: vec![result],
-                            result_types: vec![function_type_info.get_value_type(r).clone()],
-                        });
+                        panic!(
+                            "Bitwise {:?} on witness operands is only supported for u1 (bool), got type {:?}",
+                            kind,
+                            l_type.strip_witness()
+                        );
                     }
                 }
+            }
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                lhs: l,
+                rhs: r,
+                ..
+            } => {
+                let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                if l_taint || r_taint {
+                    panic!("Shift {:?} on witness operands is not supported", kind);
+                }
+                b.push(instruction);
             }
             OpCode::Store { ptr, value: _ } => {
                 let ptr_taint = function_type_info.get_value_type(ptr).is_witness_of();

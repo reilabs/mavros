@@ -435,6 +435,39 @@ mod def {
     }
 
     #[opcode]
+    fn or_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+        unsafe {
+            *res = a | b;
+        }
+    }
+
+    #[opcode]
+    fn xor_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+        unsafe {
+            *res = a ^ b;
+        }
+    }
+
+    #[opcode]
+    fn shl_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+        unsafe {
+            let shifted = a << b;
+            *res = if bits >= 64 {
+                shifted
+            } else {
+                shifted & ((1u64 << bits) - 1)
+            };
+        }
+    }
+
+    #[opcode]
+    fn ushr_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+        unsafe {
+            *res = a >> b;
+        }
+    }
+
+    #[opcode]
     fn not_u64(#[out] res: *mut u64, #[frame] a: u64) {
         unsafe {
             *res = !a;

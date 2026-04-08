@@ -330,6 +330,10 @@ fn lower_instruction(
                         BinaryArithOpKind::Sub => IntArithOp::Sub,
                         BinaryArithOpKind::Mul => IntArithOp::Mul,
                         BinaryArithOpKind::And => IntArithOp::And,
+                        BinaryArithOpKind::Or => IntArithOp::Or,
+                        BinaryArithOpKind::Xor => IntArithOp::Xor,
+                        BinaryArithOpKind::Shl => IntArithOp::Shl,
+                        BinaryArithOpKind::Shr => IntArithOp::UShr,
                         _ => panic!("Unsupported int arith op: {:?}", kind),
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
@@ -340,6 +344,10 @@ fn lower_instruction(
                         BinaryArithOpKind::Sub => IntArithOp::Sub,
                         BinaryArithOpKind::Mul => IntArithOp::Mul,
                         BinaryArithOpKind::And => IntArithOp::And,
+                        BinaryArithOpKind::Or => IntArithOp::Or,
+                        BinaryArithOpKind::Xor => IntArithOp::Xor,
+                        BinaryArithOpKind::Shl => IntArithOp::Shl,
+                        BinaryArithOpKind::Shr => IntArithOp::UShr,
                         BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
                         BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
                         _ => panic!("Unsupported signed int arith op: {:?}", kind),

@@ -26,6 +26,10 @@ enum Expr {
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     And(Vec<Expr>),
+    Or(Vec<Expr>),
+    Xor(Vec<Expr>),
+    Shl(Box<Expr>, Box<Expr>),
+    Shr(Box<Expr>, Box<Expr>),
     Select(Box<Expr>, Box<Expr>, Box<Expr>),
     ArrayGet(Box<Expr>, Box<Expr>),
     TupleGet(Box<Expr>, Box<Expr>),
@@ -90,6 +94,40 @@ impl Expr {
         ands.extend(other.get_ands());
         ands.sort();
         Self::And(ands)
+    }
+
+    pub fn or(&self, other: &Self) -> Self {
+        let mut ors = match self {
+            Self::Or(exprs) => exprs.iter().cloned().collect(),
+            _ => vec![self.clone()],
+        };
+        ors.extend(match other {
+            Self::Or(exprs) => exprs.iter().cloned().collect(),
+            _ => vec![other.clone()],
+        });
+        ors.sort();
+        Self::Or(ors)
+    }
+
+    pub fn xor(&self, other: &Self) -> Self {
+        let mut xors = match self {
+            Self::Xor(exprs) => exprs.iter().cloned().collect(),
+            _ => vec![self.clone()],
+        };
+        xors.extend(match other {
+            Self::Xor(exprs) => exprs.iter().cloned().collect(),
+            _ => vec![other.clone()],
+        });
+        xors.sort();
+        Self::Xor(xors)
+    }
+
+    pub fn shl(&self, other: &Self) -> Self {
+        Self::Shl(Box::new(self.clone()), Box::new(other.clone()))
+    }
+
+    pub fn shr(&self, other: &Self) -> Self {
+        Self::Shr(Box::new(self.clone()), Box::new(other.clone()))
     }
 
     pub fn fconst(value: ark_bn254::Fr) -> Self {
@@ -164,6 +202,26 @@ impl Display for Expr {
                     .collect::<Vec<_>>()
                     .join(" & ")
             ),
+            Self::Or(exprs) => write!(
+                f,
+                "({})",
+                exprs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
+            Self::Xor(exprs) => write!(
+                f,
+                "({})",
+                exprs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ^ ")
+            ),
+            Self::Shl(lhs, rhs) => write!(f, "({} << {})", lhs, rhs),
+            Self::Shr(lhs, rhs) => write!(f, "({} >> {})", lhs, rhs),
             Self::Select(cond, then, otherwise) => {
                 write!(f, "({} ? {} : {})", cond, then, otherwise)
             }
@@ -384,6 +442,50 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.and(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    }
+                    OpCode::BinaryArithOp { kind: BinaryArithOpKind::Or, result: r, lhs, rhs } => {
+                        let lhs_expr = get_expr(&exprs, lhs);
+                        let rhs_expr = get_expr(&exprs, rhs);
+                        let result_expr = lhs_expr.or(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    }
+                    OpCode::BinaryArithOp { kind: BinaryArithOpKind::Xor, result: r, lhs, rhs } => {
+                        let lhs_expr = get_expr(&exprs, lhs);
+                        let rhs_expr = get_expr(&exprs, rhs);
+                        let result_expr = lhs_expr.xor(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    }
+                    OpCode::BinaryArithOp { kind: BinaryArithOpKind::Shl, result: r, lhs, rhs } => {
+                        let lhs_expr = get_expr(&exprs, lhs);
+                        let rhs_expr = get_expr(&exprs, rhs);
+                        let result_expr = lhs_expr.shl(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    }
+                    OpCode::BinaryArithOp { kind: BinaryArithOpKind::Shr, result: r, lhs, rhs } => {
+                        let lhs_expr = get_expr(&exprs, lhs);
+                        let rhs_expr = get_expr(&exprs, rhs);
+                        let result_expr = lhs_expr.shr(&rhs_expr);
                         exprs.insert(*r, result_expr.clone());
                         result.entry(result_expr).or_default().push((
                             block_id,

@@ -279,6 +279,54 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
+            BinaryArithOpKind::Or => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a | b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::Xor => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a ^ b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::Shl => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a << b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
+            BinaryArithOpKind::Shr => match (self, b) {
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a >> b),
+                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                        b.unwrap_witness(),
+                        binary_arith_op_kind,
+                        instrumenter,
+                    )))
+                }
+                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            },
         }
     }
 

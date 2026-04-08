@@ -288,25 +288,11 @@ impl<'a> ExpressionConverter<'a> {
                 e.not(lt)
             }
             BinaryOpKind::And => e.and(lhs, rhs),
-            BinaryOpKind::Or => {
-                let not_a = e.not(lhs);
-                let not_b = e.not(rhs);
-                let and = e.and(not_a, not_b);
-                e.not(and)
-            }
-            BinaryOpKind::Xor => {
-                let not_a = e.not(lhs);
-                let not_b = e.not(rhs);
-                let nand_ab = e.and(not_a, not_b);
-                let or_result = e.not(nand_ab);
-                let and_result = e.and(lhs, rhs);
-                let not_and = e.not(and_result);
-                e.and(or_result, not_and)
-            }
+            BinaryOpKind::Or => e.or(lhs, rhs),
+            BinaryOpKind::Xor => e.xor(lhs, rhs),
             BinaryOpKind::Modulo => e.modulo(lhs, rhs),
-            BinaryOpKind::ShiftLeft | BinaryOpKind::ShiftRight => {
-                todo!("Shift operators not yet supported")
-            }
+            BinaryOpKind::ShiftLeft => e.shl(lhs, rhs),
+            BinaryOpKind::ShiftRight => e.shr(lhs, rhs),
         };
 
         Some(result)

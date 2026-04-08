@@ -597,6 +597,10 @@ pub enum BinaryArithOpKind {
     Div,
     Sub,
     And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
     Mod,
 }
 
@@ -956,6 +960,10 @@ impl Instruction for OpCode {
                     BinaryArithOpKind::Mul => "*",
                     BinaryArithOpKind::Div => "/",
                     BinaryArithOpKind::And => "&",
+                    BinaryArithOpKind::Or => "|",
+                    BinaryArithOpKind::Xor => "^",
+                    BinaryArithOpKind::Shl => "<<",
+                    BinaryArithOpKind::Shr => ">>",
                     BinaryArithOpKind::Mod => "%",
                 };
                 format!(

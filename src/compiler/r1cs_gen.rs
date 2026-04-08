@@ -433,6 +433,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Div => (a as u32) / (b as u32),
                     BinaryArithOpKind::Mod => (a as u32) % (b as u32),
                     BinaryArithOpKind::And => (a & b) as u32,
+                    BinaryArithOpKind::Or => (a | b) as u32,
+                    BinaryArithOpKind::Xor => (a ^ b) as u32,
+                    BinaryArithOpKind::Shl => ((a as u32) << (b as u32)) as u32,
+                    BinaryArithOpKind::Shr => ((a as u32) >> (b as u32)) as u32,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -446,6 +450,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Div => (a / b) as u32,
                     BinaryArithOpKind::Mod => (a % b) as u32,
                     BinaryArithOpKind::And => (a & b) as u32,
+                    BinaryArithOpKind::Or => (a | b) as u32,
+                    BinaryArithOpKind::Xor => (a ^ b) as u32,
+                    BinaryArithOpKind::Shl => ((a as u32) << (b as u32)),
+                    BinaryArithOpKind::Shr => ((a >> b) as u32),
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -459,6 +467,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Div => a / b,
                     BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
+                    BinaryArithOpKind::Or => a | b,
+                    BinaryArithOpKind::Xor => a ^ b,
+                    BinaryArithOpKind::Shl => a << b,
+                    BinaryArithOpKind::Shr => a >> b,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -472,6 +484,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Div => a / b,
                     BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
+                    BinaryArithOpKind::Or => a | b,
+                    BinaryArithOpKind::Xor => a ^ b,
+                    BinaryArithOpKind::Shl => a << b,
+                    BinaryArithOpKind::Shr => a >> b,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -485,6 +501,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Div => a / b,
                     BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
+                    BinaryArithOpKind::Or => a | b,
+                    BinaryArithOpKind::Xor => a ^ b,
+                    BinaryArithOpKind::Shl => a << b,
+                    BinaryArithOpKind::Shr => a >> b,
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -499,6 +519,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => (a.wrapping_sub(b_val) as u8) as u32,
                     BinaryArithOpKind::Mul => (a.wrapping_mul(b_val) as u8) as u32,
                     BinaryArithOpKind::And => ((a as u8) & (b_val as u8)) as u32,
+                    BinaryArithOpKind::Or => ((a as u8) | (b_val as u8)) as u32,
+                    BinaryArithOpKind::Xor => ((a as u8) ^ (b_val as u8)) as u32,
+                    BinaryArithOpKind::Shl => ((a as u8) << (b_val as u8)) as u32,
+                    BinaryArithOpKind::Shr => ((a as u8) >> (b_val as u8)) as u32,
                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
                         panic!("Signed div/mod not yet implemented")
                     }
@@ -513,6 +537,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => a.wrapping_sub(b_val) as u32,
                     BinaryArithOpKind::Mul => a.wrapping_mul(b_val) as u32,
                     BinaryArithOpKind::And => (a as u32) & (b_val as u32),
+                    BinaryArithOpKind::Or => (a as u32) | (b_val as u32),
+                    BinaryArithOpKind::Xor => (a as u32) ^ (b_val as u32),
+                    BinaryArithOpKind::Shl => ((a as u32) << (b_val as u32)),
+                    BinaryArithOpKind::Shr => ((a as u32) >> (b_val as u32)),
                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
                         panic!("Signed div/mod not yet implemented")
                     }
@@ -527,6 +555,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Sub => a.wrapping_sub(b_val) as u64,
                     BinaryArithOpKind::Mul => a.wrapping_mul(b_val) as u64,
                     BinaryArithOpKind::And => (a as u64) & (b_val as u64),
+                    BinaryArithOpKind::Or => (a as u64) | (b_val as u64),
+                    BinaryArithOpKind::Xor => (a as u64) ^ (b_val as u64),
+                    BinaryArithOpKind::Shl => ((a as u64) << (b_val as u64)),
+                    BinaryArithOpKind::Shr => ((a as u64) >> (b_val as u64)),
                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
                         panic!("Signed div/mod not yet implemented")
                     }
@@ -544,8 +576,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 BinaryArithOpKind::Mod => {
                     panic!("Modulo is not defined on field elements")
                 }
-                BinaryArithOpKind::And => {
-                    panic!("Bitwise AND is not supported on field elements")
+                BinaryArithOpKind::And
+                | BinaryArithOpKind::Or
+                | BinaryArithOpKind::Xor
+                | BinaryArithOpKind::Shl
+                | BinaryArithOpKind::Shr => {
+                    panic!("Bitwise operations are not supported on field elements")
                 }
             },
             _ => panic!("Unsupported type in R1CS arith"),
