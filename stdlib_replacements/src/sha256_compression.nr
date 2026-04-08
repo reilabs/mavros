@@ -26,7 +26,7 @@ global K: [Field; 64] = [
 // ===== Spread Tables =====
 // spread(x) places bit j of x at position 2*j, zeros at odd positions.
 
-comptime fn make_spread_table<let N: u32>() -> [Field; N] {
+fn make_spread_table<let N: u32>() -> [Field; N] {
     let mut table: [Field; N] = [0; N];
     let mut i: u32 = 0;
     for _ in 0..N {
@@ -46,18 +46,18 @@ comptime fn make_spread_table<let N: u32>() -> [Field; N] {
     table
 }
 
-global SPREAD_2: [Field; 4] = comptime { make_spread_table::<4>() };
-global SPREAD_3: [Field; 8] = comptime { make_spread_table::<8>() };
-global SPREAD_4: [Field; 16] = comptime { make_spread_table::<16>() };
-global SPREAD_5: [Field; 32] = comptime { make_spread_table::<32>() };
-global SPREAD_6: [Field; 64] = comptime { make_spread_table::<64>() };
-global SPREAD_7: [Field; 128] = comptime { make_spread_table::<128>() };
-global SPREAD_9: [Field; 512] = comptime { make_spread_table::<512>() };
-global SPREAD_10: [Field; 1024] = comptime { make_spread_table::<1024>() };
-global SPREAD_11: [Field; 2048] = comptime { make_spread_table::<2048>() };
-global SPREAD_13: [Field; 8192] = comptime { make_spread_table::<8192>() };
-global SPREAD_14: [Field; 16384] = comptime { make_spread_table::<16384>() };
-global SPREAD_16: [Field; 65536] = comptime { make_spread_table::<65536>() };
+global SPREAD_2: [Field; 4] = make_spread_table::<4>();
+global SPREAD_3: [Field; 8] = make_spread_table::<8>();
+global SPREAD_4: [Field; 16] = make_spread_table::<16>();
+global SPREAD_5: [Field; 32] = make_spread_table::<32>();
+global SPREAD_6: [Field; 64] = make_spread_table::<64>();
+global SPREAD_7: [Field; 128] = make_spread_table::<128>();
+global SPREAD_9: [Field; 512] = make_spread_table::<512>();
+global SPREAD_10: [Field; 1024] = make_spread_table::<1024>();
+global SPREAD_11: [Field; 2048] = make_spread_table::<2048>();
+global SPREAD_13: [Field; 8192] = make_spread_table::<8192>();
+global SPREAD_14: [Field; 16384] = make_spread_table::<16384>();
+global SPREAD_16: [Field; 65536] = make_spread_table::<65536>();
 
 fn spread_lookup(value: Field, size: u32) -> Field {
     // The array access implicitly range-checks value to [0, 2^size)
@@ -77,7 +77,7 @@ fn spread_lookup(value: Field, size: u32) -> Field {
 
 // ===== Powers of 2 =====
 
-global POW2: [Field; 65] = comptime {
+global POW2: [Field; 65] = {
     let mut table: [Field; 65] = [0; 65];
     table[0] = 1;
     for i in 1..65 {
