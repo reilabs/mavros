@@ -84,6 +84,50 @@ pub trait HLEmitter {
         r
     }
 
+    fn or(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Or,
+            result: r,
+            lhs,
+            rhs,
+        });
+        r
+    }
+
+    fn xor(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Xor,
+            result: r,
+            lhs,
+            rhs,
+        });
+        r
+    }
+
+    fn shl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shl,
+            result: r,
+            lhs,
+            rhs,
+        });
+        r
+    }
+
+    fn shr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shr,
+            result: r,
+            lhs,
+            rhs,
+        });
+        r
+    }
+
     fn not(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::Not { result: r, value });

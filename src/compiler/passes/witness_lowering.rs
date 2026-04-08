@@ -263,8 +263,10 @@ impl WitnessLowering {
                                             rhs: neg_rhs,
                                         });
                                     }
-                                    BinaryArithOpKind::And => {
-                                        panic!("And is not supported for witness-pure arithmetic")
+                                    BinaryArithOpKind::And | BinaryArithOpKind::Or
+                                    | BinaryArithOpKind::Xor | BinaryArithOpKind::Shl
+                                    | BinaryArithOpKind::Shr => {
+                                        panic!("{:?} is not supported for witness-pure arithmetic", kind)
                                     }
                                 },
                             }

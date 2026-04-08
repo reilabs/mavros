@@ -163,6 +163,54 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
 
+            (BinaryArithOpKind::Or, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
+                let res = a_val | b_val;
+                let res_v = ctx.u_const(s, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(s, res));
+                Self(res_v)
+            }
+
+            (BinaryArithOpKind::Or, _, _) => {
+                let res = ctx.or(self.0, b.0);
+                Self(res)
+            }
+
+            (BinaryArithOpKind::Xor, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
+                let res = a_val ^ b_val;
+                let res_v = ctx.u_const(s, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(s, res));
+                Self(res_v)
+            }
+
+            (BinaryArithOpKind::Xor, _, _) => {
+                let res = ctx.xor(self.0, b.0);
+                Self(res)
+            }
+
+            (BinaryArithOpKind::Shl, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
+                let res = a_val << b_val;
+                let res_v = ctx.u_const(s, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(s, res));
+                Self(res_v)
+            }
+
+            (BinaryArithOpKind::Shl, _, _) => {
+                let res = ctx.shl(self.0, b.0);
+                Self(res)
+            }
+
+            (BinaryArithOpKind::Shr, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
+                let res = a_val >> b_val;
+                let res_v = ctx.u_const(s, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(s, res));
+                Self(res_v)
+            }
+
+            (BinaryArithOpKind::Shr, _, _) => {
+                let res = ctx.shr(self.0, b.0);
+                Self(res)
+            }
+
             (op, a, b) => panic!("Not yet implemented {:?} {:?}", op, (a, b)),
         }
     }
