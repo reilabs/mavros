@@ -302,6 +302,7 @@ pub fn run_phase2(
                 }
             }
         } else {
+            assert_eq!(tbl.num_values, 1, "expected width-2 table, got num_values={}", tbl.num_values);
             // Width-2 table (array): x_i = -β*v_i, denom_i = α - i - x_i
             let beta = phase1.out_wit_post_comm[1];
             for i in 0..tbl.length {
@@ -346,6 +347,7 @@ pub fn run_phase2(
                 }
             }
         } else {
+            assert_eq!(tbl.num_values, 1, "expected width-2 table, got num_values={}", tbl.num_values);
             // Width-2: y-values at odd offsets
             for i in (0..tbl.length).rev() {
                 let multiplicity = phase1.out_c[base + 2 * i + 1];
@@ -398,6 +400,7 @@ pub fn run_phase2(
 
             current_lookup_off += 1;
         } else {
+            assert_eq!(table.num_values, 1, "expected width-2 table, got num_values={}", table.num_values);
             // Width-2 lookup (array): 2 constraints per lookup
             // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
             // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
@@ -457,6 +460,7 @@ pub fn run_phase2(
             }
             phase1.out_b[base + tbl.length] = Field::ONE;
         } else {
+            assert_eq!(tbl.num_values, 1, "expected width-2 table, got num_values={}", tbl.num_values);
             // Width-2: y-values at odd offsets, sum constraint at offset 2*length
             for i in 0..tbl.length {
                 let multiplicity = phase1.out_c[base + 2 * i + 1];

@@ -151,23 +151,15 @@ impl WitnessLowering {
                             results,
                             flag,
                         } => {
-                            let is_array_lookup =
-                                matches!(&target, crate::compiler::ssa::LookupTarget::Array(_));
                             let mut new_keys = vec![];
                             for key in keys.iter() {
                                 let key_type = type_info.get_value_type(*key);
-                                if !is_array_lookup {
-                                    assert!(
-                                        key_type.strip_witness().is_field(),
-                                        "Keys of lookup must be fields, got {:?}",
-                                        key_type
-                                    );
-                                }
-                                if !key_type.is_witness_of() {
-                                    new_keys.push(emitter.cast_to_witness_of(*key));
-                                } else {
-                                    new_keys.push(*key);
-                                }
+                                assert!(
+                                    key_type.is_witness_of(),
+                                    "Keys of lookup must be witness, got {:?}",
+                                    key_type
+                                );
+                                new_keys.push(*key);
                             }
                             let mut new_results = vec![];
                             for result in results.iter() {

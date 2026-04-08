@@ -1050,12 +1050,12 @@ mod def {
         }
     }
 
-    /// Shared table-init + per-lookup logic for array lookup AD.
-    fn darray_lookup_field_common(
-        array: BoxedValue,
-        index: BoxedValue,
-        result: BoxedValue,
-        flag: BoxedValue,
+    #[opcode]
+    fn darray_lookup_field(
+        #[frame] array: BoxedValue,
+        #[frame] index: BoxedValue,
+        #[frame] result: BoxedValue,
+        #[frame] flag: BoxedValue,
         stride: usize,
         elem_kind: usize,
         vm: &mut VM,
@@ -1247,19 +1247,6 @@ mod def {
             // Also y goes into the C side (RHS) of the sum
             *vm.data.as_ad.out_dc.offset(y_wit_off as isize) += sum_coeff;
         }
-    }
-
-    #[opcode]
-    fn darray_lookup_field(
-        #[frame] array: BoxedValue,
-        #[frame] index: BoxedValue,
-        #[frame] result: BoxedValue,
-        #[frame] flag: BoxedValue,
-        stride: usize,
-        elem_kind: usize,
-        vm: &mut VM,
-    ) {
-        darray_lookup_field_common(array, index, result, flag, stride, elem_kind, vm);
     }
 
     #[opcode]
