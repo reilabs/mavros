@@ -984,9 +984,7 @@ impl ExplicitWitness {
         flag: ValueId,
         result: ValueId,
     ) {
-        assert!(to_bits % 8 == 0);
-        let to_bytes = to_bits / 8;
-        assert!(to_bytes <= 32);
+        assert!(to_bits <= 256);
 
         // BN254 modulus: p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
         // modulusHi = upper 128 bits
@@ -1079,10 +1077,18 @@ impl ExplicitWitness {
         self.gen_witness_rangecheck(b, result_lo, 128, flag);
 
         // Step 9: Recover truncated value from low bytes of the decomposition
-        // In big-endian, the low `to_bytes` bytes are bytes[32 - to_bytes .. 32]
+        // In big-endian, the low bytes are bytes[start..32], where the first may be partial.
+        let full_bytes = to_bits / 8;
+        let partial_bits = to_bits % 8;
+        let start = 32 - full_bytes - if partial_bits > 0 { 1 } else { 0 };
         let mut trunc_val = zero;
-        let start = 32 - to_bytes;
         for i in start..32 {
+            let elem = if i == start && partial_bits > 0 {
+                // Non-full byte: split into hi/lo and use lo
+                self.split_partial_byte(b, bytes[i], partial_bits, flag)
+            } else {
+                bytes[i]
+            };
             let shifted = b.mul(trunc_val, two_to_8);
             if i == 31 {
                 // Last iteration: use the caller's result ValueId
@@ -1090,12 +1096,56 @@ impl ExplicitWitness {
                     kind: BinaryArithOpKind::Add,
                     result,
                     lhs: shifted,
-                    rhs: bytes[i],
+                    rhs: elem,
                 });
             } else {
-                trunc_val = b.add(shifted, bytes[i]);
+                trunc_val = b.add(shifted, elem);
             }
         }
+    }
+
+    /// Split a byte witness into hi (`8 - lo_size` bits) and lo (`lo_size` bits).
+    /// Rangechecks both parts via gap checks to 8 bits, constrains the split
+    /// correctness (`hi * 2^lo_size + lo = byte_wit`), and returns `lo_wit`
+    /// for use in reconstruction.
+    fn split_partial_byte(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        byte_wit: ValueId,
+        lo_size: usize,
+        flag: ValueId,
+    ) -> ValueId {
+        let hi_size = 8 - lo_size;
+        let two_to_lo = b.field_const(Field::from(1u128 << lo_size));
+        let zero = b.field_const(Field::ZERO);
+
+        // Compute lo and hi hints from the byte value
+        let byte_pure = b.value_of(byte_wit);
+        let lo_hint = b.truncate(byte_pure, lo_size, 254);
+        let lo_hint_field = b.cast_to_field(lo_hint);
+        let hi_pre = b.sub(byte_pure, lo_hint_field);
+        let hi_hint = b.div(hi_pre, two_to_lo);
+
+        let lo_wit = b.write_witness(lo_hint_field);
+        let hi_wit = b.write_witness(hi_hint);
+
+        // Rangecheck hi: prove 2^hi_size - 1 - hi fits in 8 bits
+        let hi_bound = b.field_const(Field::from((1u128 << hi_size) - 1));
+        let hi_gap = b.sub(hi_bound, hi_wit);
+        b.lookup_rngchk_8(hi_gap, flag);
+
+        // Rangecheck lo: prove 2^lo_size - 1 - lo fits in 8 bits
+        let lo_bound = b.field_const(Field::from((1u128 << lo_size) - 1));
+        let lo_gap = b.sub(lo_bound, lo_wit);
+        b.lookup_rngchk_8(lo_gap, flag);
+
+        // Constrain split correctness: hi * 2^lo_size + lo = byte_wit
+        let hi_shifted = b.mul(hi_wit, two_to_lo);
+        let recon = b.add(hi_shifted, lo_wit);
+        let split_diff = b.sub(recon, byte_wit);
+        b.constrain(flag, split_diff, zero);
+
+        lo_wit
     }
 
     fn gen_witness_rangecheck(
