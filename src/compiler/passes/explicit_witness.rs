@@ -1131,23 +1131,13 @@ impl ExplicitWitness {
 
         // Rangecheck hi: prove 2^hi_size - 1 - hi fits in 8 bits
         let hi_bound = b.field_const(Field::from((1u128 << hi_size) - 1));
-        let hi_pure = b.value_of(hi_wit);
-        let hi_gap_hint = b.sub(hi_bound, hi_pure);
-        let hi_gap_wit = b.write_witness(hi_gap_hint);
-        b.lookup_rngchk_8(hi_gap_wit, flag);
-        let hi_sum = b.add(hi_gap_wit, hi_wit);
-        let hi_diff = b.sub(hi_sum, hi_bound);
-        b.constrain(flag, hi_diff, zero);
+        let hi_gap = b.sub(hi_bound, hi_wit);
+        b.lookup_rngchk_8(hi_gap, flag);
 
         // Rangecheck lo: prove 2^lo_size - 1 - lo fits in 8 bits
         let lo_bound = b.field_const(Field::from((1u128 << lo_size) - 1));
-        let lo_pure = b.value_of(lo_wit);
-        let lo_gap_hint = b.sub(lo_bound, lo_pure);
-        let lo_gap_wit = b.write_witness(lo_gap_hint);
-        b.lookup_rngchk_8(lo_gap_wit, flag);
-        let lo_sum = b.add(lo_gap_wit, lo_wit);
-        let lo_diff = b.sub(lo_sum, lo_bound);
-        b.constrain(flag, lo_diff, zero);
+        let lo_gap = b.sub(lo_bound, lo_wit);
+        b.lookup_rngchk_8(lo_gap, flag);
 
         // Constrain split correctness: hi * 2^lo_size + lo = byte_wit
         let hi_shifted = b.mul(hi_wit, two_to_lo);
