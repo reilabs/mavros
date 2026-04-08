@@ -1177,9 +1177,8 @@ impl ExplicitWitness {
             b.constrain(flag, diff, zero);
             return;
         }
-        let partial_bits = max_bits % 8;
-        let full_bytes = max_bits / 8;
-        let chunks = if partial_bits > 0 { full_bytes + 1 } else { full_bytes };
+        assert!(max_bits % 8 == 0); // TODO
+        let chunks = max_bits / 8;
         let pure_value = b.value_of(value);
         let bytes_val = b.fresh_value();
         b.push(OpCode::ToRadix {
@@ -1191,24 +1190,19 @@ impl ExplicitWitness {
         });
         let mut result = b.field_const(Field::ZERO);
         let two_to_8 = b.field_const(Field::from(256));
-        let zero = b.field_const(Field::ZERO);
+        let one = b.field_const(Field::from(1));
         for i in 0..chunks {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_val, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
-            let elem = if i == 0 && partial_bits > 0 {
-                // Non-full byte: split and rangecheck both parts
-                self.split_partial_byte(b, byte_wit, partial_bits, flag)
-            } else {
-                b.lookup_rngchk_8(byte_wit, flag);
-                byte_wit
-            };
+            b.lookup_rngchk_8(byte_wit, flag);
             let shift_prev_res = b.mul(result, two_to_8);
-            result = b.add(shift_prev_res, elem);
+            result = b.add(shift_prev_res, byte_wit);
         }
         // Conditional reconstruction constraint: flag * (result - value) = 0
         let diff = b.sub(result, value);
+        let zero = b.field_const(Field::ZERO);
         b.constrain(flag, diff, zero);
     }
 
