@@ -576,8 +576,11 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 BinaryArithOpKind::Mod => {
                     panic!("Modulo is not defined on field elements")
                 }
-                BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor
-                | BinaryArithOpKind::Shl | BinaryArithOpKind::Shr => {
+                BinaryArithOpKind::And
+                | BinaryArithOpKind::Or
+                | BinaryArithOpKind::Xor
+                | BinaryArithOpKind::Shl
+                | BinaryArithOpKind::Shr => {
                     panic!("Bitwise operations are not supported on field elements")
                 }
             },

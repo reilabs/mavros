@@ -483,95 +483,85 @@ impl CodeGen {
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => {
-                    match &type_info.get_value_type(*val).expr {
-                        TypeExpr::Field => {
-                            panic!("Unsupported: field and");
-                        }
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            let result = layouter.alloc_u64(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::AndU64 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
-                        }
-                        t => panic!("Unsupported type for bitwise and: {:?}", t),
+                } => match &type_info.get_value_type(*val).expr {
+                    TypeExpr::Field => {
+                        panic!("Unsupported: field and");
                     }
-                }
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                        let result = layouter.alloc_u64(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::AndU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
+                    t => panic!("Unsupported type for bitwise and: {:?}", t),
+                },
                 ssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Or,
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => {
-                    match &type_info.get_value_type(*val).expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            let result = layouter.alloc_u64(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::OrU64 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
-                        }
-                        t => panic!("Unsupported type for bitwise or: {:?}", t),
+                } => match &type_info.get_value_type(*val).expr {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                        let result = layouter.alloc_u64(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::OrU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
                     }
-                }
+                    t => panic!("Unsupported type for bitwise or: {:?}", t),
+                },
                 ssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Xor,
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => {
-                    match &type_info.get_value_type(*val).expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            let result = layouter.alloc_u64(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::XorU64 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
-                        }
-                        t => panic!("Unsupported type for bitwise xor: {:?}", t),
+                } => match &type_info.get_value_type(*val).expr {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                        let result = layouter.alloc_u64(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::XorU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
                     }
-                }
+                    t => panic!("Unsupported type for bitwise xor: {:?}", t),
+                },
                 ssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Shl,
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => {
-                    match &type_info.get_value_type(*val).expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            let result = layouter.alloc_u64(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::ShlU64 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                                bits: *bits as u64,
-                            });
-                        }
-                        t => panic!("Unsupported type for shift left: {:?}", t),
+                } => match &type_info.get_value_type(*val).expr {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                        let result = layouter.alloc_u64(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::ShlU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                            bits: *bits as u64,
+                        });
                     }
-                }
+                    t => panic!("Unsupported type for shift left: {:?}", t),
+                },
                 ssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Shr,
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => {
-                    match &type_info.get_value_type(*val).expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            let result = layouter.alloc_u64(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::UshrU64 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
-                        }
-                        t => panic!("Unsupported type for shift right: {:?}", t),
+                } => match &type_info.get_value_type(*val).expr {
+                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                        let result = layouter.alloc_u64(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::UshrU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
                     }
-                }
+                    t => panic!("Unsupported type for shift right: {:?}", t),
+                },
                 ssa::OpCode::Cmp {
                     kind: CmpKind::Lt,
                     result: val,

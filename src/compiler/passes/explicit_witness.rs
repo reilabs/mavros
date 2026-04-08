@@ -315,7 +315,8 @@ impl ExplicitWitness {
                 }
             }
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
+                kind:
+                    kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
                 result,
                 lhs: l,
                 rhs: r,
@@ -431,10 +432,7 @@ impl ExplicitWitness {
                 let l_taint = function_type_info.get_value_type(l).is_witness_of();
                 let r_taint = function_type_info.get_value_type(r).is_witness_of();
                 if l_taint || r_taint {
-                    panic!(
-                        "Shift {:?} on witness operands is not supported",
-                        kind
-                    );
+                    panic!("Shift {:?} on witness operands is not supported", kind);
                 }
                 b.push(instruction);
             }
