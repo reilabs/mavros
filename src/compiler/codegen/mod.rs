@@ -910,13 +910,19 @@ impl CodeGen {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 1);
                     let arr_type = type_info.get_value_type(*arr);
-                    let stride = layouter.type_size(&arr_type.get_array_element());
+                    let elem_type = arr_type.get_array_element();
+                    let (stride, elem_kind) = if elem_type.is_field() {
+                        (bytecode::LIMBS, bytecode::ELEM_FIELD)
+                    } else {
+                        (1, bytecode::ELEM_WORD)
+                    };
                     emitter.push_op(bytecode::OpCode::ArrayLookupField {
                         array: layouter.get_value(*arr),
                         index: layouter.get_value(keys[0]),
                         result: layouter.get_value(results[0]),
                         flag: layouter.get_value(*flag),
                         stride,
+                        elem_kind,
                     });
                 }
                 ssa::OpCode::DLookup {
@@ -943,23 +949,21 @@ impl CodeGen {
                     assert!(results.len() == 1);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
-                    if elem_type.is_witness_of() {
-                        emitter.push_op(bytecode::OpCode::DarrayLookupFieldWit {
-                            array: layouter.get_value(*arr),
-                            index: layouter.get_value(keys[0]),
-                            result: layouter.get_value(results[0]),
-                            flag: layouter.get_value(*flag),
-                        });
+                    let (stride, elem_kind) = if elem_type.is_witness_of() {
+                        (1, bytecode::ELEM_WITNESS)
+                    } else if elem_type.is_field() {
+                        (bytecode::LIMBS, bytecode::ELEM_FIELD)
                     } else {
-                        let stride = layouter.type_size(&elem_type);
-                        emitter.push_op(bytecode::OpCode::DarrayLookupField {
-                            array: layouter.get_value(*arr),
-                            index: layouter.get_value(keys[0]),
-                            result: layouter.get_value(results[0]),
-                            flag: layouter.get_value(*flag),
-                            stride,
-                        });
-                    }
+                        (1, bytecode::ELEM_WORD)
+                    };
+                    emitter.push_op(bytecode::OpCode::DarrayLookupField {
+                        array: layouter.get_value(*arr),
+                        index: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        stride,
+                        elem_kind,
+                    });
                 }
                 ssa::OpCode::Todo { payload, .. } => {
                     panic!("Todo opcode encountered in Codegen: {}", payload);

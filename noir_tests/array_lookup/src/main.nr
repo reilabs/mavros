@@ -16,4 +16,9 @@ fn main(x: Field, idx: u32) {
     let mixed: [Field; 4] = [1, x, 100, x + 1];
     let mixed_val = mixed[idx];
     assert_eq(mixed_val, 100); // idx=2 -> 100
+
+    // 4. Array of u32 elements
+    let u32_arr: [u32; 4] = [10, 20, 30, 40];
+    let u32_val = u32_arr[idx];
+    assert_eq(u32_val, 30); // idx=2 -> 30
 }

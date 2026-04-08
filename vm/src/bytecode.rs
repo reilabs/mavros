@@ -14,6 +14,42 @@ use std::ptr;
 
 pub const LIMBS: usize = 4;
 
+/// Element storage kind for array lookup opcodes.
+/// Encoded as usize for compatibility with the opcode proc macro.
+pub const ELEM_WORD: usize = 0;
+pub const ELEM_FIELD: usize = 1;
+pub const ELEM_WITNESS: usize = 2;
+
+/// Read an array element as a Field and bump out_db accordingly.
+#[inline(always)]
+unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm: &mut VM) {
+    match elem_kind {
+        ELEM_WORD => {
+            let v = Field::from(*(ptr as *const u64));
+            *vm.data.as_ad.out_db += coeff * v;
+        }
+        ELEM_FIELD => {
+            let v = *(ptr as *const Field);
+            *vm.data.as_ad.out_db += coeff * v;
+        }
+        ELEM_WITNESS => {
+            let elem = BoxedValue(*(ptr as *const *mut u64));
+            elem.bump_db(coeff, vm);
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Read a pure (non-WitnessOf) array element as a Field value.
+#[inline(always)]
+unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
+    match elem_kind {
+        ELEM_WORD => Field::from(*(ptr as *const u64)),
+        ELEM_FIELD => *(ptr as *const Field),
+        _ => unreachable!(),
+    }
+}
+
 pub struct FramePosition(pub usize);
 
 impl FramePosition {
@@ -811,6 +847,7 @@ mod def {
         #[frame] result: Field,
         #[frame] flag: Field,
         stride: usize,
+        elem_kind: usize,
         vm: &mut VM,
     ) {
         let table_id_ptr = array.table_id();
@@ -839,8 +876,7 @@ mod def {
                 let cnst_off = vm.data.as_forward.elem_inverses_constraint_section_offset;
                 for i in 0..length {
                     let elem_ptr = array.array_idx(i, stride);
-                    // Read the Field element from the array
-                    let elem_field = *(elem_ptr as *const Field);
+                    let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind);
                     // Write it into the x-slot (even offset: 2*i) of the constraint section
                     *vm.data
                         .as_forward
@@ -1015,14 +1051,13 @@ mod def {
     }
 
     /// Shared table-init + per-lookup logic for array lookup AD.
-    /// `elem_bump_db` is called for each table element's x-constraint B entry.
     fn darray_lookup_field_common(
         array: BoxedValue,
         index: BoxedValue,
         result: BoxedValue,
         flag: BoxedValue,
         stride: usize,
-        elem_bump_db: fn(*mut u64, Field, &mut VM),
+        elem_kind: usize,
         vm: &mut VM,
     ) {
         let table_id_ptr = array.table_id();
@@ -1080,7 +1115,7 @@ mod def {
                             .out_da
                             .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
                         // db[v_i] += x_coeff (B entry: element value)
-                        elem_bump_db(elem_ptr, x_coeff, vm);
+                        lookup_elem_bump_db(elem_ptr, elem_kind, x_coeff, vm);
                         // dc[x_wit] -= x_coeff (C entry: (x, -1))
                         *vm.data
                             .as_ad
@@ -1221,30 +1256,10 @@ mod def {
         #[frame] result: BoxedValue,
         #[frame] flag: BoxedValue,
         stride: usize,
+        elem_kind: usize,
         vm: &mut VM,
     ) {
-        // Pure Field elements: read raw Field value, bump constant position
-        fn bump_const(elem_ptr: *mut u64, coeff: Field, vm: &mut VM) {
-            let v_i = unsafe { *(elem_ptr as *const Field) };
-            unsafe { *vm.data.as_ad.out_db += coeff * v_i };
-        }
-        darray_lookup_field_common(array, index, result, flag, stride, bump_const, vm);
-    }
-
-    #[opcode]
-    fn darray_lookup_field_wit(
-        #[frame] array: BoxedValue,
-        #[frame] index: BoxedValue,
-        #[frame] result: BoxedValue,
-        #[frame] flag: BoxedValue,
-        vm: &mut VM,
-    ) {
-        // WitnessOf elements: read BoxedValue, use bump_db dispatch
-        fn bump_wit(elem_ptr: *mut u64, coeff: Field, vm: &mut VM) {
-            let elem = unsafe { BoxedValue(*(elem_ptr as *const *mut u64)) };
-            elem.bump_db(coeff, vm);
-        }
-        darray_lookup_field_common(array, index, result, flag, 1, bump_wit, vm);
+        darray_lookup_field_common(array, index, result, flag, stride, elem_kind, vm);
     }
 
     #[opcode]
