@@ -201,7 +201,8 @@ impl ExplicitWitness {
                             let lr_diff = b.sub(l_field, r_field);
 
                             let two = b.field_const(Field::from(2));
-                            let two_res = b.mul(result, two);
+                            let result_field = b.cast_to_field(result);
+                            let two_res = b.mul(result_field, two);
                             let one = b.field_const(Field::ONE);
                             let adjustment = b.sub(one, two_res);
 
