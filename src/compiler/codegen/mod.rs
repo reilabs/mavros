@@ -94,6 +94,7 @@ impl FrameLayouter {
             TypeExpr::Slice(_) => 1,     // Ptr
             TypeExpr::WitnessOf(_) => 1, // Ptr
             TypeExpr::Tuple(_) => 1,     // Ptr
+            TypeExpr::Ref(_) => 1,       // Ptr
             _ => todo!(),
         }
     }
@@ -1083,6 +1084,36 @@ impl CodeGen {
                         panic!("FnPtr constants not supported in codegen");
                     }
                 },
+                ssa::OpCode::Alloc { result, elem_type } => {
+                    let res = layouter.alloc_ptr(*result);
+                    let elem_size = layouter.type_size(elem_type);
+                    let elem_rc = elem_type.is_heap_allocated();
+                    let meta = vm::array::BoxedLayout::ref_cell(elem_size, elem_rc);
+                    emitter.push_op(bytecode::OpCode::RefAlloc { res, meta });
+                }
+                ssa::OpCode::Store { ptr, value } => {
+                    let ptr_type = type_info.get_value_type(*ptr);
+                    let elem_type = ptr_type.get_pointed();
+                    let stride = layouter.type_size(&elem_type);
+                    let elem_rc = if elem_type.is_heap_allocated() { 1usize } else { 0usize };
+                    emitter.push_op(bytecode::OpCode::RefStore {
+                        cell: layouter.get_value(*ptr),
+                        source: layouter.get_value(*value),
+                        stride,
+                        elem_rc,
+                    });
+                }
+                ssa::OpCode::Load { result, ptr } => {
+                    let ptr_type = type_info.get_value_type(*ptr);
+                    let elem_type = ptr_type.get_pointed();
+                    let stride = layouter.type_size(&elem_type);
+                    let res = layouter.alloc_value(*result, &elem_type);
+                    emitter.push_op(bytecode::OpCode::RefLoad {
+                        res,
+                        cell: layouter.get_value(*ptr),
+                        stride,
+                    });
+                }
                 other => panic!("Unsupported instruction: {:?}", other),
             }
         }

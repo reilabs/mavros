@@ -23,6 +23,7 @@ pub enum DataType {
     ADSum = 4,
     ADMulConst = 5,
     Struct = 6,
+    RefCell = 7,
 }
 
 // BoxedLayout packing scheme:
@@ -59,6 +60,19 @@ impl BoxedLayout {
         }
         assert!(size < (1 << 56));
         Self::new_sized(DataType::Struct, size)
+    }
+
+    pub fn ref_cell(elem_size: usize, elem_is_refcounted: bool) -> Self {
+        assert!(elem_size < 8);
+        Self::new_sized(DataType::RefCell, (elem_is_refcounted as usize) << 3 | elem_size)
+    }
+
+    pub fn ref_cell_elem_size(&self) -> usize {
+        (self.0 as usize >> 8) & 0x7
+    }
+
+    pub fn ref_cell_elem_is_refcounted(&self) -> bool {
+        (self.0 as usize >> 8) & 0x8 != 0
     }
 
     pub fn ad_const() -> Self {
@@ -139,6 +153,7 @@ impl BoxedLayout {
             DataType::ADSum => size_of::<ADSum>(),
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
             DataType::Struct => 8 * self.struct_size(),
+            DataType::RefCell => 8 * self.ref_cell_elem_size(),
         };
         let arr_size = ((base_byte_size + 7) / 8) + 3;
         arr_size
@@ -203,7 +218,7 @@ impl BoxedValue {
         unsafe { self.0.offset(2) }
     }
 
-    fn data(&self) -> *mut u64 {
+    pub fn data(&self) -> *mut u64 {
         unsafe { self.0.offset(3) }
     }
 
@@ -252,6 +267,9 @@ impl BoxedValue {
             DataType::Struct => {
                 panic!("bump_da for Struct")
             }
+            DataType::RefCell => {
+                panic!("bump_da for RefCell")
+            }
         }
     }
 
@@ -284,6 +302,9 @@ impl BoxedValue {
             DataType::Struct => {
                 panic!("bump_db for Struct")
             }
+            DataType::RefCell => {
+                panic!("bump_db for RefCell")
+            }
         }
     }
 
@@ -315,6 +336,9 @@ impl BoxedValue {
             }
             DataType::Struct => {
                 panic!("bump_dc for Struct")
+            }
+            DataType::RefCell => {
+                panic!("bump_dc for RefCell")
             }
         }
     }
@@ -379,6 +403,15 @@ impl BoxedValue {
                                 let elem = unsafe {
                                     *(item.tuple_idx(i, &child_sizes) as *mut BoxedValue)
                                 };
+                                queue.push_back(elem);
+                            }
+                        }
+                        item.free(vm);
+                    }
+                    DataType::RefCell => {
+                        if layout.ref_cell_elem_is_refcounted() {
+                            let elem = unsafe { *(item.data() as *mut BoxedValue) };
+                            if !elem.0.is_null() {
                                 queue.push_back(elem);
                             }
                         }
