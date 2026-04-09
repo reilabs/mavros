@@ -109,52 +109,47 @@ fn get_or_create_drop_fn(
 
 /// Holds function IDs for the generated AD dispatch functions.
 /// These are created lazily on first use.
+struct AdFunctionIds {
+    bump_da: FunctionId,
+    bump_db: FunctionId,
+    bump_dc: FunctionId,
+    ad_drop: FunctionId,
+}
+
+impl AdFunctionIds {
+    fn bump_fn(&self, matrix: DMatrix) -> FunctionId {
+        match matrix {
+            DMatrix::A => self.bump_da,
+            DMatrix::B => self.bump_db,
+            DMatrix::C => self.bump_dc,
+        }
+    }
+}
+
 struct AdFunctions {
-    bump_da: Option<FunctionId>,
-    bump_db: Option<FunctionId>,
-    bump_dc: Option<FunctionId>,
-    ad_drop: Option<FunctionId>,
+    ids: Option<AdFunctionIds>,
 }
 
 impl AdFunctions {
     fn new() -> Self {
-        Self {
-            bump_da: None,
-            bump_db: None,
-            bump_dc: None,
-            ad_drop: None,
-        }
+        Self { ids: None }
+    }
+
+    fn ensure_allocated(&mut self, llssa: &mut LLSSA) -> &AdFunctionIds {
+        self.ids.get_or_insert_with(|| AdFunctionIds {
+            bump_da: llssa.add_function("__ad_bump_da".to_string()),
+            bump_db: llssa.add_function("__ad_bump_db".to_string()),
+            bump_dc: llssa.add_function("__ad_bump_dc".to_string()),
+            ad_drop: llssa.add_function("__ad_drop".to_string()),
+        })
     }
 
     fn get_bump_fn(&mut self, matrix: DMatrix, llssa: &mut LLSSA) -> FunctionId {
-        let slot = match matrix {
-            DMatrix::A => &mut self.bump_da,
-            DMatrix::B => &mut self.bump_db,
-            DMatrix::C => &mut self.bump_dc,
-        };
-        if let Some(id) = *slot {
-            return id;
-        }
-        let name = match matrix {
-            DMatrix::A => "__ad_bump_da",
-            DMatrix::B => "__ad_bump_db",
-            DMatrix::C => "__ad_bump_dc",
-        };
-        let id = llssa.add_function(name.to_string());
-        *slot = Some(id);
-        id
+        self.ensure_allocated(llssa).bump_fn(matrix)
     }
 
     fn get_drop_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
-        if let Some(id) = self.ad_drop {
-            return id;
-        }
-        self.get_bump_fn(DMatrix::A, llssa);
-        self.get_bump_fn(DMatrix::B, llssa);
-        self.get_bump_fn(DMatrix::C, llssa);
-        let id = llssa.add_function("__ad_drop".to_string());
-        self.ad_drop = Some(id);
-        id
+        self.ensure_allocated(llssa).ad_drop
     }
 }
 
@@ -1031,25 +1026,21 @@ fn make_field_zero(e: &mut LLBlockEmitter<'_>) -> ValueId {
 
 /// Generate all AD dispatch function bodies.
 fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
-    // Generate bump functions
-    for (matrix, fn_id) in [
-        (DMatrix::A, ad_fns.bump_da),
-        (DMatrix::B, ad_fns.bump_db),
-        (DMatrix::C, ad_fns.bump_dc),
-    ] {
-        if let Some(id) = fn_id {
-            let func = generate_ad_bump_function(matrix, ad_fns);
-            let _old = llssa.take_function(id);
-            llssa.put_function(id, func);
-        }
-    }
+    let ids = match &ad_fns.ids {
+        Some(ids) => ids,
+        None => return,
+    };
 
-    // Generate drop function
-    if let Some(id) = ad_fns.ad_drop {
-        let func = generate_ad_drop_function(ad_fns);
+    for matrix in [DMatrix::A, DMatrix::B, DMatrix::C] {
+        let id = ids.bump_fn(matrix);
+        let func = generate_ad_bump_function(matrix);
         let _old = llssa.take_function(id);
         llssa.put_function(id, func);
     }
+
+    let func = generate_ad_drop_function(ids);
+    let _old = llssa.take_function(ids.ad_drop);
+    llssa.put_function(ids.ad_drop, func);
 }
 
 /// Generate __ad_bump_d{a,b,c}(node: Ptr, amount: FieldElem):
@@ -1059,7 +1050,7 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
 ///   WITNESS:   ad_write_witness(matrix, node.index, amount)
 ///   SUM:       node.d{a,b,c} += amount  (field add)
 ///   MUL_CONST: node.d{a,b,c} += amount  (field add)
-fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFunction {
+fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
     let name = match matrix {
         DMatrix::A => "__ad_bump_da",
         DMatrix::B => "__ad_bump_db",
@@ -1164,16 +1155,16 @@ fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFuncti
 ///   CONST/WITNESS: free
 ///   SUM: propagate da/db/dc to children, drop children, free
 ///   MUL_CONST: propagate da*coeff/db*coeff/dc*coeff to child, drop child, free
-fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
+fn generate_ad_drop_function(ids: &AdFunctionIds) -> LLFunction {
     let mut func = LLFunction::empty("__ad_drop".to_string());
     let entry = func.get_entry_id();
 
     let field_type = LLType::Struct(LLStruct::field_elem());
 
-    let bump_da = ad_fns.bump_da.expect("bump_da must exist");
-    let bump_db = ad_fns.bump_db.expect("bump_db must exist");
-    let bump_dc = ad_fns.bump_dc.expect("bump_dc must exist");
-    let ad_drop_id = ad_fns.ad_drop.expect("ad_drop must exist");
+    let bump_da = ids.bump_da;
+    let bump_db = ids.bump_db;
+    let bump_dc = ids.bump_dc;
+    let ad_drop_id = ids.ad_drop;
 
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
