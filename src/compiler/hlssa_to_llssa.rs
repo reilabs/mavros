@@ -149,6 +149,9 @@ impl AdFunctions {
         if let Some(id) = self.ad_drop {
             return id;
         }
+        self.get_bump_fn(DMatrix::A, llssa);
+        self.get_bump_fn(DMatrix::B, llssa);
+        self.get_bump_fn(DMatrix::C, llssa);
         let id = llssa.add_function("__ad_drop".to_string());
         self.ad_drop = Some(id);
         id
