@@ -839,10 +839,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
     fn unspread(&self, _ctx: &mut R1CGen) -> (Self, Self) {
         let val = self.expect_constant();
         let v: u64 = val.into_bigint().0[0];
-        let (and_val, xor_val) = ssa_mod::unspread_u64(v);
+        let (odd_val, even_val) = ssa_mod::unspread_u64(v);
         (
-            Value::Const(ark_bn254::Fr::from(and_val)),
-            Value::Const(ark_bn254::Fr::from(xor_val)),
+            Value::Const(ark_bn254::Fr::from(odd_val)),
+            Value::Const(ark_bn254::Fr::from(even_val)),
         )
     }
 }

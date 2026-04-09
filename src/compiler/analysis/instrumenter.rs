@@ -539,6 +539,62 @@ impl Value {
         }
     }
 
+    fn spread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> Value {
+        match self {
+            Value::U(_, v) => {
+                let spread_val = crate::compiler::ssa::spread_u64(*v as u64);
+                Value::Field(Field::from(spread_val))
+            }
+            Value::Field(f) => {
+                let v: u64 = f.into_bigint().0[0];
+                let spread_val = crate::compiler::ssa::spread_u64(v);
+                Value::Field(Field::from(spread_val))
+            }
+            Value::WitnessOf(inner) => {
+                instrumenter.record_lookups(256, 1, 1);
+                Value::WitnessOf(Box::new(inner.spread_op(instrumenter)))
+            }
+            Value::Unknown(kind) => {
+                instrumenter.record_lookups(256, 1, 1);
+                Value::Unknown(*kind)
+            }
+            _ => panic!("Cannot spread {:?}", self),
+        }
+    }
+
+    fn unspread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> (Value, Value) {
+        match self {
+            Value::U(_, v) => {
+                let (odd_val, even_val) = crate::compiler::ssa::unspread_u64(*v as u64);
+                (
+                    Value::Field(Field::from(odd_val)),
+                    Value::Field(Field::from(even_val)),
+                )
+            }
+            Value::Field(f) => {
+                let v: u64 = f.into_bigint().0[0];
+                let (odd_val, even_val) = crate::compiler::ssa::unspread_u64(v);
+                (
+                    Value::Field(Field::from(odd_val)),
+                    Value::Field(Field::from(even_val)),
+                )
+            }
+            Value::WitnessOf(inner) => {
+                instrumenter.record_constraints(1);
+                let (odd, even) = inner.unspread_op(instrumenter);
+                (
+                    Value::WitnessOf(Box::new(odd)),
+                    Value::WitnessOf(Box::new(even)),
+                )
+            }
+            Value::Unknown(kind) => {
+                instrumenter.record_constraints(1);
+                (Value::Unknown(*kind), Value::Unknown(*kind))
+            }
+            _ => panic!("Cannot unspread {:?}", self),
+        }
+    }
+
     fn cast_op(
         &self,
         cast_target: &crate::compiler::ssa::CastTarget,
@@ -1157,20 +1213,28 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
 
-    fn spread(&self, _ctx: &mut CostAnalysis) -> Self {
-        // spread is pure field computation, no cost to track
+    fn spread(&self, instrumenter: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: Value::Unknown(ScalarKind::Field),
-            specialized: Value::Unknown(ScalarKind::Field),
+            unspecialized: self.unspecialized.spread_op(instrumenter.get_unspecialized()),
+            specialized: self.specialized.spread_op(instrumenter.get_specialized()),
         }
     }
 
-    fn unspread(&self, _ctx: &mut CostAnalysis) -> (Self, Self) {
-        let v = Self {
-            unspecialized: Value::Unknown(ScalarKind::Field),
-            specialized: Value::Unknown(ScalarKind::Field),
-        };
-        (v.clone(), v)
+    fn unspread(&self, instrumenter: &mut CostAnalysis) -> (Self, Self) {
+        let (unspec_odd, unspec_even) =
+            self.unspecialized.unspread_op(instrumenter.get_unspecialized());
+        let (spec_odd, spec_even) =
+            self.specialized.unspread_op(instrumenter.get_specialized());
+        (
+            Self {
+                unspecialized: unspec_odd,
+                specialized: spec_odd,
+            },
+            Self {
+                unspecialized: unspec_even,
+                specialized: spec_even,
+            },
+        )
     }
 }
 

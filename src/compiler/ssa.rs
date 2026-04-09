@@ -903,8 +903,8 @@ pub enum OpCode {
         value: ValueId,
     },
     Unspread {
-        result_and: ValueId,
-        result_xor: ValueId,
+        result_odd: ValueId,
+        result_even: ValueId,
         value: ValueId,
     },
     Guard {
@@ -1415,16 +1415,16 @@ impl Instruction for OpCode {
                 )
             }
             OpCode::Unspread {
-                result_and,
-                result_xor,
+                result_odd,
+                result_even,
                 value,
             } => {
                 format!(
                     "v{}{}, v{}{} = unspread(v{})",
-                    result_and.0,
-                    annotate_value(*result_and),
-                    result_xor.0,
-                    annotate_value(*result_xor),
+                    result_odd.0,
+                    annotate_value(*result_odd),
+                    result_even.0,
+                    annotate_value(*result_even),
                     value.0
                 )
             }
@@ -1472,8 +1472,8 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::Unspread {
-                result_and: _,
-                result_xor: _,
+                result_odd: _,
+                result_even: _,
                 value: v,
             } => vec![v].into_iter(),
             Self::ArraySet {
@@ -1780,10 +1780,10 @@ impl Instruction for OpCode {
                 value: _,
             } => vec![r].into_iter(),
             Self::Unspread {
-                result_and,
-                result_xor,
+                result_odd,
+                result_even,
                 value: _,
-            } => vec![result_and, result_xor].into_iter(),
+            } => vec![result_odd, result_even].into_iter(),
             Self::ToBits {
                 result: r,
                 value: _,
@@ -1855,8 +1855,8 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![v].into_iter(),
             Self::Unspread {
-                result_and: _,
-                result_xor: _,
+                result_odd: _,
+                result_even: _,
                 value: v,
             } => vec![v].into_iter(),
             Self::ArraySet {
@@ -2189,8 +2189,8 @@ impl Instruction for OpCode {
                 value: v,
             } => vec![r, v].into_iter(),
             Self::Unspread {
-                result_and: a,
-                result_xor: b,
+                result_odd: a,
+                result_even: b,
                 value: v,
             } => vec![a, b, v].into_iter(),
             Self::ToBits {
@@ -2296,18 +2296,18 @@ pub fn spread_u64(v: u64) -> u64 {
     result
 }
 
-/// Extract even bits (xor component) and odd bits (and component) from a spread sum.
-/// Returns (and_value, xor_value).
+/// Extract even bits and odd bits from a spread sum.
+/// Returns (odd_bits, even_bits).
 pub fn unspread_u64(v: u64) -> (u64, u64) {
-    let mut and_val = 0u64;
-    let mut xor_val = 0u64;
+    let mut odd_val = 0u64;
+    let mut even_val = 0u64;
     for i in 0..32 {
         if v & (1 << (2 * i)) != 0 {
-            xor_val |= 1 << i;
+            even_val |= 1 << i;
         }
         if v & (1 << (2 * i + 1)) != 0 {
-            and_val |= 1 << i;
+            odd_val |= 1 << i;
         }
     }
-    (and_val, xor_val)
+    (odd_val, even_val)
 }

@@ -442,8 +442,8 @@ pub trait HLEmitter {
         let r_and = self.fresh_value();
         let r_xor = self.fresh_value();
         self.emit(OpCode::Unspread {
-            result_and: r_and,
-            result_xor: r_xor,
+            result_odd: r_and,
+            result_even: r_xor,
             value,
         });
         (r_and, r_xor)

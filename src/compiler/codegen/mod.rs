@@ -1073,12 +1073,12 @@ impl CodeGen {
                     });
                 }
                 ssa::OpCode::Unspread {
-                    result_and,
-                    result_xor,
+                    result_odd,
+                    result_even,
                     value,
                 } => {
-                    let res_and = layouter.alloc_field(*result_and);
-                    let res_xor = layouter.alloc_field(*result_xor);
+                    let res_and = layouter.alloc_field(*result_odd);
+                    let res_xor = layouter.alloc_field(*result_even);
                     emitter.push_op(bytecode::OpCode::UnspreadU64 {
                         res_and,
                         res_xor,

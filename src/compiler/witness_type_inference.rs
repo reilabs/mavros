@@ -706,13 +706,13 @@ impl WitnessTypeInference {
                         value_wt.insert(*result, val_wt);
                     }
                     OpCode::Unspread {
-                        result_and,
-                        result_xor,
+                        result_odd,
+                        result_even,
                         value,
                     } => {
                         let val_wt = value_wt.get(value).unwrap().clone();
-                        value_wt.insert(*result_and, val_wt.clone());
-                        value_wt.insert(*result_xor, val_wt);
+                        value_wt.insert(*result_odd, val_wt.clone());
+                        value_wt.insert(*result_even, val_wt);
                     }
                     OpCode::Cast { result, value, .. }
                     | OpCode::Truncate { result, value, .. }

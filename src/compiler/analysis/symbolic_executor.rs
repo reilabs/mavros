@@ -576,14 +576,14 @@ impl SymbolicExecutor {
                         scope[result.0 as usize] = Some(val.spread(ctx));
                     }
                     crate::compiler::ssa::OpCode::Unspread {
-                        result_and,
-                        result_xor,
+                        result_odd,
+                        result_even,
                         value,
                     } => {
                         let val = scope[value.0 as usize].as_ref().unwrap();
-                        let (and_val, xor_val) = val.unspread(ctx);
-                        scope[result_and.0 as usize] = Some(and_val);
-                        scope[result_xor.0 as usize] = Some(xor_val);
+                        let (odd_val, even_val) = val.unspread(ctx);
+                        scope[result_odd.0 as usize] = Some(odd_val);
+                        scope[result_even.0 as usize] = Some(even_val);
                     }
                     crate::compiler::ssa::OpCode::ValueOf { result, value } => {
                         let val = scope[value.0 as usize].clone().unwrap();

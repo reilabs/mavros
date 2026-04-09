@@ -613,7 +613,7 @@ fn lower_instruction(
 
         OpCode::Spread { result, value }
         | OpCode::Unspread {
-            result_and: result,
+            result_odd: result,
             value,
             ..
         } => {
