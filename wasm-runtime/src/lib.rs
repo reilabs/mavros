@@ -54,7 +54,13 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
     let size = *(base as *mut u32) as usize;
     let total = HEADER + size;
     let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
-    LIVE_BYTES = LIVE_BYTES.saturating_sub(size);
+    assert!(
+        size <= LIVE_BYTES,
+        "__live_bytes underflow: freeing {} bytes but only {} tracked",
+        size,
+        LIVE_BYTES
+    );
+    LIVE_BYTES -= size;
     std::alloc::dealloc(base, layout);
 }
 
