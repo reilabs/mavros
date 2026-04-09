@@ -64,7 +64,10 @@ impl BoxedLayout {
 
     pub fn ref_cell(elem_size: usize, elem_is_refcounted: bool) -> Self {
         assert!(elem_size < 8);
-        Self::new_sized(DataType::RefCell, (elem_is_refcounted as usize) << 3 | elem_size)
+        Self::new_sized(
+            DataType::RefCell,
+            (elem_is_refcounted as usize) << 3 | elem_size,
+        )
     }
 
     pub fn ref_cell_elem_size(&self) -> usize {

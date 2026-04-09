@@ -280,12 +280,8 @@ impl WitnessLowering {
                             let ptr_type = type_info.get_value_type(ptr);
                             let new_ptr_type = self.witness_lowering_in_type(&ptr_type);
                             let elem_type = new_ptr_type.get_pointed();
-                            let converted = self.convert_if_needed(
-                                value,
-                                &elem_type,
-                                type_info,
-                                &mut emitter,
-                            );
+                            let converted =
+                                self.convert_if_needed(value, &elem_type, type_info, &mut emitter);
                             emitter.emit(OpCode::Store {
                                 ptr,
                                 value: converted,

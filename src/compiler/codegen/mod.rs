@@ -1095,7 +1095,11 @@ impl CodeGen {
                     let ptr_type = type_info.get_value_type(*ptr);
                     let elem_type = ptr_type.get_pointed();
                     let stride = layouter.type_size(&elem_type);
-                    let elem_rc = if elem_type.is_heap_allocated() { 1usize } else { 0usize };
+                    let elem_rc = if elem_type.is_heap_allocated() {
+                        1usize
+                    } else {
+                        0usize
+                    };
                     emitter.push_op(bytecode::OpCode::RefStore {
                         cell: layouter.get_value(*ptr),
                         source: layouter.get_value(*value),
