@@ -1098,6 +1098,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "-z",
                 "stack-size=65536",
                 "--export=__data_end",
+                "--export=__live_bytes",
                 "-o",
             ])
             .arg(path)
