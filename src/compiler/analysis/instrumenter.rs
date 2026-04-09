@@ -542,12 +542,12 @@ impl Value {
     fn spread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             Value::U(_, v) => {
-                let spread_val = crate::compiler::ssa::spread_u64(*v as u64);
+                let spread_val = crate::compiler::ssa::spread_u64(*v as u32);
                 Value::Field(Field::from(spread_val))
             }
             Value::Field(f) => {
                 let v: u64 = f.into_bigint().0[0];
-                let spread_val = crate::compiler::ssa::spread_u64(v);
+                let spread_val = crate::compiler::ssa::spread_u64(v as u32);
                 Value::Field(Field::from(spread_val))
             }
             Value::WitnessOf(inner) => {
@@ -567,16 +567,16 @@ impl Value {
             Value::U(_, v) => {
                 let (odd_val, even_val) = crate::compiler::ssa::unspread_u64(*v as u64);
                 (
-                    Value::Field(Field::from(odd_val)),
-                    Value::Field(Field::from(even_val)),
+                    Value::Field(Field::from(odd_val as u64)),
+                    Value::Field(Field::from(even_val as u64)),
                 )
             }
             Value::Field(f) => {
                 let v: u64 = f.into_bigint().0[0];
                 let (odd_val, even_val) = crate::compiler::ssa::unspread_u64(v);
                 (
-                    Value::Field(Field::from(odd_val)),
-                    Value::Field(Field::from(even_val)),
+                    Value::Field(Field::from(odd_val as u64)),
+                    Value::Field(Field::from(even_val as u64)),
                 )
             }
             Value::WitnessOf(inner) => {
@@ -1215,16 +1215,18 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn spread(&self, instrumenter: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: self.unspecialized.spread_op(instrumenter.get_unspecialized()),
+            unspecialized: self
+                .unspecialized
+                .spread_op(instrumenter.get_unspecialized()),
             specialized: self.specialized.spread_op(instrumenter.get_specialized()),
         }
     }
 
     fn unspread(&self, instrumenter: &mut CostAnalysis) -> (Self, Self) {
-        let (unspec_odd, unspec_even) =
-            self.unspecialized.unspread_op(instrumenter.get_unspecialized());
-        let (spec_odd, spec_even) =
-            self.specialized.unspread_op(instrumenter.get_specialized());
+        let (unspec_odd, unspec_even) = self
+            .unspecialized
+            .unspread_op(instrumenter.get_unspecialized());
+        let (spec_odd, spec_even) = self.specialized.unspread_op(instrumenter.get_specialized());
         (
             Self {
                 unspecialized: unspec_odd,

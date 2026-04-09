@@ -2286,28 +2286,31 @@ impl Terminator {
 
 /// Compute spread of a byte/value: interleave zero bits between each bit.
 /// E.g., spread(0b1011) = 0b01_00_01_01
-pub fn spread_u64(v: u64) -> u64 {
-    let mut result = 0u64;
-    for i in 0..32 {
-        if v & (1 << i) != 0 {
-            result |= 1 << (2 * i);
-        }
-    }
-    result
+pub fn spread_u64(v: u32) -> u64 {
+    let mut x = v as u64;
+    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
+    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
+    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x << 2)) & 0x3333_3333_3333_3333;
+    x = (x | (x << 1)) & 0x5555_5555_5555_5555;
+    x
+}
+
+/// Compact even-positioned bits into contiguous low bits.
+fn compact_bits(mut x: u64) -> u32 {
+    x &= 0x5555_5555_5555_5555;
+    x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
+    x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF;
+    x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF;
+    x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF;
+    x as u32
 }
 
 /// Extract even bits and odd bits from a spread sum.
 /// Returns (odd_bits, even_bits).
-pub fn unspread_u64(v: u64) -> (u64, u64) {
-    let mut odd_val = 0u64;
-    let mut even_val = 0u64;
-    for i in 0..32 {
-        if v & (1 << (2 * i)) != 0 {
-            even_val |= 1 << i;
-        }
-        if v & (1 << (2 * i + 1)) != 0 {
-            odd_val |= 1 << i;
-        }
-    }
-    (odd_val, even_val)
+pub fn unspread_u64(v: u64) -> (u32, u32) {
+    let even = compact_bits(v);
+    let odd = compact_bits(v >> 1);
+    (odd, even)
 }

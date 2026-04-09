@@ -832,7 +832,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
     fn spread(&self, _ctx: &mut R1CGen) -> Self {
         let val = self.expect_constant();
         let v: u64 = val.into_bigint().0[0];
-        let spread_val = ssa_mod::spread_u64(v);
+        let spread_val = ssa_mod::spread_u64(v as u32);
         Value::Const(ark_bn254::Fr::from(spread_val))
     }
 
@@ -841,8 +841,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         let v: u64 = val.into_bigint().0[0];
         let (odd_val, even_val) = ssa_mod::unspread_u64(v);
         (
-            Value::Const(ark_bn254::Fr::from(odd_val)),
-            Value::Const(ark_bn254::Fr::from(even_val)),
+            Value::Const(ark_bn254::Fr::from(odd_val as u64)),
+            Value::Const(ark_bn254::Fr::from(even_val as u64)),
         )
     }
 }
@@ -1055,7 +1055,7 @@ impl R1CGen {
                     let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
-                        let spread_val = ssa_mod::spread_u64(i as u64);
+                        let spread_val = ssa_mod::spread_u64(i as u32);
                         let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
                         let x = witness_layout.next_table_data();
                         let y = witness_layout.next_table_data();

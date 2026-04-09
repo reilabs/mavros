@@ -556,7 +556,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         let cst_val = ctx.const_vals.get(&self.0);
         match cst_val {
             Some(ConstVal::U(_, v)) => {
-                let spread_val = crate::compiler::ssa::spread_u64(*v as u64);
+                let spread_val = crate::compiler::ssa::spread_u64(*v as u32);
                 let res = ctx.field_const(crate::compiler::Field::from(spread_val));
                 ctx.const_vals.insert(
                     res,
@@ -577,6 +577,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(ConstVal::Field(f)) => {
                 let v: u64 = (*f).into_bigint().0[0];
                 let (and_v, xor_v) = crate::compiler::ssa::unspread_u64(v);
+                let (and_v, xor_v) = (and_v as u64, xor_v as u64);
                 let res_and = ctx.field_const(crate::compiler::Field::from(and_v));
                 let res_xor = ctx.field_const(crate::compiler::Field::from(xor_v));
                 ctx.const_vals.insert(
