@@ -1,0 +1,6 @@
+[package]
+name = "binary_wit"
+type = "bin"
+authors = [""]
+
+[dependencies]

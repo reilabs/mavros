@@ -701,6 +701,19 @@ impl WitnessTypeInference {
                             WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
                         );
                     }
+                    OpCode::Spread { result, value } => {
+                        let val_wt = value_wt.get(value).unwrap().clone();
+                        value_wt.insert(*result, val_wt);
+                    }
+                    OpCode::Unspread {
+                        result_and,
+                        result_xor,
+                        value,
+                    } => {
+                        let val_wt = value_wt.get(value).unwrap().clone();
+                        value_wt.insert(*result_and, val_wt.clone());
+                        value_wt.insert(*result_xor, val_wt);
+                    }
                     OpCode::Cast { result, value, .. }
                     | OpCode::Truncate { result, value, .. }
                     | OpCode::SExt { result, value, .. }

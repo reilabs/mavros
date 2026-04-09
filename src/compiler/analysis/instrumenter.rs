@@ -1156,6 +1156,22 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
+
+    fn spread(&self, _ctx: &mut CostAnalysis) -> Self {
+        // spread is pure field computation, no cost to track
+        Self {
+            unspecialized: Value::Unknown(ScalarKind::Field),
+            specialized: Value::Unknown(ScalarKind::Field),
+        }
+    }
+
+    fn unspread(&self, _ctx: &mut CostAnalysis) -> (Self, Self) {
+        let v = Self {
+            unspecialized: Value::Unknown(ScalarKind::Field),
+            specialized: Value::Unknown(ScalarKind::Field),
+        };
+        (v.clone(), v)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -62,6 +62,8 @@ where
     fn value_of(&self, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
+    fn spread(&self, ctx: &mut Context) -> Self;
+    fn unspread(&self, ctx: &mut Context) -> (Self, Self);
 }
 
 pub trait Context<V> {
@@ -485,6 +487,7 @@ impl SymbolicExecutor {
                     } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
+                            LookupTarget::Spread(n) => LookupTarget::Spread(*n),
                             LookupTarget::DynRangecheck(v) => LookupTarget::DynRangecheck(
                                 scope[v.0 as usize].as_ref().unwrap().clone(),
                             ),
@@ -511,6 +514,7 @@ impl SymbolicExecutor {
                     } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
+                            LookupTarget::Spread(n) => LookupTarget::Spread(*n),
                             LookupTarget::DynRangecheck(v) => LookupTarget::DynRangecheck(
                                 scope[v.0 as usize].as_ref().unwrap().clone(),
                             ),
@@ -566,6 +570,20 @@ impl SymbolicExecutor {
                         for (result_id, result_value) in results.iter().zip(result_values.iter()) {
                             scope[result_id.0 as usize] = Some(result_value.clone());
                         }
+                    }
+                    crate::compiler::ssa::OpCode::Spread { result, value } => {
+                        let val = scope[value.0 as usize].as_ref().unwrap();
+                        scope[result.0 as usize] = Some(val.spread(ctx));
+                    }
+                    crate::compiler::ssa::OpCode::Unspread {
+                        result_and,
+                        result_xor,
+                        value,
+                    } => {
+                        let val = scope[value.0 as usize].as_ref().unwrap();
+                        let (and_val, xor_val) = val.unspread(ctx);
+                        scope[result_and.0 as usize] = Some(and_val);
+                        scope[result_xor.0 as usize] = Some(xor_val);
                     }
                     crate::compiler::ssa::OpCode::ValueOf { result, value } => {
                         let val = scope[value.0 as usize].clone().unwrap();

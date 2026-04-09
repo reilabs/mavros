@@ -266,6 +266,8 @@ impl RCInsertion {
                         result: _,
                         value: _,
                     }
+                    | OpCode::Spread { .. }
+                    | OpCode::Unspread { .. }
                     | OpCode::Todo { .. } => {
                         let rcd_inputs = instruction
                             .get_inputs()

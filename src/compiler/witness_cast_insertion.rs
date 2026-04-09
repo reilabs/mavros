@@ -451,7 +451,9 @@ impl WitnessCastInsertion {
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::Const { .. }) => {
+                    | OpCode::Const { .. }
+                    | OpCode::Spread { .. }
+                    | OpCode::Unspread { .. }) => {
                         emitter.emit(op);
                     }
                     OpCode::Guard { .. } => {

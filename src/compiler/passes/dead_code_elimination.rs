@@ -117,7 +117,9 @@ impl DCE {
             | OpCode::ReadGlobal { .. }
             | OpCode::MkTuple { .. }
             | OpCode::ValueOf { .. }
-            | OpCode::Const { .. } => false,
+            | OpCode::Const { .. }
+            | OpCode::Spread { .. }
+            | OpCode::Unspread { .. } => false,
             OpCode::Guard { inner, .. } => self.is_initially_live(inner.as_ref()),
         }
     }

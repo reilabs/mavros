@@ -699,6 +699,7 @@ pub enum LookupTarget<V> {
     Rangecheck(u8),
     DynRangecheck(V),
     Array(V),
+    Spread(u8),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -896,6 +897,15 @@ pub enum OpCode {
     Const {
         result: ValueId,
         value: ConstValue,
+    },
+    Spread {
+        result: ValueId,
+        value: ValueId,
+    },
+    Unspread {
+        result_and: ValueId,
+        result_xor: ValueId,
+        value: ValueId,
     },
     Guard {
         condition: ValueId,
@@ -1138,6 +1148,7 @@ impl Instruction for OpCode {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
+                    LookupTarget::Spread(n) => format!("spread({})", n),
                 };
                 format!(
                     "constrain_lookup({}, ({}) => ({}), flag=v{})",
@@ -1171,6 +1182,7 @@ impl Instruction for OpCode {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
+                    LookupTarget::Spread(n) => format!("spread({})", n),
                 };
                 format!(
                     "∂lookup({}, ({}) => ({}), flag=v{})",
@@ -1394,6 +1406,28 @@ impl Instruction for OpCode {
                     )
                 }
             },
+            OpCode::Spread { result, value } => {
+                format!(
+                    "v{}{} = spread(v{})",
+                    result.0,
+                    annotate_value(*result),
+                    value.0
+                )
+            }
+            OpCode::Unspread {
+                result_and,
+                result_xor,
+                value,
+            } => {
+                format!(
+                    "v{}{}, v{}{} = unspread(v{})",
+                    result_and.0,
+                    annotate_value(*result_and),
+                    result_xor.0,
+                    annotate_value(*result_xor),
+                    value.0
+                )
+            }
             OpCode::Guard { condition, inner } => {
                 format!(
                     "guard(v{}) {{ {} }}",
@@ -1433,6 +1467,15 @@ impl Instruction for OpCode {
                 array: b,
                 index: c,
             } => vec![b, c].into_iter(),
+            Self::Spread {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::Unspread {
+                result_and: _,
+                result_xor: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::ArraySet {
                 result: _,
                 array: b,
@@ -1569,7 +1612,7 @@ impl Instruction for OpCode {
             } => {
                 let mut ret_vec = vec![];
                 match target {
-                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
                     LookupTarget::DynRangecheck(v) => {
                         ret_vec.push(v);
                     }
@@ -1731,7 +1774,16 @@ impl Instruction for OpCode {
             | Self::ValueOf {
                 result: r,
                 value: _,
+            }
+            | Self::Spread {
+                result: r,
+                value: _,
             } => vec![r].into_iter(),
+            Self::Unspread {
+                result_and,
+                result_xor,
+                value: _,
+            } => vec![result_and, result_xor].into_iter(),
             Self::ToBits {
                 result: r,
                 value: _,
@@ -1798,6 +1850,15 @@ impl Instruction for OpCode {
                 const_val: b,
                 var: c,
             } => vec![b, c].into_iter(),
+            Self::Spread {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
+            Self::Unspread {
+                result_and: _,
+                result_xor: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::ArraySet {
                 result: _,
                 array: b,
@@ -1935,7 +1996,7 @@ impl Instruction for OpCode {
             } => {
                 let mut ret_vec = vec![];
                 match target {
-                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
                     LookupTarget::DynRangecheck(v) => {
                         ret_vec.push(v);
                     }
@@ -2086,7 +2147,7 @@ impl Instruction for OpCode {
             } => {
                 let mut ret_vec = vec![];
                 match target {
-                    LookupTarget::Rangecheck(_) => {}
+                    LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
                     LookupTarget::DynRangecheck(v) => {
                         ret_vec.push(v);
                     }
@@ -2122,7 +2183,16 @@ impl Instruction for OpCode {
             | Self::ValueOf {
                 result: r,
                 value: v,
+            }
+            | Self::Spread {
+                result: r,
+                value: v,
             } => vec![r, v].into_iter(),
+            Self::Unspread {
+                result_and: a,
+                result_xor: b,
+                value: v,
+            } => vec![a, b, v].into_iter(),
             Self::ToBits {
                 result: r,
                 value: v,
@@ -2212,4 +2282,32 @@ impl Terminator {
             }
         }
     }
+}
+
+/// Compute spread of a byte/value: interleave zero bits between each bit.
+/// E.g., spread(0b1011) = 0b01_00_01_01
+pub fn spread_u64(v: u64) -> u64 {
+    let mut result = 0u64;
+    for i in 0..32 {
+        if v & (1 << i) != 0 {
+            result |= 1 << (2 * i);
+        }
+    }
+    result
+}
+
+/// Extract even bits (xor component) and odd bits (and component) from a spread sum.
+/// Returns (and_value, xor_value).
+pub fn unspread_u64(v: u64) -> (u64, u64) {
+    let mut and_val = 0u64;
+    let mut xor_val = 0u64;
+    for i in 0..32 {
+        if v & (1 << (2 * i)) != 0 {
+            xor_val |= 1 << i;
+        }
+        if v & (1 << (2 * i + 1)) != 0 {
+            and_val |= 1 << i;
+        }
+    }
+    (and_val, xor_val)
 }

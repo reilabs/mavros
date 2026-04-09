@@ -6,7 +6,10 @@ use crate::compiler::{
         types::TypeInfo,
     },
     ir::r#type::{Type, TypeExpr},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix, SliceOpDir},
+    ssa::{
+        self as ssa_mod, BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix,
+        SliceOpDir,
+    },
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
@@ -257,6 +260,7 @@ pub struct LookupConstraint {
 pub enum Table {
     Range(u64),
     OfElems(Vec<LC>),
+    Spread(u8),
 }
 
 #[derive(Clone)]
@@ -304,7 +308,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     match self.tables[0] {
                         Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) => panic!("unsupported"),
+                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
                 let els = keys
@@ -328,7 +332,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     match self.tables[0] {
                         Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) => panic!("unsupported"),
+                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
                 let els = keys
@@ -340,6 +344,30 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     table_id: 0,
                     elements: els,
                     flag: flag_lc.clone(),
+                });
+            }
+            super::ssa::LookupTarget::Spread(bits) => {
+                let table_id = {
+                    let existing = self.tables.iter().position(|t| match t {
+                        Table::Spread(n) => *n == bits,
+                        _ => false,
+                    });
+                    if let Some(idx) = existing {
+                        idx
+                    } else {
+                        self.tables.push(Table::Spread(bits));
+                        self.tables.len() - 1
+                    }
+                };
+                let els = keys
+                    .into_iter()
+                    .chain(results.into_iter())
+                    .map(|e| e.expect_linear_combination())
+                    .collect();
+                self.lookups.push(LookupConstraint {
+                    table_id,
+                    elements: els,
+                    flag: flag_lc,
                 });
             }
             super::ssa::LookupTarget::Array(arr) => {
@@ -800,6 +828,23 @@ impl symbolic_executor::Value<R1CGen> for Value {
     ) -> Self {
         todo!("ToRadix R1CS generation not yet implemented")
     }
+
+    fn spread(&self, _ctx: &mut R1CGen) -> Self {
+        let val = self.expect_constant();
+        let v: u64 = val.into_bigint().0[0];
+        let spread_val = ssa_mod::spread_u64(v);
+        Value::Const(ark_bn254::Fr::from(spread_val))
+    }
+
+    fn unspread(&self, _ctx: &mut R1CGen) -> (Self, Self) {
+        let val = self.expect_constant();
+        let v: u64 = val.into_bigint().0[0];
+        let (and_val, xor_val) = ssa_mod::unspread_u64(v);
+        (
+            Value::Const(ark_bn254::Fr::from(and_val)),
+            Value::Const(ark_bn254::Fr::from(xor_val)),
+        )
+    }
 }
 
 impl R1CGen {
@@ -911,6 +956,17 @@ impl R1CGen {
                     max_width = max_width.max(2);
                     witness_layout.multiplicities_size += len;
                 }
+                Table::Spread(bits) => {
+                    let len = 1usize << bits;
+                    table_infos.push(TableInfo {
+                        multiplicities_witness_off: witness_layout.multiplicities_size
+                            + witness_layout.algebraic_size,
+                        table,
+                        sum_constraint_idx: 0,
+                    });
+                    max_width = max_width.max(2); // key + spread_value
+                    witness_layout.multiplicities_size += len;
+                }
             }
         }
 
@@ -990,6 +1046,40 @@ impl R1CGen {
                         a: sum_lhs,
                         b: vec![(0, ark_bn254::Fr::ONE)],
                         c: vec![], // this is prepared for the looked up values to come into
+                    });
+                    table_info.sum_constraint_idx = result.len() - 1;
+                }
+                Table::Spread(bits) => {
+                    // Spread table: for each entry i in 0..2^bits, value = spread(i)
+                    // Width = 2 (key=i, value=spread(i)), same structure as OfElems
+                    let len = 1usize << bits;
+                    let mut sum_lhs: LC = vec![];
+                    for i in 0..len {
+                        let spread_val = ssa_mod::spread_u64(i as u64);
+                        let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
+                        let x = witness_layout.next_table_data();
+                        let y = witness_layout.next_table_data();
+                        let m = table_info.multiplicities_witness_off + i;
+                        result.push(R1C {
+                            a: vec![(beta, crate::compiler::Field::ONE)],
+                            b: v,
+                            c: vec![(x, -crate::compiler::Field::ONE)],
+                        });
+                        result.push(R1C {
+                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            b: vec![
+                                (alpha, ark_bn254::Fr::ONE),
+                                (0, -crate::compiler::Field::from(i as u64)),
+                                (x, -crate::compiler::Field::ONE),
+                            ],
+                            c: vec![(m, crate::compiler::Field::ONE)],
+                        });
+                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                    }
+                    result.push(R1C {
+                        a: sum_lhs,
+                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        c: vec![],
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
                 }

@@ -554,7 +554,9 @@ impl CSE {
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
                     | OpCode::ValueOf { .. }
-                    | OpCode::MulConst { .. } => {}
+                    | OpCode::MulConst { .. }
+                    | OpCode::Spread { .. }
+                    | OpCode::Unspread { .. } => {}
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.not();

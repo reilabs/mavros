@@ -1035,6 +1035,56 @@ impl CodeGen {
                         elem_kind,
                     });
                 }
+                ssa::OpCode::Lookup {
+                    target: LookupTarget::Spread(bits),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    emitter.push_op(bytecode::OpCode::SpreadLookupField {
+                        val: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        bits: *bits as usize,
+                    });
+                }
+                ssa::OpCode::DLookup {
+                    target: LookupTarget::Spread(bits),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    emitter.push_op(bytecode::OpCode::DspreadLookupField {
+                        val: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        bits: *bits as usize,
+                    });
+                }
+                ssa::OpCode::Spread { result, value } => {
+                    let res = layouter.alloc_field(*result);
+                    emitter.push_op(bytecode::OpCode::SpreadU64 {
+                        res,
+                        val: layouter.get_value(*value),
+                    });
+                }
+                ssa::OpCode::Unspread {
+                    result_and,
+                    result_xor,
+                    value,
+                } => {
+                    let res_and = layouter.alloc_field(*result_and);
+                    let res_xor = layouter.alloc_field(*result_xor);
+                    emitter.push_op(bytecode::OpCode::UnspreadU64 {
+                        res_and,
+                        res_xor,
+                        val: layouter.get_value(*value),
+                    });
+                }
                 ssa::OpCode::Todo { payload, .. } => {
                     panic!("Todo opcode encountered in Codegen: {}", payload);
                 }

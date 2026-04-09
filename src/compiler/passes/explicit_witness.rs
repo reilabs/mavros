@@ -414,9 +414,12 @@ impl ExplicitWitness {
                             _ => unreachable!(),
                         }
                     }
+                    TypeExpr::U(n) => {
+                        self.gen_witness_bitwise(b, kind, l, r, l_taint, r_taint, n, result);
+                    }
                     _ => {
                         panic!(
-                            "Bitwise {:?} on witness operands is only supported for u1 (bool), got type {:?}",
+                            "Bitwise {:?} on witness operands is only supported for unsigned int, got type {:?}",
                             kind,
                             l_type.strip_witness()
                         );
@@ -814,7 +817,9 @@ impl ExplicitWitness {
             OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
             | OpCode::ValueOf { .. }
-            | OpCode::Const { .. } => {
+            | OpCode::Const { .. }
+            | OpCode::Spread { .. }
+            | OpCode::Unspread { .. } => {
                 b.push(instruction);
             }
             OpCode::Guard { condition, inner } => {
@@ -1686,6 +1691,180 @@ impl ExplicitWitness {
             });
             b.constrain(result, divisor, a);
         }
+    }
+
+    /// Multi-bit witness And/Or/Xor via spread tables.
+    ///
+    /// Uses the identity: spread(a) + spread(b) = 2*spread(a&b) + spread(a^b)
+    /// Each operand is decomposed into bytes, each byte spread via lookup table,
+    /// then per-byte and/xor are extracted and verified.
+    fn gen_witness_bitwise(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        kind: BinaryArithOpKind,
+        l: ValueId,
+        r: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+        n: usize,
+        result: ValueId,
+    ) {
+        assert!(n % 8 == 0 && n >= 8 && n <= 256);
+        let chunks = n / 8;
+        let one = b.field_const(Field::ONE);
+        let zero = b.field_const(Field::ZERO);
+        let two = b.field_const(Field::from(2));
+        let two_to_8 = b.field_const(Field::from(256u128));
+
+        // Get pure values for hint computation
+        let l_pure = if l_taint { b.value_of(l) } else { l };
+        let r_pure = if r_taint { b.value_of(r) } else { r };
+
+        // Cast operands to field for arithmetic
+        let l_field = b.cast_to_field(l);
+        let r_field = b.cast_to_field(r);
+
+        // Step 1: Byte decomposition + spread for each operand
+        // Returns (pure_bytes, constrained_bytes, constrained_spreads)
+        let (a_pure_bytes, a_bytes_cst, a_spreads_cst) =
+            self.spread_decompose(b, l_pure, l_field, chunks, one);
+        let (b_pure_bytes, b_bytes_cst, b_spreads_cst) =
+            self.spread_decompose(b, r_pure, r_field, chunks, one);
+
+        // Step 2: Per-byte unspread — compute and/xor from spread sums
+        let mut and_bytes = Vec::with_capacity(chunks);
+        let mut xor_bytes = Vec::with_capacity(chunks);
+        for i in 0..chunks {
+            let sum_i = b.add(a_spreads_cst[i], b_spreads_cst[i]);
+
+            // Compute pure hints for and/xor of this byte (using pure byte values)
+            // Cast back to u8 for bitwise ops, then to field for witnesses
+            let a_byte_u8 = b.cast_to(CastTarget::U(8), a_pure_bytes[i]);
+            let b_byte_u8 = b.cast_to(CastTarget::U(8), b_pure_bytes[i]);
+            let and_hint = b.and(a_byte_u8, b_byte_u8);
+            let and_hint_f = b.cast_to_field(and_hint);
+            let xor_hint = b.xor(a_byte_u8, b_byte_u8);
+            let xor_hint_f = b.cast_to_field(xor_hint);
+
+            // Write and/xor bytes as witnesses
+            let and_byte_wit = b.write_witness(and_hint_f);
+            let xor_byte_wit = b.write_witness(xor_hint_f);
+
+            // Spread the and/xor bytes and verify via lookups
+            let and_spread_hint = b.spread(and_hint_f);
+            let and_spread_wit = b.write_witness(and_spread_hint);
+            b.lookup_spread(8, and_byte_wit, and_spread_wit, one);
+
+            let xor_spread_hint = b.spread(xor_hint_f);
+            let xor_spread_wit = b.write_witness(xor_spread_hint);
+            b.lookup_spread(8, xor_byte_wit, xor_spread_wit, one);
+
+            // Constrain: 2*and_spread + xor_spread = sum
+            // i.e. one * (2*and_spread + xor_spread - sum) = 0
+            let two_and = b.mul(two, and_spread_wit);
+            let two_and_plus_xor = b.add(two_and, xor_spread_wit);
+            let diff = b.sub(two_and_plus_xor, sum_i);
+            b.constrain(one, diff, zero);
+
+            and_bytes.push(and_byte_wit);
+            xor_bytes.push(xor_byte_wit);
+        }
+
+        // Step 3: Reconstruct result from byte-level results (big-endian order)
+        let result_bytes = match kind {
+            BinaryArithOpKind::And => &and_bytes,
+            BinaryArithOpKind::Xor => &xor_bytes,
+            BinaryArithOpKind::Or => {
+                // Or = And + Xor, compute per-byte
+                let mut or_bytes = Vec::with_capacity(chunks);
+                for i in 0..chunks {
+                    let or_byte = b.add(and_bytes[i], xor_bytes[i]);
+                    or_bytes.push(or_byte);
+                }
+                // Can't return reference to local, so reconstruct inline
+                let mut acc = zero;
+                for i in 0..chunks {
+                    let shifted = b.mul(acc, two_to_8);
+                    acc = b.add(shifted, or_bytes[i]);
+                }
+                b.push(OpCode::Cast {
+                    result,
+                    value: acc,
+                    target: CastTarget::U(n),
+                });
+                return;
+            }
+            _ => unreachable!(),
+        };
+
+        let mut acc = zero;
+        for i in 0..chunks {
+            let shifted = b.mul(acc, two_to_8);
+            acc = b.add(shifted, result_bytes[i]);
+        }
+        b.push(OpCode::Cast {
+            result,
+            value: acc,
+            target: CastTarget::U(n),
+        });
+    }
+
+    /// Decompose an operand into bytes and their spreads.
+    /// Returns (pure_bytes, constrained_bytes, constrained_spreads) in big-endian order.
+    /// pure_bytes: for use in hint computations (never witness-typed).
+    /// constrained_bytes/spreads: witness values verified via spread lookup (or pure if operand is pure).
+    fn spread_decompose(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        pure_val: ValueId,
+        field_val: ValueId,
+        chunks: usize,
+        flag: ValueId,
+    ) -> (Vec<ValueId>, Vec<ValueId>, Vec<ValueId>) {
+        let zero = b.field_const(Field::ZERO);
+        let two_to_8 = b.field_const(Field::from(256u128));
+
+        // Decompose into bytes via ToRadix (big-endian) using pure value
+        let pure_field = b.cast_to_field(pure_val);
+        let bytes_arr = b.to_radix(pure_field, Radix::Bytes, Endianness::Big, chunks);
+
+        let mut pure_bytes = Vec::with_capacity(chunks);
+        let mut cst_bytes = Vec::with_capacity(chunks);
+        let mut cst_spreads = Vec::with_capacity(chunks);
+
+        // Always use witness path: write bytes as witnesses and verify via spread lookups.
+        // Even for pure operands we need witnesses so the spread constraint works in R1CS
+        // (ToRadix is hint-only, not available in R1CS).
+        let mut recon = zero;
+        for i in 0..chunks {
+            let idx = b.u_const(32, i as u128);
+            let byte_i = b.array_get(bytes_arr, idx);
+            let byte_i_field = b.cast_to_field(byte_i);
+
+            // Write byte as witness
+            let byte_wit = b.write_witness(byte_i_field);
+
+            // Spread the byte (pure hint) and write spread as witness
+            let spread_hint = b.spread(byte_i_field);
+            let spread_wit = b.write_witness(spread_hint);
+
+            // Verify (byte, spread) pair via spread lookup
+            b.lookup_spread(8, byte_wit, spread_wit, flag);
+
+            // Accumulate reconstruction
+            let shifted = b.mul(recon, two_to_8);
+            recon = b.add(shifted, byte_wit);
+
+            pure_bytes.push(byte_i_field);  // pure for hints
+            cst_bytes.push(byte_wit);       // witness for constraints
+            cst_spreads.push(spread_wit);   // witness for constraints
+        }
+
+        // Constrain reconstruction equals original: flag * (recon - field_val) = 0
+        let diff = b.sub(recon, field_val);
+        b.constrain(flag, diff, zero);
+
+        (pure_bytes, cst_bytes, cst_spreads)
     }
 
     fn ensure_field(

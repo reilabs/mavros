@@ -566,6 +566,27 @@ impl Types {
                 function_info.values.insert(*result, ty);
                 Ok(())
             }
+            OpCode::Spread { result, value } => {
+                let _value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                function_info.values.insert(*result, Type::field());
+                Ok(())
+            }
+            OpCode::Unspread {
+                result_and,
+                result_xor,
+                value,
+            } => {
+                let _value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                function_info.values.insert(*result_and, Type::field());
+                function_info.values.insert(*result_xor, Type::field());
+                Ok(())
+            }
             OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),
         }
     }
