@@ -109,47 +109,55 @@ fn get_or_create_drop_fn(
 
 /// Holds function IDs for the generated AD dispatch functions.
 /// These are created lazily on first use.
-struct AdFunctionIds {
-    bump_da: FunctionId,
-    bump_db: FunctionId,
-    bump_dc: FunctionId,
-    ad_drop: FunctionId,
+struct AdBumpIds {
+    da: FunctionId,
+    db: FunctionId,
+    dc: FunctionId,
 }
 
-impl AdFunctionIds {
-    fn bump_fn(&self, matrix: DMatrix) -> FunctionId {
+impl AdBumpIds {
+    fn get(&self, matrix: DMatrix) -> FunctionId {
         match matrix {
-            DMatrix::A => self.bump_da,
-            DMatrix::B => self.bump_db,
-            DMatrix::C => self.bump_dc,
+            DMatrix::A => self.da,
+            DMatrix::B => self.db,
+            DMatrix::C => self.dc,
         }
     }
 }
 
 struct AdFunctions {
-    ids: Option<AdFunctionIds>,
+    bumps: Option<AdBumpIds>,
+    ad_drop: Option<FunctionId>,
 }
 
 impl AdFunctions {
     fn new() -> Self {
-        Self { ids: None }
+        Self {
+            bumps: None,
+            ad_drop: None,
+        }
     }
 
-    fn ensure_allocated(&mut self, llssa: &mut LLSSA) -> &AdFunctionIds {
-        self.ids.get_or_insert_with(|| AdFunctionIds {
-            bump_da: llssa.add_function("__ad_bump_da".to_string()),
-            bump_db: llssa.add_function("__ad_bump_db".to_string()),
-            bump_dc: llssa.add_function("__ad_bump_dc".to_string()),
-            ad_drop: llssa.add_function("__ad_drop".to_string()),
+    fn ensure_bumps(&mut self, llssa: &mut LLSSA) -> &AdBumpIds {
+        self.bumps.get_or_insert_with(|| AdBumpIds {
+            da: llssa.add_function("__ad_bump_da".to_string()),
+            db: llssa.add_function("__ad_bump_db".to_string()),
+            dc: llssa.add_function("__ad_bump_dc".to_string()),
         })
     }
 
     fn get_bump_fn(&mut self, matrix: DMatrix, llssa: &mut LLSSA) -> FunctionId {
-        self.ensure_allocated(llssa).bump_fn(matrix)
+        self.ensure_bumps(llssa).get(matrix)
     }
 
     fn get_drop_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
-        self.ensure_allocated(llssa).ad_drop
+        if let Some(id) = self.ad_drop {
+            return id;
+        }
+        self.ensure_bumps(llssa);
+        let id = llssa.add_function("__ad_drop".to_string());
+        self.ad_drop = Some(id);
+        id
     }
 }
 
@@ -1026,21 +1034,24 @@ fn make_field_zero(e: &mut LLBlockEmitter<'_>) -> ValueId {
 
 /// Generate all AD dispatch function bodies.
 fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
-    let ids = match &ad_fns.ids {
-        Some(ids) => ids,
-        None => return,
-    };
-
-    for matrix in [DMatrix::A, DMatrix::B, DMatrix::C] {
-        let id = ids.bump_fn(matrix);
-        let func = generate_ad_bump_function(matrix);
-        let _old = llssa.take_function(id);
-        llssa.put_function(id, func);
+    if let Some(bumps) = &ad_fns.bumps {
+        for matrix in [DMatrix::A, DMatrix::B, DMatrix::C] {
+            let id = bumps.get(matrix);
+            let func = generate_ad_bump_function(matrix);
+            let _old = llssa.take_function(id);
+            llssa.put_function(id, func);
+        }
     }
 
-    let func = generate_ad_drop_function(ids);
-    let _old = llssa.take_function(ids.ad_drop);
-    llssa.put_function(ids.ad_drop, func);
+    if let Some(drop_id) = ad_fns.ad_drop {
+        let bumps = ad_fns.bumps.as_ref().expect(
+            "ICE: ad_drop allocated without bump functions. \
+             This is a bug in AdFunctions — get_drop_fn must call ensure_bumps.",
+        );
+        let func = generate_ad_drop_function(bumps, drop_id);
+        let _old = llssa.take_function(drop_id);
+        llssa.put_function(drop_id, func);
+    }
 }
 
 /// Generate __ad_bump_d{a,b,c}(node: Ptr, amount: FieldElem):
@@ -1155,16 +1166,15 @@ fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
 ///   CONST/WITNESS: free
 ///   SUM: propagate da/db/dc to children, drop children, free
 ///   MUL_CONST: propagate da*coeff/db*coeff/dc*coeff to child, drop child, free
-fn generate_ad_drop_function(ids: &AdFunctionIds) -> LLFunction {
+fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFunction {
     let mut func = LLFunction::empty("__ad_drop".to_string());
     let entry = func.get_entry_id();
 
     let field_type = LLType::Struct(LLStruct::field_elem());
 
-    let bump_da = ids.bump_da;
-    let bump_db = ids.bump_db;
-    let bump_dc = ids.bump_dc;
-    let ad_drop_id = ids.ad_drop;
+    let bump_da = bumps.da;
+    let bump_db = bumps.db;
+    let bump_dc = bumps.dc;
 
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
