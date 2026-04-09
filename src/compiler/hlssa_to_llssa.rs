@@ -722,8 +722,11 @@ fn lower_array_set(
         None
     };
     let inner_rc_struct = if elem_is_rc {
-        let (inner_et, inner_count) = array_info(et);
-        Some(rc_array_struct(inner_et, inner_count))
+        Some(match &et.expr {
+            TypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
+            TypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
+            _ => panic!("Unsupported RC element type: {}", et),
+        })
     } else {
         None
     };
