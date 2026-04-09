@@ -982,7 +982,7 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 21 {
+        if cells.len() < 23 {
             continue;
         }
         let rows = cells[3].parse().ok();
@@ -1015,9 +1015,11 @@ const REGRESSION_COLS: &[(usize, &str)] = &[
     (15, "Witgen WASM Compile"),
     (16, "Witgen WASM Run"),
     (17, "Witgen WASM Correct"),
-    (18, "AD WASM Compile"),
-    (19, "AD WASM Run"),
-    (20, "AD WASM Correct"),
+    (18, "Witgen WASM No Leak"),
+    (19, "AD WASM Compile"),
+    (20, "AD WASM Run"),
+    (21, "AD WASM Correct"),
+    (22, "AD WASM No Leak"),
 ];
 
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
