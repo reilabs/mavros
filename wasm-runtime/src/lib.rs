@@ -16,10 +16,21 @@ use ark_ff::BigInt;
 //
 // Each allocation prepends an 8-byte header storing the requested size so that
 // free() can reconstruct the Layout needed by dealloc().
+//
+// LIVE_BYTES tracks the bytes currently held by malloc. 
+// The host can read it via __live_bytes()
+// 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HEADER: usize = 8;
 const ALIGN: usize = 8;
+
+static mut LIVE_BYTES: usize = 0;
+
+#[no_mangle]
+pub unsafe extern "C" fn __live_bytes() -> usize {
+    LIVE_BYTES
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
@@ -30,6 +41,7 @@ pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
         return base;
     }
     *(base as *mut u32) = size;
+    LIVE_BYTES += size as usize;
     base.add(HEADER)
 }
 
@@ -42,6 +54,7 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
     let size = *(base as *mut u32) as usize;
     let total = HEADER + size;
     let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
+    LIVE_BYTES = LIVE_BYTES.saturating_sub(size);
     std::alloc::dealloc(base, layout);
 }
 
