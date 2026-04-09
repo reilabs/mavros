@@ -700,14 +700,14 @@ fn run_ad_wasm(
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 
-    let live_bytes_fn = instance                                                                         
-        .get_func(&mut store, "__live_bytes")                                                            
-        .ok_or("live_bytes not found")?;               
-    let live_bytes_args = vec![];                          
-    let mut live_bytes_out = vec![wasmtime::Val::I32(0)];                                                
-    live_bytes_fn.call(&mut store, &live_bytes_args, &mut live_bytes_out)?;      
+    let live_bytes_fn = instance
+        .get_func(&mut store, "__live_bytes")
+        .ok_or("live_bytes not found")?;
+    let live_bytes_args = vec![];
+    let mut live_bytes_out = vec![wasmtime::Val::I32(0)];
+    live_bytes_fn.call(&mut store, &live_bytes_args, &mut live_bytes_out)?;
     let live_bytes = live_bytes_out[0]
-        .i32()                                                                                           
+        .i32()
         .ok_or("__live_bytes did not return i32")? as usize;
 
     // Read dA, dB, dC from memory

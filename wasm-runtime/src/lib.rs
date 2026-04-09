@@ -17,9 +17,9 @@ use ark_ff::BigInt;
 // Each allocation prepends an 8-byte header storing the requested size so that
 // free() can reconstruct the Layout needed by dealloc().
 //
-// LIVE_BYTES tracks the bytes currently held by malloc. 
+// LIVE_BYTES tracks the bytes currently held by malloc.
 // The host can read it via __live_bytes()
-// 
+//
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const HEADER: usize = 8;
