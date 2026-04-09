@@ -611,7 +611,12 @@ fn lower_instruction(
             }
         }
 
-        OpCode::Spread { result, value } | OpCode::Unspread { result_and: result, value, .. } => {
+        OpCode::Spread { result, value }
+        | OpCode::Unspread {
+            result_and: result,
+            value,
+            ..
+        } => {
             panic!(
                 "Spread/Unspread opcodes should not appear in HLSSA->LLSSA lowering path: {:?}",
                 instruction

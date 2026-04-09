@@ -599,15 +599,27 @@ impl ExplicitWitness {
                 // Cast branches to field for arithmetic (they may be U(n)/I(n))
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
-                let l_field = if l_type.strip_witness().is_field() { l } else { b.cast_to_field(l) };
-                let r_field = if r_type.strip_witness().is_field() { r } else { b.cast_to_field(r) };
+                let l_field = if l_type.strip_witness().is_field() {
+                    l
+                } else {
+                    b.cast_to_field(l)
+                };
+                let r_field = if r_type.strip_witness().is_field() {
+                    r
+                } else {
+                    b.cast_to_field(r)
+                };
 
                 // If both branches are pure, result is a linear combination
                 // of cond and constants: cond * (l - r) + r. No constraint needed.
                 if !l_taint && !r_taint {
                     let l_sub_r = b.sub(l_field, r_field);
                     // cond * (l - r): l_sub_r is a constant, cond is witness
-                    let cond_field = if function_type_info.get_value_type(cond).strip_witness().is_field() {
+                    let cond_field = if function_type_info
+                        .get_value_type(cond)
+                        .strip_witness()
+                        .is_field()
+                    {
                         cond
                     } else {
                         b.cast_to_field(cond)
@@ -625,9 +637,14 @@ impl ExplicitWitness {
                 // At least one branch is witness: full lowering with constraint
                 let select_witness = b.select(cond, l, r);
                 let select_plain = b.value_of(select_witness);
+                let select_hint = if l_type.strip_witness().is_field() {
+                    select_plain
+                } else {
+                    b.cast_to_field(select_plain)
+                };
                 b.push(OpCode::WriteWitness {
                     result: Some(res),
-                    value: select_plain,
+                    value: select_hint,
                     pinned: false,
                 });
                 // Goal is to assert 0 = cond * l + (1 - cond) * r - res
@@ -1863,9 +1880,9 @@ impl ExplicitWitness {
             let shifted = b.mul(recon, two_to_8);
             recon = b.add(shifted, byte_wit);
 
-            pure_bytes.push(byte_i_field);  // pure for hints
-            cst_bytes.push(byte_wit);       // witness for constraints
-            cst_spreads.push(spread_wit);   // witness for constraints
+            pure_bytes.push(byte_i_field); // pure for hints
+            cst_bytes.push(byte_wit); // witness for constraints
+            cst_spreads.push(spread_wit); // witness for constraints
         }
 
         // Constrain reconstruction equals original: flag * (recon - field_val) = 0

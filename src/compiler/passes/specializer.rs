@@ -558,7 +558,10 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(ConstVal::U(_, v)) => {
                 let spread_val = crate::compiler::ssa::spread_u64(*v as u64);
                 let res = ctx.field_const(crate::compiler::Field::from(spread_val));
-                ctx.const_vals.insert(res, ConstVal::Field(crate::compiler::Field::from(spread_val)));
+                ctx.const_vals.insert(
+                    res,
+                    ConstVal::Field(crate::compiler::Field::from(spread_val)),
+                );
                 Self(res)
             }
             _ => {
@@ -576,8 +579,14 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 let (and_v, xor_v) = crate::compiler::ssa::unspread_u64(v);
                 let res_and = ctx.field_const(crate::compiler::Field::from(and_v));
                 let res_xor = ctx.field_const(crate::compiler::Field::from(xor_v));
-                ctx.const_vals.insert(res_and, ConstVal::Field(crate::compiler::Field::from(and_v)));
-                ctx.const_vals.insert(res_xor, ConstVal::Field(crate::compiler::Field::from(xor_v)));
+                ctx.const_vals.insert(
+                    res_and,
+                    ConstVal::Field(crate::compiler::Field::from(and_v)),
+                );
+                ctx.const_vals.insert(
+                    res_xor,
+                    ConstVal::Field(crate::compiler::Field::from(xor_v)),
+                );
                 (Self(res_and), Self(res_xor))
             }
             _ => {

@@ -1013,7 +1013,8 @@ mod def {
                     *vm.data
                         .as_ad
                         .out_dc
-                        .offset(inverses_witness_section_offset as isize + 2 * i as isize) -= x_coeff;
+                        .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
+                        x_coeff;
                 }
 
                 // y-constraint: y * (α - i - x) - m = 0
@@ -1101,13 +1102,10 @@ mod def {
         };
 
         let inv_sum_coeff = unsafe {
-            *vm.data
-                .as_ad
-                .ad_coeffs
-                .offset(
-                    table_info.elem_inverses_constraint_section_offset as isize
-                        + 2 * table_info.length as isize,
-                )
+            *vm.data.as_ad.ad_coeffs.offset(
+                table_info.elem_inverses_constraint_section_offset as isize
+                    + 2 * table_info.length as isize,
+            )
         };
 
         unsafe {
