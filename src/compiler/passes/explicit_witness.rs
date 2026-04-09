@@ -596,20 +596,29 @@ impl ExplicitWitness {
                     b.push(instruction);
                     return;
                 }
+                // Cast branches to field for arithmetic (they may be U(n)/I(n))
+                let l_type = function_type_info.get_value_type(l);
+                let r_type = function_type_info.get_value_type(r);
+                let l_field = if l_type.strip_witness().is_field() { l } else { b.cast_to_field(l) };
+                let r_field = if r_type.strip_witness().is_field() { r } else { b.cast_to_field(r) };
+
                 // If both branches are pure, result is a linear combination
                 // of cond and constants: cond * (l - r) + r. No constraint needed.
                 if !l_taint && !r_taint {
-                    let neg_one = b.field_const(ark_ff::Fp::from(-1));
-                    let neg_r = b.mul(r, neg_one);
-                    let l_sub_r = b.add(l, neg_r);
+                    let l_sub_r = b.sub(l_field, r_field);
                     // cond * (l - r): l_sub_r is a constant, cond is witness
-                    let cond_times_diff = b.mul(l_sub_r, cond);
+                    let cond_field = if function_type_info.get_value_type(cond).strip_witness().is_field() {
+                        cond
+                    } else {
+                        b.cast_to_field(cond)
+                    };
+                    let cond_times_diff = b.mul(l_sub_r, cond_field);
                     // result = cond * (l - r) + r
                     b.push(OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Add,
                         result: res,
                         lhs: cond_times_diff,
-                        rhs: r,
+                        rhs: r_field,
                     });
                     return;
                 }
@@ -623,10 +632,9 @@ impl ExplicitWitness {
                 });
                 // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                 // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
-                let neg_one = b.field_const(ark_ff::Fp::from(-1));
-                let neg_r = b.mul(r, neg_one);
-                let l_sub_r = b.add(l, neg_r);
-                let res_sub_r = b.add(res, neg_r);
+                let l_sub_r = b.sub(l_field, r_field);
+                let res_field = b.cast_to_field(res);
+                let res_sub_r = b.sub(res_field, r_field);
                 let cond_type = function_type_info.get_value_type(cond);
                 let cond_field = if cond_type.strip_witness().is_field() {
                     cond
