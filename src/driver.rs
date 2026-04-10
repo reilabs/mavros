@@ -527,7 +527,8 @@ impl Driver {
 
         // Dump HLSSA just before lowering
         fs::write(
-            self.get_debug_output_dir().join("ad_hlssa_before_lowering.txt"),
+            self.get_debug_output_dir()
+                .join("ad_hlssa_before_lowering.txt"),
             ssa.to_string(&DefaultSsaAnnotator),
         )
         .unwrap();
@@ -537,7 +538,8 @@ impl Driver {
 
         // Dump LLSSA after lowering
         fs::write(
-            self.get_debug_output_dir().join("ad_llssa_after_lowering.txt"),
+            self.get_debug_output_dir()
+                .join("ad_llssa_after_lowering.txt"),
             llssa.to_string(&DefaultSsaAnnotator),
         )
         .unwrap();
