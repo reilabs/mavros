@@ -34,6 +34,7 @@ fn lower_type(ty: &Type) -> LLType {
         TypeExpr::Array(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         TypeExpr::WitnessOf(_) => LLType::Ptr,
+        TypeExpr::Tuple(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
@@ -47,6 +48,7 @@ fn elem_struct(ty: &Type) -> LLStruct {
             LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
         }
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        TypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
     }
@@ -55,6 +57,28 @@ fn elem_struct(ty: &Type) -> LLStruct {
 /// Get the RC'd array struct for an Array<T, N> type.
 fn rc_array_struct(elem_type: &Type, count: usize) -> LLStruct {
     LLStruct::rc_array(elem_struct(elem_type), count)
+}
+
+/// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
+fn tuple_field_type(ty: &Type) -> LLFieldType {
+    match &ty.expr {
+        TypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
+        TypeExpr::U(bits) | TypeExpr::I(bits) => LLFieldType::Int(*bits as u32),
+        TypeExpr::Array(..) => LLFieldType::Ptr,
+        TypeExpr::Tuple(_) => LLFieldType::Ptr,
+        TypeExpr::WitnessOf(_) => LLFieldType::Ptr,
+        _ => panic!("Unsupported tuple element type: {}", ty),
+    }
+}
+
+/// Build the LLStruct layout for a heap-allocated RC'd tuple.
+/// Layout: { Inline(RcHeader), field0, field1, ... }
+fn rc_tuple_struct(element_types: &[Type]) -> LLStruct {
+    let mut fields = vec![LLFieldType::Inline(LLStruct::rc_header())];
+    for elem_ty in element_types {
+        fields.push(tuple_field_type(elem_ty));
+    }
+    LLStruct::new(fields)
 }
 
 /// Extract (element_type, count) from an HLSSA array type.
@@ -74,12 +98,13 @@ struct DropFnEntry {
     fn_id: FunctionId,
 }
 
-/// Get or create a drop function for the given array type.
-/// Recursively creates drop functions for inner array elements.
+/// Get or create a drop function for a type that needs dropping (currently Array or WitnessOf).
+/// For arrays, recursively creates drop functions for inner elements that need dropping.
 fn get_or_create_drop_fn(
     ty: &Type,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
 ) -> FunctionId {
     // Check if already exists
     for entry in drop_fns.iter() {
@@ -88,14 +113,30 @@ fn get_or_create_drop_fn(
         }
     }
 
-    // Recursively create drop fn for inner array elements first
-    if let TypeExpr::Array(inner, _) = &ty.expr {
-        if matches!(inner.expr, TypeExpr::Array(..)) {
-            get_or_create_drop_fn(inner, llssa, drop_fns);
+    // Recursively create drop fns for inner heap-allocated elements first
+    match &ty.expr {
+        TypeExpr::Array(inner, _) => {
+            if needs_drop(&inner.expr) {
+                get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
+            }
         }
+        TypeExpr::Tuple(elements) => {
+            for elem in elements {
+                if needs_drop(&elem.expr) {
+                    get_or_create_drop_fn(elem, llssa, drop_fns, ad_fns);
+                }
+            }
+        }
+        _ => {}
     }
 
-    let fn_id = llssa.add_function(format!("drop_{}", ty));
+    // Resolve or create the drop function ID
+    let fn_id = match &ty.expr {
+        TypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
+        TypeExpr::Array(_inner, _) => llssa.add_function(format!("drop_{}", ty)),
+        TypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
+        _ => panic!("{} is not supported yet", ty),
+    };
     drop_fns.push(DropFnEntry {
         hlssa_type: ty.clone(),
         fn_id,
@@ -109,46 +150,52 @@ fn get_or_create_drop_fn(
 
 /// Holds function IDs for the generated AD dispatch functions.
 /// These are created lazily on first use.
+struct AdBumpIds {
+    da: FunctionId,
+    db: FunctionId,
+    dc: FunctionId,
+}
+
+impl AdBumpIds {
+    fn get(&self, matrix: DMatrix) -> FunctionId {
+        match matrix {
+            DMatrix::A => self.da,
+            DMatrix::B => self.db,
+            DMatrix::C => self.dc,
+        }
+    }
+}
+
 struct AdFunctions {
-    bump_da: Option<FunctionId>,
-    bump_db: Option<FunctionId>,
-    bump_dc: Option<FunctionId>,
+    bumps: Option<AdBumpIds>,
     ad_drop: Option<FunctionId>,
 }
 
 impl AdFunctions {
     fn new() -> Self {
         Self {
-            bump_da: None,
-            bump_db: None,
-            bump_dc: None,
+            bumps: None,
             ad_drop: None,
         }
     }
 
+    fn ensure_bumps(&mut self, llssa: &mut LLSSA) -> &AdBumpIds {
+        self.bumps.get_or_insert_with(|| AdBumpIds {
+            da: llssa.add_function("__ad_bump_da".to_string()),
+            db: llssa.add_function("__ad_bump_db".to_string()),
+            dc: llssa.add_function("__ad_bump_dc".to_string()),
+        })
+    }
+
     fn get_bump_fn(&mut self, matrix: DMatrix, llssa: &mut LLSSA) -> FunctionId {
-        let slot = match matrix {
-            DMatrix::A => &mut self.bump_da,
-            DMatrix::B => &mut self.bump_db,
-            DMatrix::C => &mut self.bump_dc,
-        };
-        if let Some(id) = *slot {
-            return id;
-        }
-        let name = match matrix {
-            DMatrix::A => "__ad_bump_da",
-            DMatrix::B => "__ad_bump_db",
-            DMatrix::C => "__ad_bump_dc",
-        };
-        let id = llssa.add_function(name.to_string());
-        *slot = Some(id);
-        id
+        self.ensure_bumps(llssa).get(matrix)
     }
 
     fn get_drop_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
         if let Some(id) = self.ad_drop {
             return id;
         }
+        self.ensure_bumps(llssa);
         let id = llssa.add_function("__ad_drop".to_string());
         self.ad_drop = Some(id);
         id
@@ -505,6 +552,7 @@ fn lower_instruction(
                 *value,
                 llssa,
                 drop_fns,
+                ad_fns,
             );
         }
 
@@ -529,7 +577,7 @@ fn lower_instruction(
             if val_type.is_witness_of() {
                 lower_ad_rc_drop(e, val_map, *value, llssa, ad_fns);
             } else {
-                lower_rc_drop(e, val_map, fn_type_info, *value, llssa, drop_fns);
+                lower_rc_drop(e, val_map, fn_type_info, *value, llssa, drop_fns, ad_fns);
             }
         }
 
@@ -623,6 +671,18 @@ fn lower_instruction(
             )
         }
 
+        OpCode::MkTuple {
+            result,
+            elems,
+            element_types,
+        } => {
+            lower_mk_tuple(e, val_map, *result, elems, element_types);
+        }
+
+        OpCode::TupleProj { result, tuple, idx } => {
+            lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
+        }
+
         _ => panic!(
             "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
@@ -665,6 +725,60 @@ fn lower_mk_array(
     }
 
     val_map.insert(result, arr);
+}
+
+/// Lower MkTuple to heap allocation + RC init + field stores.
+fn lower_mk_tuple(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    elems: &[ValueId],
+    element_types: &[Type],
+) {
+    let rc_struct = rc_tuple_struct(element_types);
+
+    // Allocate
+    let tuple_ptr = e.heap_alloc(rc_struct.clone(), None);
+
+    // Init RC to 1
+    let rc_hdr = e.struct_field_ptr(tuple_ptr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // Store each element into its field (fields are at index 1, 2, 3, ...)
+    for (i, elem) in elems.iter().enumerate() {
+        let field_ptr = e.struct_field_ptr(tuple_ptr, rc_struct.clone(), i + 1);
+        let ll_elem = val_map[elem];
+        e.ll_store(field_ptr, ll_elem);
+    }
+
+    val_map.insert(result, tuple_ptr);
+}
+
+/// Lower TupleProj(Static) to StructFieldPtr + Load.
+fn lower_tuple_proj(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    result: ValueId,
+    tuple: ValueId,
+    field_idx: usize,
+) {
+    let tuple_type = fn_type_info.get_value_type(tuple);
+    let element_types = tuple_type.get_tuple_elements();
+    let rc_struct = rc_tuple_struct(&element_types);
+
+    let ll_tuple = val_map[&tuple];
+
+    // Field is at index field_idx + 1 (field 0 is RC header)
+    let field_ptr = e.struct_field_ptr(ll_tuple, rc_struct, field_idx + 1);
+
+    // Load the field value
+    let field_ll_type = lower_type(&element_types[field_idx]);
+    let val = e.ll_load(field_ptr, field_ll_type);
+
+    val_map.insert(result, val);
 }
 
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
@@ -712,21 +826,26 @@ fn lower_array_set(
     value: ValueId,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
     let (et, count) = array_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
-    let elem_is_rc = matches!(et.expr, TypeExpr::Array(..));
+    let elem_is_rc = needs_drop(&et.expr);
 
     let inner_drop_fn = if elem_is_rc {
-        Some(get_or_create_drop_fn(et, llssa, drop_fns))
+        Some(get_or_create_drop_fn(et, llssa, drop_fns, ad_fns))
     } else {
         None
     };
     let inner_rc_struct = if elem_is_rc {
-        let (inner_et, inner_count) = array_info(et);
-        Some(rc_array_struct(inner_et, inner_count))
+        Some(match &et.expr {
+            TypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
+            TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+            TypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
+            _ => panic!("Unsupported RC element type: {}", et),
+        })
     } else {
         None
     };
@@ -828,9 +947,13 @@ fn lower_rc_bump(
     n: usize,
     value: ValueId,
 ) {
-    let arr_type = fn_type_info.get_value_type(value);
-    let (et, count) = array_info(arr_type);
-    let rc_struct = rc_array_struct(et, count);
+    let val_type = fn_type_info.get_value_type(value);
+
+    let rc_struct = match &val_type.expr {
+        TypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
+        TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+        _ => panic!("lower_rc_bump: unexpected type {}", val_type),
+    };
 
     let ll_arr = val_map[&value];
 
@@ -850,9 +973,10 @@ fn lower_rc_drop(
     value: ValueId,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
 ) {
     let arr_type = fn_type_info.get_value_type(value);
-    let drop_fn_id = get_or_create_drop_fn(arr_type, llssa, drop_fns);
+    let drop_fn_id = get_or_create_drop_fn(arr_type, llssa, drop_fns, ad_fns);
     let ll_arr = val_map[&value];
     e.call(drop_fn_id, vec![ll_arr], 0);
 }
@@ -1040,24 +1164,23 @@ fn make_field_zero(e: &mut LLBlockEmitter<'_>) -> ValueId {
 
 /// Generate all AD dispatch function bodies.
 fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
-    // Generate bump functions
-    for (matrix, fn_id) in [
-        (DMatrix::A, ad_fns.bump_da),
-        (DMatrix::B, ad_fns.bump_db),
-        (DMatrix::C, ad_fns.bump_dc),
-    ] {
-        if let Some(id) = fn_id {
-            let func = generate_ad_bump_function(matrix, ad_fns);
+    if let Some(bumps) = &ad_fns.bumps {
+        for matrix in [DMatrix::A, DMatrix::B, DMatrix::C] {
+            let id = bumps.get(matrix);
+            let func = generate_ad_bump_function(matrix);
             let _old = llssa.take_function(id);
             llssa.put_function(id, func);
         }
     }
 
-    // Generate drop function
-    if let Some(id) = ad_fns.ad_drop {
-        let func = generate_ad_drop_function(ad_fns);
-        let _old = llssa.take_function(id);
-        llssa.put_function(id, func);
+    if let Some(drop_id) = ad_fns.ad_drop {
+        let bumps = ad_fns.bumps.as_ref().expect(
+            "ICE: ad_drop allocated without bump functions. \
+             This is a bug in AdFunctions — get_drop_fn must call ensure_bumps.",
+        );
+        let func = generate_ad_drop_function(bumps, drop_id);
+        let _old = llssa.take_function(drop_id);
+        llssa.put_function(drop_id, func);
     }
 }
 
@@ -1068,7 +1191,7 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
 ///   WITNESS:   ad_write_witness(matrix, node.index, amount)
 ///   SUM:       node.d{a,b,c} += amount  (field add)
 ///   MUL_CONST: node.d{a,b,c} += amount  (field add)
-fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFunction {
+fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
     let name = match matrix {
         DMatrix::A => "__ad_bump_da",
         DMatrix::B => "__ad_bump_db",
@@ -1173,16 +1296,15 @@ fn generate_ad_bump_function(matrix: DMatrix, _ad_fns: &AdFunctions) -> LLFuncti
 ///   CONST/WITNESS: free
 ///   SUM: propagate da/db/dc to children, drop children, free
 ///   MUL_CONST: propagate da*coeff/db*coeff/dc*coeff to child, drop child, free
-fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
+fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFunction {
     let mut func = LLFunction::empty("__ad_drop".to_string());
     let entry = func.get_entry_id();
 
     let field_type = LLType::Struct(LLStruct::field_elem());
 
-    let bump_da = ad_fns.bump_da.expect("bump_da must exist");
-    let bump_db = ad_fns.bump_db.expect("bump_db must exist");
-    let bump_dc = ad_fns.bump_dc.expect("bump_dc must exist");
-    let ad_drop_id = ad_fns.ad_drop.expect("ad_drop must exist");
+    let bump_da = bumps.da;
+    let bump_db = bumps.db;
+    let bump_dc = bumps.dc;
 
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
@@ -1300,13 +1422,28 @@ fn generate_ad_drop_function(ad_fns: &AdFunctions) -> LLFunction {
 /// Generate all drop function bodies after user functions are lowered.
 fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     for entry in drop_fns {
-        let func = generate_drop_function(&entry.hlssa_type, drop_fns);
+        let func = match &entry.hlssa_type.expr {
+            TypeExpr::Array(..) => generate_drop_function_for_array(&entry.hlssa_type, drop_fns),
+            TypeExpr::Tuple(elements) => {
+                generate_drop_function_for_tuple(elements, &entry.hlssa_type, drop_fns)
+            }
+            // WitnessOf points to ad_drop, whose body is generated by generate_all_ad_functions
+            TypeExpr::WitnessOf(_) => continue,
+            other => panic!("No drop function generator for type: {:?}", other),
+        };
         let _old = llssa.take_function(entry.fn_id);
         llssa.put_function(entry.fn_id, func);
     }
 }
 
-/// Generate a type-specific drop function.
+fn needs_drop(expr: &TypeExpr) -> bool {
+    matches!(
+        expr,
+        TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::WitnessOf(..)
+    )
+}
+
+/// Generate a drop function for an array type.
 ///
 /// Pseudocode:
 ///   fn drop(ptr):
@@ -1316,11 +1453,11 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
 ///         drop(ptr.data[i])
 ///       free(ptr)
 ///     return
-fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
+fn generate_drop_function_for_array(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
     let (et, count) = array_info(ty);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
-    let elem_is_rc = matches!(et.expr, TypeExpr::Array(..));
+    let elem_is_rc = needs_drop(&et.expr);
 
     let mut func = LLFunction::empty(format!("drop_{}", ty));
     let entry = func.get_entry_id();
@@ -1359,6 +1496,71 @@ fn generate_drop_function(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
                         e.call(inner_drop_fn, vec![elem_val], 0);
                         vec![]
                     });
+                }
+                e.free(ptr);
+                vec![]
+            },
+            |_| vec![],
+        );
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate a drop function for an RC'd tuple.
+///
+/// Pseudocode:
+///   fn drop(ptr):
+///     rc = --ptr.header.rc
+///     if rc == 0:
+///       for each heap-allocated field i:
+///         drop_FieldType(ptr.field[i+1])
+///       free(ptr)
+///     return
+fn generate_drop_function_for_tuple(
+    element_types: &[Type],
+    ty: &Type,
+    drop_fns: &[DropFnEntry],
+) -> LLFunction {
+    let rc_struct = rc_tuple_struct(element_types);
+
+    let mut func = LLFunction::empty(format!("drop_{}", ty));
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let ptr = e.add_parameter(LLType::Ptr);
+
+        // Decrement RC
+        let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
+        let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+        let rc = e.ll_load(rc_ptr, LLType::i64());
+        let one = e.int_const(64, 1);
+        let new_rc = e.int_sub(rc, one);
+        e.ll_store(rc_ptr, new_rc);
+
+        // If RC hit zero, drop inner heap-allocated elements and free
+        let zero = e.int_const(64, 0);
+        let dead = e.int_eq(new_rc, zero);
+        e.build_if_else(
+            dead,
+            vec![],
+            |e| {
+                for (i, elem_ty) in element_types.iter().enumerate() {
+                    if needs_drop(&elem_ty.expr) {
+                        let inner_drop_fn = drop_fns
+                            .iter()
+                            .find(|entry| entry.hlssa_type == *elem_ty)
+                            .expect("inner drop fn should exist for tuple element")
+                            .fn_id;
+
+                        // Field is at index i + 1 (field 0 is RC header)
+                        let field_ptr = e.struct_field_ptr(ptr, rc_struct.clone(), i + 1);
+                        let field_val = e.ll_load(field_ptr, LLType::Ptr);
+                        e.call(inner_drop_fn, vec![field_val], 0);
+                    }
                 }
                 e.free(ptr);
                 vec![]

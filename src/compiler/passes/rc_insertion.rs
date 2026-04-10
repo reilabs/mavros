@@ -354,11 +354,55 @@ impl RCInsertion {
                         currently_live.extend(inputs);
                     }
                     OpCode::Alloc {
-                        result: _,
+                        result,
                         elem_type: _,
-                    } => todo!(),
-                    OpCode::Store { ptr: _, value: _ } => todo!(),
-                    OpCode::Load { result: _, ptr: _ } => todo!(),
+                    } => {
+                        if self.needs_rc(type_info, result) && !currently_live.contains(result) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Drop,
+                                value: *result,
+                            });
+                        }
+                        new_instructions.push(instruction);
+                    }
+                    OpCode::Store { ptr, value } => {
+                        // In forward order: bump value if still live (aliased into cell), then store
+                        // In reverse: push store first, then bump
+                        let ptr = *ptr;
+                        let value = *value;
+                        new_instructions.push(instruction);
+                        if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Bump(1),
+                                value,
+                            });
+                        }
+                        currently_live.insert(ptr);
+                        currently_live.insert(value);
+                    }
+                    OpCode::Load { result, ptr } => {
+                        if !currently_live.contains(ptr) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Drop,
+                                value: *ptr,
+                            });
+                        }
+                        if self.needs_rc(type_info, result) {
+                            if currently_live.contains(result) {
+                                new_instructions.push(OpCode::MemOp {
+                                    kind: MemOp::Bump(1),
+                                    value: *result,
+                                });
+                            } else {
+                                panic!(
+                                    "ICE: Result of Load (V{} in block {}) is not live. This is a bug.",
+                                    result.0, block_id.0
+                                );
+                            }
+                        }
+                        new_instructions.push(instruction.clone());
+                        currently_live.insert(*ptr);
+                    }
                     OpCode::Call {
                         results: returns,
                         function: _,

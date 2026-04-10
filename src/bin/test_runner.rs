@@ -145,7 +145,7 @@ fn run_single(root: PathBuf) {
     let witgen_result = witgen_binary.and_then(|mut binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref()?;
+        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
         let result = interpreter::run(
             &mut binary,
             r1cs.witness_layout,
@@ -258,7 +258,7 @@ fn run_single(root: PathBuf) {
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref()?;
+        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
         match run_wasm(wasm_path, r1cs, params) {
             Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
@@ -286,6 +286,16 @@ fn run_single(root: PathBuf) {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
             "END:WITGEN_WASM_CORRECT:fail"
+        });
+    }
+
+    // 13b. Witgen WASM leak check  (depends on WITGEN_WASM_RUN)
+    if let Some(result) = &wasm_result {
+        emit("START:WITGEN_WASM_NOLEAK");
+        emit(if result.live_bytes == 0 {
+            "END:WITGEN_WASM_NOLEAK:ok"
+        } else {
+            "END:WITGEN_WASM_NOLEAK:fail"
         });
     }
 
@@ -346,6 +356,16 @@ fn run_single(root: PathBuf) {
             "END:AD_WASM_CORRECT:fail"
         });
     }
+
+    // 16b. AD WASM leak check  (depends on AD_WASM_RUN)
+    if let Some((_, result)) = &ad_wasm_result {
+        emit("START:AD_WASM_NOLEAK");
+        emit(if result.live_bytes == 0 {
+            "END:AD_WASM_NOLEAK:ok"
+        } else {
+            "END:AD_WASM_NOLEAK:fail"
+        });
+    }
 }
 
 fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::InputValueOrdered>> {
@@ -370,6 +390,7 @@ struct WasmResult {
     out_a: Vec<Field>,
     out_b: Vec<Field>,
     out_c: Vec<Field>,
+    live_bytes: usize,
 }
 
 /// Read a field element from WASM memory
@@ -498,6 +519,17 @@ fn run_wasm(
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 
+    // Read heap residual from the __live_bytes counter in wasm-runtime
+    let live_bytes_fn = instance
+        .get_func(&mut store, "__live_bytes")
+        .ok_or("live_bytes not found")?;
+    let live_bytes_args = vec![];
+    let mut live_bytes_out = vec![wasmtime::Val::I32(0)];
+    live_bytes_fn.call(&mut store, &live_bytes_args, &mut live_bytes_out)?;
+    let live_bytes = live_bytes_out[0]
+        .i32()
+        .ok_or("__live_bytes did not return i32")? as usize;
+
     // Read outputs from memory
     let mut out_witness = Vec::with_capacity(witness_count);
     let mut out_a = Vec::with_capacity(constraint_count);
@@ -537,6 +569,7 @@ fn run_wasm(
         out_a,
         out_b,
         out_c,
+        live_bytes,
     })
 }
 
@@ -547,6 +580,7 @@ struct AdWasmResult {
     out_da: Vec<Field>,
     out_db: Vec<Field>,
     out_dc: Vec<Field>,
+    live_bytes: usize,
 }
 
 /// Write a field element to WASM memory at ptr
@@ -657,7 +691,7 @@ fn run_ad_wasm(
         data[off + 16..off + 20].copy_from_slice(&0u32.to_le_bytes());
     }
 
-    let func = instance
+    let func: wasmtime::Func = instance
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
 
@@ -665,6 +699,16 @@ fn run_ad_wasm(
     let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
+
+    let live_bytes_fn = instance
+        .get_func(&mut store, "__live_bytes")
+        .ok_or("live_bytes not found")?;
+    let live_bytes_args = vec![];
+    let mut live_bytes_out = vec![wasmtime::Val::I32(0)];
+    live_bytes_fn.call(&mut store, &live_bytes_args, &mut live_bytes_out)?;
+    let live_bytes = live_bytes_out[0]
+        .i32()
+        .ok_or("__live_bytes did not return i32")? as usize;
 
     // Read dA, dB, dC from memory
     let mut out_da = Vec::with_capacity(witness_count);
@@ -693,6 +737,7 @@ fn run_ad_wasm(
         out_da,
         out_db,
         out_dc,
+        live_bytes,
     })
 }
 
@@ -713,9 +758,11 @@ const STEP_KEYS: &[&str] = &[
     "WITGEN_WASM_COMPILE",
     "WITGEN_WASM_RUN",
     "WITGEN_WASM_CORRECT",
+    "WITGEN_WASM_NOLEAK",
     "AD_WASM_COMPILE",
     "AD_WASM_RUN",
     "AD_WASM_CORRECT",
+    "AD_WASM_NOLEAK",
 ];
 
 struct TestResult {
@@ -935,7 +982,7 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 21 {
+        if cells.len() < 23 {
             continue;
         }
         let rows = cells[3].parse().ok();
@@ -968,9 +1015,11 @@ const REGRESSION_COLS: &[(usize, &str)] = &[
     (15, "Witgen WASM Compile"),
     (16, "Witgen WASM Run"),
     (17, "Witgen WASM Correct"),
-    (18, "AD WASM Compile"),
-    (19, "AD WASM Run"),
-    (20, "AD WASM Correct"),
+    (18, "Witgen WASM No Leak"),
+    (19, "AD WASM Compile"),
+    (20, "AD WASM Run"),
+    (21, "AD WASM Correct"),
+    (22, "AD WASM No Leak"),
 ];
 
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
@@ -1237,8 +1286,8 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | AD WASM Compile | AD WASM Run | AD WASM Correct |\n");
-    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|-----------------|-------------|---------------------|\n");
+    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
+    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n");
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
@@ -1247,7 +1296,7 @@ fn render_markdown(results: &[TestResult]) -> String {
         let witgen_sz = r.witgen_bytes.map_or("-".to_string(), |v| v.to_string());
         let ad_sz = r.ad_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
@@ -1266,9 +1315,11 @@ fn render_markdown(results: &[TestResult]) -> String {
             s("WITGEN_WASM_COMPILE"),
             s("WITGEN_WASM_RUN"),
             s("WITGEN_WASM_CORRECT"),
+            s("WITGEN_WASM_NOLEAK"),
             s("AD_WASM_COMPILE"),
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
+            s("AD_WASM_NOLEAK"),
         ));
     }
 
