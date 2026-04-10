@@ -442,6 +442,31 @@ pub enum LLOp {
         value: ValueId,
     },
 
+    // ── Lookup ─────────────────────────────────────────────────────────
+    /// Initialize a range-check table of the given size.
+    /// Registers the table with the VM and advances multiplicity/constraint/witness offsets.
+    /// Returns the multiplicity base pointer for this table (Ptr to u64 array).
+    /// The table ID is assigned sequentially (0, 1, 2, ...) and tracked by the caller.
+    InitRangeTable {
+        result: ValueId,
+        size: u32,
+    },
+    /// Write one entry to the 3 lookup tapes: (table_id, value_u64, flag).
+    /// All written as u64 (matching VM bytecode behavior).
+    /// table_id: Int(64), value: Int(64), flag: Int(64).
+    WriteLookup {
+        table_id: ValueId,
+        value: ValueId,
+        flag: ValueId,
+    },
+    /// Increment multiplicities[index] += amount at the given base pointer.
+    /// base: Ptr, index: Int(64), amount: Int(64).
+    WriteMultiplicity {
+        base: ValueId,
+        index: ValueId,
+        amount: ValueId,
+    },
+
     // ── AD (Automatic Differentiation) ─────────────────────────────────
     /// Read the next sensitivity coefficient from the AD input tape.
     /// Result: Struct(FieldElem).
@@ -483,6 +508,7 @@ impl Instruction for LLOp {
             LLOp::IntConst { .. }
             | LLOp::NullPtr { .. }
             | LLOp::GlobalAddr { .. }
+            | LLOp::InitRangeTable { .. }
             | LLOp::NextDCoeff { .. }
             | LLOp::ADFreshWitness { .. }
             | LLOp::Trap => vec![].into_iter(),
@@ -534,6 +560,18 @@ impl Instruction for LLOp {
             LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             LLOp::WriteWitness { value } => vec![value].into_iter(),
 
+            // Lookup
+            LLOp::WriteLookup {
+                table_id,
+                value,
+                flag,
+            } => vec![table_id, value, flag].into_iter(),
+            LLOp::WriteMultiplicity {
+                base,
+                index,
+                amount,
+            } => vec![base, index, amount].into_iter(),
+
             // AD
             LLOp::ADWriteConst {
                 const_value,
@@ -571,6 +609,7 @@ impl Instruction for LLOp {
             | LLOp::ArrayElemPtr { result, .. }
             | LLOp::Select { result, .. }
             | LLOp::GlobalAddr { result, .. }
+            | LLOp::InitRangeTable { result, .. }
             | LLOp::NextDCoeff { result, .. }
             | LLOp::ADFreshWitness { result, .. } => vec![result].into_iter(),
 
@@ -583,6 +622,8 @@ impl Instruction for LLOp {
             | LLOp::Memcpy { .. }
             | LLOp::Constrain { .. }
             | LLOp::WriteWitness { .. }
+            | LLOp::WriteLookup { .. }
+            | LLOp::WriteMultiplicity { .. }
             | LLOp::ADWriteConst { .. }
             | LLOp::ADWriteWitness { .. }
             | LLOp::Trap => vec![].into_iter(),
@@ -595,6 +636,7 @@ impl Instruction for LLOp {
             LLOp::IntConst { .. }
             | LLOp::NullPtr { .. }
             | LLOp::GlobalAddr { .. }
+            | LLOp::InitRangeTable { .. }
             | LLOp::NextDCoeff { .. }
             | LLOp::ADFreshWitness { .. }
             | LLOp::Trap => vec![].into_iter(),
@@ -648,6 +690,18 @@ impl Instruction for LLOp {
             LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             LLOp::WriteWitness { value } => vec![value].into_iter(),
 
+            // Lookup
+            LLOp::WriteLookup {
+                table_id,
+                value,
+                flag,
+            } => vec![table_id, value, flag].into_iter(),
+            LLOp::WriteMultiplicity {
+                base,
+                index,
+                amount,
+            } => vec![base, index, amount].into_iter(),
+
             // AD
             LLOp::ADWriteConst {
                 const_value,
@@ -667,6 +721,7 @@ impl Instruction for LLOp {
             LLOp::IntConst { result, .. }
             | LLOp::NullPtr { result }
             | LLOp::GlobalAddr { result, .. }
+            | LLOp::InitRangeTable { result, .. }
             | LLOp::NextDCoeff { result }
             | LLOp::ADFreshWitness { result } => vec![result].into_iter(),
 
@@ -735,6 +790,18 @@ impl Instruction for LLOp {
             // VM / Constraint
             LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             LLOp::WriteWitness { value } => vec![value].into_iter(),
+
+            // Lookup
+            LLOp::WriteLookup {
+                table_id,
+                value,
+                flag,
+            } => vec![table_id, value, flag].into_iter(),
+            LLOp::WriteMultiplicity {
+                base,
+                index,
+                amount,
+            } => vec![base, index, amount].into_iter(),
 
             // AD
             LLOp::ADWriteConst {
@@ -943,6 +1010,33 @@ impl Instruction for LLOp {
             }
             LLOp::WriteWitness { value } => {
                 format!("write_witness {}", vr(*value))
+            }
+            LLOp::InitRangeTable { result, size } => {
+                format!("{} = init_range_table {}", v(*result), size)
+            }
+            LLOp::WriteLookup {
+                table_id,
+                value,
+                flag,
+            } => {
+                format!(
+                    "write_lookup {}, {}, {}",
+                    vr(*table_id),
+                    vr(*value),
+                    vr(*flag)
+                )
+            }
+            LLOp::WriteMultiplicity {
+                base,
+                index,
+                amount,
+            } => {
+                format!(
+                    "write_multiplicity {}, {}, {}",
+                    vr(*base),
+                    vr(*index),
+                    vr(*amount)
+                )
             }
             LLOp::Trap => "trap".to_string(),
 

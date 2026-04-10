@@ -376,3 +376,113 @@ pub unsafe extern "C" fn __ad_accum_at_dc(
     let dc_ptr = *(vm_ptr as *mut *mut u64).add(AD_VM_OUT_DC);
     field_accum(dc_ptr.add(index as usize * 4), s);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Lookup runtime functions
+//
+// Witgen VM struct layout (wasm32 offsets, in units of u32 = pointer size):
+//   0:  witness_ptr
+//   1:  a_ptr
+//   2:  b_ptr
+//   3:  c_ptr
+//   4:  lookups_a_ptr
+//   5:  lookups_b_ptr
+//   6:  lookups_c_ptr
+//   7:  multiplicities_ptr
+//   8:  out_a_base_ptr
+//   9:  tables_cnst_section_off (i32)
+//  10:  tables_wit_section_off (i32)
+//  11:  num_tables (i32)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const VM_LOOKUPS_A: usize = 4;
+const VM_LOOKUPS_B: usize = 5;
+const VM_LOOKUPS_C: usize = 6;
+const VM_MULTIPLICITIES: usize = 7;
+const VM_OUT_A_BASE: usize = 8;
+const VM_TABLES_CNST_OFF: usize = 9;
+const VM_TABLES_WIT_OFF: usize = 10;
+const VM_NUM_TABLES: usize = 11;
+
+/// Write one entry to the 3 lookup tapes: (table_id, value_u64, flag).
+/// All values are written as u64 (matching the VM bytecode behavior).
+/// All 3 pointers advance by one Field element (4 u64s = 32 bytes).
+#[no_mangle]
+pub unsafe extern "C" fn __write_lookup(
+    vm_ptr: *mut u8,
+    table_id: i64,
+    value: i64,
+    flag: i64,
+) {
+    // Write table_id as u64 to lookups_a, advance
+    let la_ptr_ptr = (vm_ptr as *mut *mut u64).add(VM_LOOKUPS_A);
+    let la_ptr = *la_ptr_ptr;
+    *la_ptr = table_id as u64;
+    *la_ptr_ptr = la_ptr.add(4); // advance by 1 Field = 4 u64s
+
+    // Write value as u64 to lookups_b, advance
+    let lb_ptr_ptr = (vm_ptr as *mut *mut u64).add(VM_LOOKUPS_B);
+    let lb_ptr = *lb_ptr_ptr;
+    *lb_ptr = value as u64;
+    *lb_ptr_ptr = lb_ptr.add(4);
+
+    // Write flag as u64 to lookups_c, advance
+    let lc_ptr_ptr = (vm_ptr as *mut *mut u64).add(VM_LOOKUPS_C);
+    let lc_ptr = *lc_ptr_ptr;
+    *lc_ptr = flag as u64;
+    *lc_ptr_ptr = lc_ptr.add(4);
+}
+
+/// Increment multiplicities[index] += amount at the given base pointer.
+/// base_ptr points to the start of the multiplicity region for this table.
+/// Each multiplicity slot is one Field element (4 u64s = 32 bytes) apart,
+/// but only the first u64 is used as the counter.
+#[no_mangle]
+pub unsafe extern "C" fn __write_multiplicity(base_ptr: *mut u64, index: i64, amount: i64) {
+    let target = base_ptr.add(index as usize * 4);
+    *target = (*target).wrapping_add(amount as u64);
+}
+
+/// Stores the base pointer for the first range table (for idempotent init).
+static mut RANGE_TABLE_BASE: *mut u64 = std::ptr::null_mut();
+
+/// Initialize a range-check table of the given size.
+/// Returns the multiplicity base pointer for this table (pointer to u64 array).
+/// Idempotent: if a range table of this size already exists, returns the existing base.
+/// Advances the multiplicities pointer by `size` u64s on first call only.
+#[no_mangle]
+pub unsafe extern "C" fn __init_range_table(vm_ptr: *mut u8, size: i32) -> *mut u64 {
+    // If already initialized, return the cached base pointer
+    if !RANGE_TABLE_BASE.is_null() {
+        return RANGE_TABLE_BASE;
+    }
+
+    let size = size as usize;
+
+    // Capture the current multiplicities pointer (this is the base for the new table)
+    let mult_ptr_ptr = (vm_ptr as *mut *mut u64).add(VM_MULTIPLICITIES);
+    let mult_base = *mult_ptr_ptr;
+
+    // Read and increment table count
+    let num_tables_ptr = (vm_ptr as *mut i32).add(VM_NUM_TABLES);
+    let table_id = *num_tables_ptr;
+    *num_tables_ptr = table_id + 1;
+    let _ = table_id;
+
+    // Advance multiplicities pointer past this table's region
+    // Each slot is one Field = 4 u64s = 32 bytes
+    *mult_ptr_ptr = mult_base.add(size * 4);
+
+    // Advance constraint section offset by size + 1
+    let cnst_off_ptr = (vm_ptr as *mut i32).add(VM_TABLES_CNST_OFF);
+    *cnst_off_ptr += (size + 1) as i32;
+
+    // Advance witness section offset by size
+    let wit_off_ptr = (vm_ptr as *mut i32).add(VM_TABLES_WIT_OFF);
+    *wit_off_ptr += size as i32;
+
+    // Cache for subsequent calls
+    RANGE_TABLE_BASE = mult_base;
+
+    mult_base
+}

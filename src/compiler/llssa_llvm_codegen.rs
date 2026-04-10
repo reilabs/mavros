@@ -24,11 +24,32 @@ use crate::compiler::llssa::{
 };
 use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
-/// Witgen VM struct layout (offsets in bytes):
+/// Witgen VM struct layout (offsets in bytes, wasm32):
+///   0:  witness_ptr
+///   4:  a_ptr
+///   8:  b_ptr
+///  12:  c_ptr
+///  16:  lookups_a_ptr
+///  20:  lookups_b_ptr
+///  24:  lookups_c_ptr
+///  28:  multiplicities_ptr
+///  32:  out_a_base_ptr
+///  36:  tables_cnst_section_off (i32)
+///  40:  tables_wit_section_off (i32)
+///  44:  num_tables (i32)
 const VM_WITNESS_PTR_OFFSET: u32 = 0;
 const VM_A_PTR_OFFSET: u32 = 4;
 const VM_B_PTR_OFFSET: u32 = 8;
 const VM_C_PTR_OFFSET: u32 = 12;
+const VM_LOOKUPS_A_PTR_OFFSET: u32 = 16;
+const VM_LOOKUPS_B_PTR_OFFSET: u32 = 20;
+const VM_LOOKUPS_C_PTR_OFFSET: u32 = 24;
+const VM_MULTIPLICITIES_PTR_OFFSET: u32 = 28;
+const VM_OUT_A_BASE_PTR_OFFSET: u32 = 32;
+const VM_TABLES_CNST_OFF_OFFSET: u32 = 36;
+const VM_TABLES_WIT_OFF_OFFSET: u32 = 40;
+const VM_NUM_TABLES_OFFSET: u32 = 44;
+const VM_STRUCT_SIZE: u32 = 48;
 
 /// AD VM struct layout (offsets in bytes, wasm32):
 const AD_VM_OUT_DA_OFFSET: u32 = 0;
@@ -56,6 +77,10 @@ pub struct LLVMCodeGen<'ctx> {
     write_a_fn: Option<FunctionValue<'ctx>>,
     write_b_fn: Option<FunctionValue<'ctx>>,
     write_c_fn: Option<FunctionValue<'ctx>>,
+    // Lookup runtime functions
+    write_lookup_fn: Option<FunctionValue<'ctx>>,
+    write_multiplicity_fn: Option<FunctionValue<'ctx>>,
+    init_range_table_fn: Option<FunctionValue<'ctx>>,
     // AD runtime functions
     ad_next_d_coeff_fn: Option<FunctionValue<'ctx>>,
     ad_fresh_witness_index_fn: Option<FunctionValue<'ctx>>,
@@ -91,6 +116,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             write_a_fn: None,
             write_b_fn: None,
             write_c_fn: None,
+            write_lookup_fn: None,
+            write_multiplicity_fn: None,
+            init_range_table_fn: None,
             ad_next_d_coeff_fn: None,
             ad_fresh_witness_index_fn: None,
             ad_accum_da_fn: None,
@@ -271,6 +299,43 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.field_to_limbs_fn = Some(self.module.add_function(
             "__field_to_limbs",
             field_to_limbs_type,
+            Some(Linkage::External),
+        ));
+
+        let i64_type = self.context.i64_type();
+
+        // __write_lookup(vm*, table_id: i64, value_u64: i64, flag: i64) -> void
+        let write_lookup_type = void_type.fn_type(
+            &[
+                ptr_type.into(),
+                i64_type.into(),
+                i64_type.into(),
+                i64_type.into(),
+            ],
+            false,
+        );
+        self.write_lookup_fn = Some(self.module.add_function(
+            "__write_lookup",
+            write_lookup_type,
+            Some(Linkage::External),
+        ));
+
+        // __write_multiplicity(base_ptr: ptr, index: i64, amount: i64) -> void
+        let write_multiplicity_type = void_type.fn_type(
+            &[ptr_type.into(), i64_type.into(), i64_type.into()],
+            false,
+        );
+        self.write_multiplicity_fn = Some(self.module.add_function(
+            "__write_multiplicity",
+            write_multiplicity_type,
+            Some(Linkage::External),
+        ));
+
+        // __init_range_table(vm*, size: i32) -> ptr  (returns multiplicity base pointer)
+        let init_range_table_type = ptr_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
+        self.init_range_table_fn = Some(self.module.add_function(
+            "__init_range_table",
+            init_range_table_type,
             Some(Linkage::External),
         ));
     }
@@ -515,10 +580,27 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::Add => self.builder.build_int_add(lhs, rhs, name).unwrap(),
                     IntArithOp::Sub => self.builder.build_int_sub(lhs, rhs, name).unwrap(),
                     IntArithOp::Mul => self.builder.build_int_mul(lhs, rhs, name).unwrap(),
+                    IntArithOp::UDiv => {
+                        self.builder
+                            .build_int_unsigned_div(lhs, rhs, name)
+                            .unwrap()
+                    }
+                    IntArithOp::URem => {
+                        self.builder
+                            .build_int_unsigned_rem(lhs, rhs, name)
+                            .unwrap()
+                    }
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
-                    _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
+                    IntArithOp::Shl => {
+                        self.builder.build_left_shift(lhs, rhs, name).unwrap()
+                    }
+                    IntArithOp::UShr => {
+                        self.builder
+                            .build_right_shift(lhs, rhs, false, name)
+                            .unwrap()
+                    }
                 };
                 self.value_map.insert(*result, val.into());
             }
@@ -652,6 +734,59 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let val = self.value_map[value];
                 let vm_ptr = self.vm_ptr.unwrap();
                 self.call_write_fn(self.write_witness_fn.unwrap(), vm_ptr, val);
+            }
+
+            LLOp::InitRangeTable { result, size } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let size_val = self.context.i32_type().const_int(*size as u64, false);
+                let call = self
+                    .builder
+                    .build_call(
+                        self.init_range_table_fn.unwrap(),
+                        &[vm_ptr.into(), size_val.into()],
+                        &format!("v{}", result.0),
+                    )
+                    .unwrap();
+                let ptr_val = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__init_range_table should return a value");
+                self.value_map.insert(*result, ptr_val);
+            }
+
+            LLOp::WriteLookup {
+                table_id,
+                value,
+                flag,
+            } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let tid = self.value_map[table_id];
+                let val = self.value_map[value];
+                let fl = self.value_map[flag];
+                self.builder
+                    .build_call(
+                        self.write_lookup_fn.unwrap(),
+                        &[vm_ptr.into(), tid.into(), val.into(), fl.into()],
+                        "",
+                    )
+                    .unwrap();
+            }
+
+            LLOp::WriteMultiplicity {
+                base,
+                index,
+                amount,
+            } => {
+                let base_val = self.value_map[base];
+                let idx = self.value_map[index];
+                let amt = self.value_map[amount];
+                self.builder
+                    .build_call(
+                        self.write_multiplicity_fn.unwrap(),
+                        &[base_val.into(), idx.into(), amt.into()],
+                        "",
+                    )
+                    .unwrap();
             }
 
             LLOp::Truncate {

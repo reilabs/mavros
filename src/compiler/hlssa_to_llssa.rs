@@ -18,8 +18,8 @@ use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
 use crate::compiler::ssa::{
-    BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
-    ValueId,
+    BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId, HLFunction, HLSSA,
+    Terminator, ValueId,
 };
 
 // =============================================================================
@@ -145,6 +145,81 @@ fn get_or_create_drop_fn(
 }
 
 // =============================================================================
+// ToRadix generated function tracking
+// =============================================================================
+
+/// Tracks a generated helper function for a specific ToRadix variant.
+/// Keyed by (count, endianness) — currently only Radix::Bytes is supported.
+struct ToRadixFnEntry {
+    count: usize,
+    endianness: Endianness,
+    fn_id: FunctionId,
+}
+
+/// Get or create a ToRadix helper function for the given byte count and endianness.
+fn get_or_create_to_radix_fn(
+    count: usize,
+    endianness: Endianness,
+    llssa: &mut LLSSA,
+    to_radix_fns: &mut Vec<ToRadixFnEntry>,
+) -> FunctionId {
+    for entry in to_radix_fns.iter() {
+        if entry.count == count && entry.endianness == endianness {
+            return entry.fn_id;
+        }
+    }
+
+    let name = match endianness {
+        Endianness::Big => format!("to_radix_bytes_be_{}", count),
+        Endianness::Little => format!("to_radix_bytes_le_{}", count),
+    };
+    let fn_id = llssa.add_function(name);
+    to_radix_fns.push(ToRadixFnEntry {
+        count,
+        endianness,
+        fn_id,
+    });
+    fn_id
+}
+
+// =============================================================================
+// Lookup generated function tracking
+// =============================================================================
+
+/// Tracks generated lookup helper functions.
+struct LookupFns {
+    /// lookup_rngchk_8(mult_base: Ptr, table_id: Int(64), val: FieldElem, flag: FieldElem) -> void
+    rngchk_8: Option<FunctionId>,
+}
+
+impl LookupFns {
+    fn new() -> Self {
+        Self { rngchk_8: None }
+    }
+
+    fn get_rngchk_8(&mut self, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.rngchk_8 {
+            return id;
+        }
+        let id = llssa.add_function("lookup_rngchk_8".to_string());
+        self.rngchk_8 = Some(id);
+        id
+    }
+}
+
+/// Per-function state for tracking once-initialized lookup tables.
+/// Maps Rangecheck size -> (mult_base: ValueId, table_id: ValueId).
+struct LookupTableState {
+    rngchk_8: Option<(ValueId, ValueId)>,
+}
+
+impl LookupTableState {
+    fn new() -> Self {
+        Self { rngchk_8: None }
+    }
+}
+
+// =============================================================================
 // AD generated function tracking
 // =============================================================================
 
@@ -214,6 +289,8 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
+    let mut to_radix_fns: Vec<ToRadixFnEntry> = Vec::new();
+    let mut lookup_fns = LookupFns::new();
 
     // First pass: create all functions (so we can map FunctionIds)
     fn_map.insert(main_id, llssa.get_main_id());
@@ -240,6 +317,8 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
             &mut llssa,
             &mut drop_fns,
             &mut ad_fns,
+            &mut to_radix_fns,
+            &mut lookup_fns,
         );
 
         let _old = llssa.take_function(ll_fn_id);
@@ -251,6 +330,12 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
 
     // Fourth pass: generate AD dispatch function bodies
     generate_all_ad_functions(&mut llssa, &ad_fns);
+
+    // Fifth pass: generate ToRadix helper function bodies
+    generate_all_to_radix_functions(&mut llssa, &to_radix_fns);
+
+    // Sixth pass: generate Lookup helper function bodies
+    generate_lookup_functions(&mut llssa, &lookup_fns);
 
     llssa
 }
@@ -267,10 +352,13 @@ fn lower_function(
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
+    to_radix_fns: &mut Vec<ToRadixFnEntry>,
+    lookup_fns: &mut LookupFns,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
     let mut block_map: HashMap<BlockId, BlockId> = HashMap::new();
+    let mut lookup_table_state = LookupTableState::new();
 
     let hl_entry_id = function.get_entry_id();
     let ll_entry_id = ll_func.get_entry_id();
@@ -319,6 +407,9 @@ fn lower_function(
                 llssa,
                 drop_fns,
                 ad_fns,
+                to_radix_fns,
+                lookup_fns,
+                &mut lookup_table_state,
             );
         }
 
@@ -346,6 +437,9 @@ fn lower_instruction(
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
+    to_radix_fns: &mut Vec<ToRadixFnEntry>,
+    lookup_fns: &mut LookupFns,
+    lookup_table_state: &mut LookupTableState,
 ) {
     use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
 
@@ -669,6 +763,68 @@ fn lower_instruction(
 
         OpCode::TupleProj { result, tuple, idx } => {
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
+        }
+
+        OpCode::ToRadix {
+            result,
+            value,
+            radix: crate::compiler::ssa::Radix::Bytes,
+            endianness,
+            count,
+        } => {
+            let ll_value = val_map[value];
+            let fn_id = get_or_create_to_radix_fn(*count, *endianness, llssa, to_radix_fns);
+            let results = e.call(fn_id, vec![ll_value], 1);
+            val_map.insert(*result, results[0]);
+        }
+
+        OpCode::ToRadix { radix, .. } => {
+            panic!(
+                "ToRadix with dynamic radix {:?} not yet implemented in HLSSA->LLSSA lowering",
+                radix
+            );
+        }
+
+        OpCode::Lookup {
+            target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+            keys,
+            results: _,
+            flag,
+        } => {
+            assert!(keys.len() == 1);
+            let ll_val = val_map[&keys[0]];
+            let ll_flag = val_map[flag];
+
+            // Initialize the range table on first encounter in this function
+            let (mult_base, table_id) = match lookup_table_state.rngchk_8 {
+                Some(state) => state,
+                None => {
+                    let mb = e.init_range_table(256);
+                    let tid = e.int_const(64, 0); // First table gets ID 0
+                    // TODO: track actual table ID counter if multiple table types exist
+                    lookup_table_state.rngchk_8 = Some((mb, tid));
+                    (mb, tid)
+                }
+            };
+
+            // Call the generated lookup helper
+            let fn_id = lookup_fns.get_rngchk_8(llssa);
+            e.call(fn_id, vec![mult_base, table_id, ll_val, ll_flag], 0);
+        }
+
+        OpCode::Lookup { target, .. } => {
+            panic!(
+                "Lookup with target {:?} not yet implemented in HLSSA->LLSSA lowering",
+                target
+            );
+        }
+
+        OpCode::DLookup { .. } => {
+            // DLookup is the AD (automatic differentiation) variant of Lookup.
+            // It needs to differentiate through the lookup constraints, which requires
+            // reading sensitivity coefficients and bumping AD matrices.
+            // This is not yet implemented — for now, skip it.
+            // TODO: Implement DLookup AD lowering with NextDCoeff/ADWriteConst/ADWriteWitness.
         }
 
         _ => panic!(
@@ -1589,4 +1745,162 @@ fn lower_terminator(
             e.terminate_return(ll_values);
         }
     }
+}
+
+// =============================================================================
+// ToRadix generated function bodies
+// =============================================================================
+
+/// Generate bodies for all ToRadix helper functions.
+fn generate_all_to_radix_functions(llssa: &mut LLSSA, to_radix_fns: &[ToRadixFnEntry]) {
+    for entry in to_radix_fns {
+        let func = generate_to_radix_bytes_function(entry.count, entry.endianness);
+        let _old = llssa.take_function(entry.fn_id);
+        llssa.put_function(entry.fn_id, func);
+    }
+}
+
+/// Generate a ToRadix(Bytes) helper function.
+///
+/// Pseudocode:
+///   fn to_radix_bytes(field_val: FieldElem) -> Ptr:
+///     limbs = field_to_limbs(field_val)   // {i64, i64, i64, i64}, limb[0] = least significant
+///     arr = heap_alloc(RcArray_u8_N)
+///     arr.rc = 1
+///     for i in 0..count:
+///       // byte_index: which byte in the 32-byte little-endian representation
+///       byte_index = (big-endian) ? (count - 1 - i) : i
+///       limb = limbs[byte_index / 8]
+///       shift = (byte_index % 8) * 8
+///       byte = (limb >> shift) & 0xFF
+///       arr.data[i] = byte as u8
+///     return arr
+fn generate_to_radix_bytes_function(count: usize, endianness: Endianness) -> LLFunction {
+    assert!(count <= 32, "ToRadix byte count must be <= 32");
+
+    let name = match endianness {
+        Endianness::Big => format!("to_radix_bytes_be_{}", count),
+        Endianness::Little => format!("to_radix_bytes_le_{}", count),
+    };
+
+    let elem_s = LLStruct::new(vec![LLFieldType::Int(8)]);
+    let rc_struct = LLStruct::rc_array(elem_s.clone(), count);
+
+    let mut func = LLFunction::empty(name);
+    func.add_return_type(LLType::Ptr);
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+
+        // Parameter: the field element
+        let field_val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        // Convert to raw limbs: { limb0 (LSB), limb1, limb2, limb3 (MSB) }
+        let limbs = e.field_to_limbs(field_val);
+        let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
+        let limb1 = e.extract_field(limbs, LLStruct::limbs(), 1);
+        let limb2 = e.extract_field(limbs, LLStruct::limbs(), 2);
+        let limb3 = e.extract_field(limbs, LLStruct::limbs(), 3);
+        let limb_vals = [limb0, limb1, limb2, limb3];
+
+        // Allocate the result array
+        let arr = e.heap_alloc(rc_struct.clone(), None);
+
+        // Init RC to 1
+        let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+        let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+        let one64 = e.int_const(64, 1);
+        e.ll_store(rc_word, one64);
+
+        // Get pointer to data area
+        let data = e.struct_field_ptr(arr, rc_struct, 2);
+        let mask = e.int_const(64, 0xFF);
+
+        // Extract bytes and store them
+        for i in 0..count {
+            // Which byte in the little-endian 32-byte representation?
+            let byte_index = match endianness {
+                Endianness::Big => count - 1 - i,
+                Endianness::Little => i,
+            };
+
+            let limb_idx = byte_index / 8;
+            let shift_amount = (byte_index % 8) * 8;
+
+            let limb = limb_vals[limb_idx];
+            let byte_val = if shift_amount > 0 {
+                let shift = e.int_const(64, shift_amount as u64);
+                let shifted = e.int_arith(IntArithOp::UShr, limb, shift);
+                e.int_arith(IntArithOp::And, shifted, mask)
+            } else {
+                e.int_arith(IntArithOp::And, limb, mask)
+            };
+
+            // Truncate i64 -> u8 and store
+            let byte_u8 = e.truncate(byte_val, 8);
+            let idx = e.int_const(64, i as u64);
+            let elem_ptr = e.array_elem_ptr(data, elem_s.clone(), idx);
+            e.ll_store(elem_ptr, byte_u8);
+        }
+
+        e.terminate_return(vec![arr]);
+    }
+
+    func
+}
+
+// =============================================================================
+// Lookup generated function bodies
+// =============================================================================
+
+/// Generate bodies for all Lookup helper functions.
+fn generate_lookup_functions(llssa: &mut LLSSA, lookup_fns: &LookupFns) {
+    if let Some(fn_id) = lookup_fns.rngchk_8 {
+        let func = generate_lookup_rngchk_8();
+        let _old = llssa.take_function(fn_id);
+        llssa.put_function(fn_id, func);
+    }
+}
+
+/// Generate lookup_rngchk_8 helper function.
+///
+/// Pseudocode:
+///   fn lookup_rngchk_8(mult_base: Ptr, table_id: Int(64), val: FieldElem, flag: FieldElem):
+///     val_limbs = field_to_limbs(val)
+///     val_u64 = extract_field(val_limbs, 0)
+///     flag_limbs = field_to_limbs(flag)
+///     flag_u64 = extract_field(flag_limbs, 0)
+///     write_multiplicity(mult_base, val_u64, flag_u64)
+///     write_lookup(table_id, val, flag_u64)
+fn generate_lookup_rngchk_8() -> LLFunction {
+    let mut func = LLFunction::empty("lookup_rngchk_8".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+
+        let mult_base = e.add_parameter(LLType::Ptr);
+        let table_id = e.add_parameter(LLType::i64());
+        let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+        let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        // Extract val as u64 (limb 0 = least significant 64 bits)
+        let val_limbs = e.field_to_limbs(val);
+        let val_u64 = e.extract_field(val_limbs, LLStruct::limbs(), 0);
+
+        // Extract flag as u64
+        let flag_limbs = e.field_to_limbs(flag);
+        let flag_u64 = e.extract_field(flag_limbs, LLStruct::limbs(), 0);
+
+        // Increment multiplicity counter at index val
+        e.write_multiplicity(mult_base, val_u64, flag_u64);
+
+        // Write lookup entry: (table_id, val_as_u64, flag_as_u64)
+        e.write_lookup(table_id, val_u64, flag_u64);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
 }

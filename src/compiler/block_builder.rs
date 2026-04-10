@@ -808,6 +808,30 @@ pub trait LLEmitter {
         self.emit_ll(LLOp::WriteWitness { value });
     }
 
+    // -- Lookup --
+
+    fn init_range_table(&mut self, size: u32) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::InitRangeTable { result: r, size });
+        r
+    }
+
+    fn write_lookup(&mut self, table_id: ValueId, value: ValueId, flag: ValueId) {
+        self.emit_ll(LLOp::WriteLookup {
+            table_id,
+            value,
+            flag,
+        });
+    }
+
+    fn write_multiplicity(&mut self, base: ValueId, index: ValueId, amount: ValueId) {
+        self.emit_ll(LLOp::WriteMultiplicity {
+            base,
+            index,
+            amount,
+        });
+    }
+
     // -- Trap --
 
     fn trap(&mut self) {

@@ -11,7 +11,8 @@ use cargo_metadata::MetadataCommand;
 use ark_ff::UniformRand as _;
 use mavros::{
     Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
-    vm::interpreter,
+    vm::bytecode::TableInfo,
+    vm::interpreter::{self, Phase1Result},
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -275,12 +276,15 @@ fn run_single(root: PathBuf) {
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
+        // Apply Phase 2 (logup post-processing) to WASM output
+        let phase2_result = apply_wasm_phase2(result, r1cs);
+
         let correct = r1cs.check_witgen_output(
-            &result.out_wit_pre_comm,
-            &result.out_wit_post_comm,
-            &result.out_a,
-            &result.out_b,
-            &result.out_c,
+            &phase2_result.out_wit_pre_comm,
+            &phase2_result.out_wit_post_comm,
+            &phase2_result.out_a,
+            &phase2_result.out_b,
+            &phase2_result.out_c,
         );
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
@@ -436,7 +440,7 @@ fn run_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    let vm_struct_size: u32 = 16; // 4 x u32 pointers
+    let vm_struct_size: u32 = 48; // 12 x u32 fields (see VM struct layout in llssa_llvm_codegen.rs)
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
@@ -488,13 +492,36 @@ fn run_wasm(
     }
 
     // Initialize VM struct with buffer pointers
+    // Layout: [witness_ptr, a_ptr, b_ptr, c_ptr, lookups_a_ptr, lookups_b_ptr,
+    //          lookups_c_ptr, multiplicities_ptr, out_a_base_ptr,
+    //          tables_cnst_section_off, tables_wit_section_off, num_tables]
     {
+        let lookups_data_start = r1cs.constraints_layout.lookups_data_start();
+        let lookups_a_ptr = a_ptr + (lookups_data_start * FIELD_SIZE) as u32;
+        let lookups_b_ptr = b_ptr + (lookups_data_start * FIELD_SIZE) as u32;
+        let lookups_c_ptr = c_ptr + (lookups_data_start * FIELD_SIZE) as u32;
+        let multiplicities_ptr =
+            witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
+        let out_a_base_ptr = a_ptr;
+        let tables_cnst_off =
+            r1cs.constraints_layout.tables_data_start() as u32;
+        let tables_wit_off = (r1cs.witness_layout.tables_data_start()
+            - r1cs.witness_layout.challenges_start()) as u32;
+
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
         data[off..off + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + 4..off + 8].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + 8..off + 12].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + 12..off + 16].copy_from_slice(&c_ptr.to_le_bytes());
+        data[off + 16..off + 20].copy_from_slice(&lookups_a_ptr.to_le_bytes());
+        data[off + 20..off + 24].copy_from_slice(&lookups_b_ptr.to_le_bytes());
+        data[off + 24..off + 28].copy_from_slice(&lookups_c_ptr.to_le_bytes());
+        data[off + 28..off + 32].copy_from_slice(&multiplicities_ptr.to_le_bytes());
+        data[off + 32..off + 36].copy_from_slice(&out_a_base_ptr.to_le_bytes());
+        data[off + 36..off + 40].copy_from_slice(&tables_cnst_off.to_le_bytes());
+        data[off + 40..off + 44].copy_from_slice(&tables_wit_off.to_le_bytes());
+        data[off + 44..off + 48].copy_from_slice(&0u32.to_le_bytes()); // num_tables = 0
     }
 
     let func = instance
@@ -571,6 +598,85 @@ fn run_wasm(
         out_c,
         live_bytes,
     })
+}
+
+// ── WASM Phase 2 (logup post-processing) ────────────────────────────
+
+/// Apply Phase 2 post-processing to WASM witgen output.
+/// Phase 1 (WASM execution) produces raw lookup entries and multiplicities.
+/// Phase 2 computes challenge-dependent inverses and fills table constraint sections.
+fn apply_wasm_phase2(
+    wasm_result: &WasmResult,
+    r1cs: &R1CS,
+) -> interpreter::WitgenResult {
+    use ark_ff::{BigInt, PrimeField as _};
+    use mavros::vm::bytecode::AllocationInstrumenter;
+    use std::str::FromStr;
+
+    let wl = r1cs.witness_layout;
+    let cl = r1cs.constraints_layout;
+
+    // Fix multiplicities: convert u64-stored-as-Field to proper Field elements
+    let mut out_wit_pre_comm = wasm_result.out_wit_pre_comm.clone();
+    for i in wl.multiplicities_start()..wl.multiplicities_end() {
+        out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
+    }
+
+    // Reconstruct TableInfo from the R1CS layout.
+    // We need to figure out which tables exist. The WASM code called InitRangeTable
+    // which advanced the offsets. We can reconstruct from the layout sizes.
+    //
+    // For rangecheck(8): one table with length=256, width-1 (num_values=0).
+    let mut tables = Vec::new();
+    let mut mult_offset = wl.multiplicities_start();
+    let mut cnst_section_off = cl.tables_data_start();
+    let mut wit_section_off = wl.tables_data_start() - wl.challenges_start();
+
+    // Detect rangecheck tables from the tables_data_size.
+    // Each rangecheck(8) table uses 257 constraint slots (256 + 1 sum) and 256 witness slots.
+    let mut remaining_cnst = cl.tables_data_size;
+    while remaining_cnst > 0 {
+        // Assume width-1 (rangecheck) tables: length + 1 constraint slots, length witness slots
+        // For rangecheck(8): length = 256
+        let length = 256usize; // TODO: support other table sizes
+        let cnst_slots = length + 1;
+
+        tables.push(TableInfo {
+            multiplicities_wit: out_wit_pre_comm[mult_offset..].as_ptr() as *mut Field,
+            num_indices: 1,
+            num_values: 0,
+            length,
+            elem_inverses_constraint_section_offset: cnst_section_off,
+            elem_inverses_witness_section_offset: wit_section_off,
+        });
+
+        mult_offset += length;
+        cnst_section_off += cnst_slots;
+        wit_section_off += length;
+        remaining_cnst = remaining_cnst.saturating_sub(cnst_slots);
+    }
+
+    let phase1 = Phase1Result {
+        out_wit_pre_comm,
+        out_wit_post_comm: wasm_result.out_wit_post_comm.clone(),
+        out_a: wasm_result.out_a.clone(),
+        out_b: wasm_result.out_b.clone(),
+        out_c: wasm_result.out_c.clone(),
+        tables,
+        instrumenter: AllocationInstrumenter::new(),
+    };
+
+    // Generate same fake challenges as the VM path
+    let mut fake_challenges = vec![Field::from(0u64); wl.challenges_size];
+    let mut random =
+        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
+            .unwrap();
+    for challenge in fake_challenges.iter_mut() {
+        *challenge = random;
+        random = (random + Field::from(17)) * random;
+    }
+
+    interpreter::run_phase2(phase1, &fake_challenges, wl, cl)
 }
 
 // ── AD WASM Runner ───────────────────────────────────────────────────
