@@ -279,12 +279,9 @@ impl WitnessLowering {
                         OpCode::Store { ptr, value } => {
                             let ptr_type = type_info.get_value_type(ptr);
                             let new_ptr_type = self.witness_lowering_in_type(&ptr_type);
-                            let converted = self.convert_if_needed(
-                                value,
-                                &new_ptr_type,
-                                type_info,
-                                &mut emitter,
-                            );
+                            let elem_type = new_ptr_type.get_pointed();
+                            let converted =
+                                self.convert_if_needed(value, &elem_type, type_info, &mut emitter);
                             emitter.emit(OpCode::Store {
                                 ptr,
                                 value: converted,
@@ -486,6 +483,10 @@ impl WitnessLowering {
             }
             (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => {
                 // Both source and target are WitnessOf — same runtime representation.
+                value
+            }
+            (TypeExpr::Ref(_), TypeExpr::Ref(_)) => {
+                // Ref types pass through — same runtime representation (pointer).
                 value
             }
             _ => panic!(

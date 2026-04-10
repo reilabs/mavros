@@ -596,6 +596,40 @@ mod def {
     }
 
     #[opcode]
+    fn ref_alloc(#[out] res: *mut BoxedValue, meta: BoxedLayout, vm: &mut VM) {
+        let cell = BoxedValue::alloc(meta, vm);
+        unsafe {
+            ptr::write_bytes(cell.data(), 0, meta.ref_cell_elem_size());
+            *res = cell;
+        }
+    }
+
+    #[opcode]
+    fn ref_store(
+        #[frame] cell: BoxedValue,
+        source: FramePosition,
+        stride: usize,
+        elem_rc: usize,
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        if elem_rc != 0 {
+            let old = unsafe { *(cell.data() as *mut BoxedValue) };
+            if !old.0.is_null() {
+                old.dec_rc(vm);
+            }
+        }
+        frame.write_to(cell.data(), source.0 as isize, stride);
+    }
+
+    #[opcode]
+    fn ref_load(#[out] res: *mut u64, #[frame] cell: BoxedValue, stride: usize) {
+        unsafe {
+            ptr::copy_nonoverlapping(cell.data(), res, stride);
+        }
+    }
+
+    #[opcode]
     fn array_get(
         #[out] res: *mut u64,
         #[frame] array: BoxedValue,

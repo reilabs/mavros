@@ -145,7 +145,7 @@ fn run_single(root: PathBuf) {
     let witgen_result = witgen_binary.and_then(|mut binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref()?;
+        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
         let result = interpreter::run(
             &mut binary,
             r1cs.witness_layout,
@@ -258,7 +258,7 @@ fn run_single(root: PathBuf) {
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref()?;
+        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
         match run_wasm(wasm_path, r1cs, params) {
             Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
