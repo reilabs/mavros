@@ -671,6 +671,25 @@ fn lower_instruction(
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
+        OpCode::AssertEq { lhs, rhs } => {
+            let ll_lhs = val_map[lhs];
+            let ll_rhs = val_map[rhs];
+            let lhs_type = fn_type_info.get_value_type(*lhs);
+
+            let eq = match &lhs_type.expr {
+                TypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
+                TypeExpr::U(_) | TypeExpr::I(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
+                _ => panic!("Unsupported type for AssertEq in HLSSA->LLSSA lowering: {:?}", lhs_type),
+            };
+
+            e.build_if_else(
+                eq,
+                vec![],
+                |_| vec![],
+                |te| { te.trap(); vec![] },
+            );
+        }
+
         _ => panic!(
             "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
