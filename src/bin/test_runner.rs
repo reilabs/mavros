@@ -265,7 +265,8 @@ fn run_single(root: PathBuf) {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("WASM run error: {}", e);
                 emit("END:WITGEN_WASM_RUN:fail");
                 None
             }
@@ -432,6 +433,14 @@ fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<Field> {
     result
 }
 
+fn flatten_all_inputs(params: &[interpreter::InputValueOrdered]) -> Vec<Field> {
+    let mut result = Vec::new();
+    for param in params {
+        result.extend(flatten_input_value(param));
+    }
+    result
+}
+
 fn run_wasm(
     wasm_path: &Path,
     r1cs: &R1CS,
@@ -443,7 +452,9 @@ fn run_wasm(
     let vm_struct_size: u32 = 48; // 12 x u32 fields (see VM struct layout in llssa_llvm_codegen.rs)
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
-    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
+    let flat_inputs = flatten_all_inputs(params);
+    let inputs_bytes = (flat_inputs.len() * FIELD_SIZE) as u32;
+    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes + inputs_bytes;
 
     // Create wasmtime engine and store
     let engine = Engine::default();
@@ -453,8 +464,8 @@ fn run_wasm(
     let wasm_bytes = fs::read(wasm_path)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
-    // Estimate initial memory: stack (64KB) + module data + our buffers + heap headroom
-    let initial_estimate = 65536 + 4096 + our_data_size;
+    // Estimate initial memory: stack (1MB, matches wasm-ld) + module data + our buffers + heap headroom
+    let initial_estimate = 1048576 + 4096 + our_data_size;
     let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
     let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
     let memory = Memory::new(&mut store, memory_type)?;
@@ -482,7 +493,8 @@ fn run_wasm(
     let a_ptr = witness_ptr + witness_bytes;
     let b_ptr = a_ptr + constraint_bytes;
     let c_ptr = b_ptr + constraint_bytes;
-    let total_bytes = c_ptr + constraint_bytes;
+    let inputs_ptr = c_ptr + constraint_bytes;
+    let total_bytes = inputs_ptr + inputs_bytes;
 
     // Grow memory if needed
     let needed_pages = ((total_bytes as usize + 65535) / 65536) as u32;
@@ -528,21 +540,24 @@ fn run_wasm(
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
 
-    // Prepare arguments: vmPtr followed by all input field element limbs
-    let mut args: Vec<wasmtime::Val> = Vec::new();
-    args.push(wasmtime::Val::I32(vm_struct_ptr as i32)); // vmPtr
-
-    for param in params {
-        for field in flatten_input_value(param) {
+    // Write inputs to memory buffer (passed via pointer, not function args)
+    {
+        let data = memory.data_mut(&mut store);
+        for (i, field) in flat_inputs.iter().enumerate() {
+            let offset = inputs_ptr as usize + i * FIELD_SIZE;
             let limbs = field.0.0;
-            args.push(wasmtime::Val::I64(limbs[0] as i64));
-            args.push(wasmtime::Val::I64(limbs[1] as i64));
-            args.push(wasmtime::Val::I64(limbs[2] as i64));
-            args.push(wasmtime::Val::I64(limbs[3] as i64));
+            data[offset..offset + 8].copy_from_slice(&limbs[0].to_le_bytes());
+            data[offset + 8..offset + 16].copy_from_slice(&limbs[1].to_le_bytes());
+            data[offset + 16..offset + 24].copy_from_slice(&limbs[2].to_le_bytes());
+            data[offset + 24..offset + 32].copy_from_slice(&limbs[3].to_le_bytes());
         }
     }
 
-    // Call the function
+    // Call with (vm_ptr, inputs_ptr)
+    let args = vec![
+        wasmtime::Val::I32(vm_struct_ptr as i32),
+        wasmtime::Val::I32(inputs_ptr as i32),
+    ];
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 
@@ -732,7 +747,7 @@ fn run_ad_wasm(
     let wasm_bytes = fs::read(wasm_path)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
-    let initial_estimate = 65536 + 4096 + our_data_size;
+    let initial_estimate = 1048576 + 4096 + our_data_size;
     let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
     let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
     let memory = Memory::new(&mut store, memory_type)?;
@@ -801,8 +816,11 @@ fn run_ad_wasm(
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
 
-    // AD main takes only vm_ptr (no input parameters)
-    let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
+    // AD main takes (vm_ptr, inputs_ptr) — pass 0 for inputs_ptr (no inputs)
+    let args = vec![
+        wasmtime::Val::I32(vm_struct_ptr as i32),
+        wasmtime::Val::I32(0),
+    ];
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 

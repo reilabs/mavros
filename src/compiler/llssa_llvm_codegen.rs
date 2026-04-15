@@ -415,7 +415,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // Second pass: generate function bodies
         for (fn_id, function) in llssa.iter_functions() {
             let cfg = flow_analysis.get_function_cfg(*fn_id);
-            self.compile_function(*fn_id, function, cfg);
+            self.compile_function(*fn_id, function, cfg, main_id);
         }
     }
 
@@ -426,8 +426,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // First parameter is always VM*
         let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
 
-        for (_, tp) in entry.get_parameters() {
-            param_types.push(self.convert_type(tp).into());
+        if fn_id == main_id {
+            // Main function receives inputs via a pointer to memory (to avoid
+            // exceeding wasm function parameter limits for large structs).
+            // Signature: mavros_main(vm_ptr: ptr, inputs_ptr: ptr) -> void
+            param_types.push(ptr_type.into());
+        } else {
+            for (_, tp) in entry.get_parameters() {
+                param_types.push(self.convert_type(tp).into());
+            }
         }
 
         let return_types: Vec<BasicTypeEnum> = function
@@ -452,6 +459,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         };
 
         let fn_value = self.module.add_function(name, fn_type, None);
+
+        // Mark high-call-count helper functions as noinline to prevent LLVM from
+        // inlining them thousands of times (which causes compilation to hang).
+        let func_name = function.get_name();
+        if func_name.starts_with("to_radix_bytes") || func_name.starts_with("lookup_rngchk") {
+            let noinline = self
+                .context
+                .create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"), 0);
+            fn_value.add_attribute(inkwell::attributes::AttributeLoc::Function, noinline);
+        }
+
         self.function_map.insert(fn_id, fn_value);
     }
 
@@ -460,6 +478,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         fn_id: FunctionId,
         function: &LLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
+        main_id: FunctionId,
     ) {
         self.value_map.clear();
         self.block_map.clear();
@@ -488,9 +507,35 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
         let entry = function.get_entry();
-        for (i, (param_id, _)) in entry.get_parameters().enumerate() {
-            let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
-            self.value_map.insert(*param_id, param_value);
+
+        if fn_id == main_id {
+            // Main function: load parameters from inputs_ptr (second arg)
+            let inputs_ptr = fn_value.get_nth_param(1).unwrap().into_pointer_value();
+            let i32_type = self.context.i32_type();
+
+            for (i, (param_id, param_type)) in entry.get_parameters().enumerate() {
+                let llvm_type = self.convert_type(param_type);
+                let elem_ptr = unsafe {
+                    self.builder
+                        .build_gep(
+                            llvm_type,
+                            inputs_ptr,
+                            &[i32_type.const_int(i as u64, false)],
+                            &format!("inp_{}", i),
+                        )
+                        .unwrap()
+                };
+                let param_value = self
+                    .builder
+                    .build_load(llvm_type, elem_ptr, &format!("v{}", param_id.0))
+                    .unwrap();
+                self.value_map.insert(*param_id, param_value);
+            }
+        } else {
+            for (i, (param_id, _)) in entry.get_parameters().enumerate() {
+                let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
+                self.value_map.insert(*param_id, param_value);
+            }
         }
 
         // Track phi nodes
@@ -1231,7 +1276,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "--allow-undefined",
                 "--stack-first",
                 "-z",
-                "stack-size=65536",
+                "stack-size=1048576",
                 "--export=__data_end",
                 "--export=__live_bytes",
                 "-o",

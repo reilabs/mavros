@@ -359,6 +359,9 @@ fn lower_function(
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
     let mut block_map: HashMap<BlockId, BlockId> = HashMap::new();
     let mut lookup_table_state = LookupTableState::new();
+    // Track HLSSA values that were cast from int to Field, so lookup can skip the round-trip.
+    // Maps HLSSA result ValueId → LLSSA pre-cast integer ValueId.
+    let mut int_before_cast: HashMap<ValueId, ValueId> = HashMap::new();
 
     let hl_entry_id = function.get_entry_id();
     let ll_entry_id = ll_func.get_entry_id();
@@ -410,6 +413,7 @@ fn lower_function(
                 to_radix_fns,
                 lookup_fns,
                 &mut lookup_table_state,
+                &mut int_before_cast,
             );
         }
 
@@ -440,6 +444,7 @@ fn lower_instruction(
     to_radix_fns: &mut Vec<ToRadixFnEntry>,
     lookup_fns: &mut LookupFns,
     lookup_table_state: &mut LookupTableState,
+    int_before_cast: &mut HashMap<ValueId, ValueId>,
 ) {
     use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
 
@@ -733,6 +738,8 @@ fn lower_instruction(
                         let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
                         let field_val = e.field_from_limbs(limbs);
                         val_map.insert(*result, field_val);
+                        // Track pre-cast integer so Lookup can skip Field round-trip
+                        int_before_cast.insert(*result, ll_value);
                     }
                 }
                 CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
@@ -800,16 +807,32 @@ fn lower_instruction(
                 Some(state) => state,
                 None => {
                     let mb = e.init_range_table(256);
-                    let tid = e.int_const(64, 0); // First table gets ID 0
-                    // TODO: track actual table ID counter if multiple table types exist
+                    let tid = e.int_const(64, 0);
                     lookup_table_state.rngchk_8 = Some((mb, tid));
                     (mb, tid)
                 }
             };
 
-            // Call the generated lookup helper
+            // Extract u64 values from Field elements.
+            // If the value was just cast from an integer, reuse the pre-cast value
+            // to avoid FieldFromLimbs → FieldToLimbs round-trip.
+            let val_u64 = match int_before_cast.get(&keys[0]) {
+                Some(&pre_cast_val) => e.zext(pre_cast_val, 64),
+                None => {
+                    let limbs = e.field_to_limbs(ll_val);
+                    e.extract_field(limbs, LLStruct::limbs(), 0)
+                }
+            };
+            let flag_u64 = match int_before_cast.get(flag) {
+                Some(&pre_cast_val) => e.zext(pre_cast_val, 64),
+                None => {
+                    let limbs = e.field_to_limbs(ll_flag);
+                    e.extract_field(limbs, LLStruct::limbs(), 0)
+                }
+            };
+
             let fn_id = lookup_fns.get_rngchk_8(llssa);
-            e.call(fn_id, vec![mult_base, table_id, ll_val, ll_flag], 0);
+            e.call(fn_id, vec![mult_base, table_id, val_u64, flag_u64], 0);
         }
 
         OpCode::Lookup { target, .. } => {
@@ -819,12 +842,19 @@ fn lower_instruction(
             );
         }
 
-        OpCode::DLookup { .. } => {
-            // DLookup is the AD (automatic differentiation) variant of Lookup.
-            // It needs to differentiate through the lookup constraints, which requires
-            // reading sensitivity coefficients and bumping AD matrices.
-            // This is not yet implemented — for now, skip it.
-            // TODO: Implement DLookup AD lowering with NextDCoeff/ADWriteConst/ADWriteWitness.
+        OpCode::DLookup {
+            target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+            ..
+        } => {
+            // DLookup AD lowering not yet implemented — skip.
+            // TODO: Implement with NextDCoeff/ADWriteConst/ADWriteWitness.
+        }
+
+        OpCode::DLookup { target, .. } => {
+            panic!(
+                "DLookup with target {:?} not yet implemented in HLSSA->LLSSA lowering",
+                target
+            );
         }
 
         _ => panic!(
@@ -1880,18 +1910,11 @@ fn generate_lookup_rngchk_8() -> LLFunction {
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
 
+        // Takes pre-extracted u64 values to avoid FieldToLimbs/FieldFromLimbs round-trips
         let mult_base = e.add_parameter(LLType::Ptr);
         let table_id = e.add_parameter(LLType::i64());
-        let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
-        let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
-
-        // Extract val as u64 (limb 0 = least significant 64 bits)
-        let val_limbs = e.field_to_limbs(val);
-        let val_u64 = e.extract_field(val_limbs, LLStruct::limbs(), 0);
-
-        // Extract flag as u64
-        let flag_limbs = e.field_to_limbs(flag);
-        let flag_u64 = e.extract_field(flag_limbs, LLStruct::limbs(), 0);
+        let val_u64 = e.add_parameter(LLType::i64());
+        let flag_u64 = e.add_parameter(LLType::i64());
 
         // Increment multiplicity counter at index val
         e.write_multiplicity(mult_base, val_u64, flag_u64);
