@@ -107,15 +107,15 @@ pub enum Value {
 
 impl Value {
     fn bit_mask(bits: usize) -> u128 {
-        match bits {
-            0 => 0,
-            128.. => u128::MAX,
-            _ => (1u128 << bits) - 1,
+        assert!(
+            (1..=128).contains(&bits),
+            "invalid integer width for bit mask: {bits}"
+        );
+        if bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
         }
-    }
-
-    fn fits_in_bits(v: u128, bits: usize) -> bool {
-        bits >= 128 || (v & !Self::bit_mask(bits)) == 0
     }
 
     fn spread_bits(v: u128, bits: usize) -> u128 {
@@ -577,24 +577,12 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got u{}",
                     bits
                 );
-                assert!(
-                    Self::fits_in_bits(*v, *bits),
-                    "Value {} does not fit in declared u{} width",
-                    v,
-                    bits
-                );
                 Value::U(bits * 2, Self::spread_bits(*v, *bits))
             }
             Value::I(bits, v) => {
                 assert!(
                     *bits <= 64,
                     "Spread only supports integer widths up to 64 bits, got i{}",
-                    bits
-                );
-                assert!(
-                    Self::fits_in_bits(*v, *bits),
-                    "Value {} does not fit in declared i{} width",
-                    v,
                     bits
                 );
                 Value::I(bits * 2, Self::spread_bits(*v, *bits))
@@ -635,12 +623,6 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got u{}",
                     bits
                 );
-                assert!(
-                    Self::fits_in_bits(*v, *bits),
-                    "Value {} does not fit in declared u{} width",
-                    v,
-                    bits
-                );
                 let (odd_val, even_val) = Self::unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
@@ -649,12 +631,6 @@ impl Value {
                 assert!(
                     *bits <= 128 && bits % 2 == 0,
                     "Unspread expects an even integer width up to 128 bits, got i{}",
-                    bits
-                );
-                assert!(
-                    Self::fits_in_bits(*v, *bits),
-                    "Value {} does not fit in declared i{} width",
-                    v,
                     bits
                 );
                 let (odd_val, even_val) = Self::unspread_bits(*v, *bits);

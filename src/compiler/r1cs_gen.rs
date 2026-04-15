@@ -48,10 +48,14 @@ pub enum Value {
 
 impl Value {
     fn bit_mask(bits: usize) -> u128 {
-        match bits {
-            0 => 0,
-            128.. => u128::MAX,
-            _ => (1u128 << bits) - 1,
+        assert!(
+            (1..=128).contains(&bits),
+            "invalid integer width for bit mask: {bits}"
+        );
+        if bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
         }
     }
 
