@@ -1785,8 +1785,7 @@ impl ExplicitWitness {
         let input_spread_sum = b.add(a_spread_word, b_spread_word);
         let two_and_spread_word = b.mul(two, and_spread_word);
         let bitwise_spread_sum = b.add(two_and_spread_word, xor_spread_word);
-        let diff = b.sub(bitwise_spread_sum, input_spread_sum);
-        b.constrain(one, diff, zero);
+        b.constrain(one, bitwise_spread_sum, input_spread_sum);
 
         let result_word = match kind {
             BinaryArithOpKind::And => and_word,
