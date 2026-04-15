@@ -295,18 +295,52 @@ impl CodeGen {
             );
         }
 
+        // Potential optimization: build a chronological graph to only copy one value max to scratch
+        // Reserve a scratch region
+        let max_scratch = function
+            .get_blocks()
+            .map(|(_, block)| {
+                block
+                    .get_parameters()
+                    .map(|(_, tp)| layouter.type_size(tp))
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        let scratch_base = layouter.next_free;
+        layouter.next_free += max_scratch;
+
         for (block_id, block) in function.get_blocks() {
             let mut block_exit_start: usize = emitter.block_exits[&block_id];
             match block.get_terminator().unwrap() {
                 Terminator::Jmp(tgt, args) => {
-                    let params = function.get_block(*tgt).get_parameters();
-                    for (arg, (param, tp)) in args.iter().zip(params) {
+                    // Copy each source into a scratch
+                    let mut offset = 0usize;
+                    for (arg, (_param, tp)) in
+                        args.iter().zip(function.get_block(*tgt).get_parameters())
+                    {
+                        let size = layouter.type_size(tp);
                         emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
-                            size: layouter.type_size(tp),
-                            target: layouter.get_value(*param),
+                            size,
+                            target: bytecode::FramePosition(scratch_base + offset),
                             source: layouter.get_value(*arg),
                         };
                         block_exit_start += 1;
+                        offset += size;
+                    }
+                    // Copy each scratch into a block parameter.
+                    let mut offset = 0usize;
+                    for (_arg, (param, tp)) in
+                        args.iter().zip(function.get_block(*tgt).get_parameters())
+                    {
+                        let size = layouter.type_size(tp);
+                        emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                            size,
+                            target: layouter.get_value(*param),
+                            source: bytecode::FramePosition(scratch_base + offset),
+                        };
+                        block_exit_start += 1;
+                        offset += size;
                     }
                     emitter.code[block_exit_start] = bytecode::OpCode::Jmp {
                         target: bytecode::JumpTarget(
@@ -1140,7 +1174,9 @@ impl CodeGen {
         match block.get_terminator().unwrap() {
             Terminator::Jmp(_, params) => {
                 emitter.push_op(bytecode::OpCode::Nop {});
-                for _ in 0..params.len() {
+                // Potential optimization: build a chronological graph to only copy 1 value at most to a scratch
+                // Two MovFrame slots per parameter (read-to-scratch, write-from-scratch).
+                for _ in 0..(2 * params.len()) {
                     emitter.push_op(bytecode::OpCode::Nop {});
                 }
             }
