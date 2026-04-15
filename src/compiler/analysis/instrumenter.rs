@@ -12,8 +12,8 @@ use crate::compiler::{
     },
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA, MemOp, Radix,
-        SeqType, SliceOpDir,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
+        MemOp, Radix, SeqType, SliceOpDir,
     },
 };
 
@@ -116,24 +116,6 @@ impl Value {
         } else {
             (1u128 << bits) - 1
         }
-    }
-
-    fn spread_bits(v: u128, bits: usize) -> u128 {
-        let mut spread = 0u128;
-        for i in 0..bits {
-            spread |= ((v >> i) & 1) << (2 * i);
-        }
-        spread
-    }
-
-    fn unspread_bits(v: u128, bits: usize) -> (u128, u128) {
-        let mut odd = 0u128;
-        let mut even = 0u128;
-        for i in 0..(bits / 2) {
-            even |= ((v >> (2 * i)) & 1) << i;
-            odd |= ((v >> (2 * i + 1)) & 1) << i;
-        }
-        (odd, even)
     }
 
     fn unwrap_witness(&self) -> &Value {
@@ -577,7 +559,7 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got u{}",
                     bits
                 );
-                Value::U(bits * 2, Self::spread_bits(*v, *bits))
+                Value::U(bits * 2, ssa_mod::spread_bits(*v, *bits))
             }
             Value::I(bits, v) => {
                 assert!(
@@ -585,7 +567,7 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got i{}",
                     bits
                 );
-                Value::I(bits * 2, Self::spread_bits(*v, *bits))
+                Value::I(bits * 2, ssa_mod::spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
             Value::WitnessOf(inner) => {
@@ -623,7 +605,7 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got u{}",
                     bits
                 );
-                let (odd_val, even_val) = Self::unspread_bits(*v, *bits);
+                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
             }
@@ -633,7 +615,7 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got i{}",
                     bits
                 );
-                let (odd_val, even_val) = Self::unspread_bits(*v, *bits);
+                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::I(half_bits, odd_val), Value::I(half_bits, even_val))
             }

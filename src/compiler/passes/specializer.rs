@@ -14,8 +14,8 @@ use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLFunction, HLSSA, MemOp, OpCode,
-        Radix, SeqType, ValueId,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLFunction, HLSSA,
+        MemOp, OpCode, Radix, SeqType, ValueId,
     },
 };
 
@@ -555,14 +555,21 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     fn spread(&self, ctx: &mut SpecializationState) -> Self {
         let cst_val = ctx.const_vals.get(&self.0);
         match cst_val {
-            Some(ConstVal::U(_, v)) => {
-                let spread_val = crate::compiler::ssa::spread_u64(*v as u32);
-                let res = ctx.field_const(crate::compiler::Field::from(spread_val));
-                ctx.const_vals.insert(
-                    res,
-                    ConstVal::Field(crate::compiler::Field::from(spread_val)),
+            Some(ConstVal::U(bits, v)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    bits
                 );
-                Self(res)
+                Self::of_u(bits * 2, ssa_mod::spread_bits(*v, *bits), ctx)
+            }
+            Some(ConstVal::I(bits, v)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got i{}",
+                    bits
+                );
+                Self::of_i(bits * 2, ssa_mod::spread_bits(*v, *bits), ctx)
             }
             _ => {
                 let res = HLEmitter::spread(ctx, self.0);
@@ -574,21 +581,31 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     fn unspread(&self, ctx: &mut SpecializationState) -> (Self, Self) {
         let cst_val = ctx.const_vals.get(&self.0);
         match cst_val {
-            Some(ConstVal::Field(f)) => {
-                let v: u64 = (*f).into_bigint().0[0];
-                let (and_v, xor_v) = crate::compiler::ssa::unspread_u64(v);
-                let (and_v, xor_v) = (and_v as u64, xor_v as u64);
-                let res_and = ctx.field_const(crate::compiler::Field::from(and_v));
-                let res_xor = ctx.field_const(crate::compiler::Field::from(xor_v));
-                ctx.const_vals.insert(
-                    res_and,
-                    ConstVal::Field(crate::compiler::Field::from(and_v)),
+            Some(ConstVal::U(bits, v)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    bits
                 );
-                ctx.const_vals.insert(
-                    res_xor,
-                    ConstVal::Field(crate::compiler::Field::from(xor_v)),
+                let half_bits = bits / 2;
+                let (odd, even) = ssa_mod::unspread_bits(*v, *bits);
+                (
+                    Self::of_u(half_bits, odd, ctx),
+                    Self::of_u(half_bits, even, ctx),
+                )
+            }
+            Some(ConstVal::I(bits, v)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    bits
                 );
-                (Self(res_and), Self(res_xor))
+                let half_bits = bits / 2;
+                let (odd, even) = ssa_mod::unspread_bits(*v, *bits);
+                (
+                    Self::of_i(half_bits, odd, ctx),
+                    Self::of_i(half_bits, even, ctx),
+                )
             }
             _ => {
                 let (res_and, res_xor) = HLEmitter::unspread(ctx, self.0);
