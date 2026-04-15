@@ -67,6 +67,8 @@ pub struct LLVMCodeGen<'ctx> {
     ad_accum_at_dc_fn: Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
+    // Globals
+    globals: Vec<inkwell::values::GlobalValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -101,6 +103,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ad_accum_at_dc_fn: None,
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
+            globals: Vec::new(),
         };
 
         codegen.declare_runtime_functions();
@@ -341,6 +344,18 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Compile LLSSA to LLVM IR.
     pub fn compile(&mut self, llssa: &LLSSA, flow_analysis: &FlowAnalysis) {
         let main_id = llssa.get_main_id();
+
+        // Declare globals
+        for (i, ty) in llssa.get_global_types().iter().enumerate() {
+            let llvm_ty = self.convert_type(ty);
+            let global = self.module.add_global(
+                llvm_ty,
+                Some(AddressSpace::default()),
+                &format!("__mavros_global_{}", i),
+            );
+            global.set_initializer(&llvm_ty.const_zero());
+            self.globals.push(global);
+        }
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -980,6 +995,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.builder
                     .build_call(accum_fn, &[vm_ptr.into(), idx.into(), s.into()], "")
                     .unwrap();
+            }
+
+            LLOp::GlobalAddr { result, global_id } => {
+                let global = self.globals[*global_id];
+                let ptr = global.as_pointer_value();
+                self.value_map.insert(*result, ptr.into());
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),

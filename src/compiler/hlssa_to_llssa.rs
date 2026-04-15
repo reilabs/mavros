@@ -215,6 +215,14 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
 
+    // Transfer global types from HLSSA to LLSSA
+    let ll_global_types: Vec<LLType> = hlssa
+        .get_global_types()
+        .iter()
+        .map(|ty| lower_type(ty))
+        .collect();
+    llssa.set_global_types(ll_global_types);
+
     // First pass: create all functions (so we can map FunctionIds)
     fn_map.insert(main_id, llssa.get_main_id());
 
@@ -694,6 +702,35 @@ fn lower_instruction(
                     vec![]
                 },
             );
+        }
+
+        OpCode::InitGlobal { global, value } => {
+            let ll_value = val_map[value];
+            let r = e.fresh_value();
+            e.emit_ll(LLOp::GlobalAddr {
+                result: r,
+                global_id: *global,
+            });
+            e.ll_store(r, ll_value);
+        }
+
+        OpCode::ReadGlobal {
+            result,
+            offset,
+            result_type,
+        } => {
+            let r = e.fresh_value();
+            e.emit_ll(LLOp::GlobalAddr {
+                result: r,
+                global_id: *offset as usize,
+            });
+            let ll_type = lower_type(result_type);
+            let loaded = e.ll_load(r, ll_type);
+            val_map.insert(*result, loaded);
+        }
+
+        OpCode::DropGlobal { global: _ } => {
+            // Drop is a no-op in LLSSA — globals are cleaned up at program exit.
         }
 
         _ => panic!(
