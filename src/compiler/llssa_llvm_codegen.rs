@@ -524,10 +524,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::Add => self.builder.build_int_add(lhs, rhs, name).unwrap(),
                     IntArithOp::Sub => self.builder.build_int_sub(lhs, rhs, name).unwrap(),
                     IntArithOp::Mul => self.builder.build_int_mul(lhs, rhs, name).unwrap(),
-                    IntArithOp::UDiv => self
-                        .builder
-                        .build_int_unsigned_div(lhs, rhs, name)
-                        .unwrap(),
+                    IntArithOp::UDiv => {
+                        self.builder.build_int_unsigned_div(lhs, rhs, name).unwrap()
+                    }
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
