@@ -740,8 +740,7 @@ fn lower_instruction(
             });
             let ll_type = lower_type(global_type);
             let ll_value = e.ll_load(r, ll_type);
-            let drop_fn_id =
-                get_or_create_drop_fn(global_type, llssa, drop_fns, ad_fns);
+            let drop_fn_id = get_or_create_drop_fn(global_type, llssa, drop_fns, ad_fns);
             e.call(drop_fn_id, vec![ll_value], 0);
         }
 
