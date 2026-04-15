@@ -390,6 +390,8 @@ fn lower_instruction(
                         BinaryArithOpKind::Xor => IntArithOp::Xor,
                         BinaryArithOpKind::Shl => IntArithOp::Shl,
                         BinaryArithOpKind::Shr => IntArithOp::UShr,
+                        BinaryArithOpKind::Div => IntArithOp::UDiv,
+                        BinaryArithOpKind::Mod => IntArithOp::URem,
                         _ => panic!("Unsupported int arith op: {:?}", kind),
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
