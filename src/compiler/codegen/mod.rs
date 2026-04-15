@@ -1067,13 +1067,21 @@ impl CodeGen {
                     });
                 }
                 ssa::OpCode::Spread { result, value } => {
+                    let value_type = type_info.get_value_type(*value);
+                    let value_bits = match &value_type.expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => bits,
+                        _ => panic!("Unsupported spread input type in codegen: {value_type}"),
+                    };
+                    if *value_bits > 32 {
+                        todo!("Spread bytecode lowering for integer widths > 32 bits");
+                    }
                     let result_type = type_info.get_value_type(*result);
                     let res = match result_type.strip_witness().expr {
                         TypeExpr::U(bits) | TypeExpr::I(bits) => layouter.alloc_u64(*result, bits),
                         TypeExpr::Field => layouter.alloc_field(*result),
                         _ => panic!("Unsupported spread result type: {result_type}"),
                     };
-                    emitter.push_op(bytecode::OpCode::SpreadU64 {
+                    emitter.push_op(bytecode::OpCode::SpreadU32 {
                         res,
                         val: layouter.get_value(*value),
                     });

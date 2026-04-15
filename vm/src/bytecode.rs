@@ -997,7 +997,7 @@ mod def {
     }
 
     #[opcode]
-    fn spread_u64(#[out] res: *mut u64, #[frame] val: u64) {
+    fn spread_u32(#[out] res: *mut u64, #[frame] val: u64) {
         let result = spread_bits(val as u32);
         unsafe {
             *res = result;
