@@ -50,6 +50,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
     field_sub_fn: Option<FunctionValue<'ctx>>,
+    field_div_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     write_witness_fn: Option<FunctionValue<'ctx>>,
@@ -85,6 +86,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_mul_fn: None,
             field_add_fn: None,
             field_sub_fn: None,
+            field_div_fn: None,
             malloc_fn: None,
             free_fn: None,
             write_witness_fn: None,
@@ -198,6 +200,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.field_sub_fn = Some(
             self.module
                 .add_function("__field_sub", field_sub_type, None),
+        );
+
+        // __field_div(FieldElem, FieldElem) -> FieldElem
+        let field_div_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_div_fn = Some(
+            self.module
+                .add_function("__field_div", field_div_type, None),
         );
 
         // __ad_next_d_coeff(vm*) -> FieldElem
@@ -515,9 +524,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::Add => self.builder.build_int_add(lhs, rhs, name).unwrap(),
                     IntArithOp::Sub => self.builder.build_int_sub(lhs, rhs, name).unwrap(),
                     IntArithOp::Mul => self.builder.build_int_mul(lhs, rhs, name).unwrap(),
+                    IntArithOp::UDiv => {
+                        self.builder.build_int_unsigned_div(lhs, rhs, name).unwrap()
+                    }
+                    IntArithOp::URem => {
+                        self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap()
+                    }
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
+                    IntArithOp::Shl => self.builder.build_left_shift(lhs, rhs, name).unwrap(),
+                    IntArithOp::UShr => self
+                        .builder
+                        .build_right_shift(lhs, rhs, false, name)
+                        .unwrap(),
                     _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val.into());
@@ -583,6 +603,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .try_as_basic_value()
                             .left()
                             .expect("field_sub should return a value")
+                    }
+                    FieldArithOp::Div => {
+                        let div_fn = self.field_div_fn.expect("__field_div not declared");
+                        let call_site = self
+                            .builder
+                            .build_call(div_fn, &[lhs.into(), rhs.into()], "field_div")
+                            .unwrap();
+                        call_site
+                            .try_as_basic_value()
+                            .left()
+                            .expect("field_div should return a value")
                     }
                     _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
