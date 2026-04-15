@@ -533,6 +533,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
+                    IntArithOp::Shl => self.builder.build_left_shift(lhs, rhs, name).unwrap(),
+                    IntArithOp::UShr => {
+                        self.builder.build_right_shift(lhs, rhs, false, name).unwrap()
+                    }
                     _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val.into());
