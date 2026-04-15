@@ -14,8 +14,8 @@ use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLFunction, HLSSA, MemOp, OpCode,
-        Radix, SeqType, ValueId,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLFunction, HLSSA,
+        MemOp, OpCode, Radix, SeqType, ValueId,
     },
 };
 
@@ -550,6 +550,68 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 
     fn rangecheck(&self, max_bits: usize, ctx: &mut SpecializationState) {
         HLEmitter::rangecheck(ctx, self.0, max_bits);
+    }
+
+    fn spread(&self, ctx: &mut SpecializationState) -> Self {
+        let cst_val = ctx.const_vals.get(&self.0);
+        match cst_val {
+            Some(ConstVal::U(bits, v)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    bits
+                );
+                Self::of_u(bits * 2, ssa_mod::spread_bits(*v, *bits), ctx)
+            }
+            Some(ConstVal::I(bits, v)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got i{}",
+                    bits
+                );
+                Self::of_i(bits * 2, ssa_mod::spread_bits(*v, *bits), ctx)
+            }
+            _ => {
+                let res = HLEmitter::spread(ctx, self.0);
+                Self(res)
+            }
+        }
+    }
+
+    fn unspread(&self, ctx: &mut SpecializationState) -> (Self, Self) {
+        let cst_val = ctx.const_vals.get(&self.0);
+        match cst_val {
+            Some(ConstVal::U(bits, v)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    bits
+                );
+                let half_bits = bits / 2;
+                let (odd, even) = ssa_mod::unspread_bits(*v, *bits);
+                (
+                    Self::of_u(half_bits, odd, ctx),
+                    Self::of_u(half_bits, even, ctx),
+                )
+            }
+            Some(ConstVal::I(bits, v)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    bits
+                );
+                let half_bits = bits / 2;
+                let (odd, even) = ssa_mod::unspread_bits(*v, *bits);
+                (
+                    Self::of_i(half_bits, odd, ctx),
+                    Self::of_i(half_bits, even, ctx),
+                )
+            }
+            _ => {
+                let (res_and, res_xor) = HLEmitter::unspread(ctx, self.0);
+                (Self(res_and), Self(res_xor))
+            }
+        }
     }
 
     fn to_radix(

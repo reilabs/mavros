@@ -1036,6 +1036,83 @@ impl CodeGen {
                         elem_kind,
                     });
                 }
+                ssa::OpCode::Lookup {
+                    target: LookupTarget::Spread(bits),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    emitter.push_op(bytecode::OpCode::SpreadLookupField {
+                        val: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        bits: *bits as usize,
+                    });
+                }
+                ssa::OpCode::DLookup {
+                    target: LookupTarget::Spread(bits),
+                    keys,
+                    results,
+                    flag,
+                } => {
+                    assert!(keys.len() == 1);
+                    assert!(results.len() == 1);
+                    emitter.push_op(bytecode::OpCode::DspreadLookupField {
+                        val: layouter.get_value(keys[0]),
+                        result: layouter.get_value(results[0]),
+                        flag: layouter.get_value(*flag),
+                        bits: *bits as usize,
+                    });
+                }
+                ssa::OpCode::Spread { result, value } => {
+                    let value_type = type_info.get_value_type(*value);
+                    let value_bits = match &value_type.expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => bits,
+                        _ => panic!("Unsupported spread input type in codegen: {value_type}"),
+                    };
+                    if *value_bits > 32 {
+                        todo!("Spread bytecode lowering for integer widths > 32 bits");
+                    }
+                    let result_type = type_info.get_value_type(*result);
+                    let res = match result_type.strip_witness().expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => layouter.alloc_u64(*result, bits),
+                        TypeExpr::Field => layouter.alloc_field(*result),
+                        _ => panic!("Unsupported spread result type: {result_type}"),
+                    };
+                    emitter.push_op(bytecode::OpCode::SpreadU32 {
+                        res,
+                        val: layouter.get_value(*value),
+                    });
+                }
+                ssa::OpCode::Unspread {
+                    result_odd,
+                    result_even,
+                    value,
+                } => {
+                    let odd_type = type_info.get_value_type(*result_odd);
+                    let even_type = type_info.get_value_type(*result_even);
+                    let res_and = match odd_type.strip_witness().expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                            layouter.alloc_u64(*result_odd, bits)
+                        }
+                        TypeExpr::Field => layouter.alloc_field(*result_odd),
+                        _ => panic!("Unsupported unspread odd result type: {odd_type}"),
+                    };
+                    let res_xor = match even_type.strip_witness().expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                            layouter.alloc_u64(*result_even, bits)
+                        }
+                        TypeExpr::Field => layouter.alloc_field(*result_even),
+                        _ => panic!("Unsupported unspread even result type: {even_type}"),
+                    };
+                    emitter.push_op(bytecode::OpCode::UnspreadU64 {
+                        res_and,
+                        res_xor,
+                        val: layouter.get_value(*value),
+                    });
+                }
                 ssa::OpCode::Todo { payload, .. } => {
                     panic!("Todo opcode encountered in Codegen: {}", payload);
                 }

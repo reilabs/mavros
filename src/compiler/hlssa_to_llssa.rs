@@ -670,6 +670,18 @@ fn lower_instruction(
             }
         }
 
+        OpCode::Spread { result, value }
+        | OpCode::Unspread {
+            result_odd: result,
+            value,
+            ..
+        } => {
+            todo!(
+                "Spread/Unspread opcodes are not handled yet in HLSSA->LLSSA lowering: {:?}",
+                instruction
+            )
+        }
+
         OpCode::MkTuple {
             result,
             elems,
