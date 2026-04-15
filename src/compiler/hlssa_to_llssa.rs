@@ -676,7 +676,7 @@ fn lower_instruction(
             value,
             ..
         } => {
-            panic!(
+            todo!(
                 "Spread/Unspread opcodes should not appear in HLSSA->LLSSA lowering path: {:?}",
                 instruction
             )
