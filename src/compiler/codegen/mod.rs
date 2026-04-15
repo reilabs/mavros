@@ -881,8 +881,23 @@ impl CodeGen {
                         amount: *size as u64,
                     });
                 }
-                ssa::OpCode::AssertEq { lhs: _, rhs: _ } => {
-                    // TODO: Implement this
+                ssa::OpCode::AssertEq { lhs, rhs } => {
+                    let lhs_type = type_info.get_value_type(*lhs);
+                    match &lhs_type.expr {
+                        TypeExpr::Field => {
+                            emitter.push_op(bytecode::OpCode::AssertEqField {
+                                a: layouter.get_value(*lhs),
+                                b: layouter.get_value(*rhs),
+                            });
+                        }
+                        TypeExpr::U(_) | TypeExpr::I(_) => {
+                            emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                                a: layouter.get_value(*lhs),
+                                b: layouter.get_value(*rhs),
+                            });
+                        }
+                        t => panic!("Unsupported type for AssertEq in vm: {:?}", t),
+                    }
                 }
                 ssa::OpCode::ToBits {
                     result: r,

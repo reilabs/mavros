@@ -833,6 +833,16 @@ mod def {
     }
 
     #[opcode]
+    fn assert_eq_u64(#[frame] a: u64, #[frame] b: u64) {
+        assert_eq!(a, b);
+    }
+
+    #[opcode]
+    fn assert_eq_field(#[frame] a: Field, #[frame] b: Field) {
+        assert_eq!(a, b);
+    }
+
+    #[opcode]
     #[inline(never)] // TODO better impl
     fn rangecheck(#[frame] val: Field, max_bits: usize) {
         // Convert field to bigint and check if it fits in max_bits
