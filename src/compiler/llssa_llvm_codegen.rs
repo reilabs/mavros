@@ -527,6 +527,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::UDiv => {
                         self.builder.build_int_unsigned_div(lhs, rhs, name).unwrap()
                     }
+                    IntArithOp::URem => {
+                        self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap()
+                    }
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
