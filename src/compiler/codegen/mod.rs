@@ -1067,7 +1067,12 @@ impl CodeGen {
                     });
                 }
                 ssa::OpCode::Spread { result, value } => {
-                    let res = layouter.alloc_field(*result);
+                    let result_type = type_info.get_value_type(*result);
+                    let res = match result_type.strip_witness().expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => layouter.alloc_u64(*result, bits),
+                        TypeExpr::Field => layouter.alloc_field(*result),
+                        _ => panic!("Unsupported spread result type: {result_type}"),
+                    };
                     emitter.push_op(bytecode::OpCode::SpreadU64 {
                         res,
                         val: layouter.get_value(*value),
@@ -1078,8 +1083,22 @@ impl CodeGen {
                     result_even,
                     value,
                 } => {
-                    let res_and = layouter.alloc_field(*result_odd);
-                    let res_xor = layouter.alloc_field(*result_even);
+                    let odd_type = type_info.get_value_type(*result_odd);
+                    let even_type = type_info.get_value_type(*result_even);
+                    let res_and = match odd_type.strip_witness().expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                            layouter.alloc_u64(*result_odd, bits)
+                        }
+                        TypeExpr::Field => layouter.alloc_field(*result_odd),
+                        _ => panic!("Unsupported unspread odd result type: {odd_type}"),
+                    };
+                    let res_xor = match even_type.strip_witness().expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                            layouter.alloc_u64(*result_even, bits)
+                        }
+                        TypeExpr::Field => layouter.alloc_field(*result_even),
+                        _ => panic!("Unsupported unspread even result type: {even_type}"),
+                    };
                     emitter.push_op(bytecode::OpCode::UnspreadU64 {
                         res_and,
                         res_xor,

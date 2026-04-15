@@ -997,21 +997,19 @@ mod def {
     }
 
     #[opcode]
-    fn spread_u64(#[out] res: *mut Field, #[frame] val: Field) {
-        let v: u64 = ark_ff::PrimeField::into_bigint(val).0[0];
-        let result = spread_bits(v as u32);
+    fn spread_u64(#[out] res: *mut u64, #[frame] val: u64) {
+        let result = spread_bits(val as u32);
         unsafe {
-            *res = Field::from(result);
+            *res = result;
         }
     }
 
     #[opcode]
-    fn unspread_u64(#[out] res_and: *mut Field, #[out] res_xor: *mut Field, #[frame] val: Field) {
-        let v: u64 = ark_ff::PrimeField::into_bigint(val).0[0];
-        let (and_val, xor_val) = unspread_bits(v);
+    fn unspread_u64(#[out] res_and: *mut u64, #[out] res_xor: *mut u64, #[frame] val: u64) {
+        let (and_val, xor_val) = unspread_bits(val);
         unsafe {
-            *res_and = Field::from(and_val as u64);
-            *res_xor = Field::from(xor_val as u64);
+            *res_and = and_val as u64;
+            *res_xor = xor_val as u64;
         }
     }
 

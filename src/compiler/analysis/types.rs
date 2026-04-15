@@ -58,6 +58,69 @@ impl Types {
         type_info
     }
 
+    fn spread_result_type(value_type: &Type) -> Result<Type, String> {
+        match &value_type.expr {
+            TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
+            TypeExpr::U(bits) => {
+                if *bits > 64 {
+                    return Err(format!(
+                        "Spread expects u(n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                Ok(Type::u(bits * 2))
+            }
+            TypeExpr::I(bits) => {
+                if *bits > 64 {
+                    return Err(format!(
+                        "Spread expects i(n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                Ok(Type::i(bits * 2))
+            }
+            TypeExpr::Field => Err("Spread does not support field inputs".to_string()),
+            _ => Err(format!(
+                "Spread expects an integer input, got {}",
+                value_type
+            )),
+        }
+    }
+
+    fn unspread_result_types(value_type: &Type) -> Result<(Type, Type), String> {
+        match &value_type.expr {
+            TypeExpr::WitnessOf(inner) => {
+                let (odd, even) = Self::unspread_result_types(inner)?;
+                Ok((Type::witness_of(odd), Type::witness_of(even)))
+            }
+            TypeExpr::U(bits) => {
+                if *bits % 2 != 0 || (*bits / 2) > 64 {
+                    return Err(format!(
+                        "Unspread expects u(2n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                let half_bits = bits / 2;
+                Ok((Type::u(half_bits), Type::u(half_bits)))
+            }
+            TypeExpr::I(bits) => {
+                if *bits % 2 != 0 || (*bits / 2) > 64 {
+                    return Err(format!(
+                        "Unspread expects i(2n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                let half_bits = bits / 2;
+                Ok((Type::i(half_bits), Type::i(half_bits)))
+            }
+            TypeExpr::Field => Err("Unspread does not support field inputs".to_string()),
+            _ => Err(format!(
+                "Unspread expects an integer input, got {}",
+                value_type
+            )),
+        }
+    }
+
     #[instrument(skip_all, level = Level::DEBUG, name = "Types::run_function", fields(function = function.get_name()))]
     fn run_function(
         &self,
@@ -567,11 +630,12 @@ impl Types {
                 Ok(())
             }
             OpCode::Spread { result, value } => {
-                let _value_type = function_info
+                let value_type = function_info
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                function_info.values.insert(*result, Type::field());
+                let result_type = Self::spread_result_type(value_type)?;
+                function_info.values.insert(*result, result_type);
                 Ok(())
             }
             OpCode::Unspread {
@@ -579,12 +643,13 @@ impl Types {
                 result_even,
                 value,
             } => {
-                let _value_type = function_info
+                let value_type = function_info
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                function_info.values.insert(*result_odd, Type::field());
-                function_info.values.insert(*result_even, Type::field());
+                let (odd_type, even_type) = Self::unspread_result_types(value_type)?;
+                function_info.values.insert(*result_odd, odd_type);
+                function_info.values.insert(*result_even, even_type);
                 Ok(())
             }
             OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),

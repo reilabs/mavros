@@ -1762,26 +1762,27 @@ impl ExplicitWitness {
         for i in 0..chunks {
             let sum_i = b.add(a_spreads_cst[i], b_spreads_cst[i]);
 
-            // Compute pure hints for and/xor of this byte (using pure byte values)
-            // Cast back to u8 for bitwise ops, then to field for witnesses
+            // Compute pure integer hints for this byte.
             let a_byte_u8 = b.cast_to(CastTarget::U(8), a_pure_bytes[i]);
             let b_byte_u8 = b.cast_to(CastTarget::U(8), b_pure_bytes[i]);
             let and_hint = b.and(a_byte_u8, b_byte_u8);
-            let and_hint_f = b.cast_to_field(and_hint);
             let xor_hint = b.xor(a_byte_u8, b_byte_u8);
-            let xor_hint_f = b.cast_to_field(xor_hint);
+            let and_hint_field = b.cast_to_field(and_hint);
+            let xor_hint_field = b.cast_to_field(xor_hint);
 
             // Write and/xor bytes as witnesses
-            let and_byte_wit = b.write_witness(and_hint_f);
-            let xor_byte_wit = b.write_witness(xor_hint_f);
+            let and_byte_wit = b.write_witness(and_hint_field);
+            let xor_byte_wit = b.write_witness(xor_hint_field);
 
             // Spread the and/xor bytes and verify via lookups
-            let and_spread_hint = b.spread(and_hint_f);
-            let and_spread_wit = b.write_witness(and_spread_hint);
+            let and_spread_hint = b.spread(and_hint);
+            let and_spread_hint_field = b.cast_to_field(and_spread_hint);
+            let and_spread_wit = b.write_witness(and_spread_hint_field);
             b.lookup_spread(8, and_byte_wit, and_spread_wit, one);
 
-            let xor_spread_hint = b.spread(xor_hint_f);
-            let xor_spread_wit = b.write_witness(xor_spread_hint);
+            let xor_spread_hint = b.spread(xor_hint);
+            let xor_spread_hint_field = b.cast_to_field(xor_spread_hint);
+            let xor_spread_wit = b.write_witness(xor_spread_hint_field);
             b.lookup_spread(8, xor_byte_wit, xor_spread_wit, one);
 
             // Constrain: 2*and_spread + xor_spread = sum
@@ -1865,13 +1866,13 @@ impl ExplicitWitness {
             let idx = b.u_const(32, i as u128);
             let byte_i = b.array_get(bytes_arr, idx);
             let byte_i_field = b.cast_to_field(byte_i);
-
             // Write byte as witness
             let byte_wit = b.write_witness(byte_i_field);
 
             // Spread the byte (pure hint) and write spread as witness
-            let spread_hint = b.spread(byte_i_field);
-            let spread_wit = b.write_witness(spread_hint);
+            let spread_hint = b.spread(byte_i);
+            let spread_hint_field = b.cast_to_field(spread_hint);
+            let spread_wit = b.write_witness(spread_hint_field);
 
             // Verify (byte, spread) pair via spread lookup
             b.lookup_spread(8, byte_wit, spread_wit, flag);
@@ -1880,7 +1881,7 @@ impl ExplicitWitness {
             let shifted = b.mul(recon, two_to_8);
             recon = b.add(shifted, byte_wit);
 
-            pure_bytes.push(byte_i_field); // pure for hints
+            pure_bytes.push(byte_i); // pure integer byte for hints
             cst_bytes.push(byte_wit); // witness for constraints
             cst_spreads.push(spread_wit); // witness for constraints
         }

@@ -106,6 +106,36 @@ pub enum Value {
 }
 
 impl Value {
+    fn bit_mask(bits: usize) -> u128 {
+        match bits {
+            0 => 0,
+            128.. => u128::MAX,
+            _ => (1u128 << bits) - 1,
+        }
+    }
+
+    fn fits_in_bits(v: u128, bits: usize) -> bool {
+        bits >= 128 || (v & !Self::bit_mask(bits)) == 0
+    }
+
+    fn spread_bits(v: u128, bits: usize) -> u128 {
+        let mut spread = 0u128;
+        for i in 0..bits {
+            spread |= ((v >> i) & 1) << (2 * i);
+        }
+        spread
+    }
+
+    fn unspread_bits(v: u128, bits: usize) -> (u128, u128) {
+        let mut odd = 0u128;
+        let mut even = 0u128;
+        for i in 0..(bits / 2) {
+            even |= ((v >> (2 * i)) & 1) << i;
+            odd |= ((v >> (2 * i + 1)) & 1) << i;
+        }
+        (odd, even)
+    }
+
     fn unwrap_witness(&self) -> &Value {
         match self {
             Value::WitnessOf(inner) => inner.as_ref(),
@@ -541,55 +571,133 @@ impl Value {
 
     fn spread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
-            Value::U(_, v) => {
-                let spread_val = crate::compiler::ssa::spread_u64(*v as u32);
-                Value::Field(Field::from(spread_val))
+            Value::U(bits, v) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    bits
+                );
+                assert!(
+                    Self::fits_in_bits(*v, *bits),
+                    "Value {} does not fit in declared u{} width",
+                    v,
+                    bits
+                );
+                Value::U(bits * 2, Self::spread_bits(*v, *bits))
             }
-            Value::Field(f) => {
-                let v: u64 = f.into_bigint().0[0];
-                let spread_val = crate::compiler::ssa::spread_u64(v as u32);
-                Value::Field(Field::from(spread_val))
+            Value::I(bits, v) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got i{}",
+                    bits
+                );
+                assert!(
+                    Self::fits_in_bits(*v, *bits),
+                    "Value {} does not fit in declared i{} width",
+                    v,
+                    bits
+                );
+                Value::I(bits * 2, Self::spread_bits(*v, *bits))
             }
+            Value::Field(_) => panic!("Spread of field values is unsupported"),
             Value::WitnessOf(inner) => {
-                instrumenter.record_lookups(256, 1, 1);
+                if matches!(inner.as_ref(), Value::Unknown(_)) {
+                    instrumenter.record_lookups(256, 1, 1);
+                }
                 Value::WitnessOf(Box::new(inner.spread_op(instrumenter)))
             }
-            Value::Unknown(kind) => {
-                instrumenter.record_lookups(256, 1, 1);
-                Value::Unknown(*kind)
+            Value::Unknown(ScalarKind::U(bits)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    bits
+                );
+                Value::Unknown(ScalarKind::U(bits * 2))
             }
+            Value::Unknown(ScalarKind::I(bits)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got i{}",
+                    bits
+                );
+                Value::Unknown(ScalarKind::I(bits * 2))
+            }
+            Value::Unknown(ScalarKind::Field) => panic!("Spread of field values is unsupported"),
             _ => panic!("Cannot spread {:?}", self),
         }
     }
 
     fn unspread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> (Value, Value) {
         match self {
-            Value::U(_, v) => {
-                let (odd_val, even_val) = crate::compiler::ssa::unspread_u64(*v as u64);
-                (
-                    Value::Field(Field::from(odd_val as u64)),
-                    Value::Field(Field::from(even_val as u64)),
-                )
+            Value::U(bits, v) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    bits
+                );
+                assert!(
+                    Self::fits_in_bits(*v, *bits),
+                    "Value {} does not fit in declared u{} width",
+                    v,
+                    bits
+                );
+                let (odd_val, even_val) = Self::unspread_bits(*v, *bits);
+                let half_bits = bits / 2;
+                (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
             }
-            Value::Field(f) => {
-                let v: u64 = f.into_bigint().0[0];
-                let (odd_val, even_val) = crate::compiler::ssa::unspread_u64(v);
-                (
-                    Value::Field(Field::from(odd_val as u64)),
-                    Value::Field(Field::from(even_val as u64)),
-                )
+            Value::I(bits, v) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    bits
+                );
+                assert!(
+                    Self::fits_in_bits(*v, *bits),
+                    "Value {} does not fit in declared i{} width",
+                    v,
+                    bits
+                );
+                let (odd_val, even_val) = Self::unspread_bits(*v, *bits);
+                let half_bits = bits / 2;
+                (Value::I(half_bits, odd_val), Value::I(half_bits, even_val))
             }
+            Value::Field(_) => panic!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
-                instrumenter.record_constraints(1);
+                if matches!(inner.as_ref(), Value::Unknown(_)) {
+                    instrumenter.record_constraints(1);
+                }
                 let (odd, even) = inner.unspread_op(instrumenter);
                 (
                     Value::WitnessOf(Box::new(odd)),
                     Value::WitnessOf(Box::new(even)),
                 )
             }
-            Value::Unknown(kind) => {
-                instrumenter.record_constraints(1);
-                (Value::Unknown(*kind), Value::Unknown(*kind))
+            Value::Unknown(ScalarKind::U(bits)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    bits
+                );
+                let half_bits = bits / 2;
+                (
+                    Value::Unknown(ScalarKind::U(half_bits)),
+                    Value::Unknown(ScalarKind::U(half_bits)),
+                )
+            }
+            Value::Unknown(ScalarKind::I(bits)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    bits
+                );
+                let half_bits = bits / 2;
+                (
+                    Value::Unknown(ScalarKind::I(half_bits)),
+                    Value::Unknown(ScalarKind::I(half_bits)),
+                )
+            }
+            Value::Unknown(ScalarKind::Field) => {
+                panic!("Unspread of field values is unsupported")
             }
             _ => panic!("Cannot unspread {:?}", self),
         }
