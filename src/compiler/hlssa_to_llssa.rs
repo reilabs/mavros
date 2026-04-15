@@ -216,11 +216,8 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     let mut ad_fns = AdFunctions::new();
 
     // Transfer global types from HLSSA to LLSSA
-    let ll_global_types: Vec<LLType> = hlssa
-        .get_global_types()
-        .iter()
-        .map(|ty| lower_type(ty))
-        .collect();
+    let hlssa_global_types: Vec<Type> = hlssa.get_global_types().to_vec();
+    let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(|ty| lower_type(ty)).collect();
     llssa.set_global_types(ll_global_types);
 
     // First pass: create all functions (so we can map FunctionIds)
@@ -248,6 +245,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
             &mut llssa,
             &mut drop_fns,
             &mut ad_fns,
+            &hlssa_global_types,
         );
 
         let _old = llssa.take_function(ll_fn_id);
@@ -275,6 +273,7 @@ fn lower_function(
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
+    hlssa_global_types: &[Type],
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -327,6 +326,7 @@ fn lower_function(
                 llssa,
                 drop_fns,
                 ad_fns,
+                hlssa_global_types,
             );
         }
 
@@ -354,6 +354,7 @@ fn lower_instruction(
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
+    hlssa_global_types: &[Type],
 ) {
     use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
 
@@ -729,8 +730,19 @@ fn lower_instruction(
             val_map.insert(*result, loaded);
         }
 
-        OpCode::DropGlobal { global: _ } => {
-            // Drop is a no-op in LLSSA — globals are cleaned up at program exit.
+        OpCode::DropGlobal { global } => {
+            let global_type = &hlssa_global_types[*global];
+            // Load the value from the global slot, then call its drop function.
+            let r = e.fresh_value();
+            e.emit_ll(LLOp::GlobalAddr {
+                result: r,
+                global_id: *global,
+            });
+            let ll_type = lower_type(global_type);
+            let ll_value = e.ll_load(r, ll_type);
+            let drop_fn_id =
+                get_or_create_drop_fn(global_type, llssa, drop_fns, ad_fns);
+            e.call(drop_fn_id, vec![ll_value], 0);
         }
 
         _ => panic!(
