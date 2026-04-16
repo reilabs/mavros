@@ -1,0 +1,9 @@
+[package]
+name = "sig_check_common"
+type = "lib"
+authors = ["Theo Madzou", "Michael Elliot"]
+compiler_version = ">=1.0.0"
+
+[dependencies]
+utils = { path = "../utils" }
+sha256 = { path = "../sha256" }

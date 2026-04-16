@@ -1,0 +1,7 @@
+[package]
+name = "passport_01_compare_age"
+type = "bin"
+authors = [""]
+
+[dependencies]
+date = { path = "vendor/noir-date" }

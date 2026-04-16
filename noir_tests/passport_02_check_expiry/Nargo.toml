@@ -1,0 +1,7 @@
+[package]
+name = "passport_02_check_expiry"
+type = "bin"
+authors = [""]
+
+[dependencies]
+date = { path = "vendor/noir-date" }

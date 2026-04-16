@@ -1,0 +1,7 @@
+[package]
+name = "passport_04_check_sod_integrity"
+type = "bin"
+authors = [""]
+
+[dependencies]
+sha256 = { path = "vendor/sha256" }
