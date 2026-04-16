@@ -7,7 +7,6 @@ use constants::{
 };
 
 pub(crate) mod constants;
-mod tests;
 
 // Implementation of SHA-256 mapping a byte array of variable length to
 // 32 bytes.

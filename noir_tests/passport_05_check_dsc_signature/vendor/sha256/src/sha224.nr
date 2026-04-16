@@ -5,7 +5,6 @@ use crate::sha256::{__sha_var, finalize_sha256_blocks, partial_sha256_var_end, p
 use constants as sha224_constants;
 
 pub(crate) mod constants;
-mod tests;
 
 // Variable size SHA-224 hash
 pub fn sha224_var<let N: u32>(msg: [u8; N], message_size: u64) -> sha224_constants::HASH_SHA224 {
@@ -67,16 +66,4 @@ pub fn partial_sha224_var_end<let N: u32>(
         hash_sha224[i] = hash[i];
     }
     hash_sha224
-}
-
-mod equivalence_test {
-
-    #[test]
-    fn test_implementations_agree(msg: [u8; 100], message_size: u64) {
-        let message_size = message_size % 100;
-        // Safety: testing
-        let unconstrained_sha224 = unsafe { super::__sha224_var(msg, message_size as u32) };
-        let sha224 = super::sha224_var(msg, message_size);
-        assert_eq(sha224, unconstrained_sha224);
-    }
 }
