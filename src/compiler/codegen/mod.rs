@@ -55,7 +55,6 @@ impl FrameLayouter {
 
     fn alloc_value(&mut self, value: ValueId, tp: &Type) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
-        self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += self.type_size(&tp);
         bytecode::FramePosition(r)
@@ -271,6 +270,7 @@ impl CodeGen {
             function.get_entry_id(),
             entry,
             type_info,
+            cfg,
             &mut layouter,
             &mut emitter,
             global_layouter,
@@ -289,16 +289,17 @@ impl CodeGen {
                 block_id,
                 block,
                 type_info,
+                cfg,
                 &mut layouter,
                 &mut emitter,
                 global_layouter,
             );
         }
 
-        // Potential optimization: build a chronological graph to only copy one value max to scratch
-        // Reserve a scratch region
-        let max_scratch = function
+        // Reserve scratch for loop back-edge.
+        let max_loop_scratch = function
             .get_blocks()
+            .filter(|(block_id, _)| cfg.is_loop_entry(**block_id))
             .map(|(_, block)| {
                 block
                     .get_parameters()
@@ -308,39 +309,52 @@ impl CodeGen {
             .max()
             .unwrap_or(0);
         let scratch_base = layouter.next_free;
-        layouter.next_free += max_scratch;
+        layouter.next_free += max_loop_scratch;
 
         for (block_id, block) in function.get_blocks() {
             let mut block_exit_start: usize = emitter.block_exits[&block_id];
             match block.get_terminator().unwrap() {
                 Terminator::Jmp(tgt, args) => {
-                    // Copy each source into a scratch
-                    let mut offset = 0usize;
-                    for (arg, (_param, tp)) in
-                        args.iter().zip(function.get_block(*tgt).get_parameters())
-                    {
-                        let size = layouter.type_size(tp);
-                        emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
-                            size,
-                            target: bytecode::FramePosition(scratch_base + offset),
-                            source: layouter.get_value(*arg),
-                        };
-                        block_exit_start += 1;
-                        offset += size;
-                    }
-                    // Copy each scratch into a block parameter.
-                    let mut offset = 0usize;
-                    for (_arg, (param, tp)) in
-                        args.iter().zip(function.get_block(*tgt).get_parameters())
-                    {
-                        let size = layouter.type_size(tp);
-                        emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
-                            size,
-                            target: layouter.get_value(*param),
-                            source: bytecode::FramePosition(scratch_base + offset),
-                        };
-                        block_exit_start += 1;
-                        offset += size;
+                    if cfg.dominates(*tgt, *block_id) {
+                        // Back-edge: copy through scratch to avoid clobbering
+                        let mut offset = 0usize;
+                        for (arg, (_param, tp)) in
+                            args.iter().zip(function.get_block(*tgt).get_parameters())
+                        {
+                            let size = layouter.type_size(tp);
+                            emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                                size,
+                                target: bytecode::FramePosition(scratch_base + offset),
+                                source: layouter.get_value(*arg),
+                            };
+                            block_exit_start += 1;
+                            offset += size;
+                        }
+                        let mut offset = 0usize;
+                        for (_arg, (param, tp)) in
+                            args.iter().zip(function.get_block(*tgt).get_parameters())
+                        {
+                            let size = layouter.type_size(tp);
+                            emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                                size,
+                                target: layouter.get_value(*param),
+                                source: bytecode::FramePosition(scratch_base + offset),
+                            };
+                            block_exit_start += 1;
+                            offset += size;
+                        }
+                    } else {
+                        for (arg, (param, tp)) in
+                            args.iter().zip(function.get_block(*tgt).get_parameters())
+                        {
+                            let size = layouter.type_size(tp);
+                            emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                                size,
+                                target: layouter.get_value(*param),
+                                source: layouter.get_value(*arg),
+                            };
+                            block_exit_start += 1;
+                        }
                     }
                     emitter.code[block_exit_start] = bytecode::OpCode::Jmp {
                         target: bytecode::JumpTarget(
@@ -378,6 +392,7 @@ impl CodeGen {
         block_id: BlockId,
         block: &HLBlock,
         type_info: &FunctionTypeInfo,
+        cfg: &CFG,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
@@ -1172,11 +1187,16 @@ impl CodeGen {
         }
         emitter.exit_block(block_id);
         match block.get_terminator().unwrap() {
-            Terminator::Jmp(_, params) => {
+            Terminator::Jmp(tgt, params) => {
                 emitter.push_op(bytecode::OpCode::Nop {});
-                // Potential optimization: build a chronological graph to only copy 1 value at most to a scratch
-                // Two MovFrame slots per parameter (read-to-scratch, write-from-scratch).
-                for _ in 0..(2 * params.len()) {
+                // Back-edges (jumps to loop headers) need scratch copies to avoid
+                // clobbering parameters
+                let nop_count = if cfg.dominates(*tgt, block_id) {
+                    2 * params.len()
+                } else {
+                    params.len()
+                };
+                for _ in 0..nop_count {
                     emitter.push_op(bytecode::OpCode::Nop {});
                 }
             }
