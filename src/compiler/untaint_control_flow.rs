@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use tracing::{Level, instrument};
 
 use crate::compiler::{
+    block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
         BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
-        Terminator, ValueId,
+        SeqType, Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
@@ -197,24 +198,6 @@ impl UntaintControlFlow {
                                 // We remove the parameters from the merge block – they will be un-phi-fied
                                 let merge_params = function.get_block_mut(merge).take_parameters();
 
-                                for (_, typ) in &merge_params {
-                                    match typ {
-                                        Type {
-                                            expr: TypeExpr::Array(_, _),
-                                            ..
-                                        } => {
-                                            panic!("TODO: Witness array not supported yet")
-                                        }
-                                        Type {
-                                            expr: TypeExpr::Ref(_),
-                                            ..
-                                        } => {
-                                            panic!("TODO: Witness ref not supported yet")
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
                                 let args_passed_from_lhs = match function
                                     .get_block_mut(out_true_block)
                                     .take_terminator()
@@ -257,23 +240,33 @@ impl UntaintControlFlow {
                                     .set_terminator(Terminator::Jmp(merge, vec![]));
 
                                 if args_passed_from_lhs.len() > 0 {
-                                    for ((res, _), (lhs, rhs)) in merge_params.iter().zip(
-                                        args_passed_from_lhs
-                                            .iter()
-                                            .zip(args_passed_from_rhs.iter()),
-                                    ) {
-                                        // Strip WitnessOf casts from branches — the Select
-                                        // typing rule derives WitnessOf from the condition.
-                                        let lhs = witness_cast_strip.get(lhs).unwrap_or(lhs);
-                                        let rhs = witness_cast_strip.get(rhs).unwrap_or(rhs);
-                                        function.get_block_mut(merger_block).push_instruction(
-                                            OpCode::Select {
-                                                result: *res,
+                                    let mut instrs = Vec::new();
+                                    {
+                                        let mut builder =
+                                            HLInstrBuilder::new(function, &mut instrs);
+                                        for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
+                                            args_passed_from_lhs
+                                                .iter()
+                                                .zip(args_passed_from_rhs.iter()),
+                                        ) {
+                                            let lhs =
+                                                *witness_cast_strip.get(lhs).unwrap_or(lhs);
+                                            let rhs =
+                                                *witness_cast_strip.get(rhs).unwrap_or(rhs);
+                                            emit_recursive_select(
+                                                &mut builder,
                                                 cond,
-                                                if_t: *lhs,
-                                                if_f: *rhs,
-                                            },
-                                        );
+                                                lhs,
+                                                rhs,
+                                                *res,
+                                                typ,
+                                            );
+                                        }
+                                    }
+                                    for instr in instrs {
+                                        function
+                                            .get_block_mut(merger_block)
+                                            .push_instruction(instr);
                                     }
                                 }
                             }
@@ -286,5 +279,99 @@ impl UntaintControlFlow {
             block.put_instructions(new_instructions);
             function.put_block(block_id, block);
         }
+    }
+}
+
+/// Recursively emit element-wise selects for compound types (arrays, tuples).
+/// For scalar types, emits a single Select. The top-level result is written to `result`.
+fn emit_recursive_select(
+    builder: &mut HLInstrBuilder<'_>,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    result: ValueId,
+    typ: &Type,
+) {
+    match &typ.expr {
+        TypeExpr::Array(elem_type, size) => {
+            let mut elems = Vec::with_capacity(*size);
+            for i in 0..*size {
+                let idx = builder.u_const(32, i as u128);
+                let lhs_elem = builder.array_get(lhs, idx);
+                let rhs_elem = builder.array_get(rhs, idx);
+                let selected = emit_recursive_select_inner(
+                    builder, cond, lhs_elem, rhs_elem, elem_type,
+                );
+                elems.push(selected);
+            }
+            builder.push(OpCode::MkSeq {
+                result,
+                elems,
+                seq_type: SeqType::Array(*size),
+                elem_type: *elem_type.clone(),
+            });
+        }
+        TypeExpr::Tuple(field_types) => {
+            let mut elems = Vec::with_capacity(field_types.len());
+            for (i, field_type) in field_types.iter().enumerate() {
+                let lhs_field = builder.tuple_proj(lhs, i);
+                let rhs_field = builder.tuple_proj(rhs, i);
+                let selected = emit_recursive_select_inner(
+                    builder, cond, lhs_field, rhs_field, field_type,
+                );
+                elems.push(selected);
+            }
+            builder.push(OpCode::MkTuple {
+                result,
+                elems,
+                element_types: field_types.clone(),
+            });
+        }
+        _ => {
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+        }
+    }
+}
+
+/// Inner helper that returns a fresh ValueId for the selected value.
+fn emit_recursive_select_inner(
+    builder: &mut HLInstrBuilder<'_>,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    typ: &Type,
+) -> ValueId {
+    match &typ.expr {
+        TypeExpr::Array(elem_type, size) => {
+            let mut elems = Vec::with_capacity(*size);
+            for i in 0..*size {
+                let idx = builder.u_const(32, i as u128);
+                let lhs_elem = builder.array_get(lhs, idx);
+                let rhs_elem = builder.array_get(rhs, idx);
+                let selected = emit_recursive_select_inner(
+                    builder, cond, lhs_elem, rhs_elem, elem_type,
+                );
+                elems.push(selected);
+            }
+            builder.mk_seq(elems, SeqType::Array(*size), *elem_type.clone())
+        }
+        TypeExpr::Tuple(field_types) => {
+            let mut elems = Vec::with_capacity(field_types.len());
+            for (i, field_type) in field_types.iter().enumerate() {
+                let lhs_field = builder.tuple_proj(lhs, i);
+                let rhs_field = builder.tuple_proj(rhs, i);
+                let selected = emit_recursive_select_inner(
+                    builder, cond, lhs_field, rhs_field, field_type,
+                );
+                elems.push(selected);
+            }
+            builder.mk_tuple(elems, field_types.clone())
+        }
+        _ => builder.select(cond, lhs, rhs),
     }
 }

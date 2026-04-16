@@ -126,6 +126,27 @@ impl WitnessType {
             WitnessType::Tuple(_, inner) => WitnessType::Tuple(toplevel, inner.clone()),
         }
     }
+
+    /// Push witness info into the leaves of value-type composites (arrays, tuples)
+    /// instead of wrapping at the top level. For scalars, refs, and slices this
+    /// is equivalent to `with_toplevel_info`. For arrays/tuples, the info is
+    /// pushed recursively into children, keeping the top-level info unchanged.
+    pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessType {
+        match self {
+            WitnessType::Scalar(existing) => WitnessType::Scalar(existing.join(info)),
+            WitnessType::Array(top, inner) => {
+                WitnessType::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
+            }
+            WitnessType::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
+            WitnessType::Tuple(top, children) => WitnessType::Tuple(
+                *top,
+                children
+                    .iter()
+                    .map(|child| child.with_witness_in_leaves(info))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]

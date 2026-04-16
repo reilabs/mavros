@@ -1059,8 +1059,14 @@ impl ExplicitWitness {
                     _ => unreachable!("DivMod on non-numeric type: {:?}", l_type),
                 }
             }
-            OpCode::Cast { .. } | OpCode::Const { .. } => {
-                // Pure computations — no constraints. Emit unconditionally.
+            OpCode::Cast { .. }
+            | OpCode::Const { .. }
+            | OpCode::MkSeq { .. }
+            | OpCode::MkTuple { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
+            | OpCode::TupleProj { .. } => {
+                // Pure data construction/access — no constraints. Emit unconditionally.
                 b.push(inner);
             }
             OpCode::Rangecheck { value, max_bits } => {
