@@ -637,16 +637,39 @@ impl ExplicitWitness {
                 // At least one branch is witness: full lowering with constraint
                 let select_witness = b.select(cond, l, r);
                 let select_plain = b.value_of(select_witness);
-                let select_hint = if l_type.strip_witness().is_field() {
+                let is_field = l_type.strip_witness().is_field();
+                let select_hint = if is_field {
                     select_plain
                 } else {
                     b.cast_to_field(select_plain)
                 };
-                b.push(OpCode::WriteWitness {
-                    result: Some(res),
-                    value: select_hint,
-                    pinned: false,
-                });
+                if is_field {
+                    b.push(OpCode::WriteWitness {
+                        result: Some(res),
+                        value: select_hint,
+                        pinned: false,
+                    });
+                } else {
+                    // WriteWitness value is Field, but res must keep its original
+                    // type (e.g. u32) for downstream consumers like MkSeq.
+                    // Use a fresh ID for the WriteWitness result, then cast back.
+                    let ww_res = b.fresh_value();
+                    b.push(OpCode::WriteWitness {
+                        result: Some(ww_res),
+                        value: select_hint,
+                        pinned: false,
+                    });
+                    let cast_target = match l_type.strip_witness().expr {
+                        TypeExpr::U(n) => CastTarget::U(n),
+                        TypeExpr::I(n) => CastTarget::I(n),
+                        _ => unreachable!("non-field scalar must be U or I"),
+                    };
+                    b.push(OpCode::Cast {
+                        result: res,
+                        value: ww_res,
+                        target: cast_target,
+                    });
+                }
                 // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                 // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
                 let l_sub_r = b.sub(l_field, r_field);
