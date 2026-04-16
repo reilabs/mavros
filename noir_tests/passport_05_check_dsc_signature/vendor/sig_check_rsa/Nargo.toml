@@ -1,0 +1,11 @@
+[package]
+name = "sig_check_rsa"
+type = "lib"
+authors = ["Theo Madzou", "Michael Elliot"]
+compiler_version = ">=1.0.0"
+
+[dependencies]
+rsa = { path = "../noir_rsa" }
+bignum = { path = "../noir-bignum" }
+utils = { path = "../utils" }
+common = { path = "../sig_check_common" }

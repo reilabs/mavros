@@ -1,0 +1,6 @@
+[package]
+name = "passport_06_check_dsc_pubkey_in_cert"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -1,0 +1,7 @@
+[package]
+name = "passport_05_check_dsc_signature"
+type = "bin"
+authors = [""]
+
+[dependencies]
+sig_check_rsa = { path = "vendor/sig_check_rsa" }
