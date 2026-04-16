@@ -6,6 +6,4 @@ compiler_version = ">=1.0.0"
 
 [dependencies]
 utils = { path = "../utils" }
-sha512 = { path = "../sha512" }
 sha256 = { path = "../sha256" }
-sha1 = { path = "../sha1" }

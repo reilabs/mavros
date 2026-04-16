@@ -3,6 +3,4 @@ name = "utils"
 type = "lib"
 authors = ["Theo Madzou", "Michael Elliot"]
 compiler_version = ">=1.0.0"
-
 [dependencies]
-poseidon = { path = "../poseidon" }

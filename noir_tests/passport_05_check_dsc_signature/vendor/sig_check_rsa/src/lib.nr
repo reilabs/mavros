@@ -1,12 +1,6 @@
 use bignum::{params::BigNumParams, RuntimeBigNum};
-use common::{
-    sha1_and_check_data_to_sign, sha256_and_check_data_to_sign, sha384_and_check_data_to_sign,
-    sha512_and_check_data_to_sign,
-};
-use rsa::rsa::{
-    verify_sha1_pkcs1v15, verify_sha1_pss, verify_sha256_pkcs1v15, verify_sha256_pss,
-    verify_sha384_pkcs1v15, verify_sha384_pss, verify_sha512_pkcs1v15, verify_sha512_pss,
-};
+use common::sha256_and_check_data_to_sign;
+use rsa::rsa::verify_sha256_pkcs1v15;
 
 pub fn verify_signature<let SIG_BYTES: u32, let IS_PSS: u32, let DATA_TO_SIGN_MAX_LEN: u32, let HASH_BYTE_SIZE: u32>(
     pubkey_bytes: [u8; SIG_BYTES],
@@ -20,13 +14,12 @@ pub fn verify_signature<let SIG_BYTES: u32, let IS_PSS: u32, let DATA_TO_SIGN_MA
     pss_salt_len: u32,
 ) -> bool {
     assert(
-        (SIG_BYTES == 768)
-            | (SIG_BYTES == 512)
-            | (SIG_BYTES == 384)
-            | (SIG_BYTES == 256)
-            | (SIG_BYTES == 128),
-        "Only modulus of bit size 1024, 2048, 3072, 4096 and 6144 are supported",
+        (SIG_BYTES == 512) | (SIG_BYTES == 256),
+        "Only 2048-bit and 4096-bit RSA moduli are used in these passport tests",
     );
+    assert(IS_PSS == 0, "These passport tests only use PKCS#1 v1.5 signatures");
+    assert(HASH_BYTE_SIZE == 32, "These passport tests only use SHA-256 signatures");
+    assert(pss_salt_len == 0, "PSS salt length must be zero for PKCS#1 v1.5");
 
     let pubkey =
         utils::pack_be_bytes_into_u128s::<SIG_BYTES, (SIG_BYTES + 14) / 15, 15>(pubkey_bytes);
@@ -34,39 +27,6 @@ pub fn verify_signature<let SIG_BYTES: u32, let IS_PSS: u32, let DATA_TO_SIGN_MA
     let params = BigNumParams::new(false, pubkey, redc_param);
 
     let signature = RuntimeBigNum::from_be_bytes(params, sig_bytes);
-
-    if (IS_PSS == 1) {
-        if (HASH_BYTE_SIZE == 20) {
-            let msg_hash = sha1_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha1_pss::<_, SIG_BYTES * 8>(msg_hash, signature, exponent, pss_salt_len)
-        } else if (HASH_BYTE_SIZE == 32) {
-            let msg_hash = sha256_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha256_pss::<_, SIG_BYTES * 8>(msg_hash, signature, exponent, pss_salt_len)
-        } else if (HASH_BYTE_SIZE == 48) {
-            let msg_hash = sha384_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha384_pss::<_, SIG_BYTES * 8>(msg_hash, signature, exponent, pss_salt_len)
-        } else if (HASH_BYTE_SIZE == 64) {
-            let msg_hash = sha512_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha512_pss::<_, SIG_BYTES * 8>(msg_hash, signature, exponent, pss_salt_len)
-        } else {
-            false
-        }
-    } else {
-        if (HASH_BYTE_SIZE == 20) {
-            let msg_hash = sha1_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha1_pkcs1v15::<_, SIG_BYTES * 8>(msg_hash, signature, exponent)
-        } else if (HASH_BYTE_SIZE == 32) {
-            let msg_hash = sha256_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha256_pkcs1v15::<_, SIG_BYTES * 8>(msg_hash, signature, exponent)
-        } else if (HASH_BYTE_SIZE == 48) {
-            let msg_hash = sha384_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha384_pkcs1v15::<_, SIG_BYTES * 8>(msg_hash, signature, exponent)
-        } else if (HASH_BYTE_SIZE == 64) {
-            let msg_hash = sha512_and_check_data_to_sign(data_to_sign, data_to_sign_len);
-            verify_sha512_pkcs1v15::<_, SIG_BYTES * 8>(msg_hash, signature, exponent)
-        } else {
-            false
-        }
-    }
+    let msg_hash = sha256_and_check_data_to_sign(data_to_sign, data_to_sign_len);
+    verify_sha256_pkcs1v15::<_, SIG_BYTES * 8>(msg_hash, signature, exponent)
 }
-
