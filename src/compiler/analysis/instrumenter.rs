@@ -12,8 +12,8 @@ use crate::compiler::{
     },
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA, MemOp, Radix,
-        SeqType, SliceOpDir,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
+        MemOp, Radix, SeqType, SliceOpDir,
     },
 };
 
@@ -106,6 +106,18 @@ pub enum Value {
 }
 
 impl Value {
+    fn bit_mask(bits: usize) -> u128 {
+        assert!(
+            (1..=128).contains(&bits),
+            "invalid integer width for bit mask: {bits}"
+        );
+        if bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
     fn unwrap_witness(&self) -> &Value {
         match self {
             Value::WitnessOf(inner) => inner.as_ref(),
@@ -536,6 +548,116 @@ impl Value {
                 }
             }
             _ => panic!("Cannot sext {:?}", self),
+        }
+    }
+
+    fn spread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> Value {
+        match self {
+            Value::U(bits, v) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    bits
+                );
+                Value::U(bits * 2, ssa_mod::spread_bits(*v, *bits))
+            }
+            Value::I(bits, v) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got i{}",
+                    bits
+                );
+                Value::I(bits * 2, ssa_mod::spread_bits(*v, *bits))
+            }
+            Value::Field(_) => panic!("Spread of field values is unsupported"),
+            Value::WitnessOf(inner) => {
+                if matches!(inner.as_ref(), Value::Unknown(_)) {
+                    instrumenter.record_lookups(256, 1, 1);
+                }
+                Value::WitnessOf(Box::new(inner.spread_op(instrumenter)))
+            }
+            Value::Unknown(ScalarKind::U(bits)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    bits
+                );
+                Value::Unknown(ScalarKind::U(bits * 2))
+            }
+            Value::Unknown(ScalarKind::I(bits)) => {
+                assert!(
+                    *bits <= 64,
+                    "Spread only supports integer widths up to 64 bits, got i{}",
+                    bits
+                );
+                Value::Unknown(ScalarKind::I(bits * 2))
+            }
+            Value::Unknown(ScalarKind::Field) => panic!("Spread of field values is unsupported"),
+            _ => panic!("Cannot spread {:?}", self),
+        }
+    }
+
+    fn unspread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> (Value, Value) {
+        match self {
+            Value::U(bits, v) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    bits
+                );
+                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
+                let half_bits = bits / 2;
+                (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
+            }
+            Value::I(bits, v) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    bits
+                );
+                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
+                let half_bits = bits / 2;
+                (Value::I(half_bits, odd_val), Value::I(half_bits, even_val))
+            }
+            Value::Field(_) => panic!("Unspread of field values is unsupported"),
+            Value::WitnessOf(inner) => {
+                if matches!(inner.as_ref(), Value::Unknown(_)) {
+                    instrumenter.record_constraints(1);
+                }
+                let (odd, even) = inner.unspread_op(instrumenter);
+                (
+                    Value::WitnessOf(Box::new(odd)),
+                    Value::WitnessOf(Box::new(even)),
+                )
+            }
+            Value::Unknown(ScalarKind::U(bits)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    bits
+                );
+                let half_bits = bits / 2;
+                (
+                    Value::Unknown(ScalarKind::U(half_bits)),
+                    Value::Unknown(ScalarKind::U(half_bits)),
+                )
+            }
+            Value::Unknown(ScalarKind::I(bits)) => {
+                assert!(
+                    *bits <= 128 && bits % 2 == 0,
+                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    bits
+                );
+                let half_bits = bits / 2;
+                (
+                    Value::Unknown(ScalarKind::I(half_bits)),
+                    Value::Unknown(ScalarKind::I(half_bits)),
+                )
+            }
+            Value::Unknown(ScalarKind::Field) => {
+                panic!("Unspread of field values is unsupported")
+            }
+            _ => panic!("Cannot unspread {:?}", self),
         }
     }
 
@@ -1156,6 +1278,32 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
+
+    fn spread(&self, instrumenter: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: self
+                .unspecialized
+                .spread_op(instrumenter.get_unspecialized()),
+            specialized: self.specialized.spread_op(instrumenter.get_specialized()),
+        }
+    }
+
+    fn unspread(&self, instrumenter: &mut CostAnalysis) -> (Self, Self) {
+        let (unspec_odd, unspec_even) = self
+            .unspecialized
+            .unspread_op(instrumenter.get_unspecialized());
+        let (spec_odd, spec_even) = self.specialized.unspread_op(instrumenter.get_specialized());
+        (
+            Self {
+                unspecialized: unspec_odd,
+                specialized: spec_odd,
+            },
+            Self {
+                unspecialized: unspec_even,
+                specialized: spec_even,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

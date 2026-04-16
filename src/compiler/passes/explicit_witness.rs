@@ -10,8 +10,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLFunction, HLSSA,
-        Instruction, LookupTarget, OpCode, Radix, SeqType, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
+        OpCode, Radix, SeqType, ValueId,
     },
 };
 
@@ -414,9 +414,12 @@ impl ExplicitWitness {
                             _ => unreachable!(),
                         }
                     }
+                    TypeExpr::U(n) => {
+                        self.gen_witness_bitwise(b, kind, l, r, l_taint, r_taint, n, result);
+                    }
                     _ => {
                         panic!(
-                            "Bitwise {:?} on witness operands is only supported for u1 (bool), got type {:?}",
+                            "Bitwise {:?} on witness operands is only supported for unsigned int, got type {:?}",
                             kind,
                             l_type.strip_witness()
                         );
@@ -593,37 +596,62 @@ impl ExplicitWitness {
                     b.push(instruction);
                     return;
                 }
+                // Cast branches to field for arithmetic (they may be U(n)/I(n))
+                let l_type = function_type_info.get_value_type(l);
+                let r_type = function_type_info.get_value_type(r);
+                let l_field = if l_type.strip_witness().is_field() {
+                    l
+                } else {
+                    b.cast_to_field(l)
+                };
+                let r_field = if r_type.strip_witness().is_field() {
+                    r
+                } else {
+                    b.cast_to_field(r)
+                };
+
                 // If both branches are pure, result is a linear combination
                 // of cond and constants: cond * (l - r) + r. No constraint needed.
                 if !l_taint && !r_taint {
-                    let neg_one = b.field_const(ark_ff::Fp::from(-1));
-                    let neg_r = b.mul(r, neg_one);
-                    let l_sub_r = b.add(l, neg_r);
+                    let l_sub_r = b.sub(l_field, r_field);
                     // cond * (l - r): l_sub_r is a constant, cond is witness
-                    let cond_times_diff = b.mul(l_sub_r, cond);
+                    let cond_field = if function_type_info
+                        .get_value_type(cond)
+                        .strip_witness()
+                        .is_field()
+                    {
+                        cond
+                    } else {
+                        b.cast_to_field(cond)
+                    };
+                    let cond_times_diff = b.mul(l_sub_r, cond_field);
                     // result = cond * (l - r) + r
                     b.push(OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Add,
                         result: res,
                         lhs: cond_times_diff,
-                        rhs: r,
+                        rhs: r_field,
                     });
                     return;
                 }
                 // At least one branch is witness: full lowering with constraint
                 let select_witness = b.select(cond, l, r);
                 let select_plain = b.value_of(select_witness);
+                let select_hint = if l_type.strip_witness().is_field() {
+                    select_plain
+                } else {
+                    b.cast_to_field(select_plain)
+                };
                 b.push(OpCode::WriteWitness {
                     result: Some(res),
-                    value: select_plain,
+                    value: select_hint,
                     pinned: false,
                 });
                 // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                 // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
-                let neg_one = b.field_const(ark_ff::Fp::from(-1));
-                let neg_r = b.mul(r, neg_one);
-                let l_sub_r = b.add(l, neg_r);
-                let res_sub_r = b.add(res, neg_r);
+                let l_sub_r = b.sub(l_field, r_field);
+                let res_field = b.cast_to_field(res);
+                let res_sub_r = b.sub(res_field, r_field);
                 let cond_type = function_type_info.get_value_type(cond);
                 let cond_field = if cond_type.strip_witness().is_field() {
                     cond
@@ -816,6 +844,9 @@ impl ExplicitWitness {
             | OpCode::ValueOf { .. }
             | OpCode::Const { .. } => {
                 b.push(instruction);
+            }
+            OpCode::Spread { .. } | OpCode::Unspread { .. } => {
+                panic!("Unexpected spread opcode in explicit_witness: {instruction:?}");
             }
             OpCode::Guard { condition, inner } => {
                 self.lower_guard(b, function_type_info, condition, *inner);
@@ -1686,6 +1717,153 @@ impl ExplicitWitness {
             });
             b.constrain(result, divisor, a);
         }
+    }
+
+    /// Multi-bit witness And/Or/Xor via spread tables.
+    ///
+    /// Uses the identity: spread(a) + spread(b) = 2*spread(a&b) + spread(a^b)
+    /// Each operand is decomposed into bytes, each byte spread via lookup table,
+    /// then per-byte and/xor are extracted and verified.
+    fn gen_witness_bitwise(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        kind: BinaryArithOpKind,
+        l: ValueId,
+        r: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+        n: usize,
+        result: ValueId,
+    ) {
+        assert!(n % 8 == 0 && n >= 8 && n <= 256);
+        let chunks = n / 8;
+        let one = b.field_const(Field::ONE);
+        let zero = b.field_const(Field::ZERO);
+        let two = b.field_const(Field::from(2));
+        let two_to_8 = b.field_const(Field::from(256u128));
+        let two_to_16 = b.field_const(Field::from(1u128 << 16));
+
+        // Get pure values for hint computation
+        let l_pure = if l_taint { b.value_of(l) } else { l };
+        let r_pure = if r_taint { b.value_of(r) } else { r };
+
+        // Cast operands to field for arithmetic
+        let l_field = b.cast_to_field(l);
+        let r_field = b.cast_to_field(r);
+
+        // Step 1: Byte decomposition + spread for each operand.
+        let (a_pure_bytes, a_spread_word) = self.spread_decompose(b, l_pure, l_field, chunks, one);
+        let (b_pure_bytes, b_spread_word) = self.spread_decompose(b, r_pure, r_field, chunks, one);
+
+        // Step 2: Per-byte witness generation, while reconstructing full-word values.
+        let mut and_word = zero;
+        let mut xor_word = zero;
+        let mut and_spread_word = zero;
+        let mut xor_spread_word = zero;
+        for i in 0..chunks {
+            // Compute pure integer hints for this byte.
+            let a_byte_u8 = b.cast_to(CastTarget::U(8), a_pure_bytes[i]);
+            let b_byte_u8 = b.cast_to(CastTarget::U(8), b_pure_bytes[i]);
+            let and_hint = b.and(a_byte_u8, b_byte_u8);
+            let xor_hint = b.xor(a_byte_u8, b_byte_u8);
+            let (and_byte_wit, and_spread_wit) = self.write_spread_byte_witness(b, and_hint, one);
+            let (xor_byte_wit, xor_spread_wit) = self.write_spread_byte_witness(b, xor_hint, one);
+
+            let shifted_and_word = b.mul(and_word, two_to_8);
+            and_word = b.add(shifted_and_word, and_byte_wit);
+
+            let shifted_xor_word = b.mul(xor_word, two_to_8);
+            xor_word = b.add(shifted_xor_word, xor_byte_wit);
+
+            let shifted_and_spread = b.mul(and_spread_word, two_to_16);
+            and_spread_word = b.add(shifted_and_spread, and_spread_wit);
+
+            let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
+            xor_spread_word = b.add(shifted_xor_spread, xor_spread_wit);
+        }
+
+        let input_spread_sum = b.add(a_spread_word, b_spread_word);
+        let two_and_spread_word = b.mul(two, and_spread_word);
+        let bitwise_spread_sum = b.add(two_and_spread_word, xor_spread_word);
+        b.constrain(one, bitwise_spread_sum, input_spread_sum);
+
+        let result_word = match kind {
+            BinaryArithOpKind::And => and_word,
+            BinaryArithOpKind::Xor => xor_word,
+            BinaryArithOpKind::Or => b.add(and_word, xor_word),
+            _ => unreachable!(),
+        };
+
+        b.push(OpCode::Cast {
+            result,
+            value: result_word,
+            target: CastTarget::U(n),
+        });
+    }
+
+    /// Decompose an operand into bytes and their spreads.
+    /// Returns (pure_bytes, reconstructed_spread) in big-endian order.
+    /// pure_bytes: for use in hint computations (never witness-typed).
+    fn spread_decompose(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        pure_val: ValueId,
+        field_val: ValueId,
+        chunks: usize,
+        flag: ValueId,
+    ) -> (Vec<ValueId>, ValueId) {
+        let zero = b.field_const(Field::ZERO);
+        let two_to_8 = b.field_const(Field::from(256u128));
+        let two_to_16 = b.field_const(Field::from(1u128 << 16));
+
+        // Decompose into bytes via ToRadix (big-endian) using pure value
+        let pure_field = b.cast_to_field(pure_val);
+        let bytes_arr = b.to_radix(pure_field, Radix::Bytes, Endianness::Big, chunks);
+
+        let mut pure_bytes = Vec::with_capacity(chunks);
+
+        // Always use witness path: write bytes as witnesses and verify via spread lookups.
+        // Even for pure operands we need witnesses so the spread constraint works in R1CS
+        // (ToRadix is hint-only, not available in R1CS).
+        let mut recon_value = zero;
+        let mut recon_spread = zero;
+        for i in 0..chunks {
+            let idx = b.u_const(32, i as u128);
+            let byte_i = b.array_get(bytes_arr, idx);
+            let (byte_wit, spread_wit) = self.write_spread_byte_witness(b, byte_i, flag);
+
+            // Accumulate reconstruction
+            let shifted_value = b.mul(recon_value, two_to_8);
+            recon_value = b.add(shifted_value, byte_wit);
+
+            let shifted_spread = b.mul(recon_spread, two_to_16);
+            recon_spread = b.add(shifted_spread, spread_wit);
+
+            pure_bytes.push(byte_i); // pure integer byte for hints
+        }
+
+        // Constrain reconstruction equals original: flag * (recon - field_val) = 0
+        let diff = b.sub(recon_value, field_val);
+        b.constrain(flag, diff, zero);
+
+        (pure_bytes, recon_spread)
+    }
+
+    fn write_spread_byte_witness(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        byte_value: ValueId,
+        flag: ValueId,
+    ) -> (ValueId, ValueId) {
+        let byte_value_field = b.cast_to_field(byte_value);
+        let byte_wit = b.write_witness(byte_value_field);
+
+        let spread_hint = b.spread(byte_value);
+        let spread_hint_field = b.cast_to_field(spread_hint);
+        let spread_wit = b.write_witness(spread_hint_field);
+        b.lookup_spread(8, byte_wit, spread_wit, flag);
+
+        (byte_wit, spread_wit)
     }
 
     fn ensure_field(

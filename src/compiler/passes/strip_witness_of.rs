@@ -138,7 +138,9 @@ impl StripWitnessOf {
             | OpCode::TupleProj { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
-            | OpCode::Const { .. } => {}
+            | OpCode::Const { .. }
+            | OpCode::Spread { .. }
+            | OpCode::Unspread { .. } => {}
             OpCode::Guard { inner, .. } => {
                 Self::strip_instruction(inner);
             }

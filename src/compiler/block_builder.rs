@@ -432,6 +432,32 @@ pub trait HLEmitter {
         self.emit(OpCode::MemOp { kind, value });
     }
 
+    fn spread(&mut self, value: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::Spread { result: r, value });
+        r
+    }
+
+    fn unspread(&mut self, value: ValueId) -> (ValueId, ValueId) {
+        let r_and = self.fresh_value();
+        let r_xor = self.fresh_value();
+        self.emit(OpCode::Unspread {
+            result_odd: r_and,
+            result_even: r_xor,
+            value,
+        });
+        (r_and, r_xor)
+    }
+
+    fn lookup_spread(&mut self, bits: u8, key: ValueId, result: ValueId, flag: ValueId) {
+        self.emit(OpCode::Lookup {
+            target: LookupTarget::Spread(bits),
+            keys: vec![key],
+            results: vec![result],
+            flag,
+        });
+    }
+
     fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target,

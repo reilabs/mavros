@@ -6,7 +6,10 @@ use crate::compiler::{
         types::TypeInfo,
     },
     ir::r#type::{Type, TypeExpr},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix, SliceOpDir},
+    ssa::{
+        self as ssa_mod, BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix,
+        SliceOpDir,
+    },
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
@@ -44,6 +47,41 @@ pub enum Value {
 }
 
 impl Value {
+    fn bit_mask(bits: usize) -> u128 {
+        assert!(
+            (1..=128).contains(&bits),
+            "invalid integer width for bit mask: {bits}"
+        );
+        if bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
+    fn wrap_unsigned(v: u128, bits: usize) -> u128 {
+        v & Self::bit_mask(bits)
+    }
+
+    fn decode_signed(v: u128, bits: usize) -> i128 {
+        assert!(bits > 0 && bits <= 128, "invalid signed width: {bits}");
+        let masked = Self::wrap_unsigned(v, bits);
+        if bits == 128 {
+            masked as i128
+        } else {
+            let sign_bit = 1u128 << (bits - 1);
+            if masked & sign_bit == 0 {
+                masked as i128
+            } else {
+                (masked as i128) - ((1u128 << bits) as i128)
+            }
+        }
+    }
+
+    fn encode_signed(v: i128, bits: usize) -> u128 {
+        Self::wrap_unsigned(v as u128, bits)
+    }
+
     pub fn add(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs + rhs),
@@ -257,6 +295,7 @@ pub struct LookupConstraint {
 pub enum Table {
     Range(u64),
     OfElems(Vec<LC>),
+    Spread(u8),
 }
 
 #[derive(Clone)]
@@ -304,7 +343,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     match self.tables[0] {
                         Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) => panic!("unsupported"),
+                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
                 let els = keys
@@ -328,7 +367,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     match self.tables[0] {
                         Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) => panic!("unsupported"),
+                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
                 let els = keys
@@ -340,6 +379,30 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     table_id: 0,
                     elements: els,
                     flag: flag_lc.clone(),
+                });
+            }
+            super::ssa::LookupTarget::Spread(bits) => {
+                let table_id = {
+                    let existing = self.tables.iter().position(|t| match t {
+                        Table::Spread(n) => *n == bits,
+                        _ => false,
+                    });
+                    if let Some(idx) = existing {
+                        idx
+                    } else {
+                        self.tables.push(Table::Spread(bits));
+                        self.tables.len() - 1
+                    }
+                };
+                let els = keys
+                    .into_iter()
+                    .chain(results.into_iter())
+                    .map(|e| e.expect_linear_combination())
+                    .collect();
+                self.lookups.push(LookupConstraint {
+                    table_id,
+                    elements: els,
+                    flag: flag_lc,
                 });
             }
             super::ssa::LookupTarget::Array(arr) => {
@@ -423,150 +486,74 @@ impl symbolic_executor::Value<R1CGen> for Value {
         _ctx: &mut R1CGen,
     ) -> Self {
         match &out_type.strip_witness().expr {
-            TypeExpr::U(1) => {
-                let a = self.expect_u1();
-                let b = b.expect_u1();
+            TypeExpr::U(bits) => {
+                assert!(
+                    *bits > 0 && *bits <= 128,
+                    "Unsupported unsigned integer size in R1CS arith: u{bits}"
+                );
+                assert!(
+                    matches!((self, b), (Value::Const(_), Value::Const(_))),
+                    "Non-constant integer {:?} is not supported in R1CS arith",
+                    binary_arith_op_kind
+                );
+                let a = Self::wrap_unsigned(self.expect_u128(), *bits);
+                let b = Self::wrap_unsigned(b.expect_u128(), *bits);
+                let shift = b as u32;
                 let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => (a as u32) + (b as u32),
-                    BinaryArithOpKind::Sub => (a as u32) - (b as u32),
-                    BinaryArithOpKind::Mul => (a as u32) * (b as u32),
-                    BinaryArithOpKind::Div => (a as u32) / (b as u32),
-                    BinaryArithOpKind::Mod => (a as u32) % (b as u32),
-                    BinaryArithOpKind::And => (a & b) as u32,
-                    BinaryArithOpKind::Or => (a | b) as u32,
-                    BinaryArithOpKind::Xor => (a ^ b) as u32,
-                    BinaryArithOpKind::Shl => ((a as u32) << (b as u32)) as u32,
-                    BinaryArithOpKind::Shr => ((a as u32) >> (b as u32)) as u32,
-                };
-                Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::U(8) => {
-                let a = self.expect_u8();
-                let b = b.expect_u8();
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => (a + b) as u32,
-                    BinaryArithOpKind::Sub => (a - b) as u32,
-                    BinaryArithOpKind::Mul => (a * b) as u32,
-                    BinaryArithOpKind::Div => (a / b) as u32,
-                    BinaryArithOpKind::Mod => (a % b) as u32,
-                    BinaryArithOpKind::And => (a & b) as u32,
-                    BinaryArithOpKind::Or => (a | b) as u32,
-                    BinaryArithOpKind::Xor => (a ^ b) as u32,
-                    BinaryArithOpKind::Shl => ((a as u32) << (b as u32)),
-                    BinaryArithOpKind::Shr => ((a >> b) as u32),
-                };
-                Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::U(32) => {
-                let a = self.expect_u32();
-                let b = b.expect_u32();
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => a + b,
-                    BinaryArithOpKind::Sub => a - b,
-                    BinaryArithOpKind::Mul => a * b,
+                    BinaryArithOpKind::Add => a.wrapping_add(b),
+                    BinaryArithOpKind::Sub => a.wrapping_sub(b),
+                    BinaryArithOpKind::Mul => a.wrapping_mul(b),
                     BinaryArithOpKind::Div => a / b,
                     BinaryArithOpKind::Mod => a % b,
                     BinaryArithOpKind::And => a & b,
                     BinaryArithOpKind::Or => a | b,
                     BinaryArithOpKind::Xor => a ^ b,
-                    BinaryArithOpKind::Shl => a << b,
-                    BinaryArithOpKind::Shr => a >> b,
+                    BinaryArithOpKind::Shl => a.wrapping_shl(shift),
+                    BinaryArithOpKind::Shr => a.wrapping_shr(shift),
                 };
-                Value::Const(ark_bn254::Fr::from(result))
+                Value::Const(ark_bn254::Fr::from(Self::wrap_unsigned(result, *bits)))
             }
-            TypeExpr::U(64) => {
-                let a = self.expect_u64();
-                let b = b.expect_u64();
+            TypeExpr::I(bits) => {
+                assert!(
+                    *bits > 0 && *bits <= 128,
+                    "Unsupported signed integer size in R1CS arith: i{bits}"
+                );
+                assert!(
+                    matches!((self, b), (Value::Const(_), Value::Const(_))),
+                    "Non-constant integer {:?} is not supported in R1CS arith",
+                    binary_arith_op_kind
+                );
+                let a = Self::decode_signed(self.expect_u128(), *bits);
+                let b = Self::decode_signed(b.expect_u128(), *bits);
+                let b_bits = Self::wrap_unsigned(b as u128, *bits) as u32;
                 let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => a + b,
-                    BinaryArithOpKind::Sub => a - b,
-                    BinaryArithOpKind::Mul => a * b,
-                    BinaryArithOpKind::Div => a / b,
-                    BinaryArithOpKind::Mod => a % b,
-                    BinaryArithOpKind::And => a & b,
-                    BinaryArithOpKind::Or => a | b,
-                    BinaryArithOpKind::Xor => a ^ b,
-                    BinaryArithOpKind::Shl => a << b,
-                    BinaryArithOpKind::Shr => a >> b,
-                };
-                Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::U(128) => {
-                let a = self.expect_u128();
-                let b = b.expect_u128();
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => a + b,
-                    BinaryArithOpKind::Sub => a - b,
-                    BinaryArithOpKind::Mul => a * b,
-                    BinaryArithOpKind::Div => a / b,
-                    BinaryArithOpKind::Mod => a % b,
-                    BinaryArithOpKind::And => a & b,
-                    BinaryArithOpKind::Or => a | b,
-                    BinaryArithOpKind::Xor => a ^ b,
-                    BinaryArithOpKind::Shl => a << b,
-                    BinaryArithOpKind::Shr => a >> b,
-                };
-                Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::U(size) => {
-                panic!("Unsupported unsigned integer size in R1CS arith: u{size}")
-            }
-            TypeExpr::I(8) => {
-                let a = self.expect_u8() as i8;
-                let b_val = b.expect_u8() as i8;
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => (a.wrapping_add(b_val) as u8) as u32,
-                    BinaryArithOpKind::Sub => (a.wrapping_sub(b_val) as u8) as u32,
-                    BinaryArithOpKind::Mul => (a.wrapping_mul(b_val) as u8) as u32,
-                    BinaryArithOpKind::And => ((a as u8) & (b_val as u8)) as u32,
-                    BinaryArithOpKind::Or => ((a as u8) | (b_val as u8)) as u32,
-                    BinaryArithOpKind::Xor => ((a as u8) ^ (b_val as u8)) as u32,
-                    BinaryArithOpKind::Shl => ((a as u8) << (b_val as u8)) as u32,
-                    BinaryArithOpKind::Shr => ((a as u8) >> (b_val as u8)) as u32,
+                    BinaryArithOpKind::Add => Self::encode_signed(a.wrapping_add(b), *bits),
+                    BinaryArithOpKind::Sub => Self::encode_signed(a.wrapping_sub(b), *bits),
+                    BinaryArithOpKind::Mul => Self::encode_signed(a.wrapping_mul(b), *bits),
+                    BinaryArithOpKind::And => {
+                        Self::wrap_unsigned(a as u128, *bits)
+                            & Self::wrap_unsigned(b as u128, *bits)
+                    }
+                    BinaryArithOpKind::Or => {
+                        Self::wrap_unsigned(a as u128, *bits)
+                            | Self::wrap_unsigned(b as u128, *bits)
+                    }
+                    BinaryArithOpKind::Xor => {
+                        Self::wrap_unsigned(a as u128, *bits)
+                            ^ Self::wrap_unsigned(b as u128, *bits)
+                    }
+                    BinaryArithOpKind::Shl => {
+                        let raw = Self::wrap_unsigned(a as u128, *bits).wrapping_shl(b_bits);
+                        Self::wrap_unsigned(raw, *bits)
+                    }
+                    BinaryArithOpKind::Shr => {
+                        Self::wrap_unsigned(a as u128, *bits).wrapping_shr(b_bits)
+                    }
                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
                         panic!("Signed div/mod not yet implemented")
                     }
                 };
                 Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::I(32) => {
-                let a = self.expect_u32() as i32;
-                let b_val = b.expect_u32() as i32;
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => a.wrapping_add(b_val) as u32,
-                    BinaryArithOpKind::Sub => a.wrapping_sub(b_val) as u32,
-                    BinaryArithOpKind::Mul => a.wrapping_mul(b_val) as u32,
-                    BinaryArithOpKind::And => (a as u32) & (b_val as u32),
-                    BinaryArithOpKind::Or => (a as u32) | (b_val as u32),
-                    BinaryArithOpKind::Xor => (a as u32) ^ (b_val as u32),
-                    BinaryArithOpKind::Shl => ((a as u32) << (b_val as u32)),
-                    BinaryArithOpKind::Shr => ((a as u32) >> (b_val as u32)),
-                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
-                        panic!("Signed div/mod not yet implemented")
-                    }
-                };
-                Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::I(64) => {
-                let a = self.expect_u64() as i64;
-                let b_val = b.expect_u64() as i64;
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => a.wrapping_add(b_val) as u64,
-                    BinaryArithOpKind::Sub => a.wrapping_sub(b_val) as u64,
-                    BinaryArithOpKind::Mul => a.wrapping_mul(b_val) as u64,
-                    BinaryArithOpKind::And => (a as u64) & (b_val as u64),
-                    BinaryArithOpKind::Or => (a as u64) | (b_val as u64),
-                    BinaryArithOpKind::Xor => (a as u64) ^ (b_val as u64),
-                    BinaryArithOpKind::Shl => ((a as u64) << (b_val as u64)),
-                    BinaryArithOpKind::Shr => ((a as u64) >> (b_val as u64)),
-                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
-                        panic!("Signed div/mod not yet implemented")
-                    }
-                };
-                Value::Const(ark_bn254::Fr::from(result))
-            }
-            TypeExpr::I(size) => {
-                panic!("Unsupported signed integer size in R1CS arith: i{size}")
             }
             TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind {
                 BinaryArithOpKind::Add => self.add(b),
@@ -800,6 +787,23 @@ impl symbolic_executor::Value<R1CGen> for Value {
     ) -> Self {
         todo!("ToRadix R1CS generation not yet implemented")
     }
+
+    fn spread(&self, _ctx: &mut R1CGen) -> Self {
+        let val = self.expect_constant();
+        let v: u128 = val.into_bigint().as_ref()[0] as u128;
+        let spread_val = ssa_mod::spread_bits(v, 32);
+        Value::Const(ark_bn254::Fr::from(spread_val))
+    }
+
+    fn unspread(&self, _ctx: &mut R1CGen) -> (Self, Self) {
+        let val = self.expect_constant();
+        let v: u128 = val.into_bigint().as_ref()[0] as u128;
+        let (odd_val, even_val) = ssa_mod::unspread_bits(v, 64);
+        (
+            Value::Const(ark_bn254::Fr::from(odd_val)),
+            Value::Const(ark_bn254::Fr::from(even_val)),
+        )
+    }
 }
 
 impl R1CGen {
@@ -911,6 +915,17 @@ impl R1CGen {
                     max_width = max_width.max(2);
                     witness_layout.multiplicities_size += len;
                 }
+                Table::Spread(bits) => {
+                    let len = 1usize << bits;
+                    table_infos.push(TableInfo {
+                        multiplicities_witness_off: witness_layout.multiplicities_size
+                            + witness_layout.algebraic_size,
+                        table,
+                        sum_constraint_idx: 0,
+                    });
+                    max_width = max_width.max(2); // key + spread_value
+                    witness_layout.multiplicities_size += len;
+                }
             }
         }
 
@@ -990,6 +1005,40 @@ impl R1CGen {
                         a: sum_lhs,
                         b: vec![(0, ark_bn254::Fr::ONE)],
                         c: vec![], // this is prepared for the looked up values to come into
+                    });
+                    table_info.sum_constraint_idx = result.len() - 1;
+                }
+                Table::Spread(bits) => {
+                    // Spread table: for each entry i in 0..2^bits, value = spread(i)
+                    // Width = 2 (key=i, value=spread(i)), same structure as OfElems
+                    let len = 1usize << bits;
+                    let mut sum_lhs: LC = vec![];
+                    for i in 0..len {
+                        let spread_val = ssa_mod::spread_bits(i as u128, 32);
+                        let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
+                        let x = witness_layout.next_table_data();
+                        let y = witness_layout.next_table_data();
+                        let m = table_info.multiplicities_witness_off + i;
+                        result.push(R1C {
+                            a: vec![(beta, crate::compiler::Field::ONE)],
+                            b: v,
+                            c: vec![(x, -crate::compiler::Field::ONE)],
+                        });
+                        result.push(R1C {
+                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            b: vec![
+                                (alpha, ark_bn254::Fr::ONE),
+                                (0, -crate::compiler::Field::from(i as u64)),
+                                (x, -crate::compiler::Field::ONE),
+                            ],
+                            c: vec![(m, crate::compiler::Field::ONE)],
+                        });
+                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                    }
+                    result.push(R1C {
+                        a: sum_lhs,
+                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        c: vec![],
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
