@@ -76,6 +76,12 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
+    fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
+        let r = self.next_free;
+        self.next_free += bytecode::LIMBS;
+        bytecode::FramePosition(r)
+    }
+
     fn alloc_ptr(&mut self, value: ValueId) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
@@ -630,9 +636,21 @@ impl CodeGen {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
                     if matches!(tgt, ssa::CastTarget::WitnessOf) {
+                        // PureToWitnessRef reads a Field (4 u64s) from the frame.
+                        // If the source is not Field-sized, cast to Field first.
+                        let field_pos = if l_type.expr != TypeExpr::Field {
+                            let tmp = layouter.alloc_temp_field();
+                            emitter.push_op(bytecode::OpCode::CastU64ToField {
+                                res: tmp,
+                                a: layouter.get_value(*v),
+                            });
+                            tmp
+                        } else {
+                            layouter.get_value(*v)
+                        };
                         emitter.push_op(bytecode::OpCode::PureToWitnessRef {
                             res: layouter.alloc_ptr(*r),
-                            v: layouter.get_value(*v),
+                            v: field_pos,
                         });
                         continue;
                     }
@@ -953,9 +971,21 @@ impl CodeGen {
                     const_val: c,
                     var: v,
                 } => {
+                    // MulConst reads coeff as Field (4 u64s). Cast if needed.
+                    let c_type = type_info.get_value_type(*c);
+                    let coeff_pos = if c_type.expr != TypeExpr::Field {
+                        let tmp = layouter.alloc_temp_field();
+                        emitter.push_op(bytecode::OpCode::CastU64ToField {
+                            res: tmp,
+                            a: layouter.get_value(*c),
+                        });
+                        tmp
+                    } else {
+                        layouter.get_value(*c)
+                    };
                     emitter.push_op(bytecode::OpCode::MulConst {
                         res: layouter.alloc_ptr(*r),
-                        coeff: layouter.get_value(*c),
+                        coeff: coeff_pos,
                         v: layouter.get_value(*v),
                     });
                 }

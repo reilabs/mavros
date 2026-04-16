@@ -50,6 +50,7 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct FramePosition(pub usize);
 
 impl FramePosition {
