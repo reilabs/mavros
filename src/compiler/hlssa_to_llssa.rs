@@ -1063,11 +1063,7 @@ fn lower_rc_drop(
 
 /// Ensure a value is Field-sized ({i64, i64, i64, i64}).
 /// Non-Field integer types are zero-extended to i64 and packed into limbs.
-fn ensure_field_sized(
-    e: &mut LLBlockEmitter<'_>,
-    ll_val: ValueId,
-    source_type: &Type,
-) -> ValueId {
+fn ensure_field_sized(e: &mut LLBlockEmitter<'_>, ll_val: ValueId, source_type: &Type) -> ValueId {
     if source_type.is_field() || source_type.is_witness_of() {
         return ll_val;
     }
@@ -1075,10 +1071,7 @@ fn ensure_field_sized(
     let val64 = match &source_type.expr {
         TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => e.zext(ll_val, 64),
         TypeExpr::U(64) | TypeExpr::I(64) => ll_val,
-        _ => panic!(
-            "ensure_field_sized: unsupported type: {}",
-            source_type
-        ),
+        _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
     };
     let zero = e.int_const(64, 0);
     let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
