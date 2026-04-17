@@ -254,6 +254,7 @@ impl Driver {
         .run(&mut ssa);
 
         let flow_analysis = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow_analysis);
 
         if self.draw_cfg {
             flow_analysis.generate_images(
@@ -264,7 +265,8 @@ impl Driver {
         }
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis));
+        self.monomorphized_ssa =
+            Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis, &type_info));
 
         fs::write(
             self.get_debug_output_dir().join("untainted_ssa.txt"),

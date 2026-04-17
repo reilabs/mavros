@@ -21,15 +21,9 @@ impl WitnessCastInsertion {
 
     #[instrument(skip_all, name = "WitnessCastInsertion::run")]
     pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
-        // Sub-pass 1: Bake WitnessOf into SSA types (prepare_rebuild pattern)
-        let ssa = self.apply_types(ssa, witness_inference);
-
-        // Compute type info for cast insertion
-        let flow_analysis = FlowAnalysis::run(&ssa);
-        let type_info = Types::new().run(&ssa, &flow_analysis);
-
-        // Sub-pass 2: Insert casts at typed-slot boundaries (take_blocks/put_blocks pattern)
-        self.insert_casts(ssa, &type_info)
+        // Bake WitnessOf into SSA types (prepare_rebuild pattern).
+        // Cast insertion is now handled by UntaintControlFlow.
+        self.apply_types(ssa, witness_inference)
     }
 
     // -----------------------------------------------------------------------
