@@ -497,58 +497,13 @@ impl ExplicitWitness {
                 index: idx,
             } => {
                 let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_type = function_type_info.get_value_type(idx);
-                let idx_taint = idx_type.is_witness_of();
+                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
                 assert!(!arr_taint);
-                match idx_taint {
-                    false => {
-                        b.push(instruction);
-                    }
-                    true => {
-                        let back_cast_target = match &idx_type.expr {
-                            TypeExpr::U(s) => CastTarget::U(*s),
-                            TypeExpr::I(s) => CastTarget::I(*s),
-                            TypeExpr::Field => CastTarget::Field,
-                            TypeExpr::WitnessOf(_) => CastTarget::Field,
-                            TypeExpr::Array(_, _) => {
-                                todo!("array types in witnessed array reads")
-                            }
-                            TypeExpr::Slice(_) => {
-                                todo!("slice types in witnessed array reads")
-                            }
-                            TypeExpr::Ref(_) => {
-                                todo!("ref types in witnessed array reads")
-                            }
-                            TypeExpr::Tuple(_elements) => {
-                                todo!("Tuples not supported yet")
-                            }
-                            TypeExpr::Function => {
-                                panic!("Function type not expected in witnessed array reads")
-                            }
-                        };
-
-                        let pure_idx = b.value_of(idx);
-                        let mut r_pure_val = b.array_get(arr, pure_idx);
-
-                        let elem_is_witness = function_type_info
-                            .get_value_type(arr)
-                            .get_array_element()
-                            .is_witness_of();
-                        if elem_is_witness {
-                            r_pure_val = b.value_of(r_pure_val);
-                        }
-
-                        let idx_field = b.cast_to_field(idx);
-                        let r_wit_field = b.cast_to_field(r_pure_val);
-                        let r_wit = b.write_witness(r_wit_field);
-                        b.push(OpCode::Cast {
-                            result,
-                            value: r_wit,
-                            target: back_cast_target,
-                        });
-                        let one = b.field_const(Field::from(1));
-                        b.lookup_arr(arr, idx_field, r_wit, one);
-                    }
+                if !idx_taint {
+                    b.push(instruction);
+                } else {
+                    let flag = b.field_const(Field::from(1));
+                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
                 }
             }
             OpCode::ArraySet {
@@ -637,16 +592,39 @@ impl ExplicitWitness {
                 // At least one branch is witness: full lowering with constraint
                 let select_witness = b.select(cond, l, r);
                 let select_plain = b.value_of(select_witness);
-                let select_hint = if l_type.strip_witness().is_field() {
+                let is_field = l_type.strip_witness().is_field();
+                let select_hint = if is_field {
                     select_plain
                 } else {
                     b.cast_to_field(select_plain)
                 };
-                b.push(OpCode::WriteWitness {
-                    result: Some(res),
-                    value: select_hint,
-                    pinned: false,
-                });
+                if is_field {
+                    b.push(OpCode::WriteWitness {
+                        result: Some(res),
+                        value: select_hint,
+                        pinned: false,
+                    });
+                } else {
+                    // WriteWitness value is Field, but res must keep its original
+                    // type (e.g. u32) for downstream consumers like MkSeq.
+                    // Use a fresh ID for the WriteWitness result, then cast back.
+                    let ww_res = b.fresh_value();
+                    b.push(OpCode::WriteWitness {
+                        result: Some(ww_res),
+                        value: select_hint,
+                        pinned: false,
+                    });
+                    let cast_target = match l_type.strip_witness().expr {
+                        TypeExpr::U(n) => CastTarget::U(n),
+                        TypeExpr::I(n) => CastTarget::I(n),
+                        _ => unreachable!("non-field scalar must be U or I"),
+                    };
+                    b.push(OpCode::Cast {
+                        result: res,
+                        value: ww_res,
+                        target: cast_target,
+                    });
+                }
                 // Goal is to assert 0 = cond * l + (1 - cond) * r - res
                 // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
                 let l_sub_r = b.sub(l_field, r_field);
@@ -1059,9 +1037,31 @@ impl ExplicitWitness {
                     _ => unreachable!("DivMod on non-numeric type: {:?}", l_type),
                 }
             }
-            OpCode::Cast { .. } | OpCode::Const { .. } => {
-                // Pure computations — no constraints. Emit unconditionally.
+            OpCode::Cast { .. }
+            | OpCode::Const { .. }
+            | OpCode::MkSeq { .. }
+            | OpCode::MkTuple { .. }
+            | OpCode::TupleProj { .. } => {
+                // Pure data construction/access — no constraints. Emit unconditionally.
                 b.push(inner);
+            }
+            OpCode::ArrayGet {
+                result,
+                array: arr,
+                index: idx,
+            } => {
+                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
+                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
+                assert!(!arr_taint);
+                if !idx_taint {
+                    b.push(inner);
+                } else {
+                    let flag = self.ensure_field(b, function_type_info, condition);
+                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
+                }
+            }
+            OpCode::ArraySet { .. } => {
+                panic!("ArraySet inside Guard not supported yet: {:?}", inner);
             }
             OpCode::Rangecheck { value, max_bits } => {
                 // Guard(cond, Rangecheck(value, max_bits)) → conditional rangecheck
@@ -1864,6 +1864,62 @@ impl ExplicitWitness {
         b.lookup_spread(8, byte_wit, spread_wit, flag);
 
         (byte_wit, spread_wit)
+    }
+
+    /// Lower a witness-indexed ArrayGet into a hint + lookup constraint.
+    /// `flag` is the lookup flag: `1` unconditionally, or the guard condition.
+    fn gen_witness_array_get(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        arr: ValueId,
+        idx: ValueId,
+        result: ValueId,
+        flag: ValueId,
+    ) {
+        let idx_type = function_type_info.get_value_type(idx);
+        let back_cast_target = match &idx_type.expr {
+            TypeExpr::U(s) => CastTarget::U(*s),
+            TypeExpr::I(s) => CastTarget::I(*s),
+            TypeExpr::Field => CastTarget::Field,
+            TypeExpr::WitnessOf(_) => CastTarget::Field,
+            TypeExpr::Array(_, _) => {
+                todo!("array types in witnessed array reads")
+            }
+            TypeExpr::Slice(_) => {
+                todo!("slice types in witnessed array reads")
+            }
+            TypeExpr::Ref(_) => {
+                todo!("ref types in witnessed array reads")
+            }
+            TypeExpr::Tuple(_elements) => {
+                todo!("Tuples not supported yet")
+            }
+            TypeExpr::Function => {
+                panic!("Function type not expected in witnessed array reads")
+            }
+        };
+
+        let pure_idx = b.value_of(idx);
+        let mut r_pure_val = b.array_get(arr, pure_idx);
+
+        let elem_is_witness = function_type_info
+            .get_value_type(arr)
+            .get_array_element()
+            .is_witness_of();
+        if elem_is_witness {
+            r_pure_val = b.value_of(r_pure_val);
+        }
+
+        let idx_field = b.cast_to_field(idx);
+        let r_wit_field = b.cast_to_field(r_pure_val);
+        let r_wit = b.write_witness(r_wit_field);
+        b.push(OpCode::Cast {
+            result,
+            value: r_wit,
+            target: back_cast_target,
+        });
+        b.lookup_arr(arr, idx_field, r_wit, flag);
     }
 
     fn ensure_field(

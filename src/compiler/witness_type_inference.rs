@@ -812,8 +812,7 @@ impl WitnessTypeInference {
                             .collect();
                         for param_id in merge_params {
                             let existing = value_wt.get(&param_id).unwrap();
-                            let joined = existing
-                                .with_toplevel_info(existing.toplevel_info().join(cond_toplevel));
+                            let joined = existing.with_witness_in_leaves(cond_toplevel);
                             value_wt.insert(param_id, joined);
                         }
 

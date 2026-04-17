@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use tracing::{Level, instrument};
 
 use crate::compiler::{
+    block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
+        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode, SeqType,
         Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
@@ -197,24 +198,6 @@ impl UntaintControlFlow {
                                 // We remove the parameters from the merge block – they will be un-phi-fied
                                 let merge_params = function.get_block_mut(merge).take_parameters();
 
-                                for (_, typ) in &merge_params {
-                                    match typ {
-                                        Type {
-                                            expr: TypeExpr::Array(_, _),
-                                            ..
-                                        } => {
-                                            panic!("TODO: Witness array not supported yet")
-                                        }
-                                        Type {
-                                            expr: TypeExpr::Ref(_),
-                                            ..
-                                        } => {
-                                            panic!("TODO: Witness ref not supported yet")
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
                                 let args_passed_from_lhs = match function
                                     .get_block_mut(out_true_block)
                                     .take_terminator()
@@ -257,23 +240,31 @@ impl UntaintControlFlow {
                                     .set_terminator(Terminator::Jmp(merge, vec![]));
 
                                 if args_passed_from_lhs.len() > 0 {
-                                    for ((res, _), (lhs, rhs)) in merge_params.iter().zip(
-                                        args_passed_from_lhs
-                                            .iter()
-                                            .zip(args_passed_from_rhs.iter()),
-                                    ) {
-                                        // Strip WitnessOf casts from branches — the Select
-                                        // typing rule derives WitnessOf from the condition.
-                                        let lhs = witness_cast_strip.get(lhs).unwrap_or(lhs);
-                                        let rhs = witness_cast_strip.get(rhs).unwrap_or(rhs);
-                                        function.get_block_mut(merger_block).push_instruction(
-                                            OpCode::Select {
-                                                result: *res,
+                                    let mut instrs = Vec::new();
+                                    {
+                                        let mut builder =
+                                            HLInstrBuilder::new(function, &mut instrs);
+                                        for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
+                                            args_passed_from_lhs
+                                                .iter()
+                                                .zip(args_passed_from_rhs.iter()),
+                                        ) {
+                                            let lhs = *witness_cast_strip.get(lhs).unwrap_or(lhs);
+                                            let rhs = *witness_cast_strip.get(rhs).unwrap_or(rhs);
+                                            emit_recursive_select(
+                                                &mut builder,
                                                 cond,
-                                                if_t: *lhs,
-                                                if_f: *rhs,
-                                            },
-                                        );
+                                                lhs,
+                                                rhs,
+                                                Some(*res),
+                                                typ,
+                                            );
+                                        }
+                                    }
+                                    for instr in instrs {
+                                        function
+                                            .get_block_mut(merger_block)
+                                            .push_instruction(instr);
                                     }
                                 }
                             }
@@ -286,5 +277,70 @@ impl UntaintControlFlow {
             block.put_instructions(new_instructions);
             function.put_block(block_id, block);
         }
+    }
+}
+
+/// Recursively emit element-wise selects for compound types (arrays, tuples).
+/// For scalar types, emits a single Select. If `result` is `Some`, uses that
+/// ValueId for the top-level result; otherwise allocates a fresh one.
+/// Returns the ValueId of the result.
+fn emit_recursive_select(
+    builder: &mut HLInstrBuilder<'_>,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    result: Option<ValueId>,
+    typ: &Type,
+) -> ValueId {
+    match &typ.expr {
+        TypeExpr::Array(elem_type, size) => {
+            let mut elems = Vec::with_capacity(*size);
+            for i in 0..*size {
+                let idx = builder.u_const(32, i as u128);
+                let lhs_elem = builder.array_get(lhs, idx);
+                let rhs_elem = builder.array_get(rhs, idx);
+                let selected =
+                    emit_recursive_select(builder, cond, lhs_elem, rhs_elem, None, elem_type);
+                elems.push(selected);
+            }
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::MkSeq {
+                result,
+                elems,
+                seq_type: SeqType::Array(*size),
+                elem_type: *elem_type.clone(),
+            });
+            result
+        }
+        TypeExpr::Tuple(field_types) => {
+            let mut elems = Vec::with_capacity(field_types.len());
+            for (i, field_type) in field_types.iter().enumerate() {
+                let lhs_field = builder.tuple_proj(lhs, i);
+                let rhs_field = builder.tuple_proj(rhs, i);
+                let selected =
+                    emit_recursive_select(builder, cond, lhs_field, rhs_field, None, field_type);
+                elems.push(selected);
+            }
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::MkTuple {
+                result,
+                elems,
+                element_types: field_types.clone(),
+            });
+            result
+        }
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
+        TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
+        TypeExpr::Function => panic!("Witness select on Function type not supported"),
     }
 }
