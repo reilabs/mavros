@@ -1086,11 +1086,71 @@ impl ExplicitWitness {
             | OpCode::Const { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkTuple { .. }
-            | OpCode::ArrayGet { .. }
-            | OpCode::ArraySet { .. }
             | OpCode::TupleProj { .. } => {
                 // Pure data construction/access — no constraints. Emit unconditionally.
                 b.push(inner);
+            }
+            OpCode::ArrayGet {
+                result,
+                array: arr,
+                index: idx,
+            } => {
+                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
+                let idx_type = function_type_info.get_value_type(idx);
+                let idx_taint = idx_type.is_witness_of();
+                assert!(!arr_taint);
+                if !idx_taint {
+                    // Pure index — no constraint needed, emit unconditionally.
+                    b.push(inner);
+                } else {
+                    // Witness index inside a guard — generate conditioned lookup.
+                    let back_cast_target = match &idx_type.expr {
+                        TypeExpr::U(s) => CastTarget::U(*s),
+                        TypeExpr::I(s) => CastTarget::I(*s),
+                        TypeExpr::Field => CastTarget::Field,
+                        TypeExpr::WitnessOf(_) => CastTarget::Field,
+                        TypeExpr::Array(_, _) => {
+                            todo!("array types in witnessed array reads")
+                        }
+                        TypeExpr::Slice(_) => {
+                            todo!("slice types in witnessed array reads")
+                        }
+                        TypeExpr::Ref(_) => {
+                            todo!("ref types in witnessed array reads")
+                        }
+                        TypeExpr::Tuple(_elements) => {
+                            todo!("Tuples not supported yet")
+                        }
+                        TypeExpr::Function => {
+                            panic!("Function type not expected in witnessed array reads")
+                        }
+                    };
+
+                    let pure_idx = b.value_of(idx);
+                    let mut r_pure_val = b.array_get(arr, pure_idx);
+
+                    let elem_is_witness = function_type_info
+                        .get_value_type(arr)
+                        .get_array_element()
+                        .is_witness_of();
+                    if elem_is_witness {
+                        r_pure_val = b.value_of(r_pure_val);
+                    }
+
+                    let idx_field = b.cast_to_field(idx);
+                    let r_wit_field = b.cast_to_field(r_pure_val);
+                    let r_wit = b.write_witness(r_wit_field);
+                    b.push(OpCode::Cast {
+                        result,
+                        value: r_wit,
+                        target: back_cast_target,
+                    });
+                    let cond_field = self.ensure_field(b, function_type_info, condition);
+                    b.lookup_arr(arr, idx_field, r_wit, cond_field);
+                }
+            }
+            OpCode::ArraySet { .. } => {
+                panic!("ArraySet inside Guard not supported yet: {:?}", inner);
             }
             OpCode::Rangecheck { value, max_bits } => {
                 // Guard(cond, Rangecheck(value, max_bits)) → conditional rangecheck
