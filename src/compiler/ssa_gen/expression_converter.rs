@@ -830,7 +830,10 @@ impl<'a> ExpressionConverter<'a> {
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
         if let Some(typ) = index.collection.return_type() {
-            if matches!(typ.as_ref(), noirc_frontend::monomorphization::ast::Type::Reference(_, _)) {
+            if matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            ) {
                 collection = b.block(self.current_block).load(collection);
             }
         }
@@ -848,7 +851,10 @@ impl<'a> ExpressionConverter<'a> {
         let mut value = self.convert_expression(tuple_expr, b).unwrap();
         // If the expression is a reference (e.g. &mut self), load through it first
         if let Some(typ) = tuple_expr.return_type() {
-            if matches!(typ.as_ref(), noirc_frontend::monomorphization::ast::Type::Reference(_, _)) {
+            if matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            ) {
                 value = b.block(self.current_block).load(value);
             }
         }
