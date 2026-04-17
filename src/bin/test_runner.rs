@@ -4,6 +4,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 use cargo_metadata::MetadataCommand;
@@ -1054,12 +1055,48 @@ fn run_parent(output_path: &Path) {
             .expect("Failed to spawn child");
 
         let stdout = child.stdout.take().unwrap();
-        let lines: Vec<String> = BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .collect();
+        let lines_thread = std::thread::spawn(move || -> Vec<String> {
+            BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+                .collect()
+        });
 
-        let _ = child.wait();
+        // Per-test wall-clock cap. Prevents pathological codegen blowups from
+        // stalling the whole suite. Children that exceed this are killed and
+        // their in-progress step is recorded as a timeout (❌) rather than a
+        // crash (💥), so CI can distinguish the two.
+        let timeout = Duration::from_secs(120);
+        let start = Instant::now();
+        let mut timed_out = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        eprintln!(
+                            "  killed {} after {}s (TIMEOUT)",
+                            entry.display_name,
+                            timeout.as_secs()
+                        );
+                        timed_out = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(_) => break,
+            }
+        }
+        let mut lines = lines_thread.join().unwrap_or_default();
+        if timed_out {
+            // Synthesize an `END:<step>:fail` for the in-flight step so
+            // parse_child_output marks it Fail (❌) instead of Crash (💥).
+            if let Some(in_progress) = last_started_without_end(&lines) {
+                lines.push(format!("END:{}:fail", in_progress));
+            }
+        }
         results.push(parse_child_output(&entry.display_name, &lines));
     }
 
@@ -1067,6 +1104,26 @@ fn run_parent(output_path: &Path) {
     fs::write(output_path, &md).expect("Cannot write output file");
     eprintln!("Wrote {}", output_path.display());
     print!("{md}");
+}
+
+/// Returns the name of the most recent step that had a `START:` line but no
+/// corresponding `END:` line — i.e. the step that was still running when the
+/// stream ended. Used to mark the in-flight step as failed on a timeout.
+fn last_started_without_end(lines: &[String]) -> Option<String> {
+    let mut in_flight: Vec<String> = Vec::new();
+    for line in lines {
+        let parts: Vec<&str> = line.split(':').collect();
+        match parts.as_slice() {
+            ["START", key] => in_flight.push((*key).to_string()),
+            ["END", key, ..] => {
+                if let Some(pos) = in_flight.iter().rposition(|k| k == key) {
+                    in_flight.remove(pos);
+                }
+            }
+            _ => {}
+        }
+    }
+    in_flight.pop()
 }
 
 fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
