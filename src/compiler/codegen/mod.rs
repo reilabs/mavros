@@ -98,6 +98,12 @@ impl FrameLayouter {
         }
     }
 
+    fn alloc_scratch(&mut self, count: usize) -> bytecode::FramePosition {
+        let r = self.next_free;
+        self.next_free += count;
+        bytecode::FramePosition(r)
+    }
+
     // This method needs to ensure contiguous storage!
     fn alloc_many_contiguous(&mut self, values: Vec<(ValueId, &Type)>) -> bytecode::FramePosition {
         let r = self.next_free;
@@ -308,62 +314,61 @@ impl CodeGen {
             })
             .max()
             .unwrap_or(0);
-        let scratch_base = layouter.next_free;
-        layouter.next_free += max_loop_scratch;
+        let scratch_base = layouter.alloc_scratch(max_loop_scratch);
 
         for (block_id, block) in function.get_blocks() {
-            let mut block_exit_start: usize = emitter.block_exits[&block_id];
+            let mut exit_instruction_cursor: usize = emitter.block_exits[&block_id];
             match block.get_terminator().unwrap() {
                 Terminator::Jmp(tgt, args) => {
                     if cfg.dominates(*tgt, *block_id) {
                         // Back-edge: copy through scratch to avoid clobbering
-                        let mut offset = 0usize;
+                        let mut scratch_frame_offset = 0isize;
                         for (arg, (_param, tp)) in
                             args.iter().zip(function.get_block(*tgt).get_parameters())
                         {
                             let size = layouter.type_size(tp);
-                            emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                            emitter.code[exit_instruction_cursor] = bytecode::OpCode::MovFrame {
                                 size,
-                                target: bytecode::FramePosition(scratch_base + offset),
+                                target: scratch_base.offset(scratch_frame_offset),
                                 source: layouter.get_value(*arg),
                             };
-                            block_exit_start += 1;
-                            offset += size;
+                            exit_instruction_cursor += 1;
+                            scratch_frame_offset += size as isize;
                         }
-                        let mut offset = 0usize;
+                        let mut scratch_frame_offset = 0isize;
                         for (_arg, (param, tp)) in
                             args.iter().zip(function.get_block(*tgt).get_parameters())
                         {
                             let size = layouter.type_size(tp);
-                            emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                            emitter.code[exit_instruction_cursor] = bytecode::OpCode::MovFrame {
                                 size,
                                 target: layouter.get_value(*param),
-                                source: bytecode::FramePosition(scratch_base + offset),
+                                source: scratch_base.offset(scratch_frame_offset),
                             };
-                            block_exit_start += 1;
-                            offset += size;
+                            exit_instruction_cursor += 1;
+                            scratch_frame_offset += size as isize;
                         }
                     } else {
                         for (arg, (param, tp)) in
                             args.iter().zip(function.get_block(*tgt).get_parameters())
                         {
                             let size = layouter.type_size(tp);
-                            emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
+                            emitter.code[exit_instruction_cursor] = bytecode::OpCode::MovFrame {
                                 size,
                                 target: layouter.get_value(*param),
                                 source: layouter.get_value(*arg),
                             };
-                            block_exit_start += 1;
+                            exit_instruction_cursor += 1;
                         }
                     }
-                    emitter.code[block_exit_start] = bytecode::OpCode::Jmp {
+                    emitter.code[exit_instruction_cursor] = bytecode::OpCode::Jmp {
                         target: bytecode::JumpTarget(
                             *emitter.block_entrances.get(&tgt).unwrap() as isize
                         ),
                     };
                 }
                 Terminator::JmpIf(cond, if_t, if_f) => {
-                    emitter.code[block_exit_start] = bytecode::OpCode::JmpIf {
+                    emitter.code[exit_instruction_cursor] = bytecode::OpCode::JmpIf {
                         cond: layouter.get_value(*cond),
                         if_t: bytecode::JumpTarget(
                             *emitter.block_entrances.get(&if_t).unwrap() as isize
