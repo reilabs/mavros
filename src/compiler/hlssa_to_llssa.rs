@@ -177,11 +177,17 @@ struct AdFunctions {
 /// primitives (tape writes, multiplicity bumps).
 struct LookupFunctions {
     rngchk_8: Option<FunctionId>,
+    drngchk_8_init: Option<FunctionId>,
+    drngchk_8_call: Option<FunctionId>,
 }
 
 impl LookupFunctions {
     fn new() -> Self {
-        Self { rngchk_8: None }
+        Self {
+            rngchk_8: None,
+            drngchk_8_init: None,
+            drngchk_8_call: None,
+        }
     }
 
     fn get_rngchk_8_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
@@ -191,6 +197,20 @@ impl LookupFunctions {
         let id = llssa.add_function("__rngchk_8".to_string());
         self.rngchk_8 = Some(id);
         id
+    }
+
+    /// Ensures both `__drngchk_8_init` and `__drngchk_8_call` are registered
+    /// and returns the `_call` FunctionId (the one that per-lookup lowerings
+    /// invoke). The `_init` is hoisted to the main function prologue.
+    fn get_drngchk_8_call_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.drngchk_8_call {
+            return id;
+        }
+        let init = llssa.add_function("__drngchk_8_ad_init".to_string());
+        let call = llssa.add_function("__drngchk_8_ad_call".to_string());
+        self.drngchk_8_init = Some(init);
+        self.drngchk_8_call = Some(call);
+        call
     }
 }
 
@@ -226,11 +246,54 @@ impl AdFunctions {
 }
 
 // =============================================================================
+// R1CS layout info threaded to lookup helper generators
+// =============================================================================
+
+/// Layout offsets needed to generate code that reads/writes AD buffers and
+/// ad_coeffs at specific positions (e.g. for the rangecheck-8 AD helper).
+///
+/// All offsets are in field elements (not bytes). Witness-side offsets are
+/// absolute indices into the full witness buffer that `out_d{a,b,c}[idx]`
+/// interprets directly.
+#[derive(Clone, Copy, Debug)]
+pub struct R1csLayoutInfo {
+    /// `constraints_layout.tables_data_start()` — first table's y-slot in ad_coeffs.
+    pub tables_cnst_start: usize,
+    /// `witness_layout.tables_data_start()` — first table's y-slot (absolute witness index).
+    pub tables_wit_start: usize,
+    /// `witness_layout.multiplicities_start()` — first table's multiplicities base.
+    pub mults_wit_start: usize,
+    /// `witness_layout.challenges_start()` — absolute index of `alpha` in the witness.
+    pub logup_challenge_off: usize,
+}
+
+// =============================================================================
 // Main entry point
 // =============================================================================
 
-/// Lower an entire HLSSA program to LLSSA.
+/// Lower an entire HLSSA program to LLSSA, without R1CS layout info.
+/// DLookup opcodes will panic if encountered. Use `lower_with_layout` if the
+/// program may contain lookup-related opcodes.
 pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) -> LLSSA {
+    lower_inner(hlssa, flow_analysis, type_info, None)
+}
+
+/// Lower with R1CS layout info so the DLookup helper can be generated.
+pub fn lower_with_layout(
+    hlssa: &HLSSA,
+    flow_analysis: &FlowAnalysis,
+    type_info: &TypeInfo,
+    layout: R1csLayoutInfo,
+) -> LLSSA {
+    lower_inner(hlssa, flow_analysis, type_info, Some(layout))
+}
+
+fn lower_inner(
+    hlssa: &HLSSA,
+    flow_analysis: &FlowAnalysis,
+    type_info: &TypeInfo,
+    layout: Option<R1csLayoutInfo>,
+) -> LLSSA {
     let main_id = hlssa.get_main_id();
     let main_name = hlssa.get_main().get_name().to_string();
     let mut llssa = LLSSA::with_main(main_name);
@@ -270,6 +333,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
             &mut drop_fns,
             &mut ad_fns,
             &mut lookup_fns,
+            layout,
             &hlssa_global_types,
         );
 
@@ -284,7 +348,14 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     generate_all_ad_functions(&mut llssa, &ad_fns);
 
     // Fifth pass: generate lookup helper function bodies
-    generate_all_lookup_functions(&mut llssa, &lookup_fns);
+    generate_all_lookup_functions(&mut llssa, &lookup_fns, layout, &mut ad_fns);
+
+    // Sixth pass: if DLookup was used, hoist a call to __drngchk_8_ad_init
+    // into the prologue of the main function.
+    if let Some(init_fn) = lookup_fns.drngchk_8_init {
+        let main_ll_id = llssa.get_main_id();
+        hoist_init_call_to_main_prologue(&mut llssa, main_ll_id, init_fn);
+    }
 
     llssa
 }
@@ -302,6 +373,7 @@ fn lower_function(
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
+    layout: Option<R1csLayoutInfo>,
     hlssa_global_types: &[Type],
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
@@ -356,6 +428,7 @@ fn lower_function(
                 drop_fns,
                 ad_fns,
                 lookup_fns,
+                layout,
                 hlssa_global_types,
             );
         }
@@ -385,6 +458,7 @@ fn lower_instruction(
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
+    _layout: Option<R1csLayoutInfo>,
     hlssa_global_types: &[Type],
 ) {
     use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
@@ -825,6 +899,29 @@ fn lower_instruction(
         OpCode::Lookup { .. } => {
             panic!(
                 "Unsupported Lookup variant in HLSSA->LLSSA lowering: {:?}",
+                instruction
+            );
+        }
+
+        OpCode::DLookup {
+            target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+            keys,
+            results: _,
+            flag,
+        } => {
+            assert!(
+                keys.len() == 1,
+                "Rangecheck(8) dlookup must have exactly one key"
+            );
+            let ll_val = val_map[&keys[0]];
+            let ll_flag = val_map[flag];
+            let fn_id = lookup_fns.get_drngchk_8_call_fn(llssa);
+            e.call(fn_id, vec![ll_val, ll_flag], 0);
+        }
+
+        OpCode::DLookup { .. } => {
+            panic!(
+                "Unsupported DLookup variant in HLSSA->LLSSA lowering: {:?}",
                 instruction
             );
         }
@@ -1408,11 +1505,35 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
 // =============================================================================
 
 /// Generate all lookup helper function bodies.
-fn generate_all_lookup_functions(llssa: &mut LLSSA, lookup_fns: &LookupFunctions) {
+fn generate_all_lookup_functions(
+    llssa: &mut LLSSA,
+    lookup_fns: &LookupFunctions,
+    layout: Option<R1csLayoutInfo>,
+    ad_fns: &mut AdFunctions,
+) {
     if let Some(id) = lookup_fns.rngchk_8 {
         let func = generate_rngchk_8_function();
         let _old = llssa.take_function(id);
         llssa.put_function(id, func);
+    }
+
+    // AD rangecheck-8 helpers are a pair: init runs once (hoisted to main
+    // prologue) and call runs per DLookup. They both depend on R1CS layout
+    // offsets to bake in the correct absolute witness/constraint positions.
+    if let (Some(init_id), Some(call_id)) =
+        (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call)
+    {
+        let layout =
+            layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
+        let init_fn = generate_drngchk_8_ad_init(layout);
+        let _old = llssa.take_function(init_id);
+        llssa.put_function(init_id, init_fn);
+
+        let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
+        let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
+        let call_fn = generate_drngchk_8_ad_call(layout, bump_db_id, bump_dc_id);
+        let _old = llssa.take_function(call_id);
+        llssa.put_function(call_id, call_fn);
     }
 }
 
@@ -1452,6 +1573,166 @@ fn generate_rngchk_8_function() -> LLFunction {
     }
 
     func
+}
+
+/// Build a Field constant with `lo` as the low u64 limb and 0 for the rest.
+/// Correct for small non-negative values; do NOT use for values > 2^64 - 1.
+fn emit_small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
+    let zero = e.int_const(64, 0);
+    let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, zero, zero, zero]);
+    e.field_from_limbs(limbs)
+}
+
+/// Generate __drngchk_8_ad_init():
+///
+/// Runs the one-time AD initialization for the 8-bit rangecheck LogUp table.
+/// For each i in 0..256 reads one coefficient from the tables section and
+/// bumps `out_da`, `out_db`, `out_dc` at the positions the LogUp argument
+/// requires. After the loop it also bumps `out_db[0] += inv_sum_coeff`.
+///
+/// Matches the first-call branch of `drngchk_8_field` in `vm/src/bytecode.rs`.
+fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
+    let mut func = LLFunction::empty("__drngchk_8_ad_init".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+
+        // inv_sum_coeff = ad_coeffs[tables_cnst_start + 256] — constant across loop.
+        let inv_sum_coeff = e.ad_read_coeff_at(layout.tables_cnst_start + 256);
+
+        // Constants used inside the loop.
+        let tables_wit_start_i32 = e.int_const(32, layout.tables_wit_start as u64);
+        let mults_wit_start_i32 = e.int_const(32, layout.mults_wit_start as u64);
+        let logup_challenge_i32 = e.int_const(32, layout.logup_challenge_off as u64);
+        let wit_zero_i32 = e.int_const(32, 0);
+
+        e.build_counted_loop(256, vec![], |e, i_i64, _| {
+            // i as i32 for witness-index arithmetic.
+            let i_i32 = e.truncate(i_i64, 32);
+
+            // coeff = next_d_coeff_tables()
+            let coeff = e.next_d_coeff_tables();
+
+            // out_da[tables_wit_start + i] += coeff
+            let da_idx = e.int_arith(IntArithOp::Add, tables_wit_start_i32, i_i32);
+            e.ad_write_witness(DMatrix::A, da_idx, coeff);
+
+            // out_db[logup_challenge_off] += coeff
+            e.ad_write_witness(DMatrix::B, logup_challenge_i32, coeff);
+
+            // out_db[0] += (-i_field) * coeff  (i.e. `out_db[0] -= coeff * i`)
+            let i_i64_val = i_i64;
+            let i_field = emit_small_u64_as_field(e, i_i64_val);
+            let zero_i64 = e.int_const(64, 0);
+            let zero_field = emit_small_u64_as_field(e, zero_i64);
+            let minus_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+            e.ad_write_const(DMatrix::B, minus_i_field, coeff);
+            // Nudge out_db[0] itself: ad_write_const writes to out_db[0],
+            // which matches VM behaviour. `wit_zero_i32` isn't used by
+            // ad_write_const; the index argument here is only for the
+            // witness-indexed bumps above.
+            let _ = wit_zero_i32;
+
+            // out_dc[mults_wit_start + i] += coeff
+            let dc_idx = e.int_arith(IntArithOp::Add, mults_wit_start_i32, i_i32);
+            e.ad_write_witness(DMatrix::C, dc_idx, coeff);
+
+            // out_da[tables_wit_start + i] += inv_sum_coeff (second bump)
+            e.ad_write_witness(DMatrix::A, da_idx, inv_sum_coeff);
+
+            vec![]
+        });
+
+        // After the loop: out_db[0] += inv_sum_coeff
+        // Use ad_write_const with const=1 and sensitivity=inv_sum_coeff, so the
+        // runtime computes out_db[0] += 1 * inv_sum_coeff = inv_sum_coeff.
+        let one_i64 = e.int_const(64, 1);
+        let one_field = emit_small_u64_as_field(&mut e, one_i64);
+        e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate __drngchk_8_ad_call(val: AdNode*, flag: AdNode*):
+///
+/// Per-lookup AD work. Reads a fresh `inv_coeff` and `inv_sum_coeff`, allocates
+/// the next lookup-witness offset, and bumps the relevant entries in out_da,
+/// out_db, out_dc plus the AD-dispatched bumps on `val` and `flag`.
+///
+/// Matches the post-init tail of `drngchk_8_field` in `vm/src/bytecode.rs`.
+fn generate_drngchk_8_ad_call(
+    layout: R1csLayoutInfo,
+    bump_db_fn: FunctionId,
+    bump_dc_fn: FunctionId,
+) -> LLFunction {
+    let mut func = LLFunction::empty("__drngchk_8_ad_call".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let val_ptr = e.add_parameter(LLType::Ptr);
+        let flag_ptr = e.add_parameter(LLType::Ptr);
+
+        // inv_coeff: sequential read of the lookups-section cursor.
+        let inv_coeff = e.next_d_coeff_lookups();
+        // inv_sum_coeff: random-access read at tables_cnst_start + 256.
+        let inv_sum_coeff = e.ad_read_coeff_at(layout.tables_cnst_start + 256);
+
+        // current_inv_wit_offset: next absolute witness index for lookup slots.
+        let inv_wit_off = e.ad_next_lookup_wit_off();
+
+        // out_dc[inv_wit_off] += inv_sum_coeff
+        e.ad_write_witness(DMatrix::C, inv_wit_off, inv_sum_coeff);
+        // out_da[inv_wit_off] += inv_coeff
+        e.ad_write_witness(DMatrix::A, inv_wit_off, inv_coeff);
+        // out_db[logup_challenge_off] += inv_coeff
+        let logup_ch_i32 = e.int_const(32, layout.logup_challenge_off as u64);
+        e.ad_write_witness(DMatrix::B, logup_ch_i32, inv_coeff);
+
+        // val.bump_db(-inv_coeff) — AD dispatcher
+        let zero_i64 = e.int_const(64, 0);
+        let zero_field = emit_small_u64_as_field(&mut e, zero_i64);
+        let minus_inv_coeff = e.field_arith(FieldArithOp::Sub, zero_field, inv_coeff);
+        e.call(bump_db_fn, vec![val_ptr, minus_inv_coeff], 0);
+
+        // flag.bump_dc(inv_coeff) — AD dispatcher
+        e.call(bump_dc_fn, vec![flag_ptr, inv_coeff], 0);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Insert a call to `init_fn` at the very start of the main function's entry
+/// block. Used to hoist one-time AD lookup init before any other AD work.
+fn hoist_init_call_to_main_prologue(
+    llssa: &mut LLSSA,
+    main_fn_id: FunctionId,
+    init_fn: FunctionId,
+) {
+    let mut main_fn = llssa.take_function(main_fn_id);
+    let entry_id = main_fn.get_entry_id();
+
+    // Emit the init call (appended to the end of the instruction list) and
+    // then rotate so it becomes the first instruction of the entry block.
+    {
+        let mut e = LLBlockEmitter::new(&mut main_fn, entry_id);
+        let _ = e.call(init_fn, vec![], 0);
+    }
+
+    let entry_block = main_fn.get_block_mut(entry_id);
+    let mut insns = entry_block.take_instructions();
+    if let Some(init_call) = insns.pop() {
+        insns.insert(0, init_call);
+    }
+    entry_block.put_instructions(insns);
+
+    llssa.put_function(main_fn_id, main_fn);
 }
 
 /// Generate __ad_bump_d{a,b,c}(node: Ptr, amount: FieldElem):

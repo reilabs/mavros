@@ -248,8 +248,11 @@ pub unsafe extern "C" fn __field_div(
 //   Offset 0:  out_da       (ptr to dA array, not advanced)
 //   Offset 4:  out_db       (ptr to dB array)
 //   Offset 8:  out_dc       (ptr to dC array)
-//   Offset 12: ad_coeffs    (ptr, advanced on each read)
+//   Offset 12: ad_coeffs    (cursor ptr, advanced by __ad_next_d_coeff)
 //   Offset 16: current_wit_off (i32, next witness index)
+//   Offset 20: ad_coeffs_base   (ptr, immutable; base for random-access reads)
+//   Offset 24: ad_coeffs_tables (cursor ptr, advanced by __ad_next_d_coeff_tables)
+//   Offset 28: ad_coeffs_lookups (cursor ptr, advanced by __ad_next_d_coeff_lookups)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const AD_VM_OUT_DA: usize = 0;
@@ -257,6 +260,10 @@ const AD_VM_OUT_DB: usize = 1;
 const AD_VM_OUT_DC: usize = 2;
 const AD_VM_COEFFS: usize = 3;
 const AD_VM_WIT_OFF: usize = 4;
+const AD_VM_COEFFS_BASE: usize = 5;
+const AD_VM_COEFFS_TABLES: usize = 6;
+const AD_VM_COEFFS_LOOKUPS: usize = 7;
+const AD_VM_LOOKUP_WIT_OFF: usize = 8;
 
 /// Read the next sensitivity coefficient from the AD input tape.
 /// Returns 4 limbs via result pointer (sret convention on wasm32).
@@ -276,6 +283,52 @@ pub unsafe extern "C" fn __ad_next_d_coeff(result_ptr: *mut u64, vm_ptr: *mut u8
     *coeffs_ptr_ptr = coeffs_ptr.add(4);
 }
 
+/// Read the next sensitivity coefficient from the AD tables-section cursor.
+#[no_mangle]
+pub unsafe extern "C" fn __ad_next_d_coeff_tables(result_ptr: *mut u64, vm_ptr: *mut u8) {
+    let coeffs_ptr_ptr = (vm_ptr as *mut *const u64).add(AD_VM_COEFFS_TABLES);
+    let coeffs_ptr = *coeffs_ptr_ptr;
+    let fr = limbs_to_fr(
+        *coeffs_ptr as i64,
+        *coeffs_ptr.add(1) as i64,
+        *coeffs_ptr.add(2) as i64,
+        *coeffs_ptr.add(3) as i64,
+    );
+    write_field(result_ptr, fr);
+    *coeffs_ptr_ptr = coeffs_ptr.add(4);
+}
+
+/// Read the next sensitivity coefficient from the AD lookups-section cursor.
+#[no_mangle]
+pub unsafe extern "C" fn __ad_next_d_coeff_lookups(result_ptr: *mut u64, vm_ptr: *mut u8) {
+    let coeffs_ptr_ptr = (vm_ptr as *mut *const u64).add(AD_VM_COEFFS_LOOKUPS);
+    let coeffs_ptr = *coeffs_ptr_ptr;
+    let fr = limbs_to_fr(
+        *coeffs_ptr as i64,
+        *coeffs_ptr.add(1) as i64,
+        *coeffs_ptr.add(2) as i64,
+        *coeffs_ptr.add(3) as i64,
+    );
+    write_field(result_ptr, fr);
+    *coeffs_ptr_ptr = coeffs_ptr.add(4);
+}
+
+/// Read an AD coefficient at a fixed absolute offset (in field elements).
+/// Does not advance any cursor.
+#[no_mangle]
+pub unsafe extern "C" fn __ad_read_coeff_at(result_ptr: *mut u64, vm_ptr: *mut u8, offset: i32) {
+    let base_ptr_ptr = (vm_ptr as *const *const u64).add(AD_VM_COEFFS_BASE);
+    let base_ptr = *base_ptr_ptr;
+    let slot_ptr = base_ptr.add((offset as usize) * 4);
+    let fr = limbs_to_fr(
+        *slot_ptr as i64,
+        *slot_ptr.add(1) as i64,
+        *slot_ptr.add(2) as i64,
+        *slot_ptr.add(3) as i64,
+    );
+    write_field(result_ptr, fr);
+}
+
 /// Allocate a fresh AD witness index, returns the index as i32.
 #[no_mangle]
 pub unsafe extern "C" fn __ad_fresh_witness_index(vm_ptr: *mut u8) -> i32 {
@@ -283,6 +336,16 @@ pub unsafe extern "C" fn __ad_fresh_witness_index(vm_ptr: *mut u8) -> i32 {
     let index = *wit_off_ptr;
     *wit_off_ptr = index + 1;
     index
+}
+
+/// Return the next absolute witness offset for the LogUp lookup section and
+/// advance the cursor. Used by AD lookup helpers.
+#[no_mangle]
+pub unsafe extern "C" fn __ad_next_lookup_wit_off(vm_ptr: *mut u8) -> i32 {
+    let off_ptr = (vm_ptr as *mut i32).add(AD_VM_LOOKUP_WIT_OFF);
+    let idx = *off_ptr;
+    *off_ptr = idx + 1;
+    idx
 }
 
 /// Helper: read field from memory, add value, write back.

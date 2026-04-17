@@ -467,6 +467,25 @@ pub enum LLOp {
     NextDCoeff {
         result: ValueId,
     },
+    /// Read the next sensitivity coefficient from the AD tables section
+    /// cursor. Result: Struct(FieldElem). The tables cursor is initialized
+    /// to `constraints_layout.tables_data_start()` at AD entry.
+    NextDCoeffTables {
+        result: ValueId,
+    },
+    /// Read the next sensitivity coefficient from the AD lookups section
+    /// cursor. Result: Struct(FieldElem). The lookups cursor is initialized
+    /// to `constraints_layout.lookups_data_start()` at AD entry.
+    NextDCoeffLookups {
+        result: ValueId,
+    },
+    /// Read a sensitivity coefficient from the AD input tape at a compile-time
+    /// absolute offset, without advancing any cursor.
+    /// Result: Struct(FieldElem).
+    ADReadCoeffAt {
+        offset: usize,
+        result: ValueId,
+    },
     /// Accumulate sensitivity into AD output matrix for a constant node.
     /// Computes: out_d[matrix][0] += sensitivity * const_value
     ADWriteConst {
@@ -484,6 +503,11 @@ pub enum LLOp {
     /// Allocate a fresh AD witness node with the next witness index.
     /// Result: Ptr to ADWitnessNode.
     ADFreshWitness {
+        result: ValueId,
+    },
+    /// Return the next absolute witness offset for the LogUp lookup section and
+    /// advance the internal cursor. Result: i32 (witness index into out_d{a,b,c}).
+    ADNextLookupWitOff {
         result: ValueId,
     },
 
@@ -518,7 +542,11 @@ impl Instruction for LLOp {
             | LLOp::NullPtr { .. }
             | LLOp::GlobalAddr { .. }
             | LLOp::NextDCoeff { .. }
+            | LLOp::NextDCoeffTables { .. }
+            | LLOp::NextDCoeffLookups { .. }
+            | LLOp::ADReadCoeffAt { .. }
             | LLOp::ADFreshWitness { .. }
+            | LLOp::ADNextLookupWitOff { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -610,7 +638,11 @@ impl Instruction for LLOp {
             | LLOp::Select { result, .. }
             | LLOp::GlobalAddr { result, .. }
             | LLOp::NextDCoeff { result, .. }
-            | LLOp::ADFreshWitness { result, .. } => vec![result].into_iter(),
+            | LLOp::NextDCoeffTables { result, .. }
+            | LLOp::NextDCoeffLookups { result, .. }
+            | LLOp::ADReadCoeffAt { result, .. }
+            | LLOp::ADFreshWitness { result, .. }
+            | LLOp::ADNextLookupWitOff { result, .. } => vec![result].into_iter(),
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
@@ -636,7 +668,11 @@ impl Instruction for LLOp {
             | LLOp::NullPtr { .. }
             | LLOp::GlobalAddr { .. }
             | LLOp::NextDCoeff { .. }
+            | LLOp::NextDCoeffTables { .. }
+            | LLOp::NextDCoeffLookups { .. }
+            | LLOp::ADReadCoeffAt { .. }
             | LLOp::ADFreshWitness { .. }
+            | LLOp::ADNextLookupWitOff { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -712,7 +748,11 @@ impl Instruction for LLOp {
             | LLOp::NullPtr { result }
             | LLOp::GlobalAddr { result, .. }
             | LLOp::NextDCoeff { result }
-            | LLOp::ADFreshWitness { result } => vec![result].into_iter(),
+            | LLOp::NextDCoeffTables { result }
+            | LLOp::NextDCoeffLookups { result }
+            | LLOp::ADReadCoeffAt { result, .. }
+            | LLOp::ADFreshWitness { result }
+            | LLOp::ADNextLookupWitOff { result } => vec![result].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
 
@@ -998,6 +1038,15 @@ impl Instruction for LLOp {
             LLOp::NextDCoeff { result } => {
                 format!("{} = next_d_coeff", v(*result))
             }
+            LLOp::NextDCoeffTables { result } => {
+                format!("{} = next_d_coeff.tables", v(*result))
+            }
+            LLOp::NextDCoeffLookups { result } => {
+                format!("{} = next_d_coeff.lookups", v(*result))
+            }
+            LLOp::ADReadCoeffAt { offset, result } => {
+                format!("{} = ad_read_coeff_at {}", v(*result), offset)
+            }
             LLOp::ADWriteConst {
                 matrix,
                 const_value,
@@ -1034,6 +1083,9 @@ impl Instruction for LLOp {
             }
             LLOp::ADFreshWitness { result } => {
                 format!("{} = ad_fresh_witness", v(*result))
+            }
+            LLOp::ADNextLookupWitOff { result } => {
+                format!("{} = ad_next_lookup_wit_off", v(*result))
             }
 
             // Lookups

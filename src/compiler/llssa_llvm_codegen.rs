@@ -41,8 +41,19 @@ pub const VM_STRUCT_SIZE: u32 = 32;
 const AD_VM_OUT_DA_OFFSET: u32 = 0;
 const AD_VM_OUT_DB_OFFSET: u32 = 4;
 const AD_VM_OUT_DC_OFFSET: u32 = 8;
+/// Algebraic coeffs cursor — advances on `__ad_next_d_coeff`.
 const AD_VM_COEFFS_OFFSET: u32 = 12;
 const AD_VM_WIT_OFF_OFFSET: u32 = 16;
+/// Immutable base pointer to the AD coeffs array (for random-access reads).
+const AD_VM_COEFFS_BASE_OFFSET: u32 = 20;
+/// Cursor into the tables section of AD coeffs (advances on next_d_coeff.tables).
+const AD_VM_COEFFS_TABLES_OFFSET: u32 = 24;
+/// Cursor into the lookups section of AD coeffs (advances on next_d_coeff.lookups).
+const AD_VM_COEFFS_LOOKUPS_OFFSET: u32 = 28;
+/// Cursor for the next lookup-witness slot (i32 witness index, advances per lookup).
+const AD_VM_LOOKUP_WIT_OFFSET: u32 = 32;
+/// Total size of the wasm32 AD VM struct in bytes.
+pub const AD_VM_STRUCT_SIZE: u32 = 36;
 
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
@@ -71,7 +82,11 @@ pub struct LLVMCodeGen<'ctx> {
     bump_rngchk8_multiplicity_fn: Option<FunctionValue<'ctx>>,
     // AD runtime functions
     ad_next_d_coeff_fn: Option<FunctionValue<'ctx>>,
+    ad_next_d_coeff_tables_fn: Option<FunctionValue<'ctx>>,
+    ad_next_d_coeff_lookups_fn: Option<FunctionValue<'ctx>>,
+    ad_read_coeff_at_fn: Option<FunctionValue<'ctx>>,
     ad_fresh_witness_index_fn: Option<FunctionValue<'ctx>>,
+    ad_next_lookup_wit_off_fn: Option<FunctionValue<'ctx>>,
     ad_accum_da_fn: Option<FunctionValue<'ctx>>,
     ad_accum_db_fn: Option<FunctionValue<'ctx>>,
     ad_accum_dc_fn: Option<FunctionValue<'ctx>>,
@@ -112,7 +127,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             lookup_tape_write_u64_c_fn: None,
             bump_rngchk8_multiplicity_fn: None,
             ad_next_d_coeff_fn: None,
+            ad_next_d_coeff_tables_fn: None,
+            ad_next_d_coeff_lookups_fn: None,
+            ad_read_coeff_at_fn: None,
             ad_fresh_witness_index_fn: None,
+            ad_next_lookup_wit_off_fn: None,
             ad_accum_da_fn: None,
             ad_accum_db_fn: None,
             ad_accum_dc_fn: None,
@@ -237,10 +256,40 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Some(Linkage::External),
         ));
 
+        // __ad_next_d_coeff_tables(vm*) -> FieldElem
+        self.ad_next_d_coeff_tables_fn = Some(self.module.add_function(
+            "__ad_next_d_coeff_tables",
+            ad_next_d_coeff_type,
+            Some(Linkage::External),
+        ));
+
+        // __ad_next_d_coeff_lookups(vm*) -> FieldElem
+        self.ad_next_d_coeff_lookups_fn = Some(self.module.add_function(
+            "__ad_next_d_coeff_lookups",
+            ad_next_d_coeff_type,
+            Some(Linkage::External),
+        ));
+
+        // __ad_read_coeff_at(vm*, offset: i32) -> FieldElem
+        let ad_read_coeff_at_type =
+            field_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
+        self.ad_read_coeff_at_fn = Some(self.module.add_function(
+            "__ad_read_coeff_at",
+            ad_read_coeff_at_type,
+            Some(Linkage::External),
+        ));
+
         // __ad_fresh_witness_index(vm*) -> i32
         let ad_fresh_wit_type = i32_type.fn_type(&[ptr_type.into()], false);
         self.ad_fresh_witness_index_fn = Some(self.module.add_function(
             "__ad_fresh_witness_index",
+            ad_fresh_wit_type,
+            Some(Linkage::External),
+        ));
+
+        // __ad_next_lookup_wit_off(vm*) -> i32
+        self.ad_next_lookup_wit_off_fn = Some(self.module.add_function(
+            "__ad_next_lookup_wit_off",
             ad_fresh_wit_type,
             Some(Linkage::External),
         ));
@@ -1143,6 +1192,56 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.value_map.insert(*result, val);
             }
 
+            LLOp::NextDCoeffTables { result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let ad_fn = self
+                    .ad_next_d_coeff_tables_fn
+                    .expect("__ad_next_d_coeff_tables not declared");
+                let call_result = self
+                    .builder
+                    .build_call(ad_fn, &[vm_ptr.into()], "d_coeff_t")
+                    .unwrap();
+                let val = call_result
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__ad_next_d_coeff_tables should return a value");
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::NextDCoeffLookups { result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let ad_fn = self
+                    .ad_next_d_coeff_lookups_fn
+                    .expect("__ad_next_d_coeff_lookups not declared");
+                let call_result = self
+                    .builder
+                    .build_call(ad_fn, &[vm_ptr.into()], "d_coeff_l")
+                    .unwrap();
+                let val = call_result
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__ad_next_d_coeff_lookups should return a value");
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::ADReadCoeffAt { offset, result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let i32_type = self.context.i32_type();
+                let off_val = i32_type.const_int(*offset as u64, false);
+                let ad_fn = self
+                    .ad_read_coeff_at_fn
+                    .expect("__ad_read_coeff_at not declared");
+                let call_result = self
+                    .builder
+                    .build_call(ad_fn, &[vm_ptr.into(), off_val.into()], "d_coeff_at")
+                    .unwrap();
+                let val = call_result
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__ad_read_coeff_at should return a value");
+                self.value_map.insert(*result, val);
+            }
+
             LLOp::ADFreshWitness { result } => {
                 let vm_ptr = self.vm_ptr.unwrap();
                 let ad_fn = self
@@ -1156,6 +1255,22 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .try_as_basic_value()
                     .left()
                     .expect("__ad_fresh_witness_index should return a value");
+                self.value_map.insert(*result, val);
+            }
+
+            LLOp::ADNextLookupWitOff { result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let ad_fn = self
+                    .ad_next_lookup_wit_off_fn
+                    .expect("__ad_next_lookup_wit_off not declared");
+                let call_result = self
+                    .builder
+                    .build_call(ad_fn, &[vm_ptr.into()], "lookup_wit_off")
+                    .unwrap();
+                let val = call_result
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__ad_next_lookup_wit_off should return a value");
                 self.value_map.insert(*result, val);
             }
 

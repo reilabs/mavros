@@ -858,6 +858,30 @@ pub trait LLEmitter {
         r
     }
 
+    fn next_d_coeff_tables(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::NextDCoeffTables { result: r });
+        r
+    }
+
+    fn next_d_coeff_lookups(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::NextDCoeffLookups { result: r });
+        r
+    }
+
+    fn ad_read_coeff_at(&mut self, offset: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ADReadCoeffAt { offset, result: r });
+        r
+    }
+
+    fn ad_next_lookup_wit_off(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ADNextLookupWitOff { result: r });
+        r
+    }
+
     fn ad_write_const(
         &mut self,
         matrix: crate::compiler::ssa::DMatrix,

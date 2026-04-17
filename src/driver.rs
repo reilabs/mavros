@@ -548,8 +548,16 @@ impl Driver {
         )
         .unwrap();
 
+        // Build the R1CS layout info needed by AD lookup helpers.
+        let ad_layout = hlssa_to_llssa::R1csLayoutInfo {
+            tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
+            tables_wit_start: r1cs.witness_layout.tables_data_start(),
+            mults_wit_start: r1cs.witness_layout.multiplicities_start(),
+            logup_challenge_off: r1cs.witness_layout.challenges_start(),
+        };
+
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower(&ssa, &flow_analysis, &type_info);
+        let llssa = hlssa_to_llssa::lower_with_layout(&ssa, &flow_analysis, &type_info, ad_layout);
 
         // Dump LLSSA after lowering
         fs::write(

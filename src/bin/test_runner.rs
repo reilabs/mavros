@@ -752,13 +752,17 @@ fn run_ad_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    // AD VM struct layout (wasm32, 5 fields × 4 bytes = 20 bytes):
+    // AD VM struct layout (wasm32, 9 fields × 4 bytes = 36 bytes):
     //   offset 0:  out_da ptr
     //   offset 4:  out_db ptr
     //   offset 8:  out_dc ptr
-    //   offset 12: ad_coeffs ptr
+    //   offset 12: ad_coeffs_cursor (algebraic)
     //   offset 16: current_wit_off (i32)
-    let vm_struct_size: u32 = 20;
+    //   offset 20: ad_coeffs_base (immutable)
+    //   offset 24: ad_coeffs_tables_cursor
+    //   offset 28: ad_coeffs_lookups_cursor
+    //   offset 32: ad_lookup_wit_off (i32 witness-index cursor)
+    let vm_struct_size: u32 = 36;
     let da_bytes = (witness_count * FIELD_SIZE) as u32;
     let db_bytes = da_bytes;
     let dc_bytes = da_bytes;
@@ -824,6 +828,17 @@ fn run_ad_wasm(
         );
     }
 
+    // Tables and lookups cursors start at their respective section offsets
+    // within ad_coeffs. The algebraic cursor starts at the beginning.
+    let tables_cursor =
+        coeffs_ptr + (r1cs.constraints_layout.tables_data_start() * FIELD_SIZE) as u32;
+    let lookups_cursor =
+        coeffs_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+
+    // ad_lookup_wit_off cursor starts at witness_layout.lookups_data_start() —
+    // an absolute index into the full witness buffer (elements, not bytes).
+    let ad_lookup_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
+
     // Initialize AD VM struct
     {
         let data = memory.data_mut(&mut store);
@@ -834,6 +849,12 @@ fn run_ad_wasm(
         data[off + 12..off + 16].copy_from_slice(&coeffs_ptr.to_le_bytes());
         // current_wit_off = 0
         data[off + 16..off + 20].copy_from_slice(&0u32.to_le_bytes());
+        // Base and the two extra cursors
+        data[off + 20..off + 24].copy_from_slice(&coeffs_ptr.to_le_bytes());
+        data[off + 24..off + 28].copy_from_slice(&tables_cursor.to_le_bytes());
+        data[off + 28..off + 32].copy_from_slice(&lookups_cursor.to_le_bytes());
+        // Lookup-witness cursor
+        data[off + 32..off + 36].copy_from_slice(&ad_lookup_wit_start.to_le_bytes());
     }
 
     let func: wasmtime::Func = instance
