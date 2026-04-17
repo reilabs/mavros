@@ -256,7 +256,7 @@ impl UntaintControlFlow {
                                                 cond,
                                                 lhs,
                                                 rhs,
-                                                *res,
+                                                Some(*res),
                                                 typ,
                                             );
                                         }
@@ -281,65 +281,15 @@ impl UntaintControlFlow {
 }
 
 /// Recursively emit element-wise selects for compound types (arrays, tuples).
-/// For scalar types, emits a single Select. The top-level result is written to `result`.
+/// For scalar types, emits a single Select. If `result` is `Some`, uses that
+/// ValueId for the top-level result; otherwise allocates a fresh one.
+/// Returns the ValueId of the result.
 fn emit_recursive_select(
     builder: &mut HLInstrBuilder<'_>,
     cond: ValueId,
     lhs: ValueId,
     rhs: ValueId,
-    result: ValueId,
-    typ: &Type,
-) {
-    match &typ.expr {
-        TypeExpr::Array(elem_type, size) => {
-            let mut elems = Vec::with_capacity(*size);
-            for i in 0..*size {
-                let idx = builder.u_const(32, i as u128);
-                let lhs_elem = builder.array_get(lhs, idx);
-                let rhs_elem = builder.array_get(rhs, idx);
-                let selected =
-                    emit_recursive_select_inner(builder, cond, lhs_elem, rhs_elem, elem_type);
-                elems.push(selected);
-            }
-            builder.push(OpCode::MkSeq {
-                result,
-                elems,
-                seq_type: SeqType::Array(*size),
-                elem_type: *elem_type.clone(),
-            });
-        }
-        TypeExpr::Tuple(field_types) => {
-            let mut elems = Vec::with_capacity(field_types.len());
-            for (i, field_type) in field_types.iter().enumerate() {
-                let lhs_field = builder.tuple_proj(lhs, i);
-                let rhs_field = builder.tuple_proj(rhs, i);
-                let selected =
-                    emit_recursive_select_inner(builder, cond, lhs_field, rhs_field, field_type);
-                elems.push(selected);
-            }
-            builder.push(OpCode::MkTuple {
-                result,
-                elems,
-                element_types: field_types.clone(),
-            });
-        }
-        _ => {
-            builder.push(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-        }
-    }
-}
-
-/// Inner helper that returns a fresh ValueId for the selected value.
-fn emit_recursive_select_inner(
-    builder: &mut HLInstrBuilder<'_>,
-    cond: ValueId,
-    lhs: ValueId,
-    rhs: ValueId,
+    result: Option<ValueId>,
     typ: &Type,
 ) -> ValueId {
     match &typ.expr {
@@ -350,10 +300,17 @@ fn emit_recursive_select_inner(
                 let lhs_elem = builder.array_get(lhs, idx);
                 let rhs_elem = builder.array_get(rhs, idx);
                 let selected =
-                    emit_recursive_select_inner(builder, cond, lhs_elem, rhs_elem, elem_type);
+                    emit_recursive_select(builder, cond, lhs_elem, rhs_elem, None, elem_type);
                 elems.push(selected);
             }
-            builder.mk_seq(elems, SeqType::Array(*size), *elem_type.clone())
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::MkSeq {
+                result,
+                elems,
+                seq_type: SeqType::Array(*size),
+                elem_type: *elem_type.clone(),
+            });
+            result
         }
         TypeExpr::Tuple(field_types) => {
             let mut elems = Vec::with_capacity(field_types.len());
@@ -361,11 +318,29 @@ fn emit_recursive_select_inner(
                 let lhs_field = builder.tuple_proj(lhs, i);
                 let rhs_field = builder.tuple_proj(rhs, i);
                 let selected =
-                    emit_recursive_select_inner(builder, cond, lhs_field, rhs_field, field_type);
+                    emit_recursive_select(builder, cond, lhs_field, rhs_field, None, field_type);
                 elems.push(selected);
             }
-            builder.mk_tuple(elems, field_types.clone())
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::MkTuple {
+                result,
+                elems,
+                element_types: field_types.clone(),
+            });
+            result
         }
-        _ => builder.select(cond, lhs, rhs),
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
+        TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
+        TypeExpr::Function => panic!("Witness select on Function type not supported"),
     }
 }

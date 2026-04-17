@@ -127,10 +127,11 @@ impl WitnessType {
         }
     }
 
-    /// Push witness info into the leaves of value-type composites (arrays, tuples)
-    /// instead of wrapping at the top level. For scalars, refs, and slices this
-    /// is equivalent to `with_toplevel_info`. For arrays/tuples, the info is
-    /// pushed recursively into children, keeping the top-level info unchanged.
+    /// Push witness info into the leaves of composites (arrays, tuples)
+    /// instead of wrapping at the top level. For scalars and refs this
+    /// is equivalent to `with_toplevel_info`. For arrays and tuples, the
+    /// info is pushed recursively into children, keeping the top-level
+    /// info unchanged.
     pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessType {
         match self {
             WitnessType::Scalar(existing) => WitnessType::Scalar(existing.join(info)),
