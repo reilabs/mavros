@@ -7,8 +7,8 @@ use crate::compiler::{
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
-        SeqType, Terminator, ValueId,
+        BinaryArithOpKind, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode, SeqType,
+        Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
     witness_type_inference::WitnessTypeInference,
@@ -249,10 +249,8 @@ impl UntaintControlFlow {
                                                 .iter()
                                                 .zip(args_passed_from_rhs.iter()),
                                         ) {
-                                            let lhs =
-                                                *witness_cast_strip.get(lhs).unwrap_or(lhs);
-                                            let rhs =
-                                                *witness_cast_strip.get(rhs).unwrap_or(rhs);
+                                            let lhs = *witness_cast_strip.get(lhs).unwrap_or(lhs);
+                                            let rhs = *witness_cast_strip.get(rhs).unwrap_or(rhs);
                                             emit_recursive_select(
                                                 &mut builder,
                                                 cond,
@@ -299,9 +297,8 @@ fn emit_recursive_select(
                 let idx = builder.u_const(32, i as u128);
                 let lhs_elem = builder.array_get(lhs, idx);
                 let rhs_elem = builder.array_get(rhs, idx);
-                let selected = emit_recursive_select_inner(
-                    builder, cond, lhs_elem, rhs_elem, elem_type,
-                );
+                let selected =
+                    emit_recursive_select_inner(builder, cond, lhs_elem, rhs_elem, elem_type);
                 elems.push(selected);
             }
             builder.push(OpCode::MkSeq {
@@ -316,9 +313,8 @@ fn emit_recursive_select(
             for (i, field_type) in field_types.iter().enumerate() {
                 let lhs_field = builder.tuple_proj(lhs, i);
                 let rhs_field = builder.tuple_proj(rhs, i);
-                let selected = emit_recursive_select_inner(
-                    builder, cond, lhs_field, rhs_field, field_type,
-                );
+                let selected =
+                    emit_recursive_select_inner(builder, cond, lhs_field, rhs_field, field_type);
                 elems.push(selected);
             }
             builder.push(OpCode::MkTuple {
@@ -353,9 +349,8 @@ fn emit_recursive_select_inner(
                 let idx = builder.u_const(32, i as u128);
                 let lhs_elem = builder.array_get(lhs, idx);
                 let rhs_elem = builder.array_get(rhs, idx);
-                let selected = emit_recursive_select_inner(
-                    builder, cond, lhs_elem, rhs_elem, elem_type,
-                );
+                let selected =
+                    emit_recursive_select_inner(builder, cond, lhs_elem, rhs_elem, elem_type);
                 elems.push(selected);
             }
             builder.mk_seq(elems, SeqType::Array(*size), *elem_type.clone())
@@ -365,9 +360,8 @@ fn emit_recursive_select_inner(
             for (i, field_type) in field_types.iter().enumerate() {
                 let lhs_field = builder.tuple_proj(lhs, i);
                 let rhs_field = builder.tuple_proj(rhs, i);
-                let selected = emit_recursive_select_inner(
-                    builder, cond, lhs_field, rhs_field, field_type,
-                );
+                let selected =
+                    emit_recursive_select_inner(builder, cond, lhs_field, rhs_field, field_type);
                 elems.push(selected);
             }
             builder.mk_tuple(elems, field_types.clone())
