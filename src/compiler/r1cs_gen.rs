@@ -291,12 +291,7 @@ pub struct LookupConstraint {
     pub flag: LC,
 }
 
-#[derive(Clone, Debug)]
-pub enum Table {
-    Range(u64),
-    OfElems(Vec<LC>),
-    Spread(u8),
-}
+pub use mavros_artifacts::Table;
 
 #[derive(Clone)]
 pub struct R1CGen {
@@ -882,6 +877,8 @@ impl R1CGen {
             lookups_data_size: 0,
         };
         let mut result = self.constraints;
+        // Keep a copy of the table list for the R1CS; `self.tables` is consumed below.
+        let r1cs_tables = self.tables.clone();
 
         // multiplicities init + compute the needed challenges
         struct TableInfo {
@@ -934,6 +931,7 @@ impl R1CGen {
                 witness_layout,
                 constraints_layout,
                 constraints: result,
+                tables: r1cs_tables,
             };
         }
 
@@ -1108,6 +1106,7 @@ impl R1CGen {
             witness_layout,
             constraints_layout,
             constraints: result,
+            tables: r1cs_tables,
         };
     }
 }

@@ -206,11 +206,24 @@ impl ConstraintsLayout {
 // R1CS – the full constraint system
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Description of a lookup table, as declared in the R1CS.
+/// The rangecheck / array / spread variants map to width-1 / width-2 / width-2
+/// LogUp tables respectively.
+#[derive(Clone, Debug)]
+pub enum Table {
+    /// Width-1 rangecheck table of length `2^bits`.
+    Range(u64),
+    /// Width-2 array table with the given element linear combinations.
+    OfElems(Vec<LC>),
+    /// Width-2 spread table of length `2^bits`.
+    Spread(u8),
+}
+
 pub struct R1CS {
     pub witness_layout: WitnessLayout,
     pub constraints_layout: ConstraintsLayout,
     pub constraints: Vec<R1C>,
+    pub tables: Vec<Table>,
 }
 
 impl R1CS {
