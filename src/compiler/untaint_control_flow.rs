@@ -183,7 +183,7 @@ impl UntaintControlFlow {
         // Phase 1: bake WitnessOf into SSA types
         let mut ssa = self.apply_types(ssa, witness_inference);
 
-        // Compute flow + type info for cast insertion
+        // Compute flow + type info for cast insertion + linearization
         let flow_analysis = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow_analysis);
 

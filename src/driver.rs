@@ -207,6 +207,19 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn monomorphize(&mut self) -> Result<(), Error> {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
+
+        // Mem2Reg + cleanup before WTI so witness inference sees clean SSA
+        // and Guard never wraps promotable Store/Load.
+        PassManager::new(
+            "pre_wti".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(Mem2Reg::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
+            ],
+        )
+        .run(&mut ssa);
+
         let flow_analysis = FlowAnalysis::run(&ssa);
 
         if self.draw_cfg {
@@ -220,35 +233,11 @@ impl Driver {
         let mut witness_inference = WitnessTypeInference::new();
         witness_inference.run(&mut ssa, &flow_analysis).unwrap();
 
-        PassManager::new(
-            "post_wti_cleanup".to_string(),
-            self.draw_cfg,
-            vec![Box::new(RemoveUnreachableFunctions::new())],
-        )
-        .run(&mut ssa);
-
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
             ssa.to_string(&witness_inference),
         )
         .unwrap();
-
-        // Mem2Reg before UntaintControlFlow so Guard never wraps promotable Store/Load.
-        PassManager::new(
-            "pre_untaint_mem2reg".to_string(),
-            self.draw_cfg,
-            vec![Box::new(Mem2Reg::new())],
-        )
-        .run(&mut ssa);
-
-        if self.draw_cfg {
-            let fa = FlowAnalysis::run(&ssa);
-            fa.generate_images(
-                self.get_debug_output_dir().join("before_untaint_cf"),
-                &ssa,
-                "before untaint control flow".to_string(),
-            );
-        }
 
         let mut untaint_cf = UntaintControlFlow::new();
         self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
