@@ -44,7 +44,6 @@ use crate::{
         ssa::{DefaultSsaAnnotator, HLSSA},
         ssa_gen::LowLevelReplacement,
         untaint_control_flow::UntaintControlFlow,
-        witness_cast_insertion::WitnessCastInsertion,
         witness_type_inference::WitnessTypeInference,
     },
     lowlevel_replacement::{
@@ -234,18 +233,7 @@ impl Driver {
         )
         .unwrap();
 
-        let mut witness_cast = WitnessCastInsertion::new();
-        let ssa = witness_cast.run(ssa, &witness_inference);
-
-        fs::write(
-            self.get_debug_output_dir().join("witness_typed_ssa.txt"),
-            ssa.to_string(&witness_inference),
-        )
-        .unwrap();
-
-        // Run Mem2Reg before UntaintControlFlow so that Guard never wraps Store/Load
-        // that could be promoted to SSA values. Mem2Reg doesn't need to understand Guard.
-        let mut ssa = ssa;
+        // Mem2Reg before UntaintControlFlow so Guard never wraps promotable Store/Load.
         PassManager::new(
             "pre_untaint_mem2reg".to_string(),
             self.draw_cfg,
@@ -253,11 +241,9 @@ impl Driver {
         )
         .run(&mut ssa);
 
-        let flow_analysis = FlowAnalysis::run(&ssa);
-        let type_info = Types::new().run(&ssa, &flow_analysis);
-
         if self.draw_cfg {
-            flow_analysis.generate_images(
+            let fa = FlowAnalysis::run(&ssa);
+            fa.generate_images(
                 self.get_debug_output_dir().join("before_untaint_cf"),
                 &ssa,
                 "before untaint control flow".to_string(),
@@ -265,8 +251,7 @@ impl Driver {
         }
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa =
-            Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis, &type_info));
+        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
 
         fs::write(
             self.get_debug_output_dir().join("untainted_ssa.txt"),

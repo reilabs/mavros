@@ -3,15 +3,15 @@ use std::collections::HashMap;
 use tracing::{Level, instrument};
 
 use crate::compiler::{
-    analysis::types::{FunctionTypeInfo, TypeInfo},
+    analysis::types::{FunctionTypeInfo, TypeInfo, Types},
     block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, CastTarget, FunctionId, HLFunction, HLSSA, OpCode,
-        SeqType, Terminator, ValueId,
+        BinaryArithOpKind, BlockId, CallTarget, CastTarget, FunctionId, HLBlock, HLFunction, HLSSA,
+        OpCode, SeqType, Terminator, ValueId,
     },
-    witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo},
+    witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo, WitnessType},
     witness_type_inference::WitnessTypeInference,
 };
 
@@ -46,14 +46,148 @@ impl UntaintControlFlow {
         Self {}
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 1: Type Application — bake WitnessOf into SSA types
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip_all, name = "UntaintControlFlow::apply_types")]
+    fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
+        let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
+        result_ssa.set_global_types(old_global_types);
+
+        for (function_id, function) in functions.into_iter() {
+            if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
+            {
+                let new_function = self.apply_types_to_function(function, function_wt);
+                result_ssa.put_function(function_id, new_function);
+            } else {
+                result_ssa.put_function(function_id, function);
+            }
+        }
+
+        result_ssa
+    }
+
+    fn apply_types_to_function(
+        &self,
+        function: HLFunction,
+        function_wt: &FunctionWitnessType,
+    ) -> HLFunction {
+        let (mut function, blocks, returns) = function.prepare_rebuild();
+
+        for (block_id, mut block) in blocks.into_iter() {
+            let mut new_block = HLBlock::empty();
+
+            let mut new_parameters = Vec::new();
+            for (value_id, typ) in block.take_parameters() {
+                let wt = function_wt.get_value_witness_type(value_id);
+                new_parameters.push((value_id, apply_witness_type(typ, wt)));
+            }
+            new_block.put_parameters(new_parameters);
+
+            let mut new_instructions = Vec::<OpCode>::new();
+            for instruction in block.take_instructions() {
+                let new = match instruction {
+                    OpCode::Alloc {
+                        result: r,
+                        elem_type: l,
+                    } => {
+                        let r_wt = function_wt.get_value_witness_type(r);
+                        let child = r_wt.child_witness_type().unwrap();
+                        let child_typ = apply_witness_type(l, &child);
+                        OpCode::Alloc {
+                            result: r,
+                            elem_type: child_typ,
+                        }
+                    }
+                    OpCode::FreshWitness { .. } => instruction,
+                    OpCode::MkSeq {
+                        result: r,
+                        elems: l,
+                        seq_type: stp,
+                        elem_type: tp,
+                    } => {
+                        let r_wt = function_wt
+                            .get_value_witness_type(r)
+                            .child_witness_type()
+                            .unwrap();
+                        OpCode::MkSeq {
+                            result: r,
+                            elems: l,
+                            seq_type: stp,
+                            elem_type: apply_witness_type(tp, &r_wt),
+                        }
+                    }
+                    OpCode::MkTuple {
+                        result: r,
+                        elems: l,
+                        element_types: tps,
+                    } => {
+                        let r_wt = function_wt.get_value_witness_type(r);
+                        let child_wts = if let WitnessType::Tuple(_, children) = r_wt {
+                            children
+                        } else {
+                            panic!("MkTuple result should have Tuple witness type")
+                        };
+                        OpCode::MkTuple {
+                            result: r,
+                            elems: l,
+                            element_types: tps
+                                .iter()
+                                .zip(child_wts.iter())
+                                .map(|(tp, wt)| apply_witness_type(tp.clone(), wt))
+                                .collect(),
+                        }
+                    }
+                    OpCode::ReadGlobal {
+                        result: r,
+                        offset: l,
+                        result_type: tp,
+                    } => OpCode::ReadGlobal {
+                        result: r,
+                        offset: l,
+                        result_type: tp,
+                    },
+                    OpCode::Todo {
+                        payload,
+                        results,
+                        result_types,
+                    } => OpCode::Todo {
+                        payload,
+                        results,
+                        result_types,
+                    },
+                    other => other,
+                };
+                new_instructions.push(new);
+            }
+            new_block.put_instructions(new_instructions);
+            new_block.set_terminator(block.take_terminator().unwrap());
+            function.put_block(block_id, new_block);
+        }
+
+        for (ret, ret_wt) in returns.into_iter().zip(function_wt.returns_witness.iter()) {
+            let ret_typ = apply_witness_type(ret, ret_wt);
+            function.add_return_type(ret_typ);
+        }
+
+        function
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Cast insertion + control flow linearization
+    // -----------------------------------------------------------------------
+
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
-    pub fn run(
-        &mut self,
-        mut ssa: HLSSA,
-        witness_inference: &WitnessTypeInference,
-        flow_analysis: &FlowAnalysis,
-        type_info: &TypeInfo,
-    ) -> HLSSA {
+    pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
+        // Phase 1: bake WitnessOf into SSA types
+        let mut ssa = self.apply_types(ssa, witness_inference);
+
+        // Compute flow + type info for cast insertion
+        let flow_analysis = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow_analysis);
+
+        // Phase 2: cast insertion + control flow linearization
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
             if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
@@ -68,7 +202,7 @@ impl UntaintControlFlow {
                     function_id,
                     &mut function,
                     function_wt,
-                    flow_analysis,
+                    &flow_analysis,
                     func_type_info,
                 );
                 ssa.put_function(function_id, function);
@@ -171,8 +305,7 @@ impl UntaintControlFlow {
                                     )
                                 }
 
-                                let jumps =
-                                    cfg.get_jumps_into_merge_from_branch(if_true, merge);
+                                let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
                                 if jumps.len() != 1 {
                                     panic!(
                                         "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
@@ -181,8 +314,7 @@ impl UntaintControlFlow {
                                 }
                                 let out_true_block = jumps[0];
 
-                                let merge_params =
-                                    function.get_block_mut(merge).take_parameters();
+                                let merge_params = function.get_block_mut(merge).take_parameters();
 
                                 let args_passed_from_lhs = match function
                                     .get_block_mut(out_true_block)
@@ -198,8 +330,7 @@ impl UntaintControlFlow {
                                     .get_block_mut(out_true_block)
                                     .set_terminator(Terminator::Jmp(if_false, vec![]));
 
-                                let jumps =
-                                    cfg.get_jumps_into_merge_from_branch(if_false, merge);
+                                let jumps = cfg.get_jumps_into_merge_from_branch(if_false, merge);
                                 if jumps.len() != 1 {
                                     panic!(
                                         "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
@@ -230,13 +361,11 @@ impl UntaintControlFlow {
                                     {
                                         let mut builder =
                                             HLInstrBuilder::new(function, &mut instrs);
-                                        for ((res, typ), (lhs, rhs)) in
-                                            merge_params.iter().zip(
-                                                args_passed_from_lhs
-                                                    .iter()
-                                                    .zip(args_passed_from_rhs.iter()),
-                                            )
-                                        {
+                                        for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
+                                            args_passed_from_lhs
+                                                .iter()
+                                                .zip(args_passed_from_rhs.iter()),
+                                        ) {
                                             let lhs_type = type_info
                                                 .map(|ti| ti.get_value_type(*lhs).clone())
                                                 .unwrap_or_else(|| typ.clone());
@@ -688,11 +817,17 @@ fn emit_merge_select(
         TypeExpr::Array(result_elem_type, size) => {
             let lhs_elem_type = match &lhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!("emit_merge_select: expected array for lhs, got {:?}", lhs_type),
+                _ => panic!(
+                    "emit_merge_select: expected array for lhs, got {:?}",
+                    lhs_type
+                ),
             };
             let rhs_elem_type = match &rhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!("emit_merge_select: expected array for rhs, got {:?}", rhs_type),
+                _ => panic!(
+                    "emit_merge_select: expected array for rhs, got {:?}",
+                    rhs_type
+                ),
             };
             let mut elems = Vec::with_capacity(*size);
             for i in 0..*size {
@@ -723,11 +858,17 @@ fn emit_merge_select(
         TypeExpr::Tuple(result_fields) => {
             let lhs_fields = match &lhs_type.expr {
                 TypeExpr::Tuple(f) => f,
-                _ => panic!("emit_merge_select: expected tuple for lhs, got {:?}", lhs_type),
+                _ => panic!(
+                    "emit_merge_select: expected tuple for lhs, got {:?}",
+                    lhs_type
+                ),
             };
             let rhs_fields = match &rhs_type.expr {
                 TypeExpr::Tuple(f) => f,
-                _ => panic!("emit_merge_select: expected tuple for rhs, got {:?}", rhs_type),
+                _ => panic!(
+                    "emit_merge_select: expected tuple for rhs, got {:?}",
+                    rhs_type
+                ),
             };
             let mut elems = Vec::with_capacity(result_fields.len());
             for (i, ((rf, lf), rhsf)) in result_fields
@@ -738,9 +879,8 @@ fn emit_merge_select(
             {
                 let lhs_field = builder.tuple_proj(lhs, i);
                 let rhs_field = builder.tuple_proj(rhs, i);
-                let selected = emit_merge_select(
-                    builder, cond, lhs_field, rhs_field, None, rf, lf, rhsf,
-                );
+                let selected =
+                    emit_merge_select(builder, cond, lhs_field, rhs_field, None, rf, lf, rhsf);
                 elems.push(selected);
             }
             let result = result.unwrap_or_else(|| builder.fresh_value());
@@ -785,5 +925,77 @@ fn emit_merge_select(
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
         TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type application helper
+// ---------------------------------------------------------------------------
+
+fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
+    match (typ.expr, wt) {
+        (TypeExpr::Field, WitnessType::Scalar(info)) => {
+            let base = Type::field();
+            if info.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (TypeExpr::U(size), WitnessType::Scalar(info)) => {
+            let base = Type::u(size);
+            if info.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (TypeExpr::I(size), WitnessType::Scalar(info)) => {
+            let base = Type::i(size);
+            if info.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (TypeExpr::Array(inner, size), WitnessType::Array(top, inner_wt)) => {
+            let base = apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
+            if top.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (TypeExpr::Slice(inner), WitnessType::Array(top, inner_wt)) => {
+            let base = apply_witness_type(*inner, inner_wt.as_ref()).slice_of();
+            if top.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (TypeExpr::Ref(inner), WitnessType::Ref(top, inner_wt)) => {
+            let base = apply_witness_type(*inner, inner_wt.as_ref()).ref_of();
+            if top.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (TypeExpr::Tuple(child_types), WitnessType::Tuple(top, child_wts)) => {
+            let base = Type::tuple_of(
+                child_types
+                    .iter()
+                    .zip(child_wts.iter())
+                    .map(|(child_type, child_wt)| apply_witness_type(child_type.clone(), child_wt))
+                    .collect(),
+            );
+            if top.is_witness() {
+                Type::witness_of(base)
+            } else {
+                base
+            }
+        }
+        (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
     }
 }
