@@ -21,14 +21,21 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
+    LookupStream,
 };
 use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
-/// Witgen VM struct layout (offsets in bytes):
+/// Witgen VM struct layout (offsets in bytes, wasm32 pointers):
 const VM_WITNESS_PTR_OFFSET: u32 = 0;
 const VM_A_PTR_OFFSET: u32 = 4;
 const VM_B_PTR_OFFSET: u32 = 8;
 const VM_C_PTR_OFFSET: u32 = 12;
+const VM_LOOKUPS_A_PTR_OFFSET: u32 = 16;
+const VM_LOOKUPS_B_PTR_OFFSET: u32 = 20;
+const VM_LOOKUPS_C_PTR_OFFSET: u32 = 24;
+const VM_MULTIPLICITIES_PTR_OFFSET: u32 = 28;
+/// Total size of the wasm32 witgen VM struct in bytes.
+pub const VM_STRUCT_SIZE: u32 = 32;
 
 /// AD VM struct layout (offsets in bytes, wasm32):
 const AD_VM_OUT_DA_OFFSET: u32 = 0;
@@ -57,6 +64,11 @@ pub struct LLVMCodeGen<'ctx> {
     write_a_fn: Option<FunctionValue<'ctx>>,
     write_b_fn: Option<FunctionValue<'ctx>>,
     write_c_fn: Option<FunctionValue<'ctx>>,
+    // Lookup runtime functions (generated inline)
+    lookup_tape_write_u64_a_fn: Option<FunctionValue<'ctx>>,
+    lookup_tape_write_u64_b_fn: Option<FunctionValue<'ctx>>,
+    lookup_tape_write_u64_c_fn: Option<FunctionValue<'ctx>>,
+    bump_rngchk8_multiplicity_fn: Option<FunctionValue<'ctx>>,
     // AD runtime functions
     ad_next_d_coeff_fn: Option<FunctionValue<'ctx>>,
     ad_fresh_witness_index_fn: Option<FunctionValue<'ctx>>,
@@ -95,6 +107,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             write_a_fn: None,
             write_b_fn: None,
             write_c_fn: None,
+            lookup_tape_write_u64_a_fn: None,
+            lookup_tape_write_u64_b_fn: None,
+            lookup_tape_write_u64_c_fn: None,
+            bump_rngchk8_multiplicity_fn: None,
             ad_next_d_coeff_fn: None,
             ad_fresh_witness_index_fn: None,
             ad_accum_da_fn: None,
@@ -110,6 +126,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         codegen.declare_runtime_functions();
         codegen.define_write_functions();
+        codegen.define_lookup_functions();
         codegen
     }
 
@@ -293,6 +310,158 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.write_a_fn = Some(self.define_write_fn("__write_a", VM_A_PTR_OFFSET));
         self.write_b_fn = Some(self.define_write_fn("__write_b", VM_B_PTR_OFFSET));
         self.write_c_fn = Some(self.define_write_fn("__write_c", VM_C_PTR_OFFSET));
+    }
+
+    fn define_lookup_functions(&mut self) {
+        self.lookup_tape_write_u64_a_fn = Some(self.define_lookup_tape_write_u64_fn(
+            "__lookup_tape_write_u64_a",
+            VM_LOOKUPS_A_PTR_OFFSET,
+        ));
+        self.lookup_tape_write_u64_b_fn = Some(self.define_lookup_tape_write_u64_fn(
+            "__lookup_tape_write_u64_b",
+            VM_LOOKUPS_B_PTR_OFFSET,
+        ));
+        self.lookup_tape_write_u64_c_fn = Some(self.define_lookup_tape_write_u64_fn(
+            "__lookup_tape_write_u64_c",
+            VM_LOOKUPS_C_PTR_OFFSET,
+        ));
+        self.bump_rngchk8_multiplicity_fn = Some(self.define_bump_rngchk8_multiplicity_fn());
+    }
+
+    /// Define __lookup_tape_write_u64_{a,b,c}(vm*, value: i64):
+    ///
+    /// Writes `value` into the low u64 of the current tape slot and advances
+    /// the tape pointer by one field-element worth of bytes (32 bytes on wasm32).
+    /// The tape buffer is pre-zeroed, so upper limbs remain zero.
+    fn define_lookup_tape_write_u64_fn(&self, name: &str, ptr_offset: u32) -> FunctionValue<'ctx> {
+        let void_type = self.context.void_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let field_type = self.field_llvm_type();
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+        let function = self
+            .module
+            .add_function(name, fn_type, Some(Linkage::Internal));
+
+        let entry = self.context.append_basic_block(function, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(entry);
+
+        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
+        let value = function.get_nth_param(1).unwrap().into_int_value();
+
+        // write_pos_ptr = &vm->tape_ptr  (vm is an array of i32 ptrs on wasm32)
+        let write_pos_ptr = unsafe {
+            builder
+                .build_gep(
+                    ptr_type,
+                    vm_ptr,
+                    &[i32_type.const_int((ptr_offset / 4) as u64, false)],
+                    "pos_ptr",
+                )
+                .unwrap()
+        };
+
+        // tape_ptr = *write_pos_ptr
+        let tape_ptr = builder
+            .build_load(ptr_type, write_pos_ptr, "tape_ptr")
+            .unwrap()
+            .into_pointer_value();
+
+        // *(tape_ptr as *mut i64) = value
+        builder.build_store(tape_ptr, value).unwrap();
+
+        // tape_ptr += sizeof(FieldElem)
+        let new_ptr = unsafe {
+            builder
+                .build_gep(
+                    field_type,
+                    tape_ptr,
+                    &[i32_type.const_int(1, false)],
+                    "new_ptr",
+                )
+                .unwrap()
+        };
+
+        // *write_pos_ptr = new_ptr
+        builder.build_store(write_pos_ptr, new_ptr).unwrap();
+        builder.build_return(None).unwrap();
+
+        function
+    }
+
+    /// Define __bump_rngchk8_multiplicity(vm*, key: i64, flag: i64):
+    ///
+    /// Computes `multiplicities_base[key].low_u64 += flag`. The multiplicities
+    /// buffer is a contiguous array of field elements. For the 8-bit rangecheck
+    /// table, its base pointer is stored at VM_MULTIPLICITIES_PTR_OFFSET and
+    /// always refers to slot 0 of the witness multiplicities section (because
+    /// the rangecheck-8 table is the first — and currently only — lookup table).
+    fn define_bump_rngchk8_multiplicity_fn(&self) -> FunctionValue<'ctx> {
+        let void_type = self.context.void_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let field_type = self.field_llvm_type();
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let fn_type =
+            void_type.fn_type(&[ptr_type.into(), i64_type.into(), i64_type.into()], false);
+        let function =
+            self.module
+                .add_function("__bump_rngchk8_multiplicity", fn_type, Some(Linkage::Internal));
+
+        let entry = self.context.append_basic_block(function, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(entry);
+
+        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
+        let key = function.get_nth_param(1).unwrap().into_int_value();
+        let flag = function.get_nth_param(2).unwrap().into_int_value();
+
+        // mults_base = vm->multiplicities_ptr  (read-only; never advances)
+        let mults_base_ptr = unsafe {
+            builder
+                .build_gep(
+                    ptr_type,
+                    vm_ptr,
+                    &[i32_type.const_int((VM_MULTIPLICITIES_PTR_OFFSET / 4) as u64, false)],
+                    "mults_base_ptr_ptr",
+                )
+                .unwrap()
+        };
+        let mults_base = builder
+            .build_load(ptr_type, mults_base_ptr, "mults_base")
+            .unwrap()
+            .into_pointer_value();
+
+        // Narrow key to i32 for GEP (wasm32 indexing).
+        let key_i32 = builder
+            .build_int_truncate(key, i32_type, "key_i32")
+            .unwrap();
+
+        // slot_ptr = &mults_base[key]  (field-element-sized stride)
+        let slot_ptr = unsafe {
+            builder
+                .build_gep(field_type, mults_base, &[key_i32], "slot_ptr")
+                .unwrap()
+        };
+
+        // Read the current low u64 of the slot.
+        let old = builder
+            .build_load(i64_type, slot_ptr, "old")
+            .unwrap()
+            .into_int_value();
+
+        // new = old + flag
+        let new = builder.build_int_add(old, flag, "new").unwrap();
+
+        // Write back.
+        builder.build_store(slot_ptr, new).unwrap();
+        builder.build_return(None).unwrap();
+
+        function
     }
 
     fn define_write_fn(&self, name: &str, ptr_offset: u32) -> FunctionValue<'ctx> {
@@ -1032,6 +1201,36 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let global = self.globals[*global_id];
                 let ptr = global.as_pointer_value();
                 self.value_map.insert(*result, ptr.into());
+            }
+
+            LLOp::LookupTapeWriteU64 { stream, value } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let val = self.value_map[value];
+                let write_fn = match stream {
+                    LookupStream::A => self.lookup_tape_write_u64_a_fn,
+                    LookupStream::B => self.lookup_tape_write_u64_b_fn,
+                    LookupStream::C => self.lookup_tape_write_u64_c_fn,
+                }
+                .expect("lookup tape write fn not declared");
+                self.builder
+                    .build_call(write_fn, &[vm_ptr.into(), val.into()], "")
+                    .unwrap();
+            }
+
+            LLOp::BumpRngchk8Multiplicity { key, flag } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let key_val = self.value_map[key];
+                let flag_val = self.value_map[flag];
+                let bump_fn = self
+                    .bump_rngchk8_multiplicity_fn
+                    .expect("bump_rngchk8_multiplicity fn not declared");
+                self.builder
+                    .build_call(
+                        bump_fn,
+                        &[vm_ptr.into(), key_val.into(), flag_val.into()],
+                        "",
+                    )
+                    .unwrap();
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),

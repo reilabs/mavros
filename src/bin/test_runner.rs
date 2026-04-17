@@ -436,10 +436,14 @@ fn run_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    let vm_struct_size: u32 = 16; // 4 x u32 pointers
+    let vm_struct_size: u32 = 32; // 8 x u32 pointers (witness, a, b, c, lookups_a, lookups_b, lookups_c, multiplicities)
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
+
+    // Offsets (in field elements) into the shared buffers for lookups/multiplicities.
+    let lookups_offset_bytes = (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let mults_offset_bytes = (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
 
     // Create wasmtime engine and store
     let engine = Engine::default();
@@ -487,6 +491,12 @@ fn run_wasm(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
+    // Lookups/multiplicities share buffers with a/b/c/witness at known offsets.
+    let lookups_a_ptr = a_ptr + lookups_offset_bytes;
+    let lookups_b_ptr = b_ptr + lookups_offset_bytes;
+    let lookups_c_ptr = c_ptr + lookups_offset_bytes;
+    let multiplicities_ptr = witness_ptr + mults_offset_bytes;
+
     // Initialize VM struct with buffer pointers
     {
         let data = memory.data_mut(&mut store);
@@ -495,6 +505,10 @@ fn run_wasm(
         data[off + 4..off + 8].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + 8..off + 12].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + 12..off + 16].copy_from_slice(&c_ptr.to_le_bytes());
+        data[off + 16..off + 20].copy_from_slice(&lookups_a_ptr.to_le_bytes());
+        data[off + 20..off + 24].copy_from_slice(&lookups_b_ptr.to_le_bytes());
+        data[off + 24..off + 28].copy_from_slice(&lookups_c_ptr.to_le_bytes());
+        data[off + 28..off + 32].copy_from_slice(&multiplicities_ptr.to_le_bytes());
     }
 
     let func = instance

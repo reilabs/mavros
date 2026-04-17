@@ -1,6 +1,6 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
-    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType},
+    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType, LookupStream},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
         Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
@@ -832,6 +832,16 @@ pub trait LLEmitter {
 
     fn write_witness(&mut self, value: ValueId) {
         self.emit_ll(LLOp::WriteWitness { value });
+    }
+
+    // -- Lookups --
+
+    fn lookup_tape_write_u64(&mut self, stream: LookupStream, value: ValueId) {
+        self.emit_ll(LLOp::LookupTapeWriteU64 { stream, value });
+    }
+
+    fn bump_rngchk8_multiplicity(&mut self, key: ValueId, flag: ValueId) {
+        self.emit_ll(LLOp::BumpRngchk8Multiplicity { key, flag });
     }
 
     // -- Trap --

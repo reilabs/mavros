@@ -16,6 +16,7 @@ use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
+    LookupStream,
 };
 use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
@@ -171,6 +172,28 @@ struct AdFunctions {
     ad_drop: Option<FunctionId>,
 }
 
+/// Lazily-created generated helper functions for lookup operations.
+/// These helpers decompose the monolithic VM lookup opcodes into LLSSA-level
+/// primitives (tape writes, multiplicity bumps).
+struct LookupFunctions {
+    rngchk_8: Option<FunctionId>,
+}
+
+impl LookupFunctions {
+    fn new() -> Self {
+        Self { rngchk_8: None }
+    }
+
+    fn get_rngchk_8_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.rngchk_8 {
+            return id;
+        }
+        let id = llssa.add_function("__rngchk_8".to_string());
+        self.rngchk_8 = Some(id);
+        id
+    }
+}
+
 impl AdFunctions {
     fn new() -> Self {
         Self {
@@ -214,6 +237,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
+    let mut lookup_fns = LookupFunctions::new();
 
     // Transfer global types from HLSSA to LLSSA
     let hlssa_global_types: Vec<Type> = hlssa.get_global_types().to_vec();
@@ -245,6 +269,7 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
             &mut llssa,
             &mut drop_fns,
             &mut ad_fns,
+            &mut lookup_fns,
             &hlssa_global_types,
         );
 
@@ -257,6 +282,9 @@ pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) 
 
     // Fourth pass: generate AD dispatch function bodies
     generate_all_ad_functions(&mut llssa, &ad_fns);
+
+    // Fifth pass: generate lookup helper function bodies
+    generate_all_lookup_functions(&mut llssa, &lookup_fns);
 
     llssa
 }
@@ -273,6 +301,7 @@ fn lower_function(
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
+    lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[Type],
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
@@ -326,6 +355,7 @@ fn lower_function(
                 llssa,
                 drop_fns,
                 ad_fns,
+                lookup_fns,
                 hlssa_global_types,
             );
         }
@@ -354,6 +384,7 @@ fn lower_instruction(
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
+    lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[Type],
 ) {
     use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
@@ -758,6 +789,46 @@ fn lower_instruction(
             e.call(drop_fn_id, vec![ll_value], 0);
         }
 
+        OpCode::ToRadix {
+            result,
+            value,
+            radix: crate::compiler::ssa::Radix::Bytes,
+            endianness,
+            count,
+        } => {
+            lower_to_radix_bytes(e, val_map, *result, *value, *endianness, *count);
+        }
+
+        OpCode::ToRadix { .. } => {
+            panic!(
+                "Unsupported ToRadix variant in HLSSA->LLSSA lowering: {:?}",
+                instruction
+            );
+        }
+
+        OpCode::Lookup {
+            target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+            keys,
+            results: _,
+            flag,
+        } => {
+            assert!(
+                keys.len() == 1,
+                "Rangecheck(8) lookup must have exactly one key"
+            );
+            let ll_val = val_map[&keys[0]];
+            let ll_flag = val_map[flag];
+            let fn_id = lookup_fns.get_rngchk_8_fn(llssa);
+            e.call(fn_id, vec![ll_val, ll_flag], 0);
+        }
+
+        OpCode::Lookup { .. } => {
+            panic!(
+                "Unsupported Lookup variant in HLSSA->LLSSA lowering: {:?}",
+                instruction
+            );
+        }
+
         _ => panic!(
             "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
@@ -829,6 +900,79 @@ fn lower_mk_tuple(
     }
 
     val_map.insert(result, tuple_ptr);
+}
+
+/// Lower ToRadix with Radix::Bytes to FieldToLimbs + byte extraction + array allocation.
+///
+/// Decomposes a field element into `count` bytes. The field is first converted to
+/// 4 × u64 limbs (little-endian limb order, limb 0 = least significant). Each byte
+/// is extracted via shift-right and truncate. For big-endian output the byte order
+/// is reversed so that output[0] is the most significant byte.
+fn lower_to_radix_bytes(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    value: ValueId,
+    endianness: crate::compiler::ssa::Endianness,
+    count: usize,
+) {
+    use crate::compiler::ssa::Endianness;
+
+    assert!(count <= 32, "ToRadix byte count must be <= 32");
+
+    let ll_value = val_map[&value];
+
+    // Decompose field → 4 × u64 limbs (little-endian: limb 0 = least significant)
+    let limbs_val = e.field_to_limbs(ll_value);
+    let limb = [
+        e.extract_field(limbs_val, LLStruct::limbs(), 0),
+        e.extract_field(limbs_val, LLStruct::limbs(), 1),
+        e.extract_field(limbs_val, LLStruct::limbs(), 2),
+        e.extract_field(limbs_val, LLStruct::limbs(), 3),
+    ];
+
+    // Extract `count` bytes in little-endian order (byte 0 = LSB).
+    // Byte i lives in limb[i/8] at bit offset (i%8)*8.
+    let mut bytes_le = Vec::with_capacity(count);
+    for i in 0..count {
+        let limb_idx = i / 8;
+        let byte_offset = (i % 8) * 8;
+        let shifted = if byte_offset == 0 {
+            limb[limb_idx]
+        } else {
+            let shift = e.int_const(64, byte_offset as u64);
+            e.int_arith(IntArithOp::UShr, limb[limb_idx], shift)
+        };
+        let byte_val = e.truncate(shifted, 8);
+        bytes_le.push(byte_val);
+    }
+
+    // Allocate RC'd array of u8
+    let u8_type = Type::u(8);
+    let rc_struct = rc_array_struct(&u8_type, count);
+    let es = elem_struct(&u8_type);
+
+    let arr = e.heap_alloc(rc_struct.clone(), None);
+
+    // Init RC to 1
+    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // Store bytes into the array
+    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    for i in 0..count {
+        let src_idx = match endianness {
+            Endianness::Big => count - 1 - i,
+            Endianness::Little => i,
+        };
+        let idx = e.int_const(64, i as u64);
+        let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
+        e.ll_store(elem_ptr, bytes_le[src_idx]);
+    }
+
+    val_map.insert(result, arr);
 }
 
 /// Lower TupleProj(Static) to StructFieldPtr + Load.
@@ -1257,6 +1401,57 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
         let _old = llssa.take_function(drop_id);
         llssa.put_function(drop_id, func);
     }
+}
+
+// =============================================================================
+// Lookup generated function bodies
+// =============================================================================
+
+/// Generate all lookup helper function bodies.
+fn generate_all_lookup_functions(llssa: &mut LLSSA, lookup_fns: &LookupFunctions) {
+    if let Some(id) = lookup_fns.rngchk_8 {
+        let func = generate_rngchk_8_function();
+        let _old = llssa.take_function(id);
+        llssa.put_function(id, func);
+    }
+}
+
+/// Generate __rngchk_8(val: FieldElem, flag: FieldElem):
+///
+/// Emits one entry into the LogUp lookup argument for the 8-bit rangecheck
+/// table. Extracts the lowest u64 limb of both `val` and `flag`, bumps the
+/// multiplicity for the indexed table slot, and appends to the lookup tape.
+fn generate_rngchk_8_function() -> LLFunction {
+    let mut func = LLFunction::empty("__rngchk_8".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+        let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        // Extract lowest u64 limb of val and flag (both assumed small).
+        let val_limbs = e.field_to_limbs(val);
+        let key = e.extract_field(val_limbs, LLStruct::limbs(), 0);
+        let flag_limbs = e.field_to_limbs(flag);
+        let flag_u64 = e.extract_field(flag_limbs, LLStruct::limbs(), 0);
+
+        // Bump multiplicities[rngchk_8_base + key] += flag_u64
+        e.bump_rngchk8_multiplicity(key, flag_u64);
+
+        // Append one tape entry: (table_id=0, key, flag_u64) to (a, b, c).
+        // The rangecheck-8 table is always the first table, so its id is the
+        // constant 0 — but we still emit an int_const so the value lives at
+        // the LL level and the LLVM codegen is uniform.
+        let table_id = e.int_const(64, 0);
+        e.lookup_tape_write_u64(LookupStream::A, table_id);
+        e.lookup_tape_write_u64(LookupStream::B, key);
+        e.lookup_tape_write_u64(LookupStream::C, flag_u64);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
 }
 
 /// Generate __ad_bump_d{a,b,c}(node: Ptr, amount: FieldElem):

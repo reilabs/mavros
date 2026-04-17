@@ -287,6 +287,25 @@ impl Display for FieldArithOp {
     }
 }
 
+/// One of the three lookup tape streams (a, b, c) written during LogUp lookups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupStream {
+    A,
+    B,
+    C,
+}
+
+impl Display for LookupStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            LookupStream::A => "a",
+            LookupStream::B => "b",
+            LookupStream::C => "c",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LLOp
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -468,6 +487,21 @@ pub enum LLOp {
         result: ValueId,
     },
 
+    // ── Lookups ─────────────────────────────────────────────────────────
+    /// Write a u64 value to one of the lookup tape streams (a/b/c) and advance.
+    LookupTapeWriteU64 {
+        stream: LookupStream,
+        value: ValueId,
+    },
+    /// Bump the multiplicity count for the 8-bit rangecheck table:
+    /// `multiplicities_wit[rngchk_8_offset + key] += flag`
+    /// Both `key` and `flag` are u64. The runtime lazily allocates the
+    /// rangecheck-8 table slot on first call.
+    BumpRngchk8Multiplicity {
+        key: ValueId,
+        flag: ValueId,
+    },
+
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -545,6 +579,10 @@ impl Instruction for LLOp {
                 sensitivity,
                 ..
             } => vec![witness_index, sensitivity].into_iter(),
+
+            // Lookups
+            LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
+            LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
         }
     }
 
@@ -585,6 +623,8 @@ impl Instruction for LLOp {
             | LLOp::WriteWitness { .. }
             | LLOp::ADWriteConst { .. }
             | LLOp::ADWriteWitness { .. }
+            | LLOp::LookupTapeWriteU64 { .. }
+            | LLOp::BumpRngchk8Multiplicity { .. }
             | LLOp::Trap => vec![].into_iter(),
         }
     }
@@ -659,6 +699,10 @@ impl Instruction for LLOp {
                 sensitivity,
                 ..
             } => vec![witness_index, sensitivity].into_iter(),
+
+            // Lookups
+            LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
+            LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
         }
     }
 
@@ -747,6 +791,10 @@ impl Instruction for LLOp {
                 sensitivity,
                 ..
             } => vec![witness_index, sensitivity].into_iter(),
+
+            // Lookups
+            LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
+            LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
         }
     }
 
@@ -986,6 +1034,14 @@ impl Instruction for LLOp {
             }
             LLOp::ADFreshWitness { result } => {
                 format!("{} = ad_fresh_witness", v(*result))
+            }
+
+            // Lookups
+            LLOp::LookupTapeWriteU64 { stream, value } => {
+                format!("lookup_tape_write_u64.{} {}", stream, vr(*value))
+            }
+            LLOp::BumpRngchk8Multiplicity { key, flag } => {
+                format!("bump_rngchk8_multiplicity {}, {}", vr(*key), vr(*flag))
             }
         }
     }
