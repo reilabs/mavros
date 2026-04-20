@@ -618,7 +618,8 @@ fn lower_instruction(
             const_val,
             var,
         } => {
-            lower_ad_mul_const(e, val_map, *result, *const_val, *var);
+            let coeff_type = fn_type_info.get_value_type(*const_val);
+            lower_ad_mul_const(e, val_map, *result, *const_val, *var, &coeff_type);
         }
 
         OpCode::Cast {
@@ -631,7 +632,7 @@ fn lower_instruction(
             match target {
                 CastTarget::WitnessOf => {
                     // Pure value → AD constant node
-                    lower_ad_const_wrap(e, val_map, *result, *value);
+                    lower_ad_const_wrap(e, val_map, *result, *value, &source_type);
                 }
                 CastTarget::Field => {
                     if source_type.is_field() {
@@ -1060,14 +1061,32 @@ fn lower_rc_drop(
 // AD lowering helpers
 // =============================================================================
 
+/// Ensure a value is Field-sized ({i64, i64, i64, i64}).
+/// Non-Field integer types are zero-extended to i64 and packed into limbs.
+fn ensure_field_sized(e: &mut LLBlockEmitter<'_>, ll_val: ValueId, source_type: &Type) -> ValueId {
+    if source_type.is_field() || source_type.is_witness_of() {
+        return ll_val;
+    }
+    // U(n)/I(n) → build {val_as_i64, 0, 0, 0}, then FieldFromLimbs
+    let val64 = match &source_type.expr {
+        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => e.zext(ll_val, 64),
+        TypeExpr::U(64) | TypeExpr::I(64) => ll_val,
+        _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
+    };
+    let zero = e.int_const(64, 0);
+    let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
+    e.field_from_limbs(limbs)
+}
+
 /// Allocate an ADConstNode wrapping a pure field value.
 fn lower_ad_const_wrap(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     value: ValueId,
+    source_type: &Type,
 ) {
-    let ll_val = val_map[&value];
+    let ll_val = ensure_field_sized(e, val_map[&value], source_type);
     let node_struct = LLStruct::ad_const_node();
     let node = e.heap_alloc(node_struct.clone(), None);
 
@@ -1160,8 +1179,9 @@ fn lower_ad_mul_const(
     result: ValueId,
     const_val: ValueId,
     var: ValueId,
+    coeff_type: &Type,
 ) {
-    let ll_coeff = val_map[&const_val];
+    let ll_coeff = ensure_field_sized(e, val_map[&const_val], coeff_type);
     let ll_var = val_map[&var];
     let node_struct = LLStruct::ad_mul_const_node();
     let node = e.heap_alloc(node_struct.clone(), None);

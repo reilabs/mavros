@@ -827,7 +827,16 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let collection = self.convert_expression(&index.collection, b).unwrap();
+        let mut collection = self.convert_expression(&index.collection, b).unwrap();
+        // If the collection is a reference, load through it first
+        if let Some(typ) = index.collection.return_type() {
+            if matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            ) {
+                collection = b.block(self.current_block).load(collection);
+            }
+        }
         let idx = self.convert_expression(&index.index, b).unwrap();
         let result = b.block(self.current_block).array_get(collection, idx);
         Some(result)
@@ -839,9 +848,17 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        // Expressions always return materialized tuples, so just use projection
-        let tuple = self.convert_expression(tuple_expr, b).unwrap();
-        let result = b.block(self.current_block).tuple_proj(tuple, idx);
+        let mut value = self.convert_expression(tuple_expr, b).unwrap();
+        // If the expression is a reference (e.g. &mut self), load through it first
+        if let Some(typ) = tuple_expr.return_type() {
+            if matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            ) {
+                value = b.block(self.current_block).load(value);
+            }
+        }
+        let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)
     }
 
