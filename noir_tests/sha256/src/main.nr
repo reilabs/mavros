@@ -1,4 +1,5 @@
-use std::hash::sha256_compression;
+mod sha256_compression;
+use sha256_compression::sha256_compression;
 
 // SHA-256 initial hash values.
 global H: [u32; 8] = [

@@ -41,21 +41,6 @@ fn big_sigma1(e: u32) -> u32 {
     rotr(e, 64, 67108864) ^ rotr(e, 2048, 2097152) ^ rotr(e, 33554432, 128)
 }
 
-unconstrained fn split4_hint(f: u32, a: u32, b: u32, c: u32, d: u32) -> (Field, Field, Field) {
-    let a0 = (f & (((1 << a) - 1) << (b + c + d))) >> (b + c + d);
-    let a1 = (f & (((1 << b) - 1) << (c + d))) >> (c + d);
-    let a2 = (f & (((1 << c) - 1) << d)) >> d;
-    (a0 as Field, a1 as Field, a2 as Field)
-}
-
-fn split_and_spread_4<let a: u32, let b: u32, let c: u32, let d: u32>(f: u32) -> [Field; 4] {
-    assert(a + b + c + d == 32);
-    let (a0, a1, a2) = unsafe { split4_hint(f, a, b, c, d) };
-    let a3 = f - (a0 * ((1 << (b + c + d)) as Field)) - (a1 * ((1 << (c + d)) as Field)) - (a2 * ((1 << d) as Field));
-    [spread::<a>(a0), spread::<b>(a1), spread::<c>(a2), spread::<d>(a3)]
-}
-
-
 fn small_sigma0(x: u32) -> u32 {
     // rotr(7) ^ rotr(18) ^ shr(3)
     rotr(x, 128, 33554432) ^ rotr(x, 262144, 16384) ^ (x / 8)
