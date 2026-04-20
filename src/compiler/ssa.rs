@@ -901,17 +901,15 @@ pub enum OpCode {
     Spread {
         result: ValueId,
         value: ValueId,
-        /// If known, the number of non-zero input bits (1..=16).
-        /// `None` means the compiler decides dynamically from the type.
-        bits: Option<u8>,
+        /// Number of input bits (1..=16).
+        bits: u8,
     },
     Unspread {
         result_odd: ValueId,
         result_even: ValueId,
         value: ValueId,
-        /// If known, the number of non-zero input bits per half (1..=16).
-        /// `None` means the compiler decides dynamically from the type.
-        bits: Option<u8>,
+        /// Number of input bits per half (1..=16).
+        bits: u8,
     },
     Guard {
         condition: ValueId,
@@ -1417,16 +1415,11 @@ impl Instruction for OpCode {
                 value,
                 bits,
             } => {
-                let bits_str = match bits {
-                    Some(n) => format!(", {n}"),
-                    None => String::new(),
-                };
                 format!(
-                    "v{}{} = spread(v{}{})",
+                    "v{}{} = spread(v{}, {bits})",
                     result.0,
                     annotate_value(*result),
                     value.0,
-                    bits_str
                 )
             }
             OpCode::Unspread {
@@ -1435,18 +1428,13 @@ impl Instruction for OpCode {
                 value,
                 bits,
             } => {
-                let bits_str = match bits {
-                    Some(n) => format!(", {n}"),
-                    None => String::new(),
-                };
                 format!(
-                    "v{}{}, v{}{} = unspread(v{}{})",
+                    "v{}{}, v{}{} = unspread(v{}, {bits})",
                     result_odd.0,
                     annotate_value(*result_odd),
                     result_even.0,
                     annotate_value(*result_even),
                     value.0,
-                    bits_str
                 )
             }
             OpCode::Guard { condition, inner } => {

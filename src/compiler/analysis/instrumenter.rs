@@ -1279,7 +1279,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
 
-    fn spread(&self, instrumenter: &mut CostAnalysis) -> Self {
+    fn spread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: self
                 .unspecialized
@@ -1288,7 +1288,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn unspread(&self, instrumenter: &mut CostAnalysis) -> (Self, Self) {
+    fn unspread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> (Self, Self) {
         let (unspec_odd, unspec_even) = self
             .unspecialized
             .unspread_op(instrumenter.get_unspecialized());

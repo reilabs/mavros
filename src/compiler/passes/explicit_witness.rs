@@ -832,7 +832,6 @@ impl ExplicitWitness {
                 if !is_witness {
                     b.push(instruction);
                 } else {
-                    let bits = bits.expect("witness spread requires known bits parameter");
                     let one = b.field_const(Field::ONE);
                     // Strip WitnessOf for pure computation
                     let value_pure = b.value_of(value);
@@ -840,7 +839,7 @@ impl ExplicitWitness {
                     let value_field = b.cast_to_field(value_pure);
                     let input_wit = b.write_witness(value_field);
                     // Compute spread hint (pure) and write as witness
-                    let spread_hint = b.spread(value_pure);
+                    let spread_hint = b.spread(value_pure, bits);
                     let spread_hint_field = b.cast_to_field(spread_hint);
                     let spread_wit = b.write_witness(spread_hint_field);
                     // Constrain via lookup table
@@ -863,25 +862,24 @@ impl ExplicitWitness {
                 if !is_witness {
                     b.push(instruction);
                 } else {
-                    let bits = bits.expect("witness unspread requires known bits parameter");
                     let one = b.field_const(Field::ONE);
                     let two = b.field_const(Field::from(2));
                     let zero = b.field_const(Field::ZERO);
                     // Strip WitnessOf for pure computation
                     let value_pure = b.value_of(value);
                     // Compute unspread hints (pure)
-                    let (odd_hint, even_hint) = b.unspread(value_pure);
+                    let (odd_hint, even_hint) = b.unspread(value_pure, bits);
                     // Write odd as witness with spread lookup
                     let odd_field = b.cast_to_field(odd_hint);
                     let odd_wit = b.write_witness(odd_field);
-                    let odd_spread_hint = b.spread(odd_hint);
+                    let odd_spread_hint = b.spread(odd_hint, bits);
                     let odd_spread_field = b.cast_to_field(odd_spread_hint);
                     let odd_spread_wit = b.write_witness(odd_spread_field);
                     b.lookup_spread(bits, odd_wit, odd_spread_wit, one);
                     // Write even as witness with spread lookup
                     let even_field = b.cast_to_field(even_hint);
                     let even_wit = b.write_witness(even_field);
-                    let even_spread_hint = b.spread(even_hint);
+                    let even_spread_hint = b.spread(even_hint, bits);
                     let even_spread_field = b.cast_to_field(even_spread_hint);
                     let even_spread_wit = b.write_witness(even_spread_field);
                     b.lookup_spread(bits, even_wit, even_spread_wit, one);
@@ -1936,7 +1934,7 @@ impl ExplicitWitness {
         let byte_value_field = b.cast_to_field(byte_value);
         let byte_wit = b.write_witness(byte_value_field);
 
-        let spread_hint = b.spread(byte_value);
+        let spread_hint = b.spread(byte_value, 8);
         let spread_hint_field = b.cast_to_field(spread_hint);
         let spread_wit = b.write_witness(spread_hint_field);
         b.lookup_spread(8, byte_wit, spread_wit, flag);
