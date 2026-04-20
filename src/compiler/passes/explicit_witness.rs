@@ -861,10 +861,8 @@ impl ExplicitWitness {
                 } else {
                     let one = b.field_const(Field::ONE);
                     let two = b.field_const(Field::from(2));
-                    let zero = b.field_const(Field::ZERO);
-                    // Strip WitnessOf for pure computation
                     let value_pure = b.value_of(value);
-                    // Compute unspread hints (pure)
+                    let value_field = b.cast_to_field(value);
                     let (odd_hint, even_hint) = b.unspread(value_pure, bits);
                     // Write odd as witness with spread lookup
                     let odd_field = b.cast_to_field(odd_hint);
@@ -876,16 +874,10 @@ impl ExplicitWitness {
                     // Write even as witness with spread lookup
                     let even_field = b.cast_to_field(even_hint);
                     let even_wit = b.write_witness(even_field);
-                    let even_spread_hint = b.spread(even_hint, bits);
-                    let even_spread_field = b.cast_to_field(even_spread_hint);
-                    let even_spread_wit = b.write_witness(even_spread_field);
-                    b.lookup_spread(bits, even_wit, even_spread_wit, one);
-                    // Constrain: value == spread(even) + 2 * spread(odd)
-                    let value_field = b.cast_to_field(value);
+                    // Derive even_spread algebraically: value - 2 * spread(odd)
                     let two_odd_spread = b.mul(two, odd_spread_wit);
-                    let reconstructed = b.add(even_spread_wit, two_odd_spread);
-                    let diff = b.sub(reconstructed, value_field);
-                    b.constrain(one, diff, zero);
+                    let even_spread = b.sub(value_field, two_odd_spread);
+                    b.lookup_spread(bits, even_wit, even_spread, one);
                     // Bind results
                     b.push(OpCode::Cast {
                         result: result_odd,
