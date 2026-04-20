@@ -592,7 +592,7 @@ impl Value {
                 );
                 Value::Unknown(ScalarKind::I(bits * 2))
             }
-            Value::Unknown(ScalarKind::Field) => panic!("Spread of field values is unsupported"),
+            Value::Unknown(ScalarKind::Field) => Value::Unknown(ScalarKind::Field),
             _ => panic!("Cannot spread {:?}", self),
         }
     }
@@ -655,7 +655,7 @@ impl Value {
                 )
             }
             Value::Unknown(ScalarKind::Field) => {
-                panic!("Unspread of field values is unsupported")
+                (Value::Unknown(ScalarKind::Field), Value::Unknown(ScalarKind::Field))
             }
             _ => panic!("Cannot unspread {:?}", self),
         }

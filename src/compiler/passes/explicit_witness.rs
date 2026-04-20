@@ -823,8 +823,86 @@ impl ExplicitWitness {
             | OpCode::Const { .. } => {
                 b.push(instruction);
             }
-            OpCode::Spread { .. } | OpCode::Unspread { .. } => {
-                panic!("Unexpected spread opcode in explicit_witness: {instruction:?}");
+            OpCode::Spread {
+                result,
+                value,
+                bits,
+            } => {
+                let is_witness = function_type_info.get_value_type(value).is_witness_of();
+                if !is_witness {
+                    b.push(instruction);
+                } else {
+                    let bits = bits.expect("witness spread requires known bits parameter");
+                    let one = b.field_const(Field::ONE);
+                    // Strip WitnessOf for pure computation
+                    let value_pure = b.value_of(value);
+                    // Write input as witness
+                    let value_field = b.cast_to_field(value_pure);
+                    let input_wit = b.write_witness(value_field);
+                    // Compute spread hint (pure) and write as witness
+                    let spread_hint = b.spread(value_pure);
+                    let spread_hint_field = b.cast_to_field(spread_hint);
+                    let spread_wit = b.write_witness(spread_hint_field);
+                    // Constrain via lookup table
+                    b.lookup_spread(bits, input_wit, spread_wit, one);
+                    // Bind the original result to the spread witness
+                    b.push(OpCode::Cast {
+                        result,
+                        value: spread_wit,
+                        target: CastTarget::U(bits as usize * 2),
+                    });
+                }
+            }
+            OpCode::Unspread {
+                result_odd,
+                result_even,
+                value,
+                bits,
+            } => {
+                let is_witness = function_type_info.get_value_type(value).is_witness_of();
+                if !is_witness {
+                    b.push(instruction);
+                } else {
+                    let bits = bits.expect("witness unspread requires known bits parameter");
+                    let one = b.field_const(Field::ONE);
+                    let two = b.field_const(Field::from(2));
+                    let zero = b.field_const(Field::ZERO);
+                    // Strip WitnessOf for pure computation
+                    let value_pure = b.value_of(value);
+                    // Compute unspread hints (pure)
+                    let (odd_hint, even_hint) = b.unspread(value_pure);
+                    // Write odd as witness with spread lookup
+                    let odd_field = b.cast_to_field(odd_hint);
+                    let odd_wit = b.write_witness(odd_field);
+                    let odd_spread_hint = b.spread(odd_hint);
+                    let odd_spread_field = b.cast_to_field(odd_spread_hint);
+                    let odd_spread_wit = b.write_witness(odd_spread_field);
+                    b.lookup_spread(bits, odd_wit, odd_spread_wit, one);
+                    // Write even as witness with spread lookup
+                    let even_field = b.cast_to_field(even_hint);
+                    let even_wit = b.write_witness(even_field);
+                    let even_spread_hint = b.spread(even_hint);
+                    let even_spread_field = b.cast_to_field(even_spread_hint);
+                    let even_spread_wit = b.write_witness(even_spread_field);
+                    b.lookup_spread(bits, even_wit, even_spread_wit, one);
+                    // Constrain: value == spread(even) + 2 * spread(odd)
+                    let value_field = b.cast_to_field(value);
+                    let two_odd_spread = b.mul(two, odd_spread_wit);
+                    let reconstructed = b.add(even_spread_wit, two_odd_spread);
+                    let diff = b.sub(reconstructed, value_field);
+                    b.constrain(one, diff, zero);
+                    // Bind results
+                    b.push(OpCode::Cast {
+                        result: result_odd,
+                        value: odd_wit,
+                        target: CastTarget::U(bits as usize),
+                    });
+                    b.push(OpCode::Cast {
+                        result: result_even,
+                        value: even_wit,
+                        target: CastTarget::U(bits as usize),
+                    });
+                }
             }
             OpCode::Guard { condition, inner } => {
                 self.lower_guard(b, function_type_info, condition, *inner);

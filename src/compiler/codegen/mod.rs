@@ -1165,7 +1165,7 @@ impl CodeGen {
                         bits: *bits as usize,
                     });
                 }
-                ssa::OpCode::Spread { result, value } => {
+                ssa::OpCode::Spread { result, value, .. } => {
                     let value_type = type_info.get_value_type(*value);
                     let value_bits = match &value_type.expr {
                         TypeExpr::U(bits) | TypeExpr::I(bits) => bits,
@@ -1189,6 +1189,7 @@ impl CodeGen {
                     result_odd,
                     result_even,
                     value,
+                    ..
                 } => {
                     let odd_type = type_info.get_value_type(*result_odd);
                     let even_type = type_info.get_value_type(*result_even);

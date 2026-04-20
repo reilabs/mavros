@@ -571,7 +571,7 @@ impl SymbolicExecutor {
                             scope[result_id.0 as usize] = Some(result_value.clone());
                         }
                     }
-                    crate::compiler::ssa::OpCode::Spread { result, value } => {
+                    crate::compiler::ssa::OpCode::Spread { result, value, .. } => {
                         let val = scope[value.0 as usize].as_ref().unwrap();
                         scope[result.0 as usize] = Some(val.spread(ctx));
                     }
@@ -579,6 +579,7 @@ impl SymbolicExecutor {
                         result_odd,
                         result_even,
                         value,
+                        ..
                     } => {
                         let val = scope[value.0 as usize].as_ref().unwrap();
                         let (odd_val, even_val) = val.unspread(ctx);
