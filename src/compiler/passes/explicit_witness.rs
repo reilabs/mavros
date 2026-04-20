@@ -833,17 +833,14 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let one = b.field_const(Field::ONE);
-                    // Strip WitnessOf for pure computation
                     let value_pure = b.value_of(value);
-                    // Write input as witness
-                    let value_field = b.cast_to_field(value_pure);
-                    let input_wit = b.write_witness(value_field);
+                    let input_field = b.cast_to_field(value);
                     // Compute spread hint (pure) and write as witness
                     let spread_hint = b.spread(value_pure, bits);
                     let spread_hint_field = b.cast_to_field(spread_hint);
                     let spread_wit = b.write_witness(spread_hint_field);
                     // Constrain via lookup table
-                    b.lookup_spread(bits, input_wit, spread_wit, one);
+                    b.lookup_spread(bits, input_field, spread_wit, one);
                     // Bind the original result to the spread witness
                     b.push(OpCode::Cast {
                         result,
