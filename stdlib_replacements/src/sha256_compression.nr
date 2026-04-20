@@ -1,6 +1,8 @@
 // SHA-256 compression function replacement
 // Replaces the stdlib sha256_compression lowlevel intrinsic.
 
+use std::mavros::{spread, unspread};
+
 global K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -38,6 +40,21 @@ fn big_sigma1(e: u32) -> u32 {
     // rotr(6) ^ rotr(11) ^ rotr(25)
     rotr(e, 64, 67108864) ^ rotr(e, 2048, 2097152) ^ rotr(e, 33554432, 128)
 }
+
+unconstrained fn split4_hint(f: u32, a: u32, b: u32, c: u32, d: u32) -> (Field, Field, Field) {
+    let a0 = (f & (((1 << a) - 1) << (b + c + d))) >> (b + c + d);
+    let a1 = (f & (((1 << b) - 1) << (c + d))) >> (c + d);
+    let a2 = (f & (((1 << c) - 1) << d)) >> d;
+    (a0 as Field, a1 as Field, a2 as Field)
+}
+
+fn split_and_spread_4<let a: u32, let b: u32, let c: u32, let d: u32>(f: u32) -> [Field; 4] {
+    assert(a + b + c + d == 32);
+    let (a0, a1, a2) = unsafe { split4_hint(f, a, b, c, d) };
+    let a3 = f - (a0 * ((1 << (b + c + d)) as Field)) - (a1 * ((1 << (c + d)) as Field)) - (a2 * ((1 << d) as Field));
+    [spread::<a>(a0), spread::<b>(a1), spread::<c>(a2), spread::<d>(a3)]
+}
+
 
 fn small_sigma0(x: u32) -> u32 {
     // rotr(7) ^ rotr(18) ^ shr(3)
