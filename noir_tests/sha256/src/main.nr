@@ -9,13 +9,9 @@ global H: [u32; 8] = [
 
 fn main(input: [u8; 5]) {
     // Manually pad the 5-byte message "hello" into a single 512-bit block.
-    // Padding: message bytes | 0x80 | zeros | 64-bit big-endian length (40 bits)
     let mut block: [u32; 16] = [0; 16];
-    // Pack bytes into big-endian u32 words using multiplication instead of <<
     block[0] = (input[0] as u32) * 16777216 + (input[1] as u32) * 65536 + (input[2] as u32) * 256 + (input[3] as u32);
     block[1] = (input[4] as u32) * 16777216 + 0x800000;
-    // block[2..14] = 0 (already initialized)
-    // Length in bits = 5 * 8 = 40, stored as big-endian u64 in last two words
     block[15] = 40;
 
     let mut state = H;

@@ -57,25 +57,21 @@ fn split_and_spread_4<let a: u32, let b: u32, let c: u32, let d: u32>(f: u32) ->
 }
 
 unconstrained fn unspread_64_hint(f: u64) -> (Field, Field) {
-    let a = 22;
-    let b = 22;
-    let c = 20;
-    let a0 = (f & (((1 << a) - 1) << (b + c))) >> (b + c);
-    let a1 = (f & (((1 << b) - 1) << (c))) >> (c);
+    let mask22: u64 = (1 << 22) - 1;
+    let a0 = (f >> 42) & mask22;
+    let a1 = (f >> 20) & mask22;
     (a0 as Field, a1 as Field)
 }
 
 fn unspread_64(x: u64) -> (u32, u32) {
     // Safety: is for the weak
     let (a0, a1) = unsafe { unspread_64_hint(x) };
-    let b = 22;
-    let c = 20;
-    let a2 = (x as Field) - (a0 * ((1 << (b + c)) as Field)) - (a1 * ((1 << c) as Field));
+    let a2 = (x as Field) - (a0 * POW_2_42) - (a1 * POW_2_20);
     let (a0_uns_0, a0_uns_1) = unspread::<11>(unsafe_cast(a0));
     let (a1_uns_0, a1_uns_1) = unspread::<11>(unsafe_cast(a1));
     let (a2_uns_0, a2_uns_1) = unspread::<10>(unsafe_cast(a2));
-    let a_0 = a0_uns_0 as Field + a1_uns_0 as Field * POW_2_11 + a2_uns_0 as Field * POW_2_21;
-    let a_1 = a0_uns_1 as Field + a1_uns_1 as Field * POW_2_11 + a2_uns_1 as Field * POW_2_21;
+    let a_0 = a2_uns_0 as Field + a1_uns_0 as Field * POW_2_10 + a0_uns_0 as Field * POW_2_21;
+    let a_1 = a2_uns_1 as Field + a1_uns_1 as Field * POW_2_10 + a0_uns_1 as Field * POW_2_21;
     (unsafe_cast(a_0), unsafe_cast(a_1))
 }
 
@@ -108,7 +104,9 @@ global POW_2_56: Field = (1u64 << 56) as Field;
 global POW_2_34: Field = (1u64 << 34) as Field;
 global POW_2_42: Field = (1u64 << 42) as Field;
 global POW_2_30: Field = (1u64 << 30) as Field;
+global POW_2_20: Field = (1u64 << 20) as Field;
 global POW_2_8: Field = (1u64 << 8) as Field;
+global POW_2_10: Field = (1u64 << 10) as Field;
 
 
 
