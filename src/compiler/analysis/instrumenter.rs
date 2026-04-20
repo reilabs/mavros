@@ -671,7 +671,9 @@ impl Value {
             (Value::Unknown(_), CastTarget::U(s)) => Value::Unknown(ScalarKind::U(*s)),
             (Value::Unknown(_), CastTarget::I(s)) => Value::Unknown(ScalarKind::I(*s)),
             (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
-            (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => Value::Unknown(*kind),
+            (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => {
+                Value::Unknown(*kind)
+            }
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
