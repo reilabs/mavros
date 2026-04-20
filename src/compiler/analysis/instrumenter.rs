@@ -1600,7 +1600,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         fn unknown_value(ty: &Type) -> Value {
             match &ty.expr {
                 TypeExpr::Field => Value::Unknown(ScalarKind::Field),
-                TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+                TypeExpr::U(s) | TypeExpr::I(s) => Value::Unknown(ScalarKind::U(*s)),
                 TypeExpr::Array(elem, size) => {
                     Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
                 }

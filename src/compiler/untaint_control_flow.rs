@@ -47,7 +47,13 @@ impl UntaintControlFlow {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 1: Type Application — bake WitnessOf into SSA types
+    // Step 1: Type application — bake WitnessOf into SSA types
+    //
+    // Walks every function that has witness type info and rewrites SSA types
+    // (block params, instruction result types, return types) to include
+    // WitnessOf wrappers where witness inference determined a value is witness-
+    // dependent. This must run before cast insertion / linearization so that
+    // the type info pass can see the WitnessOf types.
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all, name = "UntaintControlFlow::apply_types")]
@@ -175,19 +181,30 @@ impl UntaintControlFlow {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 2: Cast insertion + control flow linearization
+    // Step 2: Cast insertion + control flow linearization
+    //
+    // After types are baked in and flow/type analysis is recomputed:
+    //  - Linearizes witness-conditional branches: witness JmpIf is replaced
+    //    by unconditional Jmp + Select at merge points; instructions in
+    //    tainted blocks are wrapped in Guard.
+    //  - Inserts WitnessOf casts at typed-slot boundaries (MkSeq elems,
+    //    ArraySet value, SlicePush values, Store value, Select operands,
+    //    Jmp args, Return values) where the actual type doesn't match the
+    //    expected slot type.
+    //  - Pushes cfg_witness arg to constrained calls; strips WitnessOf from
+    //    unconstrained call args via ValueOf.
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
     pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
-        // Phase 1: bake WitnessOf into SSA types
+        // Step 1: bake WitnessOf into SSA types
         let mut ssa = self.apply_types(ssa, witness_inference);
 
-        // Compute flow + type info for cast insertion + linearization
+        // Recompute flow + type info (types changed in step 1)
         let flow_analysis = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow_analysis);
 
-        // Phase 2: cast insertion + control flow linearization
+        // Step 2: cast insertion + control flow linearization
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
             if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
@@ -675,7 +692,7 @@ impl UntaintControlFlow {
 }
 
 // ---------------------------------------------------------------------------
-// Cast insertion helpers (moved from WitnessCastInsertion)
+// Cast insertion helpers
 // ---------------------------------------------------------------------------
 
 fn convert_if_needed(
