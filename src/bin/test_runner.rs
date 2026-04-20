@@ -613,7 +613,6 @@ fn run_wasm_phase2(
 ) -> (Vec<Field>, Vec<Field>, Vec<Field>, Vec<Field>, Vec<Field>) {
     use mavros::artifacts::Table;
     use mavros::vm::bytecode::TableInfo;
-    use std::str::FromStr;
 
     // Fix multiplicities: during WASM execution we wrote them as raw u64 in the
     // low limb. Convert each one into a proper Montgomery-form Field.
@@ -679,18 +678,7 @@ fn run_wasm_phase2(
         inv_wit_cursor += wit_size;
     }
 
-    // Generate the same fake challenges the VM path uses. Must match exactly so
-    // both paths produce identical witness and constraint vectors.
-    use ark_ff::BigInt;
-    let mut fake_challenges = vec![Field::from(0u64); r1cs.witness_layout.challenges_size];
-    let mut random = <Field as ark_ff::PrimeField>::from_bigint(
-        BigInt::from_str("18765435241434657586764563434227903").unwrap(),
-    )
-    .unwrap();
-    for challenge in fake_challenges.iter_mut() {
-        *challenge = random;
-        random = (random + Field::from(17u64)) * random;
-    }
+    let fake_challenges = interpreter::fake_challenges(r1cs.witness_layout.challenges_size);
 
     // Phase 2 takes an owned Phase1Result; assemble one from the WASM buffers.
     let phase1 = interpreter::Phase1Result {

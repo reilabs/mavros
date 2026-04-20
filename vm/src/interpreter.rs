@@ -514,18 +514,24 @@ pub fn run(
     ordered_inputs: &[InputValueOrdered],
 ) -> WitgenResult {
     let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs);
+    let fake_challenges = fake_challenges(witness_layout.challenges_size);
+    run_phase2(phase1, &fake_challenges, witness_layout, constraints_layout)
+}
 
-    // Generate fake challenges (matches the old hardcoded behaviour).
-    let mut fake_challenges = vec![Field::ZERO; witness_layout.challenges_size];
+/// Generate the deterministic "fake" Fiat-Shamir challenges used by both the
+/// VM's `run()` entry point and the WASM test harness's Phase 2. The seed and
+/// update rule are fixed so that both paths produce identical witness and
+/// constraint vectors.
+pub fn fake_challenges(count: usize) -> Vec<Field> {
+    let mut out = vec![Field::ZERO; count];
     let mut random =
         Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
             .unwrap();
-    for challenge in fake_challenges.iter_mut() {
+    for challenge in out.iter_mut() {
         *challenge = random;
         random = (random + Field::from(17)) * random;
     }
-
-    run_phase2(phase1, &fake_challenges, witness_layout, constraints_layout)
+    out
 }
 
 #[instrument(skip_all, name = "Interpreter::run_ad")]
