@@ -1,48 +1,42 @@
 use std::mavros::{unsafe_cast, spread, unspread};
 
-fn main(x: u32, y: u32, cast_x: Field, cast_big: Field) {
+fn main(x: u32, y: u32, a: u32, b: u32, cast_x: Field, cast_big: Field) {
     // --- unsafe_cast ---
 
-    // Field -> u8: truncates to low 8 bits
     let x_u8: u8 = unsafe_cast(cast_x);
     assert_eq(x_u8, 200);
-
-    // Field -> u16
     let x_u16: u16 = unsafe_cast(cast_x);
     assert_eq(x_u16, 200);
-
-    // Field -> u32
     let big_u32: u32 = unsafe_cast(cast_big);
     assert_eq(big_u32, 1000);
-
-    // Field -> u64
     let big_u64: u64 = unsafe_cast(cast_big);
     assert_eq(big_u64, 1000);
 
-    // --- spread / unspread ---
+    // --- spread<5> / unspread<5> ---
 
-    // spread<8> on x=5 (binary 101)
-    // spread interleaves zero-bits: 101 -> 0_1_0_0_0_1 = 0x11 = 17
-    let sx: u64 = spread::<8>(x);
-    assert_eq(sx, 17);
-
-    // unspread<8> should recover the original value and zero
-    let (odd, even) = unspread::<8>(sx);
+    let sx: u64 = spread::<5>(x);
+    assert_eq(sx, 17); // spread(5) = 17
+    let (odd, even) = unspread::<5>(sx);
     assert_eq(odd, 0);
     assert_eq(even, x);
+    let sy: u64 = spread::<5>(y);
+    assert_eq(sy, 81); // spread(13) = 81
+    let combined5 = sx + sy;
+    let (result_and5, result_xor5) = unspread::<5>(combined5);
+    assert_eq(result_and5, x & y); // 5 & 13 = 5
+    assert_eq(result_xor5, x ^ y); // 5 ^ 13 = 8
 
-    // spread<8> on y=13 (binary 1101)
-    // 1101 -> 0_1_0_1_0_0_0_1 = 0x51 = 81
-    let sy: u64 = spread::<8>(y);
-    assert_eq(sy, 81);
+    // --- spread<7> / unspread<7> ---
 
-    let (odd2, even2) = unspread::<8>(sy);
-    assert_eq(odd2, 0);
-    assert_eq(even2, y);
-
-    // Test spread then adding two spreads (the core use case for AND/XOR)
-    let combined = sx + sy;
-    let (result_and, result_xor) = unspread::<8>(combined);
-    assert_eq(result_and, x & y);  // 5 & 13 = 5
-    assert_eq(result_xor, x ^ y);  // 5 ^ 13 = 8
+    let sa: u64 = spread::<7>(a);
+    assert_eq(sa, 5136); // spread(100) = 5136
+    let (odd7, even7) = unspread::<7>(sa);
+    assert_eq(odd7, 0);
+    assert_eq(even7, a);
+    let sb: u64 = spread::<7>(b);
+    assert_eq(sb, 4177); // spread(77) = 4177
+    let combined7 = sa + sb;
+    let (result_and7, result_xor7) = unspread::<7>(combined7);
+    assert_eq(result_and7, a & b); // 100 & 77 = 68
+    assert_eq(result_xor7, a ^ b); // 100 ^ 77 = 41
 }
