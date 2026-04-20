@@ -12,8 +12,13 @@ global K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+fn wrapping_mul(a: u32, b: u32) -> u32 {
+    let prod = a as u64 * b as u64;
+    (prod & 0xffffffff) as u32
+}
+
 fn rotr(x: u32, right_divisor: u32, left_multiplier: u32) -> u32 {
-    (x / right_divisor) | (x * left_multiplier)
+    (x / right_divisor) | wrapping_mul(x, left_multiplier)
 }
 
 fn ch(e: u32, f: u32, g: u32) -> u32 {
