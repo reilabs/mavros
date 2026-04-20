@@ -1,0 +1,6 @@
+[package]
+name = "spread_and_cast"
+type = "bin"
+authors = [""]
+
+[dependencies]

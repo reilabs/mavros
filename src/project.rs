@@ -10,6 +10,7 @@ use nargo::{
     workspace::Workspace,
 };
 use nargo_toml::PackageSelection::All;
+use noirc_driver::stdlib_paths_with_source;
 use noirc_frontend::hir::ParsedFiles;
 
 use crate::error::Error;
@@ -22,6 +23,13 @@ pub struct Project {
     nargo_parsed_files: ParsedFiles,
 }
 
+/// Mavros stdlib extensions that get injected into the `std/` namespace.
+/// These must be added before the embedded stdlib so our modified `std/lib.nr` takes precedence.
+const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
+    ("std/lib.nr", include_str!("../mavros_stdlib/lib.nr")),
+    ("std/mavros.nr", include_str!("../mavros_stdlib/mavros.nr")),
+];
+
 fn add_stdlib_replacements(file_manager: &mut FileManager) {
     for crate_def in REPLACEMENT_CRATES {
         file_manager.add_file_with_source_canonical_path(
@@ -32,7 +40,23 @@ fn add_stdlib_replacements(file_manager: &mut FileManager) {
 }
 
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
-    let mut file_manager = workspace.new_file_manager();
+    // Build file manager manually so we can inject mavros stdlib extensions
+    // before the embedded stdlib. Since `add_file_with_source_canonical_path`
+    // is a no-op for paths that already exist, our `std/lib.nr` (which adds
+    // `pub mod mavros;`) takes precedence over the embedded one.
+    let mut file_manager = FileManager::new(&workspace.root_dir);
+
+    // 1. Add mavros stdlib extensions first
+    for (path, source) in MAVROS_STDLIB_FILES {
+        file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string());
+    }
+
+    // 2. Add the rest of the embedded stdlib (std/lib.nr will be skipped)
+    for (path, source) in stdlib_paths_with_source() {
+        file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
+    }
+
+    // 3. Add workspace files and lowlevel replacements
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
     add_stdlib_replacements(&mut file_manager);
     let parsed_files = nargo::parse_all(&file_manager);

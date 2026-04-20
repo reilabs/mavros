@@ -629,7 +629,7 @@ impl Types {
                 function_info.values.insert(*result, ty);
                 Ok(())
             }
-            OpCode::Spread { result, value } => {
+            OpCode::Spread { result, value, .. } => {
                 let value_type = function_info
                     .values
                     .get(value)
@@ -642,6 +642,7 @@ impl Types {
                 result_odd,
                 result_even,
                 value,
+                ..
             } => {
                 let value_type = function_info
                     .values
