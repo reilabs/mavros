@@ -295,13 +295,28 @@ impl Types {
                 result,
                 array,
                 index: _,
-                value: _,
+                value,
             } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {
                     format!("Array value {:?} not found in type assignments", array)
                 })?;
+                let value_type = function_info.values.get(value).ok_or_else(|| {
+                    format!("Value {:?} not found in type assignments", value)
+                })?;
 
-                function_info.values.insert(*result, array_type.clone());
+                // If the value is witness-typed but the array element is not,
+                // promote the result array's element type to match.
+                let elem_type = array_type.get_array_element();
+                let result_type = if value_type.is_witness_of() && !elem_type.is_witness_of() {
+                    match &array_type.expr {
+                        TypeExpr::Array(_, size) => value_type.clone().array_of(*size),
+                        TypeExpr::Slice(_) => value_type.clone().slice_of(),
+                        _ => array_type.clone(),
+                    }
+                } else {
+                    array_type.clone()
+                };
+                function_info.values.insert(*result, result_type);
                 Ok(())
             }
             OpCode::SlicePush {
