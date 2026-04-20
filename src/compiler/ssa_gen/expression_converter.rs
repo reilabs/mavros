@@ -1407,20 +1407,25 @@ impl<'a> ExpressionConverter<'a> {
             }
             "spread_inner" => {
                 let bits = Self::extract_const_u32(&call.arguments[1]);
-                assert!(bits >= 1 && bits <= 16, "spread: bits must be 1..=16, got {bits}");
+                assert!(
+                    bits >= 1 && bits <= 16,
+                    "spread: bits must be 1..=16, got {bits}"
+                );
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let result = b.block(self.current_block).spread(value, bits as u8);
                 Some(result)
             }
             "unspread_inner" => {
                 let bits = Self::extract_const_u32(&call.arguments[1]);
-                assert!(bits >= 1 && bits <= 16, "unspread: bits must be 1..=16, got {bits}");
+                assert!(
+                    bits >= 1 && bits <= 16,
+                    "unspread: bits must be 1..=16, got {bits}"
+                );
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let (odd, even) = b.block(self.current_block).unspread(value, bits as u8);
-                let result = b.block(self.current_block).mk_tuple(
-                    vec![odd, even],
-                    vec![Type::u(32), Type::u(32)],
-                );
+                let result = b
+                    .block(self.current_block)
+                    .mk_tuple(vec![odd, even], vec![Type::u(32), Type::u(32)]);
                 Some(result)
             }
             _ => None,

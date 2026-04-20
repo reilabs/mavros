@@ -654,9 +654,10 @@ impl Value {
                     Value::Unknown(ScalarKind::I(half_bits)),
                 )
             }
-            Value::Unknown(ScalarKind::Field) => {
-                (Value::Unknown(ScalarKind::Field), Value::Unknown(ScalarKind::Field))
-            }
+            Value::Unknown(ScalarKind::Field) => (
+                Value::Unknown(ScalarKind::Field),
+                Value::Unknown(ScalarKind::Field),
+            ),
             _ => panic!("Cannot unspread {:?}", self),
         }
     }

@@ -48,8 +48,7 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
 
     // 1. Add mavros stdlib extensions first
     for (path, source) in MAVROS_STDLIB_FILES {
-        file_manager
-            .add_file_with_source_canonical_path(Path::new(path), source.to_string());
+        file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string());
     }
 
     // 2. Add the rest of the embedded stdlib (std/lib.nr will be skipped)
