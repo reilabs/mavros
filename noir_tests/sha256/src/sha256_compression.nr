@@ -86,13 +86,59 @@ fn small_sigma0(x: u32) -> u32 {
 }
 
 fn small_sigma1(x: u32) -> u32 {
-    // rotr(17) ^ rotr(19) ^ shr(10)
-    rotr(x, 131072, 32768) ^ rotr(x, 524288, 8192) ^ (x / 1024)
+
+    let (wi2s13, wi2s2, wi2s7, wi2s10) = split_and_spread_4::<13,2,7,10>(x);
+    let wi2rr17 = wi2s2 + wi2s13 * POW_2_4 + wi2s10 * POW_2_30 + wi2s7 * POW_2_50;
+    let wi2rr19 = wi2s13 + wi2s10 * POW_2_26 + wi2s7 * POW_2_46 + wi2s2 * POW_2_60;
+    let wi2rs10 = wi2s7 + wi2s2 * POW_2_14 + wi2s13 * POW_2_18;
+    let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
+    let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
+    s1
+	// wi2s13, wi2s2, wi2s7, wi2s10 := hasher.splitAndSpread4(res[i-2], 13, 2, 7, 10)
+	// wi2rr17 := hasher.api.Add(
+		// wi2s2,
+		// hasher.api.Mul(wi2s13, 1<<4),
+		// hasher.api.Mul(wi2s10, 1<<30),
+		// hasher.api.Mul(wi2s7, 1<<50),
+	// )
+	// wi2rr19 := hasher.api.Add(
+		// wi2s13,
+		// hasher.api.Mul(wi2s10, 1<<26),
+		// hasher.api.Mul(wi2s7, 1<<46),
+		// hasher.api.Mul(wi2s2, 1<<60),
+	// )
+	// wi2rs10 := hasher.api.Add(
+		// wi2s7,
+		// hasher.api.Mul(wi2s2, 1<<14),
+		// hasher.api.Mul(wi2s13, 1<<18),
+	// )
+	// s1XorPlus := hasher.api.Add(wi2rr17, wi2rr19, wi2rs10)
+	// _, s1 := hasher.unspread(s1XorPlus)
 }
 
 fn wrapping_add(a: u32, b: u32) -> u32 {
     let sum = a as u64 + b as u64;
     (sum & 0xffffffff) as u32
+}
+
+unconstrained fn wrapping_add_N_hint(a: Field) -> u32 {
+    a as u32
+}
+
+fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
+    assert(N < 20);
+    assert(N > 0);
+    let mut sum: Field = 0;
+    for i in a {
+        sum = sum + i as Field;
+    }
+
+    // Safety: is for the weak
+    let res = unsafe { wrapping_add_N_hint(sum) };
+    let carry = (sum - res as Field) / POW_2_32;
+    carry.assert_max_bit_size::<8>();
+    (N as Field - 1 - carry).assert_max_bit_size::<8>();
+    res
 }
 
 global POW_2_22: Field = (1u64 << 22) as Field;
@@ -107,8 +153,13 @@ global POW_2_30: Field = (1u64 << 30) as Field;
 global POW_2_20: Field = (1u64 << 20) as Field;
 global POW_2_8: Field = (1u64 << 8) as Field;
 global POW_2_10: Field = (1u64 << 10) as Field;
-
-
+global POW_2_4: Field = (1u64 << 4) as Field;
+global POW_2_26: Field = (1u64 << 26) as Field;
+global POW_2_46: Field = (1u64 << 46) as Field;
+global POW_2_60: Field = (1u64 << 60) as Field;
+global POW_2_14: Field = (1u64 << 14) as Field;
+global POW_2_18: Field = (1u64 << 18) as Field;
+global POW_2_32: Field = (1u64 << 32) as Field;
 
 pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     // Message schedule
@@ -116,32 +167,8 @@ pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     for i in 0..16 {
         w[i] = msg_block[i];
     }
-    for i in 16..64 {
-		// wi15rr7 := hasher.api.Add(
-		// 	wi15s11,
-		// 	hasher.api.Mul(wi15s14, 1<<22),
-		// 	hasher.api.Mul(wi15s3, 1<<50),
-		// 	hasher.api.Mul(wi15s4, 1<<56),
-		// )
-		// wi15rr18 := hasher.api.Add(
-		// 	wi15s14,
-		// 	hasher.api.Mul(wi15s3, 1<<28),
-		// 	hasher.api.Mul(wi15s4, 1<<34),
-		// 	hasher.api.Mul(wi15s11, 1<<42),
-		// )
-		// wi15rs3 := hasher.api.Add(
-		// 	wi15s4,
-		// 	hasher.api.Mul(wi15s11, 1<<8),
-		// 	hasher.api.Mul(wi15s14, 1<<30),
-		// )
-		// s0XorPlus := hasher.api.Add(wi15rr7, wi15rr18, wi15rs3)
-		// _, s0 := hasher.unspread(s0XorPlus)
-
-        
-        w[i] = wrapping_add(
-            wrapping_add(small_sigma1(w[i - 2]), w[i - 7]),
-            wrapping_add(small_sigma0(w[i - 15]), w[i - 16]),
-        );
+    for i in 16..64 {        
+        w[i] = wrapping_add_N([small_sigma1(w[i - 2]), w[i - 7], small_sigma0(w[i - 15]), w[i - 16]]);
     }
 
     let mut a = state[0];
