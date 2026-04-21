@@ -1186,20 +1186,10 @@ impl Instruction for LLOp {
                 format!("{} = witgen_buf_load.{} {}", v(*result), buf, vr(*idx))
             }
             LLOp::WitgenBufStore { buf, idx, value } => {
-                format!(
-                    "witgen_buf_store.{} {}, {}",
-                    buf,
-                    vr(*idx),
-                    vr(*value)
-                )
+                format!("witgen_buf_store.{} {}, {}", buf, vr(*idx), vr(*value))
             }
             LLOp::WitgenBufAdd { buf, idx, value } => {
-                format!(
-                    "witgen_buf_add.{} {}, {}",
-                    buf,
-                    vr(*idx),
-                    vr(*value)
-                )
+                format!("witgen_buf_add.{} {}, {}", buf, vr(*idx), vr(*value))
             }
             LLOp::FieldInverse { src, result } => {
                 format!("{} = field.inverse {}", v(*result), vr(*src))

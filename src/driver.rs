@@ -478,15 +478,17 @@ impl Driver {
         // If we have R1CS in hand, pass its layout through so the lowering can
         // generate the Phase 2 helper. (Witgen only — the AD path has its own
         // separate layout wiring below.)
-        let witgen_layout = wasm_config.as_ref().map(|(_, r1cs)| hlssa_to_llssa::R1csLayoutInfo {
-            tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
-            tables_wit_start: r1cs.witness_layout.tables_data_start(),
-            mults_wit_start: r1cs.witness_layout.multiplicities_start(),
-            logup_challenge_off: r1cs.witness_layout.challenges_start(),
-            lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
-            lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
-            mode: hlssa_to_llssa::LoweringMode::Witgen,
-        });
+        let witgen_layout = wasm_config
+            .as_ref()
+            .map(|(_, r1cs)| hlssa_to_llssa::R1csLayoutInfo {
+                tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
+                tables_wit_start: r1cs.witness_layout.tables_data_start(),
+                mults_wit_start: r1cs.witness_layout.multiplicities_start(),
+                logup_challenge_off: r1cs.witness_layout.challenges_start(),
+                lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
+                lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
+                mode: hlssa_to_llssa::LoweringMode::Witgen,
+            });
 
         // Lower HLSSA → LLSSA
         let llssa = match witgen_layout {

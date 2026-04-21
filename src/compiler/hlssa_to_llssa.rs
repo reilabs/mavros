@@ -1561,11 +1561,8 @@ fn generate_all_lookup_functions(
     // AD rangecheck-8 helpers are a pair: init runs once (hoisted to main
     // prologue) and call runs per DLookup. They both depend on R1CS layout
     // offsets to bake in the correct absolute witness/constraint positions.
-    if let (Some(init_id), Some(call_id)) =
-        (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call)
-    {
-        let layout =
-            layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
+    if let (Some(init_id), Some(call_id)) = (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call) {
+        let layout = layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
         let init_fn = generate_drngchk_8_ad_init(layout);
         let _old = llssa.take_function(init_id);
         llssa.put_function(init_id, init_fn);
@@ -1638,11 +1635,7 @@ fn emit_small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
 /// lookup tape entries and pre-fix multiplicities this way), and return that
 /// low limb directly as an i64. Do NOT go through `__field_to_limbs`, which
 /// would interpret the slot as Montgomery and produce garbage.
-fn load_raw_low_u64(
-    e: &mut LLBlockEmitter<'_>,
-    buf: WitgenBuf,
-    idx: ValueId,
-) -> ValueId {
+fn load_raw_low_u64(e: &mut LLBlockEmitter<'_>, buf: WitgenBuf, idx: ValueId) -> ValueId {
     let v = e.witgen_buf_load(buf, idx);
     e.extract_field(v, LLStruct::field_elem(), 0)
 }
@@ -1842,8 +1835,7 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
         let one_i64 = e.int_const(64, 1);
         let one_field = emit_small_u64_as_field(&mut e, one_i64);
         let post_base: u64 = layout.logup_challenge_off as u64;
-        let sum_cnst_i32 =
-            e.int_const(32, (layout.tables_cnst_start + table_len) as u64);
+        let sum_cnst_i32 = e.int_const(32, (layout.tables_cnst_start + table_len) as u64);
 
         // Step 1: Phase 1 wrote raw u64 counts into the LOW LIMB of each
         // multiplicity slot. Re-encode to Montgomery via __field_from_limbs.
@@ -1882,8 +1874,7 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                     |_then_e| vec![running_prod],
                     |else_e| {
                         else_e.witgen_buf_store(WitgenBuf::A, base_plus_i, running_prod);
-                        let new_rp =
-                            else_e.field_arith(FieldArithOp::Mul, running_prod, denom);
+                        let new_rp = else_e.field_arith(FieldArithOp::Mul, running_prod, denom);
                         vec![new_rp]
                     },
                 );
@@ -1918,8 +1909,7 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                     |else_e| {
                         let elem = else_e.field_arith(FieldArithOp::Mul, rp, running_inv);
                         else_e.witgen_buf_store(WitgenBuf::A, base_plus_i, elem);
-                        let new_ri =
-                            else_e.field_arith(FieldArithOp::Mul, running_inv, denom);
+                        let new_ri = else_e.field_arith(FieldArithOp::Mul, running_inv, denom);
                         vec![new_ri]
                     },
                 );
@@ -1964,18 +1954,13 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                         then_e.witgen_buf_store(WitgenBuf::A, cnst_off, zero_field);
                         then_e.witgen_buf_store(WitgenBuf::B, cnst_off, b_val);
                         then_e.witgen_buf_store(WitgenBuf::C, cnst_off, zero_field);
-                        then_e.witgen_buf_store(
-                            WitgenBuf::WitnessPostComm,
-                            wit_off,
-                            zero_field,
-                        );
+                        then_e.witgen_buf_store(WitgenBuf::WitnessPostComm, wit_off, zero_field);
                         vec![]
                     },
                     |else_e| {
                         let ix_u64 = load_raw_low_u64(else_e, WitgenBuf::B, cnst_off);
                         let ix_i32 = else_e.truncate(ix_u64, 32);
-                        let tbl_idx =
-                            else_e.int_arith(IntArithOp::Add, base_cnst_i32, ix_i32);
+                        let tbl_idx = else_e.int_arith(IntArithOp::Add, base_cnst_i32, ix_i32);
                         let y_a = else_e.witgen_buf_load(WitgenBuf::A, tbl_idx);
                         let y_b = else_e.witgen_buf_load(WitgenBuf::B, tbl_idx);
                         let flag_field = emit_small_u64_as_field(else_e, flag_u64);
@@ -2013,13 +1998,8 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                     let a_val = else_e.witgen_buf_load(WitgenBuf::A, base_plus_i);
                     let elem = else_e.field_arith(FieldArithOp::Mul, a_val, m);
                     else_e.witgen_buf_store(WitgenBuf::A, base_plus_i, elem);
-                    let wit_post_idx =
-                        else_e.int_arith(IntArithOp::Add, tables_wit_rel_i32, i_i32);
-                    else_e.witgen_buf_store(
-                        WitgenBuf::WitnessPostComm,
-                        wit_post_idx,
-                        elem,
-                    );
+                    let wit_post_idx = else_e.int_arith(IntArithOp::Add, tables_wit_rel_i32, i_i32);
+                    else_e.witgen_buf_store(WitgenBuf::WitnessPostComm, wit_post_idx, elem);
                     else_e.witgen_buf_add(WitgenBuf::A, sum_cnst_i32, elem);
                     vec![]
                 },
@@ -2066,11 +2046,7 @@ fn hoist_init_call_to_main_prologue(
 /// main function. This runs `target_fn` once per return path without any CFG
 /// restructuring: the call is appended to the block's instruction list, which
 /// already ends (terminator-wise) in `Return`.
-fn hoist_call_to_main_epilogue(
-    llssa: &mut LLSSA,
-    main_fn_id: FunctionId,
-    target_fn: FunctionId,
-) {
+fn hoist_call_to_main_epilogue(llssa: &mut LLSSA, main_fn_id: FunctionId, target_fn: FunctionId) {
     let mut main_fn = llssa.take_function(main_fn_id);
 
     let return_blocks: Vec<BlockId> = main_fn

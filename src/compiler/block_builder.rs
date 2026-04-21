@@ -848,7 +848,11 @@ pub trait LLEmitter {
 
     fn witgen_buf_load(&mut self, buf: WitgenBuf, idx: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit_ll(LLOp::WitgenBufLoad { buf, idx, result: r });
+        self.emit_ll(LLOp::WitgenBufLoad {
+            buf,
+            idx,
+            result: r,
+        });
         r
     }
 

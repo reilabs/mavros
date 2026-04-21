@@ -304,8 +304,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         ));
 
         // __ad_read_coeff_at(vm*, offset: i32) -> FieldElem
-        let ad_read_coeff_at_type =
-            field_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
+        let ad_read_coeff_at_type = field_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
         self.ad_read_coeff_at_fn = Some(self.module.add_function(
             "__ad_read_coeff_at",
             ad_read_coeff_at_type,
@@ -444,18 +443,21 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     fn define_lookup_functions(&mut self) {
-        self.lookup_tape_write_u64_a_fn = Some(self.define_lookup_tape_write_u64_fn(
-            "__lookup_tape_write_u64_a",
-            VM_LOOKUPS_A_PTR_OFFSET,
-        ));
-        self.lookup_tape_write_u64_b_fn = Some(self.define_lookup_tape_write_u64_fn(
-            "__lookup_tape_write_u64_b",
-            VM_LOOKUPS_B_PTR_OFFSET,
-        ));
-        self.lookup_tape_write_u64_c_fn = Some(self.define_lookup_tape_write_u64_fn(
-            "__lookup_tape_write_u64_c",
-            VM_LOOKUPS_C_PTR_OFFSET,
-        ));
+        self.lookup_tape_write_u64_a_fn =
+            Some(self.define_lookup_tape_write_u64_fn(
+                "__lookup_tape_write_u64_a",
+                VM_LOOKUPS_A_PTR_OFFSET,
+            ));
+        self.lookup_tape_write_u64_b_fn =
+            Some(self.define_lookup_tape_write_u64_fn(
+                "__lookup_tape_write_u64_b",
+                VM_LOOKUPS_B_PTR_OFFSET,
+            ));
+        self.lookup_tape_write_u64_c_fn =
+            Some(self.define_lookup_tape_write_u64_fn(
+                "__lookup_tape_write_u64_c",
+                VM_LOOKUPS_C_PTR_OFFSET,
+            ));
         self.bump_rngchk8_multiplicity_fn = Some(self.define_bump_rngchk8_multiplicity_fn());
     }
 
@@ -539,9 +541,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         let fn_type =
             void_type.fn_type(&[ptr_type.into(), i64_type.into(), i64_type.into()], false);
-        let function =
-            self.module
-                .add_function("__bump_rngchk8_multiplicity", fn_type, Some(Linkage::Internal));
+        let function = self.module.add_function(
+            "__bump_rngchk8_multiplicity",
+            fn_type,
+            Some(Linkage::Internal),
+        );
 
         let entry = self.context.append_basic_block(function, "entry");
         let builder = self.context.create_builder();
@@ -1435,9 +1439,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let i32_type = self.context.i32_type();
                 let buf_id = i32_type.const_int(witgen_buf_id(*buf) as u64, false);
                 let idx_val = self.value_map[idx];
-                let load_fn = self
-                    .witgen_load_fn
-                    .expect("__witgen_load not declared");
+                let load_fn = self.witgen_load_fn.expect("__witgen_load not declared");
                 let call = self
                     .builder
                     .build_call(
@@ -1459,9 +1461,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let buf_id = i32_type.const_int(witgen_buf_id(*buf) as u64, false);
                 let idx_val = self.value_map[idx];
                 let v = self.value_map[value];
-                let store_fn = self
-                    .witgen_store_fn
-                    .expect("__witgen_store not declared");
+                let store_fn = self.witgen_store_fn.expect("__witgen_store not declared");
                 self.builder
                     .build_call(
                         store_fn,
@@ -1489,9 +1489,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldInverse { src, result } => {
                 let src_val = self.value_map[src];
-                let inv_fn = self
-                    .field_inverse_fn
-                    .expect("__field_inverse not declared");
+                let inv_fn = self.field_inverse_fn.expect("__field_inverse not declared");
                 let call = self
                     .builder
                     .build_call(inv_fn, &[src_val.into()], "inv")
