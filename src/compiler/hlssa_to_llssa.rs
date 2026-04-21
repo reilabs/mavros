@@ -1626,6 +1626,19 @@ fn emit_small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
     e.field_from_limbs(limbs)
 }
 
+/// Load a Field slot known to hold a RAW u64 in the low limb (Phase 1 writes
+/// lookup tape entries and pre-fix multiplicities this way), and return that
+/// low limb directly as an i64. Do NOT go through `__field_to_limbs`, which
+/// would interpret the slot as Montgomery and produce garbage.
+fn load_raw_low_u64(
+    e: &mut LLBlockEmitter<'_>,
+    buf: WitgenBuf,
+    idx: ValueId,
+) -> ValueId {
+    let v = e.witgen_buf_load(buf, idx);
+    e.extract_field(v, LLStruct::field_elem(), 0)
+}
+
 /// Generate __drngchk_8_ad_init():
 ///
 /// Runs the one-time AD initialization for the 8-bit rangecheck LogUp table.
@@ -1820,19 +1833,17 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
         let zero_field = emit_small_u64_as_field(&mut e, zero_i64);
         let one_i64 = e.int_const(64, 1);
         let one_field = emit_small_u64_as_field(&mut e, one_i64);
+        let post_base: u64 = layout.logup_challenge_off as u64;
+        let sum_cnst_i32 =
+            e.int_const(32, (layout.tables_cnst_start + table_len) as u64);
 
         // Step 1: Phase 1 wrote raw u64 counts into the LOW LIMB of each
         // multiplicity slot. Re-encode to Montgomery via __field_from_limbs.
-        // Read the low limb DIRECTLY (no __field_to_limbs, which would assume
-        // Montgomery input and produce garbage for raw values).
         e.build_counted_loop(table_len, vec![], |e, i_i64, _| {
             let i_i32 = e.truncate(i_i64, 32);
             let idx = e.int_arith(IntArithOp::Add, mults_base_i32, i_i32);
-            let raw = e.witgen_buf_load(WitgenBuf::WitnessPreComm, idx);
-            let low = e.extract_field(raw, LLStruct::field_elem(), 0);
-            let z = e.int_const(64, 0);
-            let new_limbs = e.mk_struct(LLStruct::limbs(), vec![low, z, z, z]);
-            let fixed = e.field_from_limbs(new_limbs);
+            let count = load_raw_low_u64(e, WitgenBuf::WitnessPreComm, idx);
+            let fixed = emit_small_u64_as_field(e, count);
             e.witgen_buf_store(WitgenBuf::WitnessPreComm, idx, fixed);
             vec![]
         });
@@ -1908,20 +1919,18 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
             },
         );
 
-        // Step 5: lookup tape walk.
-        let post_base: u64 = layout.logup_challenge_off as u64;
-        let lookups_wit_rel: u64 =
-            (layout.lookups_wit_start as u64).saturating_sub(post_base);
-        let lookups_cnst: u64 = layout.lookups_cnst_start as u64;
-        let sum_cnst: u64 = (layout.tables_cnst_start + table_len) as u64;
-        let lookups_wit_rel_i32 = e.int_const(32, lookups_wit_rel);
-        let lookups_cnst_i32 = e.int_const(32, lookups_cnst);
-        let sum_cnst_i32 = e.int_const(32, sum_cnst);
+        // Step 5: lookup tape walk. Tape entries written by Phase 1 hold RAW
+        // u64 values (flag in C, key in B) in the low limb — we read them
+        // directly via `load_raw_low_u64`.
+        let lookups_wit_rel_i32 = e.int_const(
+            32,
+            (layout.lookups_wit_start as u64).saturating_sub(post_base),
+        );
+        let lookups_cnst_i32 = e.int_const(32, layout.lookups_cnst_start as u64);
 
         let n_lookups_i32 = e.lookup_tape_len();
         let j0_i32 = e.int_const(32, 0);
         let one_i32 = e.int_const(32, 1);
-        // DIAG: then-branch does work, else-branch empty.
         e.build_loop(
             vec![(j0_i32, LLType::i32())],
             |b, params| b.int_ult(params[0], n_lookups_i32),
@@ -1929,23 +1938,16 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                 let j_i32 = params[0];
                 let cnst_off = le.int_arith(IntArithOp::Add, lookups_cnst_i32, j_i32);
                 let wit_off = le.int_arith(IntArithOp::Add, lookups_wit_rel_i32, j_i32);
-                // C[cnst_off] and B[cnst_off] hold RAW u64 values written by
-                // Phase 1 (not Montgomery). Extract the low limb directly.
-                let flag_entry = le.witgen_buf_load(WitgenBuf::C, cnst_off);
-                let flag_u64 =
-                    le.extract_field(flag_entry, LLStruct::field_elem(), 0);
+                let flag_u64 = load_raw_low_u64(le, WitgenBuf::C, cnst_off);
                 let is_zero = le.int_eq(flag_u64, zero_i64);
 
                 le.build_if_else(
                     is_zero,
                     vec![],
                     |then_e| {
-                        let key_entry = then_e.witgen_buf_load(WitgenBuf::B, cnst_off);
-                        let key_u64 =
-                            then_e.extract_field(key_entry, LLStruct::field_elem(), 0);
+                        let key_u64 = load_raw_low_u64(then_e, WitgenBuf::B, cnst_off);
                         let key_field = emit_small_u64_as_field(then_e, key_u64);
                         let b_val = then_e.field_arith(FieldArithOp::Sub, alpha, key_field);
-
                         then_e.witgen_buf_store(WitgenBuf::A, cnst_off, zero_field);
                         then_e.witgen_buf_store(WitgenBuf::B, cnst_off, b_val);
                         then_e.witgen_buf_store(WitgenBuf::C, cnst_off, zero_field);
@@ -1957,20 +1959,13 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                         vec![]
                     },
                     |else_e| {
-                        // B[cnst_off] holds a RAW u64 key (written by Phase 1 via
-                        // lookup_tape_write_u64). Extract limb 0 directly without
-                        // going through field_to_limbs (which assumes Montgomery).
-                        let ix_entry = else_e.witgen_buf_load(WitgenBuf::B, cnst_off);
-                        let ix_u64 =
-                            else_e.extract_field(ix_entry, LLStruct::field_elem(), 0);
+                        let ix_u64 = load_raw_low_u64(else_e, WitgenBuf::B, cnst_off);
                         let ix_i32 = else_e.truncate(ix_u64, 32);
                         let tbl_idx =
                             else_e.int_arith(IntArithOp::Add, base_cnst_i32, ix_i32);
-
                         let y_a = else_e.witgen_buf_load(WitgenBuf::A, tbl_idx);
                         let y_b = else_e.witgen_buf_load(WitgenBuf::B, tbl_idx);
                         let flag_field = emit_small_u64_as_field(else_e, flag_u64);
-
                         else_e.witgen_buf_store(WitgenBuf::A, cnst_off, y_a);
                         else_e.witgen_buf_store(WitgenBuf::B, cnst_off, y_b);
                         else_e.witgen_buf_store(WitgenBuf::C, cnst_off, flag_field);
@@ -1988,9 +1983,10 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
         // Step 6: final consolidation — multiply each table y-value by its
         // multiplicity, write to post-commit witness, accumulate into sum slot.
         // Finally set B at sum slot to 1.
-        let tables_wit_rel: u64 =
-            (layout.tables_wit_start as u64).saturating_sub(post_base);
-        let tables_wit_rel_i32 = e.int_const(32, tables_wit_rel);
+        let tables_wit_rel_i32 = e.int_const(
+            32,
+            (layout.tables_wit_start as u64).saturating_sub(post_base),
+        );
         e.build_counted_loop(table_len, vec![], |e, i_i64, _| {
             let i_i32 = e.truncate(i_i64, 32);
             let base_plus_i = e.int_arith(IntArithOp::Add, base_cnst_i32, i_i32);
