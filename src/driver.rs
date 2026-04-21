@@ -485,7 +485,7 @@ impl Driver {
             logup_challenge_off: r1cs.witness_layout.challenges_start(),
             lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
             lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
-            is_witgen: true,
+            mode: hlssa_to_llssa::LoweringMode::Witgen,
         });
 
         // Lower HLSSA → LLSSA
@@ -574,7 +574,7 @@ impl Driver {
             logup_challenge_off: r1cs.witness_layout.challenges_start(),
             lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
             lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
-            is_witgen: false,
+            mode: hlssa_to_llssa::LoweringMode::Ad,
         };
 
         // Lower HLSSA → LLSSA

@@ -6,6 +6,11 @@ use tracing::error;
 
 pub type Field = ark_bn254::Fr;
 
+/// Size of one BN254 field element in bytes (4 × u64 limbs).
+pub const FIELD_BYTES: usize = 32;
+/// Number of u64 limbs in one BN254 field element.
+pub const FIELD_LIMBS: usize = 4;
+
 // ---------------------------------------------------------------------------
 // Linear constraint helpers
 // ---------------------------------------------------------------------------

@@ -260,6 +260,17 @@ impl AdFunctions {
 /// All offsets are in field elements (not bytes). Witness-side offsets are
 /// absolute indices into the full witness buffer that `out_d{a,b,c}[idx]`
 /// interprets directly.
+/// Which of the two LLSSA-emitting compile paths is currently running.
+/// Controls a handful of mode-specific codegen decisions — most notably
+/// whether to generate and hoist the Phase 2 helper (witgen only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoweringMode {
+    /// Witgen path: Phase 1 + generated Phase 2 finalization in the epilogue.
+    Witgen,
+    /// AD path: DLookup helpers + AD-side init hoist, no Phase 2.
+    Ad,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct R1csLayoutInfo {
     /// `constraints_layout.tables_data_start()` — first table's y-slot in ad_coeffs.
@@ -274,11 +285,8 @@ pub struct R1csLayoutInfo {
     pub lookups_cnst_start: usize,
     /// `witness_layout.lookups_data_start()` — start of per-lookup witness slots.
     pub lookups_wit_start: usize,
-    /// True when this layout was provided by the witgen compile path (so the
-    /// generated module should include `__run_phase2` and call it from main).
-    /// False for the AD path — AD uses its own DLookup helpers but doesn't do
-    /// Phase 2.
-    pub is_witgen: bool,
+    /// Which compile path this layout is being threaded through.
+    pub mode: LoweringMode,
 }
 
 // =============================================================================
@@ -366,7 +374,7 @@ fn lower_inner(
     // registration to post-lowering so programs with no lookups don't pay the
     // cost of a generated __run_phase2 at all.
     if let Some(l) = layout {
-        if l.is_witgen && lookup_fns.rngchk_8.is_some() {
+        if l.mode == LoweringMode::Witgen && lookup_fns.rngchk_8.is_some() {
             let id = llssa.add_function("__run_phase2".to_string());
             lookup_fns.run_phase2 = Some(id);
         }
@@ -1922,10 +1930,15 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
         // Step 5: lookup tape walk. Tape entries written by Phase 1 hold RAW
         // u64 values (flag in C, key in B) in the low limb — we read them
         // directly via `load_raw_low_u64`.
-        let lookups_wit_rel_i32 = e.int_const(
-            32,
-            (layout.lookups_wit_start as u64).saturating_sub(post_base),
-        );
+        //
+        // `lookups_wit_start` and `tables_wit_start` are always ≥ `post_base`
+        // (= `challenges_start`) in the witness layout — the sections are
+        // strictly ordered. Use `checked_sub` + expect so a broken layout
+        // surfaces at codegen time instead of silently emitting offset 0.
+        let lookups_wit_rel = (layout.lookups_wit_start as u64)
+            .checked_sub(post_base)
+            .expect("layout invariant violated: lookups_wit_start < challenges_start");
+        let lookups_wit_rel_i32 = e.int_const(32, lookups_wit_rel);
         let lookups_cnst_i32 = e.int_const(32, layout.lookups_cnst_start as u64);
 
         let n_lookups_i32 = e.lookup_tape_len();
@@ -1983,10 +1996,10 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
         // Step 6: final consolidation — multiply each table y-value by its
         // multiplicity, write to post-commit witness, accumulate into sum slot.
         // Finally set B at sum slot to 1.
-        let tables_wit_rel_i32 = e.int_const(
-            32,
-            (layout.tables_wit_start as u64).saturating_sub(post_base),
-        );
+        let tables_wit_rel = (layout.tables_wit_start as u64)
+            .checked_sub(post_base)
+            .expect("layout invariant violated: tables_wit_start < challenges_start");
+        let tables_wit_rel_i32 = e.int_const(32, tables_wit_rel);
         e.build_counted_loop(table_len, vec![], |e, i_i64, _| {
             let i_i32 = e.truncate(i_i64, 32);
             let base_plus_i = e.int_arith(IntArithOp::Add, base_cnst_i32, i_i32);

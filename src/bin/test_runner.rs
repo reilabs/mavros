@@ -383,7 +383,7 @@ fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::Inp
 
 // ── WASM Runner ──────────────────────────────────────────────────────
 
-const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
+use mavros::artifacts::FIELD_BYTES as FIELD_SIZE;
 
 /// Output from running WASM witgen
 struct WasmResult {
