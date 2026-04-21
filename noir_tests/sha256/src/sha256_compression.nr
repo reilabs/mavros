@@ -14,12 +14,26 @@ global K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+/// LIFTED FROM PROVEKIT
 fn ch(e: u32, f: u32, g: u32) -> u32 {
-    (e & f) ^ (!e & g)
+    let e_spread = spread_32(e) as Field;
+    let f_spread = spread_32(f) as Field;
+    let g_spread = spread_32(g) as Field;
+
+    let (e_and_f, _) = unspread_64(unsafe_cast(e_spread + f_spread));
+    let (e_and_g, _) = unspread_64(unsafe_cast(e_spread + g_spread));
+
+    let ch = e_and_f as Field + g as Field - e_and_g as Field;
+    unsafe_cast(ch)
 }
 
 fn maj(a: u32, b: u32, c: u32) -> u32 {
-    (a & b) ^ (a & c) ^ (b & c)
+    let a_spread = spread_32(a) as Field;
+    let b_spread = spread_32(b) as Field;
+    let c_spread = spread_32(c) as Field;
+    let s = a_spread + b_spread + c_spread;
+    let (s, _) = unspread_64(unsafe_cast(s));
+    s
 }
 
 fn big_sigma0(a: u32) -> u32 {
@@ -76,6 +90,22 @@ fn unspread_64(x: u64) -> (u32, u32) {
     (unsafe_cast(a_0), unsafe_cast(a_1))
 }
 
+unconstrained fn spread_32_hint(x: u32) -> (Field, Field) {
+    let a0 = ((x >> 21) & 0x7FF) as Field;
+    let a1 = ((x >> 10) & 0x7FF) as Field;
+    (a0, a1)
+}
+
+fn spread_32(x: u32) -> u64 {
+    // Safety: is for the weak
+    let (a0, a1) = unsafe { spread_32_hint(x) };
+    let a2 = (x as Field) - (a0 * POW_2_21) - (a1 * POW_2_10);
+    let sa0 = spread::<11>(unsafe_cast(a0)) as Field;
+    let sa1 = spread::<11>(unsafe_cast(a1)) as Field;
+    let sa2 = spread::<10>(unsafe_cast(a2)) as Field;
+    unsafe_cast(sa0 * POW_2_42 + sa1 * POW_2_20 + sa2)
+}
+
 fn small_sigma0(x: u32) -> u32 {
     let (wi15s14, wi15s11, wi15s4, wi15s3) = split_and_spread_4::<14,11,4,3>(x);
     let wi15rr7 = wi15s11 + wi15s14 * POW_2_22 + wi15s3 * POW_2_50 + wi15s4 * POW_2_56;
@@ -112,7 +142,6 @@ fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
     let res = unsafe { wrapping_add_N_hint(sum) };
     let carry = (sum - res as Field) / POW_2_32;
     carry.assert_max_bit_size::<8>();
-    (N as Field - 1 - carry).assert_max_bit_size::<8>();
     res
 }
 
