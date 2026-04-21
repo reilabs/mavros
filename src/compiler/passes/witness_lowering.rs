@@ -239,6 +239,22 @@ impl WitnessLowering {
                                             var: wit,
                                         });
                                     }
+                                    BinaryArithOpKind::Div if a == wit => {
+                                        // wit / pure → MulConst(wit, 1/pure)
+                                        let one = emitter.field_const(ark_bn254::Fr::from(1u64));
+                                        let inv_pure = emitter.fresh_value();
+                                        emitter.emit(OpCode::BinaryArithOp {
+                                            kind: BinaryArithOpKind::Div,
+                                            result: inv_pure,
+                                            lhs: one,
+                                            rhs: pure,
+                                        });
+                                        emitter.emit(OpCode::MulConst {
+                                            result: r,
+                                            const_val: inv_pure,
+                                            var: wit,
+                                        });
+                                    }
                                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
                                         panic!(
                                             "Div/Mod is not supported for witness-pure arithmetic"

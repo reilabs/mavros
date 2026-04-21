@@ -135,6 +135,10 @@ impl Value {
     pub fn div(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs / rhs),
+            (_, Value::Const(rhs)) => {
+                let inv = Value::Const(ark_bn254::Fr::ONE / rhs);
+                self.mul(&inv)
+            }
             (_, _) => panic!("expected constant"),
         }
     }
