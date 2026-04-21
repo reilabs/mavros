@@ -300,9 +300,10 @@ impl Types {
                 let array_type = function_info.values.get(array).ok_or_else(|| {
                     format!("Array value {:?} not found in type assignments", array)
                 })?;
-                let value_type = function_info.values.get(value).ok_or_else(|| {
-                    format!("Value {:?} not found in type assignments", value)
-                })?;
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
                 // If the value is witness-typed but the array element is not,
                 // promote the result array's element type to match.

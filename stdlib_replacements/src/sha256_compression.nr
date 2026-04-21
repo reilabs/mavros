@@ -1,7 +1,7 @@
 // SHA-256 compression function replacement
 // Replaces the stdlib sha256_compression lowlevel intrinsic.
 
-use std::mavros::{spread, unspread};
+use std::mavros::{spread, unspread, unsafe_cast};
 
 global K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -14,46 +14,181 @@ global K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-fn wrapping_mul(a: u32, b: u32) -> u32 {
-    let prod = a as u64 * b as u64;
-    (prod & 0xffffffff) as u32
+// Pre-decomposed word with sigma0 chunk layout [10, 9, 11, 2]
+struct Sigma0Word {
+    packed: u32,
+    s0: Field, // spread of top 10 bits
+    s1: Field, // spread of next 9 bits
+    s2: Field, // spread of next 11 bits
+    s3: Field, // spread of bottom 2 bits
 }
 
-fn rotr(x: u32, right_divisor: u32, left_multiplier: u32) -> u32 {
-    (x / right_divisor) | wrapping_mul(x, left_multiplier)
+impl Sigma0Word {
+    fn new(x: u32) -> Self {
+        let (s0, s1, s2, s3) = split_and_spread_4::<10,9,11,2>(x);
+        Sigma0Word { packed: x, s0, s1, s2, s3 }
+    }
+
+    // Reconstruct full 64-bit spread from sigma0 chunks [10|9|11|2]
+    // Bit offsets: s3 at 0, s2 at 2*2=4, s1 at 2*(2+11)=26, s0 at 2*(2+11+9)=44
+    fn spread(self) -> Field {
+        self.s3 + self.s2 * pow2(4) + self.s1 * pow2(26) + self.s0 * pow2(44)
+    }
+
+    // Sigma0(a) = ROTR2(a) XOR ROTR13(a) XOR ROTR22(a)
+    fn big_sigma(self) -> u32 {
+        // s0=as10, s1=as9, s2=as11, s3=as2
+        let arr2 = self.s2 + self.s1 * pow2(22) + self.s0 * pow2(40) + self.s3 * pow2(60);
+        let arr13 = self.s1 + self.s0 * pow2(18) + self.s3 * pow2(38) + self.s2 * pow2(42);
+        let arr22 = self.s0 + self.s3 * pow2(20) + self.s2 * pow2(24) + self.s1 * pow2(46);
+        let (_, S0) = unspread_64(unsafe_cast(arr2 + arr13 + arr22));
+        S0
+    }
+
+    // Maj(a,b,c) = majority of each bit, from pre-decomposed chunks
+    fn maj(a: Self, b: Self, c: Self) -> u32 {
+        let (maj, _) = unspread_64(unsafe_cast(
+            a.spread() + b.spread() + c.spread(),
+        ));
+        maj
+    }
+
+    fn wrapping_add<let N: u32>(a: [u32; N]) -> Self {
+        Sigma0Word::new(unsafe_cast(unsafe_wrapping_add_N(a)))
+    }
 }
 
-fn ch(e: u32, f: u32, g: u32) -> u32 {
-    (e & f) ^ (!e & g)
+// Pre-decomposed word with sigma1 chunk layout [7, 14, 5, 6]
+struct Sigma1Word {
+    packed: u32,
+    s0: Field, // spread of top 7 bits
+    s1: Field, // spread of next 14 bits
+    s2: Field, // spread of next 5 bits
+    s3: Field, // spread of bottom 6 bits
 }
 
-fn maj(a: u32, b: u32, c: u32) -> u32 {
-    (a & b) ^ (a & c) ^ (b & c)
+impl Sigma1Word {
+    fn new(x: u32) -> Self {
+        let (s0, s1, s2, s3) = split_and_spread_4::<7,14,5,6>(x);
+        Sigma1Word { packed: x, s0, s1, s2, s3 }
+    }
+
+    // Reconstruct full 64-bit spread from sigma1 chunks [7|14|5|6]
+    // Bit offsets: s3 at 0, s2 at 2*6=12, s1 at 2*(6+5)=22, s0 at 2*(6+5+14)=50
+    fn spread(self) -> Field {
+        self.s3 + self.s2 * pow2(12) + self.s1 * pow2(22) + self.s0 * pow2(50)
+    }
+
+    // Sigma1(e) = ROTR6(e) XOR ROTR11(e) XOR ROTR25(e)
+    fn big_sigma(self) -> u32 {
+        // s0=es7, s1=es14, s2=es5, s3=es6
+        let err6 = self.s2 + self.s1 * pow2(10) + self.s0 * pow2(38) + self.s3 * pow2(52);
+        let err11 = self.s1 + self.s0 * pow2(28) + self.s3 * pow2(42) + self.s2 * pow2(54);
+        let err25 = self.s0 + self.s3 * pow2(14) + self.s2 * pow2(26) + self.s1 * pow2(36);
+        let (_, S1) = unspread_64(unsafe_cast(err6 + err11 + err25));
+        S1
+    }
+
+    // Ch(e,f,g) = (e & f) XOR (~e & g) = (e&f) + g - (e&g)
+    fn ch(e: Self, f: Self, g: Self) -> u32 {
+        let e_spread = e.spread();
+        let f_spread = f.spread();
+        let g_spread = g.spread();
+        let (e_and_f, _) = unspread_64(unsafe_cast(e_spread + f_spread));
+        let (e_and_g, _) = unspread_64(unsafe_cast(e_spread + g_spread));
+        unsafe_cast(e_and_f as Field + g.packed as Field - e_and_g as Field)
+    }
+
+    fn wrapping_add<let N: u32>(a: [u32; N]) -> Self {
+        Sigma1Word::new(unsafe_cast(unsafe_wrapping_add_N(a)))
+    }
 }
 
-fn big_sigma0(a: u32) -> u32 {
-    // rotr(2) ^ rotr(13) ^ rotr(22)
-    rotr(a, 4, 1073741824) ^ rotr(a, 8192, 524288) ^ rotr(a, 4194304, 1024)
+unconstrained fn split4_hint(f: u32, a: u32, b: u32, c: u32, d: u32) -> (Field, Field, Field) {
+    let a0 = (f & (((1 << a) - 1) << (b + c + d))) >> (b + c + d);
+    let a1 = (f & (((1 << b) - 1) << (c + d))) >> (c + d);
+    let a2 = (f & (((1 << c) - 1) << d)) >> d;
+    (a0 as Field, a1 as Field, a2 as Field)
 }
 
-fn big_sigma1(e: u32) -> u32 {
-    // rotr(6) ^ rotr(11) ^ rotr(25)
-    rotr(e, 64, 67108864) ^ rotr(e, 2048, 2097152) ^ rotr(e, 33554432, 128)
+fn split_and_spread_4<let a: u32, let b: u32, let c: u32, let d: u32>(f: u32) -> (Field, Field, Field, Field) {
+    assert(a + b + c + d == 32);
+    // Safety: the definition of `a3` ensures that `a0`, `a1`, `a2`, and `a3` form the proper decomposition of `f`. The calls to `spread`
+    // ensure that each chunk is exactly in the defined range.
+    let (a0, a1, a2) = unsafe { split4_hint(f, a, b, c, d) };
+    let a3 = (f as Field) - (a0 * ((1 << (b + c + d)) as Field)) - (a1 * ((1 << (c + d)) as Field)) - (a2 * ((1 << d) as Field));
+    (spread::<a>(unsafe_cast(a0)) as Field, spread::<b>(unsafe_cast(a1)) as Field, spread::<c>(unsafe_cast(a2)) as Field, spread::<d>(unsafe_cast(a3)) as Field)
+}
+
+unconstrained fn unspread_64_hint(f: u64) -> (Field, Field) {
+    let mask22: u64 = (1 << 22) - 1;
+    let a0 = (f >> 42) & mask22;
+    let a1 = (f >> 20) & mask22;
+    (a0 as Field, a1 as Field)
+}
+
+// The input can be the result of unsafe_cast, because it will get rangechecked here independently.
+fn unspread_64(x: u64) -> (u32, u32) {
+    // Safety: the definition of `a2` ensures that `a0`, `a1`, and `a2` form the proper decomposition of `x`. The calls to `unspread`
+    // ensure that each chunk is exactly in the defined range.
+    let (a0, a1) = unsafe { unspread_64_hint(x) };
+    let a2 = (x as Field) - (a0 * pow2(42)) - (a1 * pow2(20));
+    let (a0_uns_0, a0_uns_1) = unspread::<11>(unsafe_cast(a0));
+    let (a1_uns_0, a1_uns_1) = unspread::<11>(unsafe_cast(a1));
+    let (a2_uns_0, a2_uns_1) = unspread::<10>(unsafe_cast(a2));
+    let a_0 = a2_uns_0 as Field + a1_uns_0 as Field * pow2(10) + a0_uns_0 as Field * pow2(21);
+    let a_1 = a2_uns_1 as Field + a1_uns_1 as Field * pow2(10) + a0_uns_1 as Field * pow2(21);
+    (unsafe_cast(a_0), unsafe_cast(a_1))
 }
 
 fn small_sigma0(x: u32) -> u32 {
-    // rotr(7) ^ rotr(18) ^ shr(3)
-    rotr(x, 128, 33554432) ^ rotr(x, 262144, 16384) ^ (x / 8)
+    let (wi15s14, wi15s11, wi15s4, wi15s3) = split_and_spread_4::<14,11,4,3>(x);
+    let wi15rr7 = wi15s11 + wi15s14 * pow2(22) + wi15s3 * pow2(50) + wi15s4 * pow2(56);
+    let wi15rr18 = wi15s14 + wi15s3 * pow2(28) + wi15s4 * pow2(34) + wi15s11 * pow2(42);
+    let wi15rs3 = wi15s4 + wi15s11 * pow2(8) + wi15s14 * pow2(30);
+    let s0XorPlus = wi15rr7 + wi15rr18 + wi15rs3;
+    let (_, s0) = unspread_64(unsafe_cast(s0XorPlus));
+    s0
 }
 
 fn small_sigma1(x: u32) -> u32 {
-    // rotr(17) ^ rotr(19) ^ shr(10)
-    rotr(x, 131072, 32768) ^ rotr(x, 524288, 8192) ^ (x / 1024)
+    let (wi2s13, wi2s2, wi2s7, wi2s10) = split_and_spread_4::<13,2,7,10>(x);
+    let wi2rr17 = wi2s2 + wi2s13 * pow2(4) + wi2s10 * pow2(30) + wi2s7 * pow2(50);
+    let wi2rr19 = wi2s13 + wi2s10 * pow2(26) + wi2s7 * pow2(46) + wi2s2 * pow2(60);
+    let wi2rs10 = wi2s7 + wi2s2 * pow2(14) + wi2s13 * pow2(18);
+    let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
+    let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
+    s1
 }
 
-fn wrapping_add(a: u32, b: u32) -> u32 {
-    let sum = a as u64 + b as u64;
-    (sum & 0xffffffff) as u32
+unconstrained fn wrapping_add_N_hint(a: Field) -> Field {
+    (a as u32) as Field
+}
+
+// Result must be rangechecked later!
+fn unsafe_wrapping_add_N<let N: u32>(a: [u32; N]) -> Field {
+    assert(N < 20);
+    assert(N > 0);
+    let mut sum: Field = 0;
+    for i in a {
+        sum = sum + i as Field;
+    }
+    // Safety: this is unsafe - we know res and carry form a proper decomposition and carry is small,
+    // but res needs rangechecking.
+    let res = unsafe { wrapping_add_N_hint(sum) };
+    let carry = (sum - res as Field) / pow2(32);
+    carry.assert_max_bit_size::<8>();
+    res as Field
+}
+
+fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
+    let res = unsafe_wrapping_add_N(a);
+    res.assert_max_bit_size::<32>();
+    unsafe_cast(res)
+}
+
+fn pow2(n: u64) -> Field {
+    (1u64 << n) as Field
 }
 
 pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
@@ -63,46 +198,52 @@ pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
         w[i] = msg_block[i];
     }
     for i in 16..64 {
-        w[i] = wrapping_add(
-            wrapping_add(small_sigma1(w[i - 2]), w[i - 7]),
-            wrapping_add(small_sigma0(w[i - 15]), w[i - 16]),
-        );
+        w[i] = wrapping_add_N([small_sigma1(w[i - 2]), w[i - 7], small_sigma0(w[i - 15]), w[i - 16]]);
     }
 
-    let mut a = state[0];
-    let mut b = state[1];
-    let mut c = state[2];
-    let mut d = state[3];
-    let mut e = state[4];
-    let mut f = state[5];
-    let mut g = state[6];
-    let mut h = state[7];
+    // Pre-decompose initial state into spread chunks.
+    // a,b,c use sigma0 layout (for big_sigma + maj reuse).
+    // e,f,g use sigma1 layout (for big_sigma + ch reuse).
+    // d,h are only used in additions so stay as plain u32.
+    let mut a_w = Sigma0Word::new(state[0]);
+    let mut b_w = Sigma0Word::new(state[1]);
+    let mut c_w = Sigma0Word::new(state[2]);
+    let mut d: u32 = state[3];
+    let mut e_w = Sigma1Word::new(state[4]);
+    let mut f_w = Sigma1Word::new(state[5]);
+    let mut g_w = Sigma1Word::new(state[6]);
+    let mut h: u32 = state[7];
 
     for i in 0..64 {
-        let t1 = wrapping_add(
-            wrapping_add(h, big_sigma1(e)),
-            wrapping_add(ch(e, f, g), wrapping_add(K[i], w[i])),
-        );
-        let t2 = wrapping_add(big_sigma0(a), maj(a, b, c));
+        // Reuse cached spread chunks - no re-decomposition needed
+        let bs1 = e_w.big_sigma();
+        let ch = Sigma1Word::ch(e_w, f_w, g_w);
+        let bs0 = a_w.big_sigma();
+        let maj = Sigma0Word::maj(a_w, b_w, c_w);
 
-        h = g;
-        g = f;
-        f = e;
-        e = wrapping_add(d, t1);
-        d = c;
-        c = b;
-        b = a;
-        a = wrapping_add(t1, t2);
+        // Fused add + decompose: result is pre-decomposed for next round
+        let new_e_w = Sigma1Word::wrapping_add([d, h, bs1, ch, K[i], w[i]]);
+        let new_a_w = Sigma0Word::wrapping_add([h, bs1, ch, K[i], w[i], bs0, maj]);
+
+        // Rotate working variables, carrying decompositions forward
+        h = g_w.packed;
+        g_w = f_w;
+        f_w = e_w;
+        e_w = new_e_w;
+        d = c_w.packed;
+        c_w = b_w;
+        b_w = a_w;
+        a_w = new_a_w;
     }
 
     [
-        wrapping_add(state[0], a),
-        wrapping_add(state[1], b),
-        wrapping_add(state[2], c),
-        wrapping_add(state[3], d),
-        wrapping_add(state[4], e),
-        wrapping_add(state[5], f),
-        wrapping_add(state[6], g),
-        wrapping_add(state[7], h),
+        wrapping_add_N([state[0], a_w.packed]),
+        wrapping_add_N([state[1], b_w.packed]),
+        wrapping_add_N([state[2], c_w.packed]),
+        wrapping_add_N([state[3], d]),
+        wrapping_add_N([state[4], e_w.packed]),
+        wrapping_add_N([state[5], f_w.packed]),
+        wrapping_add_N([state[6], g_w.packed]),
+        wrapping_add_N([state[7], h]),
     ]
 }
