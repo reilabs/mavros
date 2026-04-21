@@ -32,8 +32,35 @@ fn maj(a: u32, b: u32, c: u32) -> u32 {
 }
 
 fn big_sigma0(a: u32) -> u32 {
-    // rotr(2) ^ rotr(13) ^ rotr(22)
-    rotr(a, 4, 1073741824) ^ rotr(a, 8192, 524288) ^ rotr(a, 4194304, 1024)
+    let (as10, as9, as11, as2) = split_and_spread_4::<10,9,11,2>(a);
+    let arr2 = as11 + as9 * POW_2_22 + as10 * POW_2_40 + as2 * POW_2_60;
+    let arr13 = as9 + as10 * POW_2_18 + as2 * POW_2_38 + as11 * POW_2_42;
+    let arr22 = as10 + as2 * POW_2_20 + as11 * POW_2_24 + as9 * POW_2_46;
+    let S0S = arr2 + arr13 + arr22;
+    let (_, S0) = unspread_64(unsafe_cast(S0S));
+    S0
+
+    	// 	as10, as9, as11, as2 := hasher.splitAndSpread4(a, 10, 9, 11, 2)
+		// arr2 := hasher.api.Add(
+		// 	as11,
+		// 	hasher.api.Mul(as9, 1<<22),
+		// 	hasher.api.Mul(as10, 1<<40),
+		// 	hasher.api.Mul(as2, 1<<60),
+		// )
+		// arr13 := hasher.api.Add(
+		// 	as9,
+		// 	hasher.api.Mul(as10, 1<<18),
+		// 	hasher.api.Mul(as2, 1<<38),
+		// 	hasher.api.Mul(as11, 1<<42),
+		// )
+		// arr22 := hasher.api.Add(
+		// 	as10,
+		// 	hasher.api.Mul(as2, 1<<20),
+		// 	hasher.api.Mul(as11, 1<<24),
+		// 	hasher.api.Mul(as9, 1<<46),
+		// )
+		// S0S := hasher.api.Add(arr2, arr13, arr22)
+		// _, S0 := hasher.unspread(S0S)
 }
 
 fn big_sigma1(e: u32) -> u32 {
@@ -148,6 +175,8 @@ global POW_2_38: Field = (1u64 << 38) as Field;
 global POW_2_52: Field = (1u64 << 52) as Field;
 global POW_2_54: Field = (1u64 << 54) as Field;
 global POW_2_36: Field = (1u64 << 36) as Field;
+global POW_2_40: Field = (1u64 << 40) as Field;
+global POW_2_24: Field = (1u64 << 24) as Field;
 
 pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     // Message schedule
