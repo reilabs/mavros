@@ -101,7 +101,8 @@ unconstrained fn split4_hint(f: u32, a: u32, b: u32, c: u32, d: u32) -> (Field, 
 
 fn split_and_spread_4<let a: u32, let b: u32, let c: u32, let d: u32>(f: u32) -> (Field, Field, Field, Field) {
     assert(a + b + c + d == 32);
-    // Safety: is for the weak
+    // Safety: the definition of `a3` ensures that `a0`, `a1`, `a2`, and `a3` form the proper decomposition of `f`. The calls to `spread`
+    // ensure that each chunk is exactly in the defined range.
     let (a0, a1, a2) = unsafe { split4_hint(f, a, b, c, d) };
     let a3 = (f as Field) - (a0 * ((1 << (b + c + d)) as Field)) - (a1 * ((1 << (c + d)) as Field)) - (a2 * ((1 << d) as Field));
     (spread::<a>(unsafe_cast(a0)) as Field, spread::<b>(unsafe_cast(a1)) as Field, spread::<c>(unsafe_cast(a2)) as Field, spread::<d>(unsafe_cast(a3)) as Field)
@@ -114,8 +115,10 @@ unconstrained fn unspread_64_hint(f: u64) -> (Field, Field) {
     (a0 as Field, a1 as Field)
 }
 
+// The input can be the result of unsafe_cast, because it will get rangechecked here independently.
 fn unspread_64(x: u64) -> (u32, u32) {
-    // Safety: is for the weak
+    // Safety: the definition of `a2` ensures that `a0`, `a1`, and `a2` form the proper decomposition of `x`. The calls to `unspread`
+    // ensure that each chunk is exactly in the defined range.
     let (a0, a1) = unsafe { unspread_64_hint(x) };
     let a2 = (x as Field) - (a0 * pow2(42)) - (a1 * pow2(20));
     let (a0_uns_0, a0_uns_1) = unspread::<11>(unsafe_cast(a0));
@@ -146,33 +149,40 @@ fn small_sigma1(x: u32) -> u32 {
     s1
 }
 
-unconstrained fn wrapping_add_N_hint(a: Field) -> u32 {
-    a as u32
+unconstrained fn wrapping_add_N_hint(a: Field) -> Field {
+    (a as u32) as Field
 }
 
-fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
+// Result must be rangechecked later!
+fn unsafe_wrapping_add_N<let N: u32>(a: [u32; N]) -> Field {
     assert(N < 20);
     assert(N > 0);
     let mut sum: Field = 0;
     for i in a {
         sum = sum + i as Field;
     }
-
-    // Safety: is for the weak
+    // Safety: this is unsafe - we know res and carry form a proper decomposition and carry is small,
+    // but res needs rangechecking.
     let res = unsafe { wrapping_add_N_hint(sum) };
     let carry = (sum - res as Field) / pow2(32);
     carry.assert_max_bit_size::<8>();
-    res
+    res as Field
+}
+
+fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
+    let res = unsafe_wrapping_add_N(a);
+    res.assert_max_bit_size::<32>();
+    unsafe_cast(res)
 }
 
 // Combined wrapping add + sigma0 decomposition (optimization #4)
 fn wrapping_add_sigma0<let N: u32>(a: [u32; N]) -> Sigma0Word {
-    decompose_sigma0(wrapping_add_N(a))
+    decompose_sigma0(unsafe_cast(unsafe_wrapping_add_N(a)))
 }
 
 // Combined wrapping add + sigma1 decomposition (optimization #4)
 fn wrapping_add_sigma1<let N: u32>(a: [u32; N]) -> Sigma1Word {
-    decompose_sigma1(wrapping_add_N(a))
+    decompose_sigma1(unsafe_cast(unsafe_wrapping_add_N(a)))
 }
 
 fn pow2(n: u64) -> Field {
