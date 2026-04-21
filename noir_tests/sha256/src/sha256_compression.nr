@@ -37,8 +37,13 @@ fn big_sigma0(a: u32) -> u32 {
 }
 
 fn big_sigma1(e: u32) -> u32 {
-    // rotr(6) ^ rotr(11) ^ rotr(25)
-    rotr(e, 64, 67108864) ^ rotr(e, 2048, 2097152) ^ rotr(e, 33554432, 128)
+    let (es7, es14, es5, es6) = split_and_spread_4::<7,14,5,6>(e);
+    let err6 = es5 + es14 * POW_2_10 + es7 * POW_2_38 + es6 * POW_2_52;
+    let err11 = es14 + es7 * POW_2_28 + es6 * POW_2_42 + es5 * POW_2_54;
+    let err25 = es7 + es6 * POW_2_14 + es5 * POW_2_26 + es14 * POW_2_36;
+    let S1S = err6 + err11 + err25;
+    let (_, S1) = unspread_64(unsafe_cast(S1S));
+    S1
 }
 
 unconstrained fn split4_hint(f: u32, a: u32, b: u32, c: u32, d: u32) -> (Field, Field, Field) {
@@ -86,7 +91,6 @@ fn small_sigma0(x: u32) -> u32 {
 }
 
 fn small_sigma1(x: u32) -> u32 {
-
     let (wi2s13, wi2s2, wi2s7, wi2s10) = split_and_spread_4::<13,2,7,10>(x);
     let wi2rr17 = wi2s2 + wi2s13 * POW_2_4 + wi2s10 * POW_2_30 + wi2s7 * POW_2_50;
     let wi2rr19 = wi2s13 + wi2s10 * POW_2_26 + wi2s7 * POW_2_46 + wi2s2 * POW_2_60;
@@ -94,26 +98,6 @@ fn small_sigma1(x: u32) -> u32 {
     let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
     let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
     s1
-	// wi2s13, wi2s2, wi2s7, wi2s10 := hasher.splitAndSpread4(res[i-2], 13, 2, 7, 10)
-	// wi2rr17 := hasher.api.Add(
-		// wi2s2,
-		// hasher.api.Mul(wi2s13, 1<<4),
-		// hasher.api.Mul(wi2s10, 1<<30),
-		// hasher.api.Mul(wi2s7, 1<<50),
-	// )
-	// wi2rr19 := hasher.api.Add(
-		// wi2s13,
-		// hasher.api.Mul(wi2s10, 1<<26),
-		// hasher.api.Mul(wi2s7, 1<<46),
-		// hasher.api.Mul(wi2s2, 1<<60),
-	// )
-	// wi2rs10 := hasher.api.Add(
-		// wi2s7,
-		// hasher.api.Mul(wi2s2, 1<<14),
-		// hasher.api.Mul(wi2s13, 1<<18),
-	// )
-	// s1XorPlus := hasher.api.Add(wi2rr17, wi2rr19, wi2rs10)
-	// _, s1 := hasher.unspread(s1XorPlus)
 }
 
 fn wrapping_add(a: u32, b: u32) -> u32 {
@@ -160,6 +144,10 @@ global POW_2_60: Field = (1u64 << 60) as Field;
 global POW_2_14: Field = (1u64 << 14) as Field;
 global POW_2_18: Field = (1u64 << 18) as Field;
 global POW_2_32: Field = (1u64 << 32) as Field;
+global POW_2_38: Field = (1u64 << 38) as Field;
+global POW_2_52: Field = (1u64 << 52) as Field;
+global POW_2_54: Field = (1u64 << 54) as Field;
+global POW_2_36: Field = (1u64 << 36) as Field;
 
 pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     // Message schedule
