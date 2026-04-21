@@ -432,19 +432,24 @@ pub trait HLEmitter {
         self.emit(OpCode::MemOp { kind, value });
     }
 
-    fn spread(&mut self, value: ValueId) -> ValueId {
+    fn spread(&mut self, value: ValueId, bits: u8) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::Spread { result: r, value });
+        self.emit(OpCode::Spread {
+            result: r,
+            value,
+            bits,
+        });
         r
     }
 
-    fn unspread(&mut self, value: ValueId) -> (ValueId, ValueId) {
+    fn unspread(&mut self, value: ValueId, bits: u8) -> (ValueId, ValueId) {
         let r_and = self.fresh_value();
         let r_xor = self.fresh_value();
         self.emit(OpCode::Unspread {
             result_odd: r_and,
             result_even: r_xor,
             value,
+            bits,
         });
         (r_and, r_xor)
     }

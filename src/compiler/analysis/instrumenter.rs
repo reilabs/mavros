@@ -668,7 +668,12 @@ impl Value {
     ) -> Value {
         match (self, cast_target) {
             (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
-            (Value::Unknown(kind), _) => Value::Unknown(*kind),
+            (Value::Unknown(_), CastTarget::U(s)) => Value::Unknown(ScalarKind::U(*s)),
+            (Value::Unknown(_), CastTarget::I(s)) => Value::Unknown(ScalarKind::I(*s)),
+            (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
+            (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => {
+                Value::Unknown(*kind)
+            }
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
@@ -1279,7 +1284,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
 
-    fn spread(&self, instrumenter: &mut CostAnalysis) -> Self {
+    fn spread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: self
                 .unspecialized
@@ -1288,7 +1293,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn unspread(&self, instrumenter: &mut CostAnalysis) -> (Self, Self) {
+    fn unspread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> (Self, Self) {
         let (unspec_odd, unspec_even) = self
             .unspecialized
             .unspread_op(instrumenter.get_unspecialized());
@@ -1600,7 +1605,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         fn unknown_value(ty: &Type) -> Value {
             match &ty.expr {
                 TypeExpr::Field => Value::Unknown(ScalarKind::Field),
-                TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+                TypeExpr::U(s) | TypeExpr::I(s) => Value::Unknown(ScalarKind::U(*s)),
                 TypeExpr::Array(elem, size) => {
                     Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
                 }

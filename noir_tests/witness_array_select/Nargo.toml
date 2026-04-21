@@ -1,0 +1,6 @@
+[package]
+name = "witness_array_select"
+type = "bin"
+authors = [""]
+
+[dependencies]

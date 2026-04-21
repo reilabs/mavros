@@ -55,7 +55,6 @@ impl FrameLayouter {
 
     fn alloc_value(&mut self, value: ValueId, tp: &Type) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
-        self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += self.type_size(&tp);
         bytecode::FramePosition(r)
@@ -71,6 +70,12 @@ impl FrameLayouter {
 
     fn alloc_field(&mut self, value: ValueId) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
+        let r = self.next_free;
+        self.next_free += bytecode::LIMBS;
+        bytecode::FramePosition(r)
+    }
+
+    fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
         let r = self.next_free;
         self.next_free += bytecode::LIMBS;
         bytecode::FramePosition(r)
@@ -97,6 +102,12 @@ impl FrameLayouter {
             TypeExpr::Ref(_) => 1,       // Ptr
             _ => todo!(),
         }
+    }
+
+    fn alloc_scratch(&mut self, count: usize) -> bytecode::FramePosition {
+        let r = self.next_free;
+        self.next_free += count;
+        bytecode::FramePosition(r)
     }
 
     // This method needs to ensure contiguous storage!
@@ -271,6 +282,7 @@ impl CodeGen {
             function.get_entry_id(),
             entry,
             type_info,
+            cfg,
             &mut layouter,
             &mut emitter,
             global_layouter,
@@ -289,33 +301,80 @@ impl CodeGen {
                 block_id,
                 block,
                 type_info,
+                cfg,
                 &mut layouter,
                 &mut emitter,
                 global_layouter,
             );
         }
 
+        // Reserve scratch for loop back-edge.
+        let max_loop_scratch = function
+            .get_blocks()
+            .filter(|(block_id, _)| cfg.is_loop_entry(**block_id))
+            .map(|(_, block)| {
+                block
+                    .get_parameters()
+                    .map(|(_, tp)| layouter.type_size(tp))
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        let scratch_base = layouter.alloc_scratch(max_loop_scratch);
+
         for (block_id, block) in function.get_blocks() {
-            let mut block_exit_start: usize = emitter.block_exits[&block_id];
+            let mut exit_instruction_cursor: usize = emitter.block_exits[&block_id];
             match block.get_terminator().unwrap() {
                 Terminator::Jmp(tgt, args) => {
-                    let params = function.get_block(*tgt).get_parameters();
-                    for (arg, (param, tp)) in args.iter().zip(params) {
-                        emitter.code[block_exit_start] = bytecode::OpCode::MovFrame {
-                            size: layouter.type_size(tp),
-                            target: layouter.get_value(*param),
-                            source: layouter.get_value(*arg),
-                        };
-                        block_exit_start += 1;
+                    if cfg.dominates(*tgt, *block_id) {
+                        // Back-edge: copy through scratch to avoid clobbering
+                        let mut scratch_frame_offset = 0isize;
+                        for (arg, (_param, tp)) in
+                            args.iter().zip(function.get_block(*tgt).get_parameters())
+                        {
+                            let size = layouter.type_size(tp);
+                            emitter.code[exit_instruction_cursor] = bytecode::OpCode::MovFrame {
+                                size,
+                                target: scratch_base.offset(scratch_frame_offset),
+                                source: layouter.get_value(*arg),
+                            };
+                            exit_instruction_cursor += 1;
+                            scratch_frame_offset += size as isize;
+                        }
+                        let mut scratch_frame_offset = 0isize;
+                        for (_arg, (param, tp)) in
+                            args.iter().zip(function.get_block(*tgt).get_parameters())
+                        {
+                            let size = layouter.type_size(tp);
+                            emitter.code[exit_instruction_cursor] = bytecode::OpCode::MovFrame {
+                                size,
+                                target: layouter.get_value(*param),
+                                source: scratch_base.offset(scratch_frame_offset),
+                            };
+                            exit_instruction_cursor += 1;
+                            scratch_frame_offset += size as isize;
+                        }
+                    } else {
+                        for (arg, (param, tp)) in
+                            args.iter().zip(function.get_block(*tgt).get_parameters())
+                        {
+                            let size = layouter.type_size(tp);
+                            emitter.code[exit_instruction_cursor] = bytecode::OpCode::MovFrame {
+                                size,
+                                target: layouter.get_value(*param),
+                                source: layouter.get_value(*arg),
+                            };
+                            exit_instruction_cursor += 1;
+                        }
                     }
-                    emitter.code[block_exit_start] = bytecode::OpCode::Jmp {
+                    emitter.code[exit_instruction_cursor] = bytecode::OpCode::Jmp {
                         target: bytecode::JumpTarget(
                             *emitter.block_entrances.get(&tgt).unwrap() as isize
                         ),
                     };
                 }
                 Terminator::JmpIf(cond, if_t, if_f) => {
-                    emitter.code[block_exit_start] = bytecode::OpCode::JmpIf {
+                    emitter.code[exit_instruction_cursor] = bytecode::OpCode::JmpIf {
                         cond: layouter.get_value(*cond),
                         if_t: bytecode::JumpTarget(
                             *emitter.block_entrances.get(&if_t).unwrap() as isize
@@ -344,6 +403,7 @@ impl CodeGen {
         block_id: BlockId,
         block: &HLBlock,
         type_info: &FunctionTypeInfo,
+        cfg: &CFG,
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
@@ -630,9 +690,21 @@ impl CodeGen {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
                     if matches!(tgt, ssa::CastTarget::WitnessOf) {
+                        // PureToWitnessRef reads a Field (4 u64s) from the frame.
+                        // If the source is not Field-sized, cast to Field first.
+                        let field_pos = if l_type.expr != TypeExpr::Field {
+                            let tmp = layouter.alloc_temp_field();
+                            emitter.push_op(bytecode::OpCode::CastU64ToField {
+                                res: tmp,
+                                a: layouter.get_value(*v),
+                            });
+                            tmp
+                        } else {
+                            layouter.get_value(*v)
+                        };
                         emitter.push_op(bytecode::OpCode::PureToWitnessRef {
                             res: layouter.alloc_ptr(*r),
-                            v: layouter.get_value(*v),
+                            v: field_pos,
                         });
                         continue;
                     }
@@ -881,8 +953,23 @@ impl CodeGen {
                         amount: *size as u64,
                     });
                 }
-                ssa::OpCode::AssertEq { lhs: _, rhs: _ } => {
-                    // TODO: Implement this
+                ssa::OpCode::AssertEq { lhs, rhs } => {
+                    let lhs_type = type_info.get_value_type(*lhs);
+                    match &lhs_type.expr {
+                        TypeExpr::Field => {
+                            emitter.push_op(bytecode::OpCode::AssertEqField {
+                                a: layouter.get_value(*lhs),
+                                b: layouter.get_value(*rhs),
+                            });
+                        }
+                        TypeExpr::U(_) | TypeExpr::I(_) => {
+                            emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                                a: layouter.get_value(*lhs),
+                                b: layouter.get_value(*rhs),
+                            });
+                        }
+                        t => panic!("Unsupported type for AssertEq in vm: {:?}", t),
+                    }
                 }
                 ssa::OpCode::ToBits {
                     result: r,
@@ -953,9 +1040,21 @@ impl CodeGen {
                     const_val: c,
                     var: v,
                 } => {
+                    // MulConst reads coeff as Field (4 u64s). Cast if needed.
+                    let c_type = type_info.get_value_type(*c);
+                    let coeff_pos = if c_type.expr != TypeExpr::Field {
+                        let tmp = layouter.alloc_temp_field();
+                        emitter.push_op(bytecode::OpCode::CastU64ToField {
+                            res: tmp,
+                            a: layouter.get_value(*c),
+                        });
+                        tmp
+                    } else {
+                        layouter.get_value(*c)
+                    };
                     emitter.push_op(bytecode::OpCode::MulConst {
                         res: layouter.alloc_ptr(*r),
-                        coeff: layouter.get_value(*c),
+                        coeff: coeff_pos,
                         v: layouter.get_value(*v),
                     });
                 }
@@ -1066,7 +1165,7 @@ impl CodeGen {
                         bits: *bits as usize,
                     });
                 }
-                ssa::OpCode::Spread { result, value } => {
+                ssa::OpCode::Spread { result, value, .. } => {
                     let value_type = type_info.get_value_type(*value);
                     let value_bits = match &value_type.expr {
                         TypeExpr::U(bits) | TypeExpr::I(bits) => bits,
@@ -1090,6 +1189,7 @@ impl CodeGen {
                     result_odd,
                     result_even,
                     value,
+                    ..
                 } => {
                     let odd_type = type_info.get_value_type(*result_odd);
                     let even_type = type_info.get_value_type(*result_even);
@@ -1200,9 +1300,16 @@ impl CodeGen {
         }
         emitter.exit_block(block_id);
         match block.get_terminator().unwrap() {
-            Terminator::Jmp(_, params) => {
+            Terminator::Jmp(tgt, params) => {
                 emitter.push_op(bytecode::OpCode::Nop {});
-                for _ in 0..params.len() {
+                // Back-edges (jumps to loop headers) need scratch copies to avoid
+                // clobbering parameters
+                let nop_count = if cfg.dominates(*tgt, block_id) {
+                    2 * params.len()
+                } else {
+                    params.len()
+                };
+                for _ in 0..nop_count {
                     emitter.push_op(bytecode::OpCode::Nop {});
                 }
             }

@@ -12,7 +12,6 @@ pub mod r1cs_gen;
 pub mod ssa;
 pub mod ssa_gen;
 pub mod untaint_control_flow;
-pub mod witness_cast_insertion;
 pub mod witness_info;
 pub mod witness_type_inference;
 

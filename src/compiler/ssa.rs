@@ -901,11 +901,15 @@ pub enum OpCode {
     Spread {
         result: ValueId,
         value: ValueId,
+        /// Number of input bits (1..=16).
+        bits: u8,
     },
     Unspread {
         result_odd: ValueId,
         result_even: ValueId,
         value: ValueId,
+        /// Number of input bits per half (1..=16).
+        bits: u8,
     },
     Guard {
         condition: ValueId,
@@ -1406,26 +1410,31 @@ impl Instruction for OpCode {
                     )
                 }
             },
-            OpCode::Spread { result, value } => {
+            OpCode::Spread {
+                result,
+                value,
+                bits,
+            } => {
                 format!(
-                    "v{}{} = spread(v{})",
+                    "v{}{} = spread(v{}, {bits})",
                     result.0,
                     annotate_value(*result),
-                    value.0
+                    value.0,
                 )
             }
             OpCode::Unspread {
                 result_odd,
                 result_even,
                 value,
+                bits,
             } => {
                 format!(
-                    "v{}{}, v{}{} = unspread(v{})",
+                    "v{}{}, v{}{} = unspread(v{}, {bits})",
                     result_odd.0,
                     annotate_value(*result_odd),
                     result_even.0,
                     annotate_value(*result_even),
-                    value.0
+                    value.0,
                 )
             }
             OpCode::Guard { condition, inner } => {
@@ -1470,11 +1479,13 @@ impl Instruction for OpCode {
             Self::Spread {
                 result: _,
                 value: v,
+                ..
             } => vec![v].into_iter(),
             Self::Unspread {
                 result_odd: _,
                 result_even: _,
                 value: v,
+                ..
             } => vec![v].into_iter(),
             Self::ArraySet {
                 result: _,
@@ -1778,11 +1789,13 @@ impl Instruction for OpCode {
             | Self::Spread {
                 result: r,
                 value: _,
+                ..
             } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
                 value: _,
+                ..
             } => vec![result_odd, result_even].into_iter(),
             Self::ToBits {
                 result: r,
@@ -1853,11 +1866,13 @@ impl Instruction for OpCode {
             Self::Spread {
                 result: _,
                 value: v,
+                ..
             } => vec![v].into_iter(),
             Self::Unspread {
                 result_odd: _,
                 result_even: _,
                 value: v,
+                ..
             } => vec![v].into_iter(),
             Self::ArraySet {
                 result: _,
@@ -2187,11 +2202,13 @@ impl Instruction for OpCode {
             | Self::Spread {
                 result: r,
                 value: v,
+                ..
             } => vec![r, v].into_iter(),
             Self::Unspread {
                 result_odd: a,
                 result_even: b,
                 value: v,
+                ..
             } => vec![a, b, v].into_iter(),
             Self::ToBits {
                 result: r,

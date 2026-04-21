@@ -796,17 +796,17 @@ impl symbolic_executor::Value<R1CGen> for Value {
         todo!("ToRadix R1CS generation not yet implemented")
     }
 
-    fn spread(&self, _ctx: &mut R1CGen) -> Self {
+    fn spread(&self, bits: u8, _ctx: &mut R1CGen) -> Self {
         let val = self.expect_constant();
         let v: u128 = val.into_bigint().as_ref()[0] as u128;
-        let spread_val = ssa_mod::spread_bits(v, 32);
+        let spread_val = ssa_mod::spread_bits(v, bits as usize);
         Value::Const(ark_bn254::Fr::from(spread_val))
     }
 
-    fn unspread(&self, _ctx: &mut R1CGen) -> (Self, Self) {
+    fn unspread(&self, bits: u8, _ctx: &mut R1CGen) -> (Self, Self) {
         let val = self.expect_constant();
         let v: u128 = val.into_bigint().as_ref()[0] as u128;
-        let (odd_val, even_val) = ssa_mod::unspread_bits(v, 64);
+        let (odd_val, even_val) = ssa_mod::unspread_bits(v, bits as usize * 2);
         (
             Value::Const(ark_bn254::Fr::from(odd_val)),
             Value::Const(ark_bn254::Fr::from(even_val)),
