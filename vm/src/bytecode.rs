@@ -647,6 +647,7 @@ mod def {
     }
 
     #[opcode]
+    #[inline(never)]
     fn div_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
             *res = if b == Field::ZERO { Field::ZERO } else { a / b };
@@ -708,6 +709,7 @@ mod def {
     }
 
     #[opcode]
+    #[inline(never)]
     fn tuple_alloc(
         #[out] res: *mut BoxedValue,
         meta: BoxedLayout,
@@ -735,6 +737,7 @@ mod def {
     }
 
     #[opcode]
+    #[inline(never)]
     fn ref_store(
         #[frame] cell: BoxedValue,
         source: FramePosition,
