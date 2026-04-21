@@ -49,7 +49,7 @@ impl Sigma0Word {
 
     // Maj(a,b,c) = majority of each bit, from pre-decomposed chunks
     fn maj(a: Self, b: Self, c: Self) -> u32 {
-        // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+        // Safety: this will not overflow by construction - for each input, the biggest 2-bit-aligned chunk is 0b01,
         // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
         let (maj, _) = unspread_64(unsafe_cast(
             a.spread() + b.spread() + c.spread(),
@@ -90,7 +90,7 @@ impl Sigma1Word {
         let err6 = self.s2 + self.s1 * pow2(10) + self.s0 * pow2(38) + self.s3 * pow2(52);
         let err11 = self.s1 + self.s0 * pow2(28) + self.s3 * pow2(42) + self.s2 * pow2(54);
         let err25 = self.s0 + self.s3 * pow2(14) + self.s2 * pow2(26) + self.s1 * pow2(36);
-        // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+        // Safety: this will not overflow by construction - for each input, the biggest 2-bit-aligned chunk is 0b01,
         // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
         let (_, S1) = unspread_64(unsafe_cast(err6 + err11 + err25));
         S1
@@ -104,7 +104,7 @@ impl Sigma1Word {
         let e_spread = e.spread();
         let f_spread = f.spread();
         let g_spread = g.spread();
-        // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+        // Safety: this will not overflow by construction - for each input, the biggest 2-bit-aligned chunk is 0b01,
         // so the max sum is 0b10, so each 2-bit chunk is guaranteed to not have a carry.
         let (e_and_f, _) = unspread_64(unsafe_cast(e_spread + f_spread));
         let (e_and_g, _) = unspread_64(unsafe_cast(e_spread + g_spread));
@@ -168,7 +168,7 @@ fn small_sigma0(x: u32) -> u32 {
     let wi15rr18 = wi15s14 + wi15s3 * pow2(28) + wi15s4 * pow2(34) + wi15s11 * pow2(42);
     let wi15rs3 = wi15s4 + wi15s11 * pow2(8) + wi15s14 * pow2(30);
     let s0XorPlus = wi15rr7 + wi15rr18 + wi15rs3;
-    // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+    // Safety: this will not overflow by construction - for each input, the biggest 2-bit-aligned chunk is 0b01,
     // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
     let (_, s0) = unspread_64(unsafe_cast(s0XorPlus));
     s0
@@ -180,7 +180,7 @@ fn small_sigma1(x: u32) -> u32 {
     let wi2rr19 = wi2s13 + wi2s10 * pow2(26) + wi2s7 * pow2(46) + wi2s2 * pow2(60);
     let wi2rs10 = wi2s7 + wi2s2 * pow2(14) + wi2s13 * pow2(18);
     let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
-    // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+    // Safety: this will not overflow by construction - for each input, the biggest 2-bit-aligned chunk is 0b01,
     // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
     let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
     s1
