@@ -24,6 +24,7 @@ struct Sigma0Word {
 }
 
 impl Sigma0Word {
+    // Implicitly rangechecks x because it uses split_and_spread_4
     fn new(x: u32) -> Self {
         let (s0, s1, s2, s3) = split_and_spread_4::<10,9,11,2>(x);
         Sigma0Word { packed: x, s0, s1, s2, s3 }
@@ -41,12 +42,15 @@ impl Sigma0Word {
         let arr2 = self.s2 + self.s1 * pow2(22) + self.s0 * pow2(40) + self.s3 * pow2(60);
         let arr13 = self.s1 + self.s0 * pow2(18) + self.s3 * pow2(38) + self.s2 * pow2(42);
         let arr22 = self.s0 + self.s3 * pow2(20) + self.s2 * pow2(24) + self.s1 * pow2(46);
+        // Safety: sum of 3 rotated spread values fits in 66 bits; unspread_64 rangechecks via lookups.
         let (_, S0) = unspread_64(unsafe_cast(arr2 + arr13 + arr22));
         S0
     }
 
     // Maj(a,b,c) = majority of each bit, from pre-decomposed chunks
     fn maj(a: Self, b: Self, c: Self) -> u32 {
+        // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+        // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
         let (maj, _) = unspread_64(unsafe_cast(
             a.spread() + b.spread() + c.spread(),
         ));
@@ -54,6 +58,7 @@ impl Sigma0Word {
     }
 
     fn wrapping_add<let N: u32>(a: [u32; N]) -> Self {
+        // Safety: calls `new` which does a rangecheck.
         Sigma0Word::new(unsafe_cast(unsafe_wrapping_add_N(a)))
     }
 }
@@ -68,6 +73,7 @@ struct Sigma1Word {
 }
 
 impl Sigma1Word {
+    // Implicitly rangechecks x, because it uses split_and_spread_4.
     fn new(x: u32) -> Self {
         let (s0, s1, s2, s3) = split_and_spread_4::<7,14,5,6>(x);
         Sigma1Word { packed: x, s0, s1, s2, s3 }
@@ -81,25 +87,33 @@ impl Sigma1Word {
 
     // Sigma1(e) = ROTR6(e) XOR ROTR11(e) XOR ROTR25(e)
     fn big_sigma(self) -> u32 {
-        // s0=es7, s1=es14, s2=es5, s3=es6
         let err6 = self.s2 + self.s1 * pow2(10) + self.s0 * pow2(38) + self.s3 * pow2(52);
         let err11 = self.s1 + self.s0 * pow2(28) + self.s3 * pow2(42) + self.s2 * pow2(54);
         let err25 = self.s0 + self.s3 * pow2(14) + self.s2 * pow2(26) + self.s1 * pow2(36);
+        // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+        // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
         let (_, S1) = unspread_64(unsafe_cast(err6 + err11 + err25));
         S1
     }
 
     // Ch(e,f,g) = (e & f) XOR (~e & g) = (e&f) + g - (e&g)
+    // In we have for each bit i: `g_i <= (e&g)_i`. Moreover, we have g_i - (e&g)_i = 1 iff `g_i = 1` and `(e&g)_i = 0`, so `e_i = 0`.
+    // In other words, g_i - (e&g)_i = g_i & (~e_i).
+    // Moreover, e&f and (~e&g) are disjoint, so XOR can be replaced by addition.
     fn ch(e: Self, f: Self, g: Self) -> u32 {
         let e_spread = e.spread();
         let f_spread = f.spread();
         let g_spread = g.spread();
+        // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+        // so the max sum is 0b10, so each 2-bit chunk is guaranteed to not have a carry.
         let (e_and_f, _) = unspread_64(unsafe_cast(e_spread + f_spread));
         let (e_and_g, _) = unspread_64(unsafe_cast(e_spread + g_spread));
+        // Safety: this is just an algebraic encoding of the ch function, so it will not overflow by construction.
         unsafe_cast(e_and_f as Field + g.packed as Field - e_and_g as Field)
     }
 
     fn wrapping_add<let N: u32>(a: [u32; N]) -> Self {
+        // Safety: calls `new` which does a rangecheck.
         Sigma1Word::new(unsafe_cast(unsafe_wrapping_add_N(a)))
     }
 }
@@ -111,12 +125,15 @@ unconstrained fn split4_hint(f: u32, a: u32, b: u32, c: u32, d: u32) -> (Field, 
     (a0 as Field, a1 as Field, a2 as Field)
 }
 
+// Implicitly rangechecks f: the spread lookups on each chunk fail if any chunk is out of range,
+// which constrains f to be a valid u32 decomposable into chunks of widths [a, b, c, d].
 fn split_and_spread_4<let a: u32, let b: u32, let c: u32, let d: u32>(f: u32) -> (Field, Field, Field, Field) {
     assert(a + b + c + d == 32);
     // Safety: the definition of `a3` ensures that `a0`, `a1`, `a2`, and `a3` form the proper decomposition of `f`. The calls to `spread`
     // ensure that each chunk is exactly in the defined range.
     let (a0, a1, a2) = unsafe { split4_hint(f, a, b, c, d) };
     let a3 = (f as Field) - (a0 * ((1 << (b + c + d)) as Field)) - (a1 * ((1 << (c + d)) as Field)) - (a2 * ((1 << d) as Field));
+    // Safety: each chunk is constrained to its bit-width by the spread lookup (spread<N> fails if input >= 2^N).
     (spread::<a>(unsafe_cast(a0)) as Field, spread::<b>(unsafe_cast(a1)) as Field, spread::<c>(unsafe_cast(a2)) as Field, spread::<d>(unsafe_cast(a3)) as Field)
 }
 
@@ -127,17 +144,21 @@ unconstrained fn unspread_64_hint(f: u64) -> (Field, Field) {
     (a0 as Field, a1 as Field)
 }
 
-// The input can be the result of unsafe_cast, because it will get rangechecked here independently.
+// Implicitly rangechecks x: the unspread lookups on each limb fail if any limb is out of range,
+// which constrains x to be a valid 64-bit spread value decomposable into 3 limbs of [22, 22, 20] spread bits.
 fn unspread_64(x: u64) -> (u32, u32) {
     // Safety: the definition of `a2` ensures that `a0`, `a1`, and `a2` form the proper decomposition of `x`. The calls to `unspread`
     // ensure that each chunk is exactly in the defined range.
     let (a0, a1) = unsafe { unspread_64_hint(x) };
     let a2 = (x as Field) - (a0 * pow2(42)) - (a1 * pow2(20));
+    // Safety: each limb is constrained to its bit-width by the unspread lookup (unspread<N> fails if input is not a valid 2N-bit spread).
     let (a0_uns_0, a0_uns_1) = unspread::<11>(unsafe_cast(a0));
     let (a1_uns_0, a1_uns_1) = unspread::<11>(unsafe_cast(a1));
     let (a2_uns_0, a2_uns_1) = unspread::<10>(unsafe_cast(a2));
     let a_0 = a2_uns_0 as Field + a1_uns_0 as Field * pow2(10) + a0_uns_0 as Field * pow2(21);
     let a_1 = a2_uns_1 as Field + a1_uns_1 as Field * pow2(10) + a0_uns_1 as Field * pow2(21);
+    // Safety: each component is rangechecked by unspread, and the weighted sum fits in 32 bits
+    // (10 + 11 + 11 = 32). Consumer (wrapping_add -> split_and_spread_4) also rangechecks.
     (unsafe_cast(a_0), unsafe_cast(a_1))
 }
 
@@ -147,6 +168,8 @@ fn small_sigma0(x: u32) -> u32 {
     let wi15rr18 = wi15s14 + wi15s3 * pow2(28) + wi15s4 * pow2(34) + wi15s11 * pow2(42);
     let wi15rs3 = wi15s4 + wi15s11 * pow2(8) + wi15s14 * pow2(30);
     let s0XorPlus = wi15rr7 + wi15rr18 + wi15rs3;
+    // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+    // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
     let (_, s0) = unspread_64(unsafe_cast(s0XorPlus));
     s0
 }
@@ -157,6 +180,8 @@ fn small_sigma1(x: u32) -> u32 {
     let wi2rr19 = wi2s13 + wi2s10 * pow2(26) + wi2s7 * pow2(46) + wi2s2 * pow2(60);
     let wi2rs10 = wi2s7 + wi2s2 * pow2(14) + wi2s13 * pow2(18);
     let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
+    // Safety: this will not overflow by construction – for each input, the biggest 2-bit-aligned chunk is 0b01,
+    // so the max sum is 0b11, so each 2-bit chunk is guaranteed to not have a carry.
     let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
     s1
 }
@@ -183,7 +208,9 @@ fn unsafe_wrapping_add_N<let N: u32>(a: [u32; N]) -> Field {
 
 fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
     let res = unsafe_wrapping_add_N(a);
+    // Explicit rangecheck since this is the terminal consumer (no spread/unspread downstream).
     res.assert_max_bit_size::<32>();
+    // Safety: checked above by the rangecheck.
     unsafe_cast(res)
 }
 
