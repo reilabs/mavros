@@ -687,6 +687,20 @@ impl UntaintControlFlow {
                     },
                 );
             }
+            // -- Lt comparisons, Adds, and constants: never guard-wrap.
+            //    These are pure computations whose results the instrumenter
+            //    must see as concrete (e.g. loop bounds, loop increments). --
+            other @ OpCode::Cmp {
+                kind: crate::compiler::ssa::CmpKind::Lt,
+                ..
+            }
+            | other @ OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                ..
+            }
+            | other @ OpCode::Const { .. } => {
+                new_instructions.push(other);
+            }
             // -- All other non-Call ops: Guard-wrap when tainted --
             other => maybe_guard(new_instructions, block_taint, other),
         }
