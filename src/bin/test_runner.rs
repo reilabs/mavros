@@ -265,7 +265,8 @@ fn run_single(root: PathBuf) {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("Witgen WASM run error: {:?}", e);
                 emit("END:WITGEN_WASM_RUN:fail");
                 None
             }
@@ -437,7 +438,10 @@ fn run_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    let vm_struct_size: u32 = 32; // 8 x u32 pointers (witness, a, b, c, lookups_a, lookups_b, lookups_c, multiplicities)
+    // 14 u32 pointers = 56 bytes. Cursors (witness, a, b, c, lookups_a/b/c) and
+    // bases (multiplicities, wit_pre, wit_post, a_base, b_base, c_base,
+    // lookups_a_base). Phase 2 needs the bases for random-access reads.
+    let vm_struct_size: u32 = 56;
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
@@ -445,6 +449,7 @@ fn run_wasm(
     // Offsets (in field elements) into the shared buffers for lookups/multiplicities.
     let lookups_offset_bytes = (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
     let mults_offset_bytes = (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
+    let wit_post_offset_bytes = (r1cs.witness_layout.challenges_start() * FIELD_SIZE) as u32;
 
     // Create wasmtime engine and store
     let engine = Engine::default();
@@ -497,11 +502,14 @@ fn run_wasm(
     let lookups_b_ptr = b_ptr + lookups_offset_bytes;
     let lookups_c_ptr = c_ptr + lookups_offset_bytes;
     let multiplicities_ptr = witness_ptr + mults_offset_bytes;
+    let wit_post_ptr = witness_ptr + wit_post_offset_bytes;
 
-    // Initialize VM struct with buffer pointers
+    // Initialize VM struct with buffer pointers. The first 7 slots are cursors
+    // Phase 1 advances; the remaining 7 are immutable bases Phase 2 reads.
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
+        // Cursors (Phase 1 advances these).
         data[off..off + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + 4..off + 8].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + 8..off + 12].copy_from_slice(&b_ptr.to_le_bytes());
@@ -509,7 +517,29 @@ fn run_wasm(
         data[off + 16..off + 20].copy_from_slice(&lookups_a_ptr.to_le_bytes());
         data[off + 20..off + 24].copy_from_slice(&lookups_b_ptr.to_le_bytes());
         data[off + 24..off + 28].copy_from_slice(&lookups_c_ptr.to_le_bytes());
+        // Immutable bases for Phase 2 random access.
         data[off + 28..off + 32].copy_from_slice(&multiplicities_ptr.to_le_bytes());
+        data[off + 32..off + 36].copy_from_slice(&witness_ptr.to_le_bytes()); // wit_pre base
+        data[off + 36..off + 40].copy_from_slice(&wit_post_ptr.to_le_bytes()); // wit_post base
+        data[off + 40..off + 44].copy_from_slice(&a_ptr.to_le_bytes());
+        data[off + 44..off + 48].copy_from_slice(&b_ptr.to_le_bytes());
+        data[off + 48..off + 52].copy_from_slice(&c_ptr.to_le_bytes());
+        data[off + 52..off + 56].copy_from_slice(&lookups_a_ptr.to_le_bytes()); // tape A base
+    }
+
+    // Write Fiat-Shamir challenges into the post-commitment witness slot(s)
+    // before invoking the binary. Phase 2 (generated inside the binary) reads
+    // them via WitnessPostComm[0..challenges_size]. The seed matches the VM
+    // path so WASM and VM outputs agree.
+    let challenges_count = r1cs.witness_layout.challenges_size;
+    if challenges_count > 0 {
+        let fake = interpreter::fake_challenges(challenges_count);
+        let challenges_base_bytes =
+            witness_ptr + (r1cs.witness_layout.challenges_start() * FIELD_SIZE) as u32;
+        for (i, ch) in fake.iter().enumerate() {
+            let slot = challenges_base_bytes + (i * FIELD_SIZE) as u32;
+            write_field_to_memory(&memory, &mut store, slot, ch);
+        }
     }
 
     let func = instance
@@ -573,21 +603,12 @@ fn run_wasm(
         ));
     }
 
-    // Split witness into pre-commit and post-commit sections
+    // Split witness into pre-commit and post-commit sections. The generated
+    // __run_phase2 inside the WASM binary has already finalized the LogUp
+    // argument, so buffers are ready for the R1CS correctness check as-is.
     let pre_comm_count = r1cs.witness_layout.pre_commitment_size();
-    let mut out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
+    let out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
     let out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
-
-    // Apply Phase 2 post-processing (LogUp batch inversion + witness/constraint
-    // fill-ins) so the output matches what the R1CS constraint check expects.
-    let (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c) = run_wasm_phase2(
-        r1cs,
-        &mut out_wit_pre_comm,
-        out_wit_post_comm,
-        out_a,
-        out_b,
-        out_c,
-    );
 
     Ok(WasmResult {
         out_wit_pre_comm,
@@ -597,114 +618,6 @@ fn run_wasm(
         out_c,
         live_bytes,
     })
-}
-
-/// Runs the Phase 2 post-processing (LogUp inverse batching + lookup entry
-/// rewriting) on the WASM witgen output. Mirrors `vm::interpreter::run_phase2`
-/// but reconstructs `TableInfo` entries from the R1CS table list since the
-/// compiled WASM has no runtime table registry.
-fn run_wasm_phase2(
-    r1cs: &R1CS,
-    out_wit_pre_comm: &mut [Field],
-    out_wit_post_comm: Vec<Field>,
-    out_a: Vec<Field>,
-    out_b: Vec<Field>,
-    out_c: Vec<Field>,
-) -> (Vec<Field>, Vec<Field>, Vec<Field>, Vec<Field>, Vec<Field>) {
-    use mavros::artifacts::Table;
-    use mavros::vm::bytecode::TableInfo;
-
-    // Fix multiplicities: during WASM execution we wrote them as raw u64 in the
-    // low limb. Convert each one into a proper Montgomery-form Field.
-    interpreter::fix_multiplicities_section(out_wit_pre_comm, r1cs.witness_layout);
-
-    // If the program has no tables, Phase 2 is a no-op.
-    if r1cs.tables.is_empty() {
-        return (
-            out_wit_pre_comm.to_vec(),
-            out_wit_post_comm,
-            out_a,
-            out_b,
-            out_c,
-        );
-    }
-
-    // Reconstruct a TableInfo per table, with pointers into the (now-fixed)
-    // witness buffer for the multiplicities region. Walk the table list in
-    // declaration order, accumulating offsets the same way the VM did at
-    // runtime.
-    let mults_base = r1cs.witness_layout.multiplicities_start();
-    let mut mults_cursor = mults_base;
-    let mut inv_cnst_cursor = r1cs.constraints_layout.tables_data_start();
-    // elem_inverses_witness_section_offset is relative to the start of the
-    // post-commitment witness section (= challenges_start in the global layout).
-    let mut inv_wit_cursor =
-        r1cs.witness_layout.tables_data_start() - r1cs.witness_layout.challenges_start();
-
-    let mut tables: Vec<TableInfo> = Vec::with_capacity(r1cs.tables.len());
-    for table in &r1cs.tables {
-        let (length, num_indices, num_values, cnst_size, wit_size) = match table {
-            Table::Range(bits) => {
-                let len = 1usize << bits;
-                (len, 1, 0, len + 1, len)
-            }
-            Table::OfElems(els) => {
-                let len = els.len();
-                (len, 1, 1, 2 * len + 1, 2 * len)
-            }
-            Table::Spread(bits) => {
-                let len = 1usize << bits;
-                (len, 1, 1, 2 * len + 1, 2 * len)
-            }
-        };
-
-        // Raw pointer into the witness buffer at the start of this table's
-        // multiplicities region. Phase 2 reads these as Fields, which is safe
-        // because we already called fix_multiplicities_section above.
-        let multiplicities_wit =
-            unsafe { out_wit_pre_comm.as_mut_ptr().offset(mults_cursor as isize) };
-
-        tables.push(TableInfo {
-            multiplicities_wit,
-            num_indices,
-            num_values,
-            length,
-            elem_inverses_witness_section_offset: inv_wit_cursor,
-            elem_inverses_constraint_section_offset: inv_cnst_cursor,
-        });
-
-        mults_cursor += length;
-        inv_cnst_cursor += cnst_size;
-        inv_wit_cursor += wit_size;
-    }
-
-    let fake_challenges = interpreter::fake_challenges(r1cs.witness_layout.challenges_size);
-
-    // Phase 2 takes an owned Phase1Result; assemble one from the WASM buffers.
-    let phase1 = interpreter::Phase1Result {
-        out_wit_pre_comm: out_wit_pre_comm.to_vec(),
-        out_wit_post_comm,
-        out_a,
-        out_b,
-        out_c,
-        tables,
-        instrumenter: mavros::vm::bytecode::AllocationInstrumenter::new(),
-    };
-
-    let result = interpreter::run_phase2(
-        phase1,
-        &fake_challenges,
-        r1cs.witness_layout,
-        r1cs.constraints_layout,
-    );
-
-    (
-        result.out_wit_pre_comm,
-        result.out_wit_post_comm,
-        result.out_a,
-        result.out_b,
-        result.out_c,
-    )
 }
 
 // ── AD WASM Runner ───────────────────────────────────────────────────

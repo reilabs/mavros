@@ -100,6 +100,46 @@ pub unsafe extern "C" fn __field_mul(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Witgen VM struct layout — keep in sync with `src/compiler/llssa_llvm_codegen.rs`.
+// (Offsets are in u32 slots since each pointer is 4 bytes on wasm32.)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const WVM_WITNESS_CURSOR: usize = 0;
+const WVM_A_CURSOR: usize = 1;
+const WVM_B_CURSOR: usize = 2;
+const WVM_C_CURSOR: usize = 3;
+const WVM_LOOKUPS_A_CURSOR: usize = 4;
+const WVM_LOOKUPS_B_CURSOR: usize = 5;
+const WVM_LOOKUPS_C_CURSOR: usize = 6;
+const WVM_MULTIPLICITIES_BASE: usize = 7;
+const WVM_WITNESS_PRE_BASE: usize = 8;
+const WVM_WITNESS_POST_BASE: usize = 9;
+const WVM_A_BASE: usize = 10;
+const WVM_B_BASE: usize = 11;
+const WVM_C_BASE: usize = 12;
+const WVM_LOOKUPS_A_BASE: usize = 13;
+
+// WitgenBuf tags — keep in sync with `witgen_buf_id` in the LLVM codegen.
+const WBUF_WIT_PRE: i32 = 0;
+const WBUF_WIT_POST: i32 = 1;
+const WBUF_A: i32 = 2;
+const WBUF_B: i32 = 3;
+const WBUF_C: i32 = 4;
+
+#[inline]
+unsafe fn witgen_buf_base(vm_ptr: *mut u8, buf_id: i32) -> *mut u64 {
+    let slot = match buf_id {
+        WBUF_WIT_PRE => WVM_WITNESS_PRE_BASE,
+        WBUF_WIT_POST => WVM_WITNESS_POST_BASE,
+        WBUF_A => WVM_A_BASE,
+        WBUF_B => WVM_B_BASE,
+        WBUF_C => WVM_C_BASE,
+        _ => core::hint::unreachable_unchecked(),
+    };
+    *(vm_ptr as *mut *mut u64).add(slot)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // VM write functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -139,6 +179,86 @@ pub unsafe extern "C" fn __write_c(vm_ptr: *mut u8, v0: i64, v1: i64, v2: i64, v
     let c_ptr = *c_ptr_ptr;
     write_field(c_ptr, limbs_to_fr(v0, v1, v2, v3));
     *c_ptr_ptr = c_ptr.add(4);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 2 primitives — random-access on the witgen buffers, field inversion,
+// and lookup-tape length.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Load `buf[idx]` as a Field (4 u64 limbs returned via `result_ptr` sret).
+#[no_mangle]
+pub unsafe extern "C" fn __witgen_load(result_ptr: *mut u64, vm_ptr: *mut u8, buf_id: i32, idx: i32) {
+    let base = witgen_buf_base(vm_ptr, buf_id);
+    let slot = base.add((idx as usize) * 4);
+    let fr = limbs_to_fr(
+        *slot as i64,
+        *slot.add(1) as i64,
+        *slot.add(2) as i64,
+        *slot.add(3) as i64,
+    );
+    write_field(result_ptr, fr);
+}
+
+/// Store `buf[idx] = value`.
+#[no_mangle]
+pub unsafe extern "C" fn __witgen_store(
+    vm_ptr: *mut u8,
+    buf_id: i32,
+    idx: i32,
+    v0: i64,
+    v1: i64,
+    v2: i64,
+    v3: i64,
+) {
+    let base = witgen_buf_base(vm_ptr, buf_id);
+    let slot = base.add((idx as usize) * 4);
+    write_field(slot, limbs_to_fr(v0, v1, v2, v3));
+}
+
+/// In-place accumulate: `buf[idx] += value` in field arithmetic.
+#[no_mangle]
+pub unsafe extern "C" fn __witgen_add(
+    vm_ptr: *mut u8,
+    buf_id: i32,
+    idx: i32,
+    v0: i64,
+    v1: i64,
+    v2: i64,
+    v3: i64,
+) {
+    let base = witgen_buf_base(vm_ptr, buf_id);
+    let slot = base.add((idx as usize) * 4);
+    let old = limbs_to_fr(
+        *slot as i64,
+        *slot.add(1) as i64,
+        *slot.add(2) as i64,
+        *slot.add(3) as i64,
+    );
+    write_field(slot, old + limbs_to_fr(v0, v1, v2, v3));
+}
+
+/// Compute `1 / x` in the prime field. If `x == 0`, returns 0 (matches the
+/// existing `__field_div` convention rather than panicking).
+#[no_mangle]
+pub unsafe extern "C" fn __field_inverse(result_ptr: *mut u64, v0: i64, v1: i64, v2: i64, v3: i64) {
+    let x = limbs_to_fr(v0, v1, v2, v3);
+    let inv = if x == Fr::from(0u64) {
+        Fr::from(0u64)
+    } else {
+        ark_ff::Field::inverse(&x).unwrap()
+    };
+    write_field(result_ptr, inv);
+}
+
+/// Number of field-element entries written to the A stream of the lookup tape
+/// (one per lookup call). Computed as `(cursor - base) / sizeof(Field)`.
+#[no_mangle]
+pub unsafe extern "C" fn __lookup_tape_len(vm_ptr: *mut u8) -> i32 {
+    let base_ptr = *(vm_ptr as *const *const u64).add(WVM_LOOKUPS_A_BASE);
+    let cursor_ptr = *(vm_ptr as *const *const u64).add(WVM_LOOKUPS_A_CURSOR);
+    let bytes = (cursor_ptr as usize).wrapping_sub(base_ptr as usize);
+    (bytes / 32) as i32
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

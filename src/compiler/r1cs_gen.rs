@@ -291,7 +291,20 @@ pub struct LookupConstraint {
     pub flag: LC,
 }
 
-pub use mavros_artifacts::Table;
+/// Description of a lookup table, as declared during R1CS generation.
+/// Kept private — neither the WASM-compile path nor the VM path reads this
+/// from `R1CS`. The WASM path detects "any lookups used?" via the lowering
+/// pass (whether `__rngchk_8` got registered); the VM path discovers tables
+/// at runtime during execution.
+#[derive(Clone, Debug)]
+enum Table {
+    /// Width-1 rangecheck table of length `2^bits`.
+    Range(u64),
+    /// Width-2 array table with the given element linear combinations.
+    OfElems(Vec<LC>),
+    /// Width-2 spread table of length `2^bits`.
+    Spread(u8),
+}
 
 #[derive(Clone)]
 pub struct R1CGen {
@@ -877,8 +890,6 @@ impl R1CGen {
             lookups_data_size: 0,
         };
         let mut result = self.constraints;
-        // Keep a copy of the table list for the R1CS; `self.tables` is consumed below.
-        let r1cs_tables = self.tables.clone();
 
         // multiplicities init + compute the needed challenges
         struct TableInfo {
@@ -931,7 +942,6 @@ impl R1CGen {
                 witness_layout,
                 constraints_layout,
                 constraints: result,
-                tables: r1cs_tables,
             };
         }
 
@@ -1106,7 +1116,6 @@ impl R1CGen {
             witness_layout,
             constraints_layout,
             constraints: result,
-            tables: r1cs_tables,
         };
     }
 }

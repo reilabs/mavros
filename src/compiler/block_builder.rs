@@ -1,6 +1,6 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
-    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType, LookupStream},
+    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType, LookupStream, WitgenBuf},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
         Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
@@ -842,6 +842,34 @@ pub trait LLEmitter {
 
     fn bump_rngchk8_multiplicity(&mut self, key: ValueId, flag: ValueId) {
         self.emit_ll(LLOp::BumpRngchk8Multiplicity { key, flag });
+    }
+
+    // -- Phase 2 primitives --
+
+    fn witgen_buf_load(&mut self, buf: WitgenBuf, idx: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::WitgenBufLoad { buf, idx, result: r });
+        r
+    }
+
+    fn witgen_buf_store(&mut self, buf: WitgenBuf, idx: ValueId, value: ValueId) {
+        self.emit_ll(LLOp::WitgenBufStore { buf, idx, value });
+    }
+
+    fn witgen_buf_add(&mut self, buf: WitgenBuf, idx: ValueId, value: ValueId) {
+        self.emit_ll(LLOp::WitgenBufAdd { buf, idx, value });
+    }
+
+    fn field_inverse(&mut self, src: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::FieldInverse { src, result: r });
+        r
+    }
+
+    fn lookup_tape_len(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::LookupTapeLen { result: r });
+        r
     }
 
     // -- Trap --

@@ -475,8 +475,26 @@ impl Driver {
         )
         .unwrap();
 
+        // If we have R1CS in hand, pass its layout through so the lowering can
+        // generate the Phase 2 helper. (Witgen only — the AD path has its own
+        // separate layout wiring below.)
+        let witgen_layout = wasm_config.as_ref().map(|(_, r1cs)| hlssa_to_llssa::R1csLayoutInfo {
+            tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
+            tables_wit_start: r1cs.witness_layout.tables_data_start(),
+            mults_wit_start: r1cs.witness_layout.multiplicities_start(),
+            logup_challenge_off: r1cs.witness_layout.challenges_start(),
+            lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
+            lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
+            is_witgen: true,
+        });
+
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info);
+        let llssa = match witgen_layout {
+            Some(layout) => {
+                hlssa_to_llssa::lower_with_layout(ssa, &flow_analysis, &type_info, layout)
+            }
+            None => hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info),
+        };
 
         // Dump LLSSA after lowering
         fs::write(
@@ -554,6 +572,9 @@ impl Driver {
             tables_wit_start: r1cs.witness_layout.tables_data_start(),
             mults_wit_start: r1cs.witness_layout.multiplicities_start(),
             logup_challenge_off: r1cs.witness_layout.challenges_start(),
+            lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
+            lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
+            is_witgen: false,
         };
 
         // Lower HLSSA → LLSSA
