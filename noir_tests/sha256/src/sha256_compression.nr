@@ -14,15 +14,6 @@ global K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-fn wrapping_mul(a: u32, b: u32) -> u32 {
-    let prod = a as u64 * b as u64;
-    (prod & 0xffffffff) as u32
-}
-
-fn rotr(x: u32, right_divisor: u32, left_multiplier: u32) -> u32 {
-    (x / right_divisor) | wrapping_mul(x, left_multiplier)
-}
-
 fn ch(e: u32, f: u32, g: u32) -> u32 {
     (e & f) ^ (!e & g)
 }
@@ -39,28 +30,6 @@ fn big_sigma0(a: u32) -> u32 {
     let S0S = arr2 + arr13 + arr22;
     let (_, S0) = unspread_64(unsafe_cast(S0S));
     S0
-
-    	// 	as10, as9, as11, as2 := hasher.splitAndSpread4(a, 10, 9, 11, 2)
-		// arr2 := hasher.api.Add(
-		// 	as11,
-		// 	hasher.api.Mul(as9, 1<<22),
-		// 	hasher.api.Mul(as10, 1<<40),
-		// 	hasher.api.Mul(as2, 1<<60),
-		// )
-		// arr13 := hasher.api.Add(
-		// 	as9,
-		// 	hasher.api.Mul(as10, 1<<18),
-		// 	hasher.api.Mul(as2, 1<<38),
-		// 	hasher.api.Mul(as11, 1<<42),
-		// )
-		// arr22 := hasher.api.Add(
-		// 	as10,
-		// 	hasher.api.Mul(as2, 1<<20),
-		// 	hasher.api.Mul(as11, 1<<24),
-		// 	hasher.api.Mul(as9, 1<<46),
-		// )
-		// S0S := hasher.api.Add(arr2, arr13, arr22)
-		// _, S0 := hasher.unspread(S0S)
 }
 
 fn big_sigma1(e: u32) -> u32 {
@@ -125,11 +94,6 @@ fn small_sigma1(x: u32) -> u32 {
     let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
     let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
     s1
-}
-
-fn wrapping_add(a: u32, b: u32) -> u32 {
-    let sum = a as u64 + b as u64;
-    (sum & 0xffffffff) as u32
 }
 
 unconstrained fn wrapping_add_N_hint(a: Field) -> u32 {
@@ -198,30 +162,40 @@ pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     let mut h = state[7];
 
     for i in 0..64 {
-        let t1 = wrapping_add(
-            wrapping_add(h, big_sigma1(e)),
-            wrapping_add(ch(e, f, g), wrapping_add(K[i], w[i])),
-        );
-        let t2 = wrapping_add(big_sigma0(a), maj(a, b, c));
+
+        let bs1 = big_sigma1(e);
+        let bs0 = big_sigma0(a);
+        let ch = ch(e, f, g);
+        let k = K[i];
+        let w = w[i];
+        let maj = maj(a, b, c);
+
+        let t1 = wrapping_add_N([
+            h,
+            bs1,
+            ch,
+            k,
+            w,
+        ]);
 
         h = g;
         g = f;
         f = e;
-        e = wrapping_add(d, t1);
+        e = wrapping_add_N([d, t1]);
         d = c;
         c = b;
         b = a;
-        a = wrapping_add(t1, t2);
+        a = wrapping_add_N([t1, bs0, maj]);
     }
 
     [
-        wrapping_add(state[0], a),
-        wrapping_add(state[1], b),
-        wrapping_add(state[2], c),
-        wrapping_add(state[3], d),
-        wrapping_add(state[4], e),
-        wrapping_add(state[5], f),
-        wrapping_add(state[6], g),
-        wrapping_add(state[7], h),
+        wrapping_add_N([state[0], a]),
+        wrapping_add_N([state[1], b]),
+        wrapping_add_N([state[2], c]),
+        wrapping_add_N([state[3], d]),
+        wrapping_add_N([state[4], e]),
+        wrapping_add_N([state[5], f]),
+        wrapping_add_N([state[6], g]),
+        wrapping_add_N([state[7], h]),
     ]
 }
