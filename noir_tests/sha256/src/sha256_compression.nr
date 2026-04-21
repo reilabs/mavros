@@ -45,21 +45,21 @@ fn decompose_sigma1(x: u32) -> Sigma1Word {
 // Reconstruct full 64-bit spread from sigma0 chunks [10|9|11|2]
 // Bit offsets: s3 at 0, s2 at 2*2=4, s1 at 2*(2+11)=26, s0 at 2*(2+11+9)=44
 fn spread_of_sigma0(w: Sigma0Word) -> Field {
-    w.s3 + w.s2 * POW_2_4 + w.s1 * POW_2_26 + w.s0 * POW_2_44
+    w.s3 + w.s2 * pow2(4) + w.s1 * pow2(26) + w.s0 * pow2(44)
 }
 
 // Reconstruct full 64-bit spread from sigma1 chunks [7|14|5|6]
 // Bit offsets: s3 at 0, s2 at 2*6=12, s1 at 2*(6+5)=22, s0 at 2*(6+5+14)=50
 fn spread_of_sigma1(w: Sigma1Word) -> Field {
-    w.s3 + w.s2 * POW_2_12 + w.s1 * POW_2_22 + w.s0 * POW_2_50
+    w.s3 + w.s2 * pow2(12) + w.s1 * pow2(22) + w.s0 * pow2(50)
 }
 
 // Sigma0(a) = ROTR2(a) XOR ROTR13(a) XOR ROTR22(a)
 fn big_sigma0(w: Sigma0Word) -> u32 {
     // s0=as10, s1=as9, s2=as11, s3=as2
-    let arr2 = w.s2 + w.s1 * POW_2_22 + w.s0 * POW_2_40 + w.s3 * POW_2_60;
-    let arr13 = w.s1 + w.s0 * POW_2_18 + w.s3 * POW_2_38 + w.s2 * POW_2_42;
-    let arr22 = w.s0 + w.s3 * POW_2_20 + w.s2 * POW_2_24 + w.s1 * POW_2_46;
+    let arr2 = w.s2 + w.s1 * pow2(22) + w.s0 * pow2(40) + w.s3 * pow2(60);
+    let arr13 = w.s1 + w.s0 * pow2(18) + w.s3 * pow2(38) + w.s2 * pow2(42);
+    let arr22 = w.s0 + w.s3 * pow2(20) + w.s2 * pow2(24) + w.s1 * pow2(46);
     let (_, S0) = unspread_64(unsafe_cast(arr2 + arr13 + arr22));
     S0
 }
@@ -67,9 +67,9 @@ fn big_sigma0(w: Sigma0Word) -> u32 {
 // Sigma1(e) = ROTR6(e) XOR ROTR11(e) XOR ROTR25(e)
 fn big_sigma1(w: Sigma1Word) -> u32 {
     // s0=es7, s1=es14, s2=es5, s3=es6
-    let err6 = w.s2 + w.s1 * POW_2_10 + w.s0 * POW_2_38 + w.s3 * POW_2_52;
-    let err11 = w.s1 + w.s0 * POW_2_28 + w.s3 * POW_2_42 + w.s2 * POW_2_54;
-    let err25 = w.s0 + w.s3 * POW_2_14 + w.s2 * POW_2_26 + w.s1 * POW_2_36;
+    let err6 = w.s2 + w.s1 * pow2(10) + w.s0 * pow2(38) + w.s3 * pow2(52);
+    let err11 = w.s1 + w.s0 * pow2(28) + w.s3 * pow2(42) + w.s2 * pow2(54);
+    let err25 = w.s0 + w.s3 * pow2(14) + w.s2 * pow2(26) + w.s1 * pow2(36);
     let (_, S1) = unspread_64(unsafe_cast(err6 + err11 + err25));
     S1
 }
@@ -117,20 +117,20 @@ unconstrained fn unspread_64_hint(f: u64) -> (Field, Field) {
 fn unspread_64(x: u64) -> (u32, u32) {
     // Safety: is for the weak
     let (a0, a1) = unsafe { unspread_64_hint(x) };
-    let a2 = (x as Field) - (a0 * POW_2_42) - (a1 * POW_2_20);
+    let a2 = (x as Field) - (a0 * pow2(42)) - (a1 * pow2(20));
     let (a0_uns_0, a0_uns_1) = unspread::<11>(unsafe_cast(a0));
     let (a1_uns_0, a1_uns_1) = unspread::<11>(unsafe_cast(a1));
     let (a2_uns_0, a2_uns_1) = unspread::<10>(unsafe_cast(a2));
-    let a_0 = a2_uns_0 as Field + a1_uns_0 as Field * POW_2_10 + a0_uns_0 as Field * POW_2_21;
-    let a_1 = a2_uns_1 as Field + a1_uns_1 as Field * POW_2_10 + a0_uns_1 as Field * POW_2_21;
+    let a_0 = a2_uns_0 as Field + a1_uns_0 as Field * pow2(10) + a0_uns_0 as Field * pow2(21);
+    let a_1 = a2_uns_1 as Field + a1_uns_1 as Field * pow2(10) + a0_uns_1 as Field * pow2(21);
     (unsafe_cast(a_0), unsafe_cast(a_1))
 }
 
 fn small_sigma0(x: u32) -> u32 {
     let (wi15s14, wi15s11, wi15s4, wi15s3) = split_and_spread_4::<14,11,4,3>(x);
-    let wi15rr7 = wi15s11 + wi15s14 * POW_2_22 + wi15s3 * POW_2_50 + wi15s4 * POW_2_56;
-    let wi15rr18 = wi15s14 + wi15s3 * POW_2_28 + wi15s4 * POW_2_34 + wi15s11 * POW_2_42;
-    let wi15rs3 = wi15s4 + wi15s11 * POW_2_8 + wi15s14 * POW_2_30;
+    let wi15rr7 = wi15s11 + wi15s14 * pow2(22) + wi15s3 * pow2(50) + wi15s4 * pow2(56);
+    let wi15rr18 = wi15s14 + wi15s3 * pow2(28) + wi15s4 * pow2(34) + wi15s11 * pow2(42);
+    let wi15rs3 = wi15s4 + wi15s11 * pow2(8) + wi15s14 * pow2(30);
     let s0XorPlus = wi15rr7 + wi15rr18 + wi15rs3;
     let (_, s0) = unspread_64(unsafe_cast(s0XorPlus));
     s0
@@ -138,9 +138,9 @@ fn small_sigma0(x: u32) -> u32 {
 
 fn small_sigma1(x: u32) -> u32 {
     let (wi2s13, wi2s2, wi2s7, wi2s10) = split_and_spread_4::<13,2,7,10>(x);
-    let wi2rr17 = wi2s2 + wi2s13 * POW_2_4 + wi2s10 * POW_2_30 + wi2s7 * POW_2_50;
-    let wi2rr19 = wi2s13 + wi2s10 * POW_2_26 + wi2s7 * POW_2_46 + wi2s2 * POW_2_60;
-    let wi2rs10 = wi2s7 + wi2s2 * POW_2_14 + wi2s13 * POW_2_18;
+    let wi2rr17 = wi2s2 + wi2s13 * pow2(4) + wi2s10 * pow2(30) + wi2s7 * pow2(50);
+    let wi2rr19 = wi2s13 + wi2s10 * pow2(26) + wi2s7 * pow2(46) + wi2s2 * pow2(60);
+    let wi2rs10 = wi2s7 + wi2s2 * pow2(14) + wi2s13 * pow2(18);
     let s1XorPlus = wi2rr17 + wi2rr19 + wi2rs10;
     let (_, s1) = unspread_64(unsafe_cast(s1XorPlus));
     s1
@@ -160,7 +160,7 @@ fn wrapping_add_N<let N: u32>(a: [u32; N]) -> u32 {
 
     // Safety: is for the weak
     let res = unsafe { wrapping_add_N_hint(sum) };
-    let carry = (sum - res as Field) / POW_2_32;
+    let carry = (sum - res as Field) / pow2(32);
     carry.assert_max_bit_size::<8>();
     res
 }
@@ -175,32 +175,9 @@ fn wrapping_add_sigma1<let N: u32>(a: [u32; N]) -> Sigma1Word {
     decompose_sigma1(wrapping_add_N(a))
 }
 
-global POW_2_4: Field = (1u64 << 4) as Field;
-global POW_2_8: Field = (1u64 << 8) as Field;
-global POW_2_10: Field = (1u64 << 10) as Field;
-global POW_2_12: Field = (1u64 << 12) as Field;
-global POW_2_14: Field = (1u64 << 14) as Field;
-global POW_2_18: Field = (1u64 << 18) as Field;
-global POW_2_20: Field = (1u64 << 20) as Field;
-global POW_2_21: Field = (1u64 << 21) as Field;
-global POW_2_22: Field = (1u64 << 22) as Field;
-global POW_2_24: Field = (1u64 << 24) as Field;
-global POW_2_26: Field = (1u64 << 26) as Field;
-global POW_2_28: Field = (1u64 << 28) as Field;
-global POW_2_30: Field = (1u64 << 30) as Field;
-global POW_2_32: Field = (1u64 << 32) as Field;
-global POW_2_34: Field = (1u64 << 34) as Field;
-global POW_2_36: Field = (1u64 << 36) as Field;
-global POW_2_38: Field = (1u64 << 38) as Field;
-global POW_2_40: Field = (1u64 << 40) as Field;
-global POW_2_42: Field = (1u64 << 42) as Field;
-global POW_2_44: Field = (1u64 << 44) as Field;
-global POW_2_46: Field = (1u64 << 46) as Field;
-global POW_2_50: Field = (1u64 << 50) as Field;
-global POW_2_52: Field = (1u64 << 52) as Field;
-global POW_2_54: Field = (1u64 << 54) as Field;
-global POW_2_56: Field = (1u64 << 56) as Field;
-global POW_2_60: Field = (1u64 << 60) as Field;
+fn pow2(n: u64) -> Field {
+    (1u64 << n) as Field
+}
 
 pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     // Message schedule
