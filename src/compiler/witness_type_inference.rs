@@ -701,7 +701,7 @@ impl WitnessTypeInference {
                             WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
                         );
                     }
-                    OpCode::Spread { result, value } => {
+                    OpCode::Spread { result, value, .. } => {
                         let val_wt = value_wt.get(value).unwrap().clone();
                         value_wt.insert(*result, val_wt);
                     }
@@ -709,6 +709,7 @@ impl WitnessTypeInference {
                         result_odd,
                         result_even,
                         value,
+                        ..
                     } => {
                         let val_wt = value_wt.get(value).unwrap().clone();
                         value_wt.insert(*result_odd, val_wt.clone());
@@ -812,8 +813,7 @@ impl WitnessTypeInference {
                             .collect();
                         for param_id in merge_params {
                             let existing = value_wt.get(&param_id).unwrap();
-                            let joined = existing
-                                .with_toplevel_info(existing.toplevel_info().join(cond_toplevel));
+                            let joined = existing.with_witness_in_leaves(cond_toplevel);
                             value_wt.insert(param_id, joined);
                         }
 

@@ -827,7 +827,16 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let collection = self.convert_expression(&index.collection, b).unwrap();
+        let mut collection = self.convert_expression(&index.collection, b).unwrap();
+        // If the collection is a reference, load through it first
+        if let Some(typ) = index.collection.return_type() {
+            if matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            ) {
+                collection = b.block(self.current_block).load(collection);
+            }
+        }
         let idx = self.convert_expression(&index.index, b).unwrap();
         let result = b.block(self.current_block).array_get(collection, idx);
         Some(result)
@@ -839,9 +848,17 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        // Expressions always return materialized tuples, so just use projection
-        let tuple = self.convert_expression(tuple_expr, b).unwrap();
-        let result = b.block(self.current_block).tuple_proj(tuple, idx);
+        let mut value = self.convert_expression(tuple_expr, b).unwrap();
+        // If the expression is a reference (e.g. &mut self), load through it first
+        if let Some(typ) = tuple_expr.return_type() {
+            if matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            ) {
+                value = b.block(self.current_block).load(value);
+            }
+        }
+        let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)
     }
 
@@ -1329,6 +1346,11 @@ impl<'a> ExpressionConverter<'a> {
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
+        // Handle mavros intrinsics directly
+        if let Some(result) = self.try_convert_mavros_intrinsic(name, call, b) {
+            return Some(result);
+        }
+
         let replacement = self
             .lowlevel_replacements
             .get(name)
@@ -1367,6 +1389,75 @@ impl<'a> ExpressionConverter<'a> {
             None
         } else {
             Some(results[0])
+        }
+    }
+
+    /// Handle mavros-specific foreign functions directly in SSA,
+    /// without requiring a Noir replacement crate.
+    fn try_convert_mavros_intrinsic(
+        &mut self,
+        name: &str,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match name {
+            "unsafe_cast" => {
+                use noirc_frontend::monomorphization::ast::Type as AstType;
+                use noirc_frontend::shared::Signedness;
+
+                let target = match &call.return_type {
+                    AstType::Field => CastTarget::Field,
+                    AstType::Bool => CastTarget::U(1),
+                    AstType::Integer(signedness, bit_size) => {
+                        let bits = bit_size.bit_size() as usize;
+                        match signedness {
+                            Signedness::Unsigned => CastTarget::U(bits),
+                            Signedness::Signed => CastTarget::I(bits),
+                        }
+                    }
+                    other => panic!("unsafe_cast: unsupported target type {:?}", other),
+                };
+
+                let value = self.convert_expression(&call.arguments[0], b).unwrap();
+                let result = b.block(self.current_block).cast_to(target, value);
+                Some(result)
+            }
+            "spread_inner" => {
+                let bits = Self::extract_const_u32(&call.arguments[1]);
+                assert!(
+                    bits >= 1 && bits <= 16,
+                    "spread: bits must be 1..=16, got {bits}"
+                );
+                let value = self.convert_expression(&call.arguments[0], b).unwrap();
+                let result = b.block(self.current_block).spread(value, bits as u8);
+                Some(result)
+            }
+            "unspread_inner" => {
+                let bits = Self::extract_const_u32(&call.arguments[1]);
+                assert!(
+                    bits >= 1 && bits <= 16,
+                    "unspread: bits must be 1..=16, got {bits}"
+                );
+                let value = self.convert_expression(&call.arguments[0], b).unwrap();
+                let (odd, even) = b.block(self.current_block).unspread(value, bits as u8);
+                let result = b
+                    .block(self.current_block)
+                    .mk_tuple(vec![odd, even], vec![Type::u(32), Type::u(32)]);
+                Some(result)
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract a compile-time constant u32 from a monomorphized expression.
+    fn extract_const_u32(expr: &Expression) -> u32 {
+        match expr {
+            Expression::Literal(noirc_frontend::monomorphization::ast::Literal::Integer(
+                signed_field,
+                _typ,
+                _location,
+            )) => signed_field.to_u128() as u32,
+            _ => panic!("Expected a constant integer argument, got {:?}", expr),
         }
     }
 }

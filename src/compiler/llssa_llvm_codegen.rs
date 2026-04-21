@@ -21,11 +21,15 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
-    LookupStream,
+    LookupStream, WitgenBuf,
 };
 use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
-/// Witgen VM struct layout (offsets in bytes, wasm32 pointers):
+/// Witgen VM struct layout (offsets in bytes, wasm32 pointers).
+///
+/// The *_CURSOR slots are advanced by Phase 1 writers; the *_BASE slots are
+/// set once at program entry and provide the anchors Phase 2 needs for
+/// random-access reads and writes.
 const VM_WITNESS_PTR_OFFSET: u32 = 0;
 const VM_A_PTR_OFFSET: u32 = 4;
 const VM_B_PTR_OFFSET: u32 = 8;
@@ -34,8 +38,26 @@ const VM_LOOKUPS_A_PTR_OFFSET: u32 = 16;
 const VM_LOOKUPS_B_PTR_OFFSET: u32 = 20;
 const VM_LOOKUPS_C_PTR_OFFSET: u32 = 24;
 const VM_MULTIPLICITIES_PTR_OFFSET: u32 = 28;
+const VM_WITNESS_PRE_BASE_OFFSET: u32 = 32;
+const VM_WITNESS_POST_BASE_OFFSET: u32 = 36;
+const VM_A_BASE_OFFSET: u32 = 40;
+const VM_B_BASE_OFFSET: u32 = 44;
+const VM_C_BASE_OFFSET: u32 = 48;
+const VM_LOOKUPS_A_BASE_OFFSET: u32 = 52;
 /// Total size of the wasm32 witgen VM struct in bytes.
-pub const VM_STRUCT_SIZE: u32 = 32;
+pub const VM_STRUCT_SIZE: u32 = 56;
+
+/// Integer tag the runtime uses to select a witgen buffer in `__witgen_load`
+/// and friends. Kept in sync with the ordering in `wasm-runtime/src/lib.rs`.
+fn witgen_buf_id(buf: WitgenBuf) -> u32 {
+    match buf {
+        WitgenBuf::WitnessPreComm => 0,
+        WitgenBuf::WitnessPostComm => 1,
+        WitgenBuf::A => 2,
+        WitgenBuf::B => 3,
+        WitgenBuf::C => 4,
+    }
+}
 
 /// AD VM struct layout (offsets in bytes, wasm32):
 const AD_VM_OUT_DA_OFFSET: u32 = 0;
@@ -80,6 +102,12 @@ pub struct LLVMCodeGen<'ctx> {
     lookup_tape_write_u64_b_fn: Option<FunctionValue<'ctx>>,
     lookup_tape_write_u64_c_fn: Option<FunctionValue<'ctx>>,
     bump_rngchk8_multiplicity_fn: Option<FunctionValue<'ctx>>,
+    // Phase 2 runtime functions (external, declared in wasm-runtime)
+    witgen_load_fn: Option<FunctionValue<'ctx>>,
+    witgen_store_fn: Option<FunctionValue<'ctx>>,
+    witgen_add_fn: Option<FunctionValue<'ctx>>,
+    field_inverse_fn: Option<FunctionValue<'ctx>>,
+    lookup_tape_len_fn: Option<FunctionValue<'ctx>>,
     // AD runtime functions
     ad_next_d_coeff_fn: Option<FunctionValue<'ctx>>,
     ad_next_d_coeff_tables_fn: Option<FunctionValue<'ctx>>,
@@ -126,6 +154,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             lookup_tape_write_u64_b_fn: None,
             lookup_tape_write_u64_c_fn: None,
             bump_rngchk8_multiplicity_fn: None,
+            witgen_load_fn: None,
+            witgen_store_fn: None,
+            witgen_add_fn: None,
+            field_inverse_fn: None,
+            lookup_tape_len_fn: None,
             ad_next_d_coeff_fn: None,
             ad_next_d_coeff_tables_fn: None,
             ad_next_d_coeff_lookups_fn: None,
@@ -271,8 +304,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         ));
 
         // __ad_read_coeff_at(vm*, offset: i32) -> FieldElem
-        let ad_read_coeff_at_type =
-            field_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
+        let ad_read_coeff_at_type = field_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
         self.ad_read_coeff_at_fn = Some(self.module.add_function(
             "__ad_read_coeff_at",
             ad_read_coeff_at_type,
@@ -351,6 +383,55 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_to_limbs_type,
             Some(Linkage::External),
         ));
+
+        // ── Phase 2 primitives ────────────────────────────────────────────
+        // __witgen_load(vm*, buf_id: i32, idx: i32) -> FieldElem
+        let witgen_load_type =
+            field_type.fn_type(&[ptr_type.into(), i32_type.into(), i32_type.into()], false);
+        self.witgen_load_fn = Some(self.module.add_function(
+            "__witgen_load",
+            witgen_load_type,
+            Some(Linkage::External),
+        ));
+
+        // __witgen_store(vm*, buf_id: i32, idx: i32, value: FieldElem) -> void
+        let witgen_store_type = void_type.fn_type(
+            &[
+                ptr_type.into(),
+                i32_type.into(),
+                i32_type.into(),
+                field_type.into(),
+            ],
+            false,
+        );
+        self.witgen_store_fn = Some(self.module.add_function(
+            "__witgen_store",
+            witgen_store_type,
+            Some(Linkage::External),
+        ));
+
+        // __witgen_add(vm*, buf_id: i32, idx: i32, value: FieldElem) -> void
+        //   computes: buf[idx] = buf[idx] + value  (field arithmetic)
+        self.witgen_add_fn = Some(self.module.add_function(
+            "__witgen_add",
+            witgen_store_type,
+            Some(Linkage::External),
+        ));
+
+        // __field_inverse(FieldElem) -> FieldElem
+        let field_inverse_type = field_type.fn_type(&[field_type.into()], false);
+        self.field_inverse_fn = Some(self.module.add_function(
+            "__field_inverse",
+            field_inverse_type,
+            Some(Linkage::External),
+        ));
+
+        // __lookup_tape_len(vm*) -> i32  (field elements written to A stream)
+        self.lookup_tape_len_fn = Some(self.module.add_function(
+            "__lookup_tape_len",
+            ad_fresh_wit_type, // reuse: fn(ptr) -> i32
+            Some(Linkage::External),
+        ));
     }
 
     fn define_write_functions(&mut self) {
@@ -362,18 +443,21 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     fn define_lookup_functions(&mut self) {
-        self.lookup_tape_write_u64_a_fn = Some(self.define_lookup_tape_write_u64_fn(
-            "__lookup_tape_write_u64_a",
-            VM_LOOKUPS_A_PTR_OFFSET,
-        ));
-        self.lookup_tape_write_u64_b_fn = Some(self.define_lookup_tape_write_u64_fn(
-            "__lookup_tape_write_u64_b",
-            VM_LOOKUPS_B_PTR_OFFSET,
-        ));
-        self.lookup_tape_write_u64_c_fn = Some(self.define_lookup_tape_write_u64_fn(
-            "__lookup_tape_write_u64_c",
-            VM_LOOKUPS_C_PTR_OFFSET,
-        ));
+        self.lookup_tape_write_u64_a_fn =
+            Some(self.define_lookup_tape_write_u64_fn(
+                "__lookup_tape_write_u64_a",
+                VM_LOOKUPS_A_PTR_OFFSET,
+            ));
+        self.lookup_tape_write_u64_b_fn =
+            Some(self.define_lookup_tape_write_u64_fn(
+                "__lookup_tape_write_u64_b",
+                VM_LOOKUPS_B_PTR_OFFSET,
+            ));
+        self.lookup_tape_write_u64_c_fn =
+            Some(self.define_lookup_tape_write_u64_fn(
+                "__lookup_tape_write_u64_c",
+                VM_LOOKUPS_C_PTR_OFFSET,
+            ));
         self.bump_rngchk8_multiplicity_fn = Some(self.define_bump_rngchk8_multiplicity_fn());
     }
 
@@ -457,9 +541,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         let fn_type =
             void_type.fn_type(&[ptr_type.into(), i64_type.into(), i64_type.into()], false);
-        let function =
-            self.module
-                .add_function("__bump_rngchk8_multiplicity", fn_type, Some(Linkage::Internal));
+        let function = self.module.add_function(
+            "__bump_rngchk8_multiplicity",
+            fn_type,
+            Some(Linkage::Internal),
+        );
 
         let entry = self.context.append_basic_block(function, "entry");
         let builder = self.context.create_builder();
@@ -1346,6 +1432,89 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         "",
                     )
                     .unwrap();
+            }
+
+            LLOp::WitgenBufLoad { buf, idx, result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let i32_type = self.context.i32_type();
+                let buf_id = i32_type.const_int(witgen_buf_id(*buf) as u64, false);
+                let idx_val = self.value_map[idx];
+                let load_fn = self.witgen_load_fn.expect("__witgen_load not declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        load_fn,
+                        &[vm_ptr.into(), buf_id.into(), idx_val.into()],
+                        "wb_load",
+                    )
+                    .unwrap();
+                let v = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__witgen_load should return a value");
+                self.value_map.insert(*result, v);
+            }
+
+            LLOp::WitgenBufStore { buf, idx, value } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let i32_type = self.context.i32_type();
+                let buf_id = i32_type.const_int(witgen_buf_id(*buf) as u64, false);
+                let idx_val = self.value_map[idx];
+                let v = self.value_map[value];
+                let store_fn = self.witgen_store_fn.expect("__witgen_store not declared");
+                self.builder
+                    .build_call(
+                        store_fn,
+                        &[vm_ptr.into(), buf_id.into(), idx_val.into(), v.into()],
+                        "",
+                    )
+                    .unwrap();
+            }
+
+            LLOp::WitgenBufAdd { buf, idx, value } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let i32_type = self.context.i32_type();
+                let buf_id = i32_type.const_int(witgen_buf_id(*buf) as u64, false);
+                let idx_val = self.value_map[idx];
+                let v = self.value_map[value];
+                let add_fn = self.witgen_add_fn.expect("__witgen_add not declared");
+                self.builder
+                    .build_call(
+                        add_fn,
+                        &[vm_ptr.into(), buf_id.into(), idx_val.into(), v.into()],
+                        "",
+                    )
+                    .unwrap();
+            }
+
+            LLOp::FieldInverse { src, result } => {
+                let src_val = self.value_map[src];
+                let inv_fn = self.field_inverse_fn.expect("__field_inverse not declared");
+                let call = self
+                    .builder
+                    .build_call(inv_fn, &[src_val.into()], "inv")
+                    .unwrap();
+                let v = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__field_inverse should return a value");
+                self.value_map.insert(*result, v);
+            }
+
+            LLOp::LookupTapeLen { result } => {
+                let vm_ptr = self.vm_ptr.unwrap();
+                let len_fn = self
+                    .lookup_tape_len_fn
+                    .expect("__lookup_tape_len not declared");
+                let call = self
+                    .builder
+                    .build_call(len_fn, &[vm_ptr.into()], "tape_len")
+                    .unwrap();
+                let v = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("__lookup_tape_len should return a value");
+                self.value_map.insert(*result, v);
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),

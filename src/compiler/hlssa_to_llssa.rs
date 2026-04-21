@@ -16,7 +16,7 @@ use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
-    LookupStream,
+    LookupStream, WitgenBuf,
 };
 use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
@@ -179,6 +179,10 @@ struct LookupFunctions {
     rngchk_8: Option<FunctionId>,
     drngchk_8_init: Option<FunctionId>,
     drngchk_8_call: Option<FunctionId>,
+    /// Witgen-side Phase 2 helper. Registered by the witgen lowering path when
+    /// the program declares a rangecheck-8 table. Hoisted to the epilogue of
+    /// `mavros_main` so it runs once after all Phase 1 work is complete.
+    run_phase2: Option<FunctionId>,
 }
 
 impl LookupFunctions {
@@ -187,6 +191,7 @@ impl LookupFunctions {
             rngchk_8: None,
             drngchk_8_init: None,
             drngchk_8_call: None,
+            run_phase2: None,
         }
     }
 
@@ -255,6 +260,17 @@ impl AdFunctions {
 /// All offsets are in field elements (not bytes). Witness-side offsets are
 /// absolute indices into the full witness buffer that `out_d{a,b,c}[idx]`
 /// interprets directly.
+/// Which of the two LLSSA-emitting compile paths is currently running.
+/// Controls a handful of mode-specific codegen decisions — most notably
+/// whether to generate and hoist the Phase 2 helper (witgen only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoweringMode {
+    /// Witgen path: Phase 1 + generated Phase 2 finalization in the epilogue.
+    Witgen,
+    /// AD path: DLookup helpers + AD-side init hoist, no Phase 2.
+    Ad,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct R1csLayoutInfo {
     /// `constraints_layout.tables_data_start()` — first table's y-slot in ad_coeffs.
@@ -265,6 +281,12 @@ pub struct R1csLayoutInfo {
     pub mults_wit_start: usize,
     /// `witness_layout.challenges_start()` — absolute index of `alpha` in the witness.
     pub logup_challenge_off: usize,
+    /// `constraints_layout.lookups_data_start()` — start of per-lookup entries.
+    pub lookups_cnst_start: usize,
+    /// `witness_layout.lookups_data_start()` — start of per-lookup witness slots.
+    pub lookups_wit_start: usize,
+    /// Which compile path this layout is being threaded through.
+    pub mode: LoweringMode,
 }
 
 // =============================================================================
@@ -347,6 +369,17 @@ fn lower_inner(
     // Fourth pass: generate AD dispatch function bodies
     generate_all_ad_functions(&mut llssa, &ad_fns);
 
+    // If this is a witgen compile AND a rangecheck-8 was actually lowered
+    // during the second pass, register the Phase 2 helper now. We defer this
+    // registration to post-lowering so programs with no lookups don't pay the
+    // cost of a generated __run_phase2 at all.
+    if let Some(l) = layout {
+        if l.mode == LoweringMode::Witgen && lookup_fns.rngchk_8.is_some() {
+            let id = llssa.add_function("__run_phase2".to_string());
+            lookup_fns.run_phase2 = Some(id);
+        }
+    }
+
     // Fifth pass: generate lookup helper function bodies
     generate_all_lookup_functions(&mut llssa, &lookup_fns, layout, &mut ad_fns);
 
@@ -355,6 +388,14 @@ fn lower_inner(
     if let Some(init_fn) = lookup_fns.drngchk_8_init {
         let main_ll_id = llssa.get_main_id();
         hoist_init_call_to_main_prologue(&mut llssa, main_ll_id, init_fn);
+    }
+
+    // Seventh pass: if the witgen path registered __run_phase2, hoist a call
+    // to it into the epilogue of the main function so Phase 2 runs after all
+    // Phase 1 work is complete.
+    if let Some(phase2_fn) = lookup_fns.run_phase2 {
+        let main_ll_id = llssa.get_main_id();
+        hoist_call_to_main_epilogue(&mut llssa, main_ll_id, phase2_fn);
     }
 
     llssa
@@ -723,7 +764,8 @@ fn lower_instruction(
             const_val,
             var,
         } => {
-            lower_ad_mul_const(e, val_map, *result, *const_val, *var);
+            let coeff_type = fn_type_info.get_value_type(*const_val);
+            lower_ad_mul_const(e, val_map, *result, *const_val, *var, &coeff_type);
         }
 
         OpCode::Cast {
@@ -736,7 +778,7 @@ fn lower_instruction(
             match target {
                 CastTarget::WitnessOf => {
                     // Pure value → AD constant node
-                    lower_ad_const_wrap(e, val_map, *result, *value);
+                    lower_ad_const_wrap(e, val_map, *result, *value, &source_type);
                 }
                 CastTarget::Field => {
                     if source_type.is_field() {
@@ -775,7 +817,7 @@ fn lower_instruction(
             }
         }
 
-        OpCode::Spread { result, value }
+        OpCode::Spread { result, value, .. }
         | OpCode::Unspread {
             result_odd: result,
             value,
@@ -1301,14 +1343,32 @@ fn lower_rc_drop(
 // AD lowering helpers
 // =============================================================================
 
+/// Ensure a value is Field-sized ({i64, i64, i64, i64}).
+/// Non-Field integer types are zero-extended to i64 and packed into limbs.
+fn ensure_field_sized(e: &mut LLBlockEmitter<'_>, ll_val: ValueId, source_type: &Type) -> ValueId {
+    if source_type.is_field() || source_type.is_witness_of() {
+        return ll_val;
+    }
+    // U(n)/I(n) → build {val_as_i64, 0, 0, 0}, then FieldFromLimbs
+    let val64 = match &source_type.expr {
+        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => e.zext(ll_val, 64),
+        TypeExpr::U(64) | TypeExpr::I(64) => ll_val,
+        _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
+    };
+    let zero = e.int_const(64, 0);
+    let limbs = e.mk_struct(LLStruct::limbs(), vec![val64, zero, zero, zero]);
+    e.field_from_limbs(limbs)
+}
+
 /// Allocate an ADConstNode wrapping a pure field value.
 fn lower_ad_const_wrap(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     value: ValueId,
+    source_type: &Type,
 ) {
-    let ll_val = val_map[&value];
+    let ll_val = ensure_field_sized(e, val_map[&value], source_type);
     let node_struct = LLStruct::ad_const_node();
     let node = e.heap_alloc(node_struct.clone(), None);
 
@@ -1401,8 +1461,9 @@ fn lower_ad_mul_const(
     result: ValueId,
     const_val: ValueId,
     var: ValueId,
+    coeff_type: &Type,
 ) {
-    let ll_coeff = val_map[&const_val];
+    let ll_coeff = ensure_field_sized(e, val_map[&const_val], coeff_type);
     let ll_var = val_map[&var];
     let node_struct = LLStruct::ad_mul_const_node();
     let node = e.heap_alloc(node_struct.clone(), None);
@@ -1520,11 +1581,8 @@ fn generate_all_lookup_functions(
     // AD rangecheck-8 helpers are a pair: init runs once (hoisted to main
     // prologue) and call runs per DLookup. They both depend on R1CS layout
     // offsets to bake in the correct absolute witness/constraint positions.
-    if let (Some(init_id), Some(call_id)) =
-        (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call)
-    {
-        let layout =
-            layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
+    if let (Some(init_id), Some(call_id)) = (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call) {
+        let layout = layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
         let init_fn = generate_drngchk_8_ad_init(layout);
         let _old = llssa.take_function(init_id);
         llssa.put_function(init_id, init_fn);
@@ -1534,6 +1592,16 @@ fn generate_all_lookup_functions(
         let call_fn = generate_drngchk_8_ad_call(layout, bump_db_id, bump_dc_id);
         let _old = llssa.take_function(call_id);
         llssa.put_function(call_id, call_fn);
+    }
+
+    // Witgen Phase 2 helper — runs once at the end of main, reads multiplicities
+    // and lookup tape entries, rewrites out_a/b/c and the post-commit witness
+    // section to finalize the LogUp argument.
+    if let Some(phase2_id) = lookup_fns.run_phase2 {
+        let layout = layout.expect("R1CS layout required to generate __run_phase2");
+        let phase2_fn = generate_run_phase2_function(layout);
+        let _old = llssa.take_function(phase2_id);
+        llssa.put_function(phase2_id, phase2_fn);
     }
 }
 
@@ -1581,6 +1649,15 @@ fn emit_small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
     let zero = e.int_const(64, 0);
     let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, zero, zero, zero]);
     e.field_from_limbs(limbs)
+}
+
+/// Load a Field slot known to hold a RAW u64 in the low limb (Phase 1 writes
+/// lookup tape entries and pre-fix multiplicities this way), and return that
+/// low limb directly as an i64. Do NOT go through `__field_to_limbs`, which
+/// would interpret the slot as Montgomery and produce garbage.
+fn load_raw_low_u64(e: &mut LLBlockEmitter<'_>, buf: WitgenBuf, idx: ValueId) -> ValueId {
+    let v = e.witgen_buf_load(buf, idx);
+    e.extract_field(v, LLStruct::field_elem(), 0)
 }
 
 /// Generate __drngchk_8_ad_init():
@@ -1708,6 +1785,256 @@ fn generate_drngchk_8_ad_call(
     func
 }
 
+/// Generate __run_phase2():
+///
+/// Finalizes the LogUp lookup argument after Phase 1 has written raw values
+/// into the tape and multiplicity buffers. For the rangecheck-8 table only:
+///
+///   1. Fix multiplicities: Phase 1 wrote raw u64 values into the low limb of
+///      the multiplicity Field slots (via `__bump_rngchk8_multiplicity`).
+///      Convert each to a proper Montgomery-form Field.
+///
+///   2. Forward pass over the table: for each entry i in 0..256, store
+///      `denom = α - i` into out_b and the multiplicity into out_c. If the
+///      multiplicity is non-zero, store the running_prod into out_a and
+///      multiply running_prod by denom.
+///
+///   3. Do the one batch-inversion: running_inv = 1 / running_prod.
+///
+///   4. Backward pass: recover per-entry inverses by multiplying running_inv
+///      with the stored running_prod, then updating running_inv *= denom.
+///
+///   5. Lookup tape walk: for each entry written during Phase 1, either zero
+///      out (flag == 0) or copy the pre-inverted y-value from the table slot
+///      and accumulate into the table's sum constraint (flag == 1).
+///
+///   6. Final consolidation: multiply each per-entry inverse by its
+///      multiplicity, write to the post-commit witness, and accumulate into
+///      the table's sum constraint. Finally set B on the sum constraint to 1.
+/// Generate __run_phase2():
+///
+/// Finalizes the LogUp lookup argument after Phase 1 has written raw values
+/// into the tape and multiplicity buffers. For the rangecheck-8 table only:
+///
+///   1. Fix multiplicities: Phase 1 wrote raw u64 counts into the low limb of
+///      each multiplicity Field slot (via `__bump_rngchk8_multiplicity`).
+///      Convert each to Montgomery form by reading the low limb directly
+///      (NOT via `__field_to_limbs`, which assumes Montgomery input) and
+///      re-encoding via `__field_from_limbs`.
+///
+///   2. Forward pass over the table: for each entry i in 0..256, store
+///      `denom = α - i` into out_b and the multiplicity into out_c. If the
+///      multiplicity is non-zero, store the running_prod into out_a and
+///      multiply running_prod by denom.
+///
+///   3. Do the one batch-inversion: running_inv = 1 / running_prod.
+///
+///   4. Backward pass: recover per-entry inverses by multiplying running_inv
+///      with the stored running_prod, then updating running_inv *= denom.
+///
+///   5. Lookup tape walk: for each entry written during Phase 1, either zero
+///      out (flag == 0) or copy the pre-inverted y-value from the table slot
+///      and accumulate into the table's sum constraint (flag == 1). Tape
+///      entries hold RAW u64 flags/keys so their low limbs are read directly.
+///
+///   6. Final consolidation: multiply each per-entry inverse by its
+///      multiplicity, write to the post-commit witness, and accumulate into
+///      the table's sum constraint. Finally set B on the sum constraint to 1.
+fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
+    let mut func = LLFunction::empty("__run_phase2".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let table_len: usize = 256;
+        let mults_base_i32 = e.int_const(32, layout.mults_wit_start as u64);
+        let base_cnst_i32 = e.int_const(32, layout.tables_cnst_start as u64);
+        let post_zero = e.int_const(32, 0);
+        let zero_i64 = e.int_const(64, 0);
+        let zero_field = emit_small_u64_as_field(&mut e, zero_i64);
+        let one_i64 = e.int_const(64, 1);
+        let one_field = emit_small_u64_as_field(&mut e, one_i64);
+        let post_base: u64 = layout.logup_challenge_off as u64;
+        let sum_cnst_i32 = e.int_const(32, (layout.tables_cnst_start + table_len) as u64);
+
+        // Step 1: Phase 1 wrote raw u64 counts into the LOW LIMB of each
+        // multiplicity slot. Re-encode to Montgomery via __field_from_limbs.
+        e.build_counted_loop(table_len, vec![], |e, i_i64, _| {
+            let i_i32 = e.truncate(i_i64, 32);
+            let idx = e.int_arith(IntArithOp::Add, mults_base_i32, i_i32);
+            let count = load_raw_low_u64(e, WitgenBuf::WitnessPreComm, idx);
+            let fixed = emit_small_u64_as_field(e, count);
+            e.witgen_buf_store(WitgenBuf::WitnessPreComm, idx, fixed);
+            vec![]
+        });
+
+        // Step 2: forward pass.
+        let alpha = e.witgen_buf_load(WitgenBuf::WitnessPostComm, post_zero);
+        let results = e.build_counted_loop(
+            table_len,
+            vec![(one_field, LLType::Struct(LLStruct::field_elem()))],
+            |e, i_i64, accs| {
+                let running_prod = accs[0];
+                let i_i32 = e.truncate(i_i64, 32);
+
+                let m_idx = e.int_arith(IntArithOp::Add, mults_base_i32, i_i32);
+                let m = e.witgen_buf_load(WitgenBuf::WitnessPreComm, m_idx);
+
+                let i_field = emit_small_u64_as_field(e, i_i64);
+                let denom = e.field_arith(FieldArithOp::Sub, alpha, i_field);
+
+                let base_plus_i = e.int_arith(IntArithOp::Add, base_cnst_i32, i_i32);
+                e.witgen_buf_store(WitgenBuf::B, base_plus_i, denom);
+                e.witgen_buf_store(WitgenBuf::C, base_plus_i, m);
+
+                let is_zero = e.field_eq(m, zero_field);
+                let merged = e.build_if_else(
+                    is_zero,
+                    vec![LLType::Struct(LLStruct::field_elem())],
+                    |_then_e| vec![running_prod],
+                    |else_e| {
+                        else_e.witgen_buf_store(WitgenBuf::A, base_plus_i, running_prod);
+                        let new_rp = else_e.field_arith(FieldArithOp::Mul, running_prod, denom);
+                        vec![new_rp]
+                    },
+                );
+                merged
+            },
+        );
+        let running_prod_end = results[0];
+
+        // Step 3: inversion.
+        let running_inv_initial = e.field_inverse(running_prod_end);
+
+        // Step 4: backward pass.
+        let last_i_i32 = e.int_const(32, (table_len - 1) as u64);
+        let _bwd = e.build_counted_loop(
+            table_len,
+            vec![(running_inv_initial, LLType::Struct(LLStruct::field_elem()))],
+            |e, j_i64, accs| {
+                let running_inv = accs[0];
+                let j_i32 = e.truncate(j_i64, 32);
+                let i_i32 = e.int_arith(IntArithOp::Sub, last_i_i32, j_i32);
+                let base_plus_i = e.int_arith(IntArithOp::Add, base_cnst_i32, i_i32);
+
+                let m = e.witgen_buf_load(WitgenBuf::C, base_plus_i);
+                let denom = e.witgen_buf_load(WitgenBuf::B, base_plus_i);
+                let rp = e.witgen_buf_load(WitgenBuf::A, base_plus_i);
+
+                let is_zero = e.field_eq(m, zero_field);
+                let merged = e.build_if_else(
+                    is_zero,
+                    vec![LLType::Struct(LLStruct::field_elem())],
+                    |_then_e| vec![running_inv],
+                    |else_e| {
+                        let elem = else_e.field_arith(FieldArithOp::Mul, rp, running_inv);
+                        else_e.witgen_buf_store(WitgenBuf::A, base_plus_i, elem);
+                        let new_ri = else_e.field_arith(FieldArithOp::Mul, running_inv, denom);
+                        vec![new_ri]
+                    },
+                );
+                merged
+            },
+        );
+
+        // Step 5: lookup tape walk. Tape entries written by Phase 1 hold RAW
+        // u64 values (flag in C, key in B) in the low limb — we read them
+        // directly via `load_raw_low_u64`.
+        //
+        // `lookups_wit_start` and `tables_wit_start` are always ≥ `post_base`
+        // (= `challenges_start`) in the witness layout — the sections are
+        // strictly ordered. Use `checked_sub` + expect so a broken layout
+        // surfaces at codegen time instead of silently emitting offset 0.
+        let lookups_wit_rel = (layout.lookups_wit_start as u64)
+            .checked_sub(post_base)
+            .expect("layout invariant violated: lookups_wit_start < challenges_start");
+        let lookups_wit_rel_i32 = e.int_const(32, lookups_wit_rel);
+        let lookups_cnst_i32 = e.int_const(32, layout.lookups_cnst_start as u64);
+
+        let n_lookups_i32 = e.lookup_tape_len();
+        let j0_i32 = e.int_const(32, 0);
+        let one_i32 = e.int_const(32, 1);
+        e.build_loop(
+            vec![(j0_i32, LLType::i32())],
+            |b, params| b.int_ult(params[0], n_lookups_i32),
+            |le, params| {
+                let j_i32 = params[0];
+                let cnst_off = le.int_arith(IntArithOp::Add, lookups_cnst_i32, j_i32);
+                let wit_off = le.int_arith(IntArithOp::Add, lookups_wit_rel_i32, j_i32);
+                let flag_u64 = load_raw_low_u64(le, WitgenBuf::C, cnst_off);
+                let is_zero = le.int_eq(flag_u64, zero_i64);
+
+                le.build_if_else(
+                    is_zero,
+                    vec![],
+                    |then_e| {
+                        let key_u64 = load_raw_low_u64(then_e, WitgenBuf::B, cnst_off);
+                        let key_field = emit_small_u64_as_field(then_e, key_u64);
+                        let b_val = then_e.field_arith(FieldArithOp::Sub, alpha, key_field);
+                        then_e.witgen_buf_store(WitgenBuf::A, cnst_off, zero_field);
+                        then_e.witgen_buf_store(WitgenBuf::B, cnst_off, b_val);
+                        then_e.witgen_buf_store(WitgenBuf::C, cnst_off, zero_field);
+                        then_e.witgen_buf_store(WitgenBuf::WitnessPostComm, wit_off, zero_field);
+                        vec![]
+                    },
+                    |else_e| {
+                        let ix_u64 = load_raw_low_u64(else_e, WitgenBuf::B, cnst_off);
+                        let ix_i32 = else_e.truncate(ix_u64, 32);
+                        let tbl_idx = else_e.int_arith(IntArithOp::Add, base_cnst_i32, ix_i32);
+                        let y_a = else_e.witgen_buf_load(WitgenBuf::A, tbl_idx);
+                        let y_b = else_e.witgen_buf_load(WitgenBuf::B, tbl_idx);
+                        let flag_field = emit_small_u64_as_field(else_e, flag_u64);
+                        else_e.witgen_buf_store(WitgenBuf::A, cnst_off, y_a);
+                        else_e.witgen_buf_store(WitgenBuf::B, cnst_off, y_b);
+                        else_e.witgen_buf_store(WitgenBuf::C, cnst_off, flag_field);
+                        else_e.witgen_buf_store(WitgenBuf::WitnessPostComm, wit_off, y_a);
+                        else_e.witgen_buf_add(WitgenBuf::C, sum_cnst_i32, y_a);
+                        vec![]
+                    },
+                );
+
+                let next_j = le.int_arith(IntArithOp::Add, j_i32, one_i32);
+                vec![next_j]
+            },
+        );
+
+        // Step 6: final consolidation — multiply each table y-value by its
+        // multiplicity, write to post-commit witness, accumulate into sum slot.
+        // Finally set B at sum slot to 1.
+        let tables_wit_rel = (layout.tables_wit_start as u64)
+            .checked_sub(post_base)
+            .expect("layout invariant violated: tables_wit_start < challenges_start");
+        let tables_wit_rel_i32 = e.int_const(32, tables_wit_rel);
+        e.build_counted_loop(table_len, vec![], |e, i_i64, _| {
+            let i_i32 = e.truncate(i_i64, 32);
+            let base_plus_i = e.int_arith(IntArithOp::Add, base_cnst_i32, i_i32);
+            let m = e.witgen_buf_load(WitgenBuf::C, base_plus_i);
+            let is_zero = e.field_eq(m, zero_field);
+            e.build_if_else(
+                is_zero,
+                vec![],
+                |_then_e| vec![],
+                |else_e| {
+                    let a_val = else_e.witgen_buf_load(WitgenBuf::A, base_plus_i);
+                    let elem = else_e.field_arith(FieldArithOp::Mul, a_val, m);
+                    else_e.witgen_buf_store(WitgenBuf::A, base_plus_i, elem);
+                    let wit_post_idx = else_e.int_arith(IntArithOp::Add, tables_wit_rel_i32, i_i32);
+                    else_e.witgen_buf_store(WitgenBuf::WitnessPostComm, wit_post_idx, elem);
+                    else_e.witgen_buf_add(WitgenBuf::A, sum_cnst_i32, elem);
+                    vec![]
+                },
+            );
+            vec![]
+        });
+
+        // Final: set out_b[sum_slot] = 1 (the sum constraint's B coefficient).
+        e.witgen_buf_store(WitgenBuf::B, sum_cnst_i32, one_field);
+
+        e.terminate_return(vec![]);
+    }
+    func
+}
+
 /// Insert a call to `init_fn` at the very start of the main function's entry
 /// block. Used to hoist one-time AD lookup init before any other AD work.
 fn hoist_init_call_to_main_prologue(
@@ -1731,6 +2058,29 @@ fn hoist_init_call_to_main_prologue(
         insns.insert(0, init_call);
     }
     entry_block.put_instructions(insns);
+
+    llssa.put_function(main_fn_id, main_fn);
+}
+
+/// Insert a call to `target_fn` just before every `Return` terminator in the
+/// main function. This runs `target_fn` once per return path without any CFG
+/// restructuring: the call is appended to the block's instruction list, which
+/// already ends (terminator-wise) in `Return`.
+fn hoist_call_to_main_epilogue(llssa: &mut LLSSA, main_fn_id: FunctionId, target_fn: FunctionId) {
+    let mut main_fn = llssa.take_function(main_fn_id);
+
+    let return_blocks: Vec<BlockId> = main_fn
+        .get_blocks()
+        .filter_map(|(bid, block)| match block.get_terminator() {
+            Some(Terminator::Return(_)) => Some(*bid),
+            _ => None,
+        })
+        .collect();
+
+    for bid in return_blocks {
+        let mut e = LLBlockEmitter::new(&mut main_fn, bid);
+        let _ = e.call(target_fn, vec![], 0);
+    }
 
     llssa.put_function(main_fn_id, main_fn);
 }

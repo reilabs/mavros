@@ -180,7 +180,7 @@ pub struct Phase1Result {
     pub instrumenter: AllocationInstrumenter,
 }
 
-pub fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) {
+fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) {
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
         wit[i] = Field::from(wit[i].0.0[0]);

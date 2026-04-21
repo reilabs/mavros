@@ -62,8 +62,8 @@ where
     fn value_of(&self, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: MemOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
-    fn spread(&self, ctx: &mut Context) -> Self;
-    fn unspread(&self, ctx: &mut Context) -> (Self, Self);
+    fn spread(&self, bits: u8, ctx: &mut Context) -> Self;
+    fn unspread(&self, bits: u8, ctx: &mut Context) -> (Self, Self);
 }
 
 pub trait Context<V> {
@@ -571,17 +571,22 @@ impl SymbolicExecutor {
                             scope[result_id.0 as usize] = Some(result_value.clone());
                         }
                     }
-                    crate::compiler::ssa::OpCode::Spread { result, value } => {
+                    crate::compiler::ssa::OpCode::Spread {
+                        result,
+                        value,
+                        bits,
+                    } => {
                         let val = scope[value.0 as usize].as_ref().unwrap();
-                        scope[result.0 as usize] = Some(val.spread(ctx));
+                        scope[result.0 as usize] = Some(val.spread(*bits, ctx));
                     }
                     crate::compiler::ssa::OpCode::Unspread {
                         result_odd,
                         result_even,
                         value,
+                        bits,
                     } => {
                         let val = scope[value.0 as usize].as_ref().unwrap();
-                        let (odd_val, even_val) = val.unspread(ctx);
+                        let (odd_val, even_val) = val.unspread(*bits, ctx);
                         scope[result_odd.0 as usize] = Some(odd_val);
                         scope[result_even.0 as usize] = Some(even_val);
                     }

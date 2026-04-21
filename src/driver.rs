@@ -44,7 +44,6 @@ use crate::{
         ssa::{DefaultSsaAnnotator, HLSSA},
         ssa_gen::LowLevelReplacement,
         untaint_control_flow::UntaintControlFlow,
-        witness_cast_insertion::WitnessCastInsertion,
         witness_type_inference::WitnessTypeInference,
     },
     lowlevel_replacement::{
@@ -208,6 +207,19 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn monomorphize(&mut self) -> Result<(), Error> {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
+
+        // Mem2Reg + cleanup before WTI so witness inference sees clean SSA
+        // and Guard never wraps promotable Store/Load.
+        PassManager::new(
+            "pre_wti".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(Mem2Reg::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
+            ],
+        )
+        .run(&mut ssa);
+
         let flow_analysis = FlowAnalysis::run(&ssa);
 
         if self.draw_cfg {
@@ -221,50 +233,14 @@ impl Driver {
         let mut witness_inference = WitnessTypeInference::new();
         witness_inference.run(&mut ssa, &flow_analysis).unwrap();
 
-        PassManager::new(
-            "post_wti_cleanup".to_string(),
-            self.draw_cfg,
-            vec![Box::new(RemoveUnreachableFunctions::new())],
-        )
-        .run(&mut ssa);
-
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
             ssa.to_string(&witness_inference),
         )
         .unwrap();
 
-        let mut witness_cast = WitnessCastInsertion::new();
-        let ssa = witness_cast.run(ssa, &witness_inference);
-
-        fs::write(
-            self.get_debug_output_dir().join("witness_typed_ssa.txt"),
-            ssa.to_string(&witness_inference),
-        )
-        .unwrap();
-
-        // Run Mem2Reg before UntaintControlFlow so that Guard never wraps Store/Load
-        // that could be promoted to SSA values. Mem2Reg doesn't need to understand Guard.
-        let mut ssa = ssa;
-        PassManager::new(
-            "pre_untaint_mem2reg".to_string(),
-            self.draw_cfg,
-            vec![Box::new(Mem2Reg::new())],
-        )
-        .run(&mut ssa);
-
-        let flow_analysis = FlowAnalysis::run(&ssa);
-
-        if self.draw_cfg {
-            flow_analysis.generate_images(
-                self.get_debug_output_dir().join("before_untaint_cf"),
-                &ssa,
-                "before untaint control flow".to_string(),
-            );
-        }
-
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference, &flow_analysis));
+        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
 
         fs::write(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
@@ -475,8 +451,28 @@ impl Driver {
         )
         .unwrap();
 
+        // If we have R1CS in hand, pass its layout through so the lowering can
+        // generate the Phase 2 helper. (Witgen only — the AD path has its own
+        // separate layout wiring below.)
+        let witgen_layout = wasm_config
+            .as_ref()
+            .map(|(_, r1cs)| hlssa_to_llssa::R1csLayoutInfo {
+                tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
+                tables_wit_start: r1cs.witness_layout.tables_data_start(),
+                mults_wit_start: r1cs.witness_layout.multiplicities_start(),
+                logup_challenge_off: r1cs.witness_layout.challenges_start(),
+                lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
+                lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
+                mode: hlssa_to_llssa::LoweringMode::Witgen,
+            });
+
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info);
+        let llssa = match witgen_layout {
+            Some(layout) => {
+                hlssa_to_llssa::lower_with_layout(ssa, &flow_analysis, &type_info, layout)
+            }
+            None => hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info),
+        };
 
         // Dump LLSSA after lowering
         fs::write(
@@ -554,6 +550,9 @@ impl Driver {
             tables_wit_start: r1cs.witness_layout.tables_data_start(),
             mults_wit_start: r1cs.witness_layout.multiplicities_start(),
             logup_challenge_off: r1cs.witness_layout.challenges_start(),
+            lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
+            lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
+            mode: hlssa_to_llssa::LoweringMode::Ad,
         };
 
         // Lower HLSSA → LLSSA

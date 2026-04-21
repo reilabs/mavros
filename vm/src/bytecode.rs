@@ -50,6 +50,7 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct FramePosition(pub usize);
 
 impl FramePosition {
@@ -173,7 +174,7 @@ pub struct VM {
     pub allocation_instrumenter: AllocationInstrumenter,
     pub tables: Vec<TableInfo>,
     pub rgchk_8: Option<usize>,
-    pub spread_table: Option<usize>,
+    pub spread_tables: [Option<usize>; 17],
     pub globals: *mut u64,
 }
 
@@ -210,7 +211,7 @@ impl VM {
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_8: None,
-            spread_table: None,
+            spread_tables: [None; 17],
             globals,
         }
     }
@@ -245,7 +246,7 @@ impl VM {
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_8: None,
-            spread_table: None,
+            spread_tables: [None; 17],
             globals,
         }
     }
@@ -962,6 +963,16 @@ mod def {
     }
 
     #[opcode]
+    fn assert_eq_u64(#[frame] a: u64, #[frame] b: u64) {
+        assert_eq!(a, b);
+    }
+
+    #[opcode]
+    fn assert_eq_field(#[frame] a: Field, #[frame] b: Field) {
+        assert_eq!(a, b);
+    }
+
+    #[opcode]
     #[inline(never)] // TODO better impl
     fn rangecheck(#[frame] val: Field, max_bits: usize) {
         // Convert field to bigint and check if it fits in max_bits
@@ -1021,8 +1032,8 @@ mod def {
         bits: usize,
         vm: &mut VM,
     ) {
-        // Initialize spread table on first call
-        if vm.spread_table.is_none() {
+        // Initialize spread table for this bit-width on first call
+        if vm.spread_tables[bits].is_none() {
             let length = 1usize << bits;
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
@@ -1036,7 +1047,7 @@ mod def {
                     vm.data.as_forward.elem_inverses_witness_section_offset
                 },
             };
-            vm.spread_table = Some(vm.tables.len());
+            vm.spread_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
 
             // Fill table x-slots with spread values
@@ -1059,7 +1070,7 @@ mod def {
             }
         }
 
-        let table_idx = *vm.spread_table.as_ref().unwrap();
+        let table_idx = vm.spread_tables[bits].unwrap();
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
         let key_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         unsafe { forward_kv_lookup_emit(table_idx, key_u64, result, flag_u64, vm) };
@@ -1073,7 +1084,7 @@ mod def {
         bits: usize,
         vm: &mut VM,
     ) {
-        if vm.spread_table.is_none() {
+        if vm.spread_tables[bits].is_none() {
             let length = 1usize << bits;
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
@@ -1087,7 +1098,7 @@ mod def {
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
             };
-            vm.spread_table = Some(vm.tables.len());
+            vm.spread_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
             unsafe {
                 vm.data.as_ad.current_wit_multiplicities_off += length;
@@ -1174,7 +1185,7 @@ mod def {
             }
         }
 
-        let table_idx = *vm.spread_table.as_ref().unwrap();
+        let table_idx = vm.spread_tables[bits].unwrap();
         unsafe { ad_kv_lookup_emit(table_idx, val, result, flag, vm) };
     }
 

@@ -35,6 +35,9 @@ This project provides a pinned dev environment via Nix flakes (Rust nightly + LL
 1. Install Nix and enable flakes:
    - Install: https://install.determinate.systems/nix
    - Enable flakes: add `experimental-features = nix-command flakes` to `~/.config/nix/nix.conf`
+   ```bash
+   mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
+   ```
 
 2. Enter the dev shell and build:
 

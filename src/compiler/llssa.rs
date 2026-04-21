@@ -295,6 +295,32 @@ pub enum LookupStream {
     C,
 }
 
+/// One of the witgen-side field-element buffers: the pre-commitment witness
+/// (which contains algebraic values and multiplicities), the post-commitment
+/// witness (challenges + tables-data + lookups-data), or the three constraint
+/// vectors `out_a / out_b / out_c`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitgenBuf {
+    WitnessPreComm,
+    WitnessPostComm,
+    A,
+    B,
+    C,
+}
+
+impl Display for WitgenBuf {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            WitgenBuf::WitnessPreComm => "wit_pre",
+            WitgenBuf::WitnessPostComm => "wit_post",
+            WitgenBuf::A => "a",
+            WitgenBuf::B => "b",
+            WitgenBuf::C => "c",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 impl Display for LookupStream {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -526,6 +552,37 @@ pub enum LLOp {
         flag: ValueId,
     },
 
+    // ── Phase 2 primitives (witgen-buffer random access + misc) ─────────
+    /// Load a Field element from a witgen buffer at an i32 index.
+    WitgenBufLoad {
+        buf: WitgenBuf,
+        idx: ValueId,
+        result: ValueId,
+    },
+    /// Store a Field element to a witgen buffer at an i32 index.
+    WitgenBufStore {
+        buf: WitgenBuf,
+        idx: ValueId,
+        value: ValueId,
+    },
+    /// In-place accumulate: `buf[idx] += value`.
+    WitgenBufAdd {
+        buf: WitgenBuf,
+        idx: ValueId,
+        value: ValueId,
+    },
+    /// Invert a field element.
+    FieldInverse {
+        src: ValueId,
+        result: ValueId,
+    },
+    /// Number of lookup-tape entries written during Phase 1. Computed as
+    /// `(cursor - base) / sizeof(Field)` on the A stream, which advances once
+    /// per entry alongside B and C. Result: i32.
+    LookupTapeLen {
+        result: ValueId,
+    },
+
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -547,6 +604,7 @@ impl Instruction for LLOp {
             | LLOp::ADReadCoeffAt { .. }
             | LLOp::ADFreshWitness { .. }
             | LLOp::ADNextLookupWitOff { .. }
+            | LLOp::LookupTapeLen { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -611,6 +669,13 @@ impl Instruction for LLOp {
             // Lookups
             LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
             LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
+
+            // Phase 2
+            LLOp::WitgenBufLoad { idx, .. } => vec![idx].into_iter(),
+            LLOp::WitgenBufStore { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::WitgenBufAdd { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::FieldInverse { src, .. } => vec![src].into_iter(),
+            LLOp::LookupTapeLen { .. } => vec![].into_iter(),
         }
     }
 
@@ -642,7 +707,10 @@ impl Instruction for LLOp {
             | LLOp::NextDCoeffLookups { result, .. }
             | LLOp::ADReadCoeffAt { result, .. }
             | LLOp::ADFreshWitness { result, .. }
-            | LLOp::ADNextLookupWitOff { result, .. } => vec![result].into_iter(),
+            | LLOp::ADNextLookupWitOff { result, .. }
+            | LLOp::WitgenBufLoad { result, .. }
+            | LLOp::FieldInverse { result, .. }
+            | LLOp::LookupTapeLen { result, .. } => vec![result].into_iter(),
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
@@ -657,6 +725,8 @@ impl Instruction for LLOp {
             | LLOp::ADWriteWitness { .. }
             | LLOp::LookupTapeWriteU64 { .. }
             | LLOp::BumpRngchk8Multiplicity { .. }
+            | LLOp::WitgenBufStore { .. }
+            | LLOp::WitgenBufAdd { .. }
             | LLOp::Trap => vec![].into_iter(),
         }
     }
@@ -673,6 +743,7 @@ impl Instruction for LLOp {
             | LLOp::ADReadCoeffAt { .. }
             | LLOp::ADFreshWitness { .. }
             | LLOp::ADNextLookupWitOff { .. }
+            | LLOp::LookupTapeLen { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -739,6 +810,13 @@ impl Instruction for LLOp {
             // Lookups
             LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
             LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
+
+            // Phase 2
+            LLOp::WitgenBufLoad { idx, .. } => vec![idx].into_iter(),
+            LLOp::WitgenBufStore { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::WitgenBufAdd { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::FieldInverse { src, .. } => vec![src].into_iter(),
+            LLOp::LookupTapeLen { .. } => vec![].into_iter(),
         }
     }
 
@@ -835,6 +913,13 @@ impl Instruction for LLOp {
             // Lookups
             LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
             LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
+
+            // Phase 2 (operands_mut must include result for ops that produce one)
+            LLOp::WitgenBufLoad { idx, result, .. } => vec![result, idx].into_iter(),
+            LLOp::WitgenBufStore { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::WitgenBufAdd { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::FieldInverse { src, result } => vec![result, src].into_iter(),
+            LLOp::LookupTapeLen { result } => vec![result].into_iter(),
         }
     }
 
@@ -1094,6 +1179,23 @@ impl Instruction for LLOp {
             }
             LLOp::BumpRngchk8Multiplicity { key, flag } => {
                 format!("bump_rngchk8_multiplicity {}, {}", vr(*key), vr(*flag))
+            }
+
+            // Phase 2
+            LLOp::WitgenBufLoad { buf, idx, result } => {
+                format!("{} = witgen_buf_load.{} {}", v(*result), buf, vr(*idx))
+            }
+            LLOp::WitgenBufStore { buf, idx, value } => {
+                format!("witgen_buf_store.{} {}, {}", buf, vr(*idx), vr(*value))
+            }
+            LLOp::WitgenBufAdd { buf, idx, value } => {
+                format!("witgen_buf_add.{} {}, {}", buf, vr(*idx), vr(*value))
+            }
+            LLOp::FieldInverse { src, result } => {
+                format!("{} = field.inverse {}", v(*result), vr(*src))
+            }
+            LLOp::LookupTapeLen { result } => {
+                format!("{} = lookup_tape_len", v(*result))
             }
         }
     }
