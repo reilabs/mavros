@@ -164,28 +164,18 @@ pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
     for i in 0..64 {
 
         let bs1 = big_sigma1(e);
-        let bs0 = big_sigma0(a);
         let ch = ch(e, f, g);
-        let k = K[i];
-        let w = w[i];
-        let maj = maj(a, b, c);
-
-        let t1 = wrapping_add_N([
-            h,
-            bs1,
-            ch,
-            k,
-            w,
-        ]);
+        let new_e = wrapping_add_N([d, h, bs1, ch, K[i], w[i]]);
+        let new_a = wrapping_add_N([h, bs1, ch, K[i], w[i], big_sigma0(a), maj(a, b, c)]);
 
         h = g;
         g = f;
         f = e;
-        e = wrapping_add_N([d, t1]);
+        e = new_e;
         d = c;
         c = b;
         b = a;
-        a = wrapping_add_N([t1, bs0, maj]);
+        a = new_a;
     }
 
     [
