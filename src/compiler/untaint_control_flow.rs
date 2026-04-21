@@ -571,16 +571,18 @@ impl UntaintControlFlow {
                 value,
             } if type_info.is_some() => {
                 let ti = type_info.unwrap();
-                let array_type = ti.get_value_type(array);
-                let expected_elem_type = match &array_type.expr {
+                let result_type = ti.get_value_type(result);
+                let expected_elem_type = match &result_type.expr {
                     TypeExpr::Array(inner, _) => inner.as_ref().clone(),
                     TypeExpr::Slice(inner) => inner.as_ref().clone(),
                     _ => panic!("ArraySet on non-array type"),
                 };
                 let mut cast_instrs = Vec::new();
-                let converted = {
+                let (converted_array, converted_value) = {
                     let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
-                    convert_if_needed(value, &expected_elem_type, ti, &mut builder)
+                    let ca = convert_if_needed(array, &result_type, ti, &mut builder);
+                    let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
+                    (ca, cv)
                 };
                 for instr in cast_instrs {
                     maybe_guard(new_instructions, block_taint, instr);
@@ -590,9 +592,9 @@ impl UntaintControlFlow {
                     block_taint,
                     OpCode::ArraySet {
                         result,
-                        array,
+                        array: converted_array,
                         index,
-                        value: converted,
+                        value: converted_value,
                     },
                 );
             }
