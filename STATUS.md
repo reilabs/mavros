@@ -272,7 +272,7 @@
 | noir/test_programs/execution_success/regression_5435 | ✅ | ✅ | 1 | 3 | 448 | 784 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_5615 | ✅ | ✅ | 0 | 1 | 144 | 64 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_6285 | 💥 | ➖ | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/regression_6451 | ✅ | ✅ | 10 | 11 | 2920 | 4024 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_6451 | ✅ | ✅ | 10 | 11 | 2920 | 4024 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | ✅ | ❌ | ➖ | ➖ |
 | noir/test_programs/execution_success/regression_6674_1 | ✅ | ✅ | 0 | 1 | 144 | 64 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_6674_2 | ✅ | ✅ | 0 | 1 | 144 | 64 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_6674_3 | 💥 | ➖ | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
