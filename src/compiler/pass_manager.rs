@@ -261,18 +261,6 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
 
         self.output_debug_info(ssa, pass_index, pass.name());
         pass.run(ssa, &self.analyses);
-        if let Some(debug_output_dir) = &self.debug_output_dir {
-            let path = debug_output_dir.join(format!("after_{}_{}.txt", pass_index, pass.name()));
-            std::fs::create_dir_all(debug_output_dir).ok();
-            std::fs::write(
-                path,
-                format!(
-                    "{}",
-                    ssa.to_string(&crate::compiler::ssa::DefaultSsaAnnotator)
-                ),
-            )
-            .ok();
-        }
         self.analyses.apply_preserved(&pass.preserves());
     }
 
