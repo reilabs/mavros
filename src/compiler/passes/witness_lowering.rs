@@ -7,7 +7,7 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, BlockId, CastTarget, DMatrix, OpCode, SeqType, Terminator, ValueId},
+    ssa::{BinaryArithOpKind, BlockId, DMatrix, OpCode, SeqType, Terminator, ValueId},
 };
 
 pub struct WitnessLowering {}
@@ -509,12 +509,6 @@ impl WitnessLowering {
             (TypeExpr::Ref(_), TypeExpr::Ref(_)) => {
                 // Ref types pass through — same runtime representation (pointer).
                 value
-            }
-            (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::U(bits)) => {
-                emitter.cast_to(CastTarget::U(*bits), value)
-            }
-            (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::I(bits)) => {
-                emitter.cast_to(CastTarget::I(*bits), value)
             }
             _ => panic!(
                 "witness_lowering value conversion not supported: {:?} -> {:?}",

@@ -442,7 +442,14 @@ impl LowerPureGuards {
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
         let value_type = type_info.get_value_type(value);
-        let signed = matches!(value_type.strip_witness().expr, TypeExpr::I(_));
+        let (bits, signed) = match &value_type.strip_witness().expr {
+            TypeExpr::I(b) => (*b, true),
+            TypeExpr::U(b) => (*b, false),
+            _ => panic!(
+                "LowerPureGuards: Truncate on non-integer type: {:?}",
+                value_type
+            ),
+        };
         let max_val = if signed {
             emitter.i_const(from_bits, 1u128 << to_bits)
         } else {
@@ -451,9 +458,8 @@ impl LowerPureGuards {
         let fits = emitter.lt(value, max_val);
         let overflow = emitter.not(fits);
 
-        let result_type = Type {
-            expr: TypeExpr::U(to_bits),
-        };
+        // Truncate preserves source type in TypeInfo, so the merge block must match.
+        let result_type = value_type.strip_witness().clone();
 
         self.emit_guarded_branch(
             emitter,
@@ -462,8 +468,8 @@ impl LowerPureGuards {
             original_result,
             &result_type,
             |e| e.truncate(value, to_bits, from_bits),
-            false,
-            to_bits,
+            signed,
+            bits,
         );
     }
 
