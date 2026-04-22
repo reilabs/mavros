@@ -1057,8 +1057,6 @@ fn lower_to_radix_bytes(
 ) {
     use crate::compiler::ssa::Endianness;
 
-    assert!(count <= 32, "ToRadix byte count must be <= 32");
-
     let ll_value = val_map[&value];
 
     // Decompose field → 4 × u64 limbs (little-endian: limb 0 = least significant)
@@ -1071,9 +1069,17 @@ fn lower_to_radix_bytes(
     ];
 
     // Extract `count` bytes in little-endian order (byte 0 = LSB).
-    // Byte i lives in limb[i/8] at bit offset (i%8)*8.
+    // Byte i lives in limb[i/8] at bit offset (i%8)*8 for i < 32.
+    // Byte positions i >= 32 are structurally zero: the field representation
+    // is only 32 bytes, so any higher byte is definitionally 0. Matches the
+    // old VM `to_bytes_be` behavior of zero-padding past the field width.
+    let zero_byte = e.int_const(8, 0);
     let mut bytes_le = Vec::with_capacity(count);
     for i in 0..count {
+        if i >= 32 {
+            bytes_le.push(zero_byte);
+            continue;
+        }
         let limb_idx = i / 8;
         let byte_offset = (i % 8) * 8;
         let shifted = if byte_offset == 0 {
@@ -1625,11 +1631,45 @@ fn generate_rngchk_8_function(layout: R1csLayoutInfo) -> LLFunction {
         let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
         let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
-        // Extract lowest u64 limb of val and flag (both assumed small).
+        // Extract lowest u64 limb of val and flag.
         let val_limbs = e.field_to_limbs(val);
-        let key = e.extract_field(val_limbs, LLStruct::limbs(), 0);
+        let val_l0 = e.extract_field(val_limbs, LLStruct::limbs(), 0);
+        let val_l1 = e.extract_field(val_limbs, LLStruct::limbs(), 1);
+        let val_l2 = e.extract_field(val_limbs, LLStruct::limbs(), 2);
+        let val_l3 = e.extract_field(val_limbs, LLStruct::limbs(), 3);
         let flag_limbs = e.field_to_limbs(flag);
         let flag_u64 = e.extract_field(flag_limbs, LLStruct::limbs(), 0);
+        let flag_l1 = e.extract_field(flag_limbs, LLStruct::limbs(), 1);
+        let flag_l2 = e.extract_field(flag_limbs, LLStruct::limbs(), 2);
+        let flag_l3 = e.extract_field(flag_limbs, LLStruct::limbs(), 3);
+        let key = val_l0;
+
+        // Parity with the VM `rngchk_8_field` opcode asserts: guard callers
+        // from silently losing high bits. This is prover-internal state, so
+        // a violation here is a compiler bug rather than an attack — but
+        // without the check it would manifest as a corrupted multiplicity
+        // slot instead of a clean trap.
+        let zero_i64_check = e.int_const(64, 0);
+        let table_len_i64 = e.int_const(64, 256);
+        for ok in [
+            e.int_ult(val_l0, table_len_i64),
+            e.int_eq(val_l1, zero_i64_check),
+            e.int_eq(val_l2, zero_i64_check),
+            e.int_eq(val_l3, zero_i64_check),
+            e.int_eq(flag_l1, zero_i64_check),
+            e.int_eq(flag_l2, zero_i64_check),
+            e.int_eq(flag_l3, zero_i64_check),
+        ] {
+            e.build_if_else(
+                ok,
+                vec![],
+                |_ok_e| vec![],
+                |bad_e| {
+                    bad_e.trap();
+                    vec![]
+                },
+            );
+        }
 
         // multiplicities[mults_wit_start + key].low_u64 += flag_u64
         // Layout knowledge (where the rangecheck-8 multiplicities live in the
