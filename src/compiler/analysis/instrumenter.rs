@@ -900,7 +900,7 @@ impl Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.not_op(_instrumenter))),
-            Value::U(s, v) => Value::U(*s, !v),
+            Value::U(s, v) => Value::U(*s, !v & Self::bit_mask(*s)),
             _ => panic!("Cannot perform not operation on {:?}", self),
         }
     }
