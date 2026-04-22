@@ -230,24 +230,32 @@ impl LowerPureGuards {
                 });
             }
 
-            // -- ArraySet: RC-tracked allocation. Desugar with OOB check + value select
-            // so that ArraySet always runs exactly once (RC balanced).
+            // -- ArraySet: desugar with OOB check only if index is pure.
+            // Witness index → keep as Guard (can't branch on witness OOB condition).
             OpCode::ArraySet {
                 result,
                 array,
                 index,
                 value,
-            } => {
+            } if !type_info.get_value_type(index).is_witness_of() => {
                 self.desugar_array_set_guard(emitter, condition, result, array, index, value, type_info);
             }
 
-            // -- ArrayGet: can fail with OOB. Desugar with OOB check.
+            // -- ArrayGet: desugar with OOB check only if index is pure.
             OpCode::ArrayGet {
                 result,
                 array,
                 index,
-            } => {
+            } if !type_info.get_value_type(index).is_witness_of() => {
                 self.desugar_array_get_guard(emitter, condition, result, array, index, type_info);
+            }
+
+            // ArrayGet/ArraySet with witness index: keep as Guard
+            OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => {
+                emitter.emit(OpCode::Guard {
+                    condition,
+                    inner: Box::new(inner),
+                });
             }
 
             // -- Everything else: pure computation, no constraints, can't fail → unwrap --
@@ -414,13 +422,8 @@ impl LowerPureGuards {
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
-    ///   if oob { assert !cond }
-    ///   old_val = array_get(array, idx)
-    ///   selected_val = select(cond, val, old_val)
-    ///   result = array_set(array, idx, selected_val)
-    ///
-    /// ArraySet always runs exactly once → RC balanced. If OOB, the assert fires
-    /// first; any subsequent crash from the OOB access is irrelevant.
+    ///   if oob { assert !cond; result = array }
+    ///   else   { result = array_set(array, idx, value) }
     fn desugar_array_set_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -431,29 +434,43 @@ impl LowerPureGuards {
         value: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
-        self.emit_oob_check(emitter, condition, array, index, type_info);
+        let array_type = type_info.get_value_type(array).strip_witness().clone();
+        let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
-        // old_val = array_get(array, idx)
-        let old_val = emitter.array_get(array, index);
+        let (fail_block, _) = emitter.add_block();
+        let (ok_block, _) = emitter.add_block();
+        let (merge_block, _) = emitter.add_block();
 
-        // selected_val = select(cond, val, old_val)
-        let selected_val = emitter.select(condition, value, old_val);
+        emitter
+            .function
+            .get_block_mut(merge_block)
+            .push_parameter(original_result, array_type);
 
-        // result = array_set(array, idx, selected_val)
+        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, ok_block), fail_block);
+
+        // OOB: assert !cond, pass through original array
+        let not_cond = emitter.not(condition);
+        let one = emitter.u_const(1, 1);
+        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![array]), ok_block);
+
+        // In-bounds: do the set
+        let set_result = emitter.fresh_value();
         emitter.emit(OpCode::ArraySet {
-            result: original_result,
+            result: set_result,
             array,
             index,
-            value: selected_val,
+            value,
         });
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![set_result]), merge_block);
     }
 
     /// Desugar `Guard(cond, ArrayGet(array, idx) -> result)`.
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
-    ///   if oob { assert !cond }
-    ///   result = array_get(array, idx)
+    ///   if oob { assert !cond; result = default }
+    ///   else   { result = array_get(array, idx) }
     fn desugar_array_get_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -463,25 +480,44 @@ impl LowerPureGuards {
         index: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
-        self.emit_oob_check(emitter, condition, array, index, type_info);
+        let array_type = type_info.get_value_type(array);
+        let elem_type = match &array_type.strip_witness().expr {
+            TypeExpr::Array(elem, _) => (**elem).clone(),
+            other => panic!("LowerPureGuards: ArrayGet on non-array type: {:?}", other),
+        };
+        let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
-        // Execute the get unconditionally (if OOB, assert already failed)
-        emitter.emit(OpCode::ArrayGet {
-            result: original_result,
-            array,
-            index,
-        });
+        let (fail_block, _) = emitter.add_block();
+        let (ok_block, _) = emitter.add_block();
+        let (merge_block, _) = emitter.add_block();
+
+        emitter
+            .function
+            .get_block_mut(merge_block)
+            .push_parameter(original_result, elem_type.clone());
+
+        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, ok_block), fail_block);
+
+        // OOB: assert !cond, produce default value
+        let not_cond = emitter.not(condition);
+        let one = emitter.u_const(1, 1);
+        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
+        let default_val = self.default_scalar(emitter, &elem_type);
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
+
+        // In-bounds: do the get
+        let get_result = emitter.array_get(array, index);
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![get_result]), merge_block);
     }
 
-    /// Emit an OOB bounds check: if idx >= len(array), assert !cond.
-    fn emit_oob_check(
+    /// Compute the OOB condition: idx >= len(array). Returns a bool ValueId.
+    fn emit_oob_cond(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
-        condition: ValueId,
         array: ValueId,
         index: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-    ) {
+    ) -> ValueId {
         let array_type = type_info.get_value_type(array);
         let arr_len = match &array_type.strip_witness().expr {
             TypeExpr::Array(_, len) => *len,
@@ -496,17 +532,21 @@ impl LowerPureGuards {
             emitter.cast_to(CastTarget::U(32), index)
         };
         let in_bounds = emitter.lt(idx_as_u32, len_val);
-        let oob = emitter.not(in_bounds);
+        emitter.not(in_bounds)
+    }
 
-        let (fail_block, _) = emitter.add_block();
-        let (continue_block, _) = emitter.add_block();
-
-        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, continue_block), fail_block);
-
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
-        emitter.seal_and_switch(Terminator::Jmp(continue_block, vec![]), continue_block);
+    /// Produce a default zero value for a scalar type.
+    fn default_scalar(&self, emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
+        match &ty.expr {
+            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
+            TypeExpr::U(bits) => emitter.u_const(*bits, 0),
+            TypeExpr::I(bits) => emitter.i_const(*bits, 0),
+            // Bool is represented as U(1)
+            other => panic!(
+                "LowerPureGuards: cannot produce default for non-scalar element type: {:?}",
+                other
+            ),
+        }
     }
 
     /// Common pattern: branch on a failure condition, constraining !cond in the fail
