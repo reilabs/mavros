@@ -2,6 +2,7 @@ pub mod arithmetic_simplifier;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;
 pub mod dead_code_elimination;
+pub mod desugar_pure_guards;
 pub mod deduplicate_phis;
 pub mod defunctionalize;
 pub mod explicit_witness;
