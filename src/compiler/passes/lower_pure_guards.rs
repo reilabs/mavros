@@ -19,15 +19,15 @@ use crate::compiler::{
 /// - **Always unwrap** (no constraints, no side effects, can't fail):
 ///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, ExtractTupleField, MkTuple,
 ///   MkSeq, Load, Select, Field arith, etc.
-/// - **Desugar with OOB check** (can fail on out-of-bounds index):
+/// - **Lower with OOB check** (can fail on out-of-bounds index):
 ///   ArrayGet — bounds-check index, assert !cond on OOB, then execute unconditionally.
-/// - **Desugar with OOB check + value select** (RC-tracked allocation):
+/// - **Lower with OOB check + value select** (RC-tracked allocation):
 ///   ArraySet — bounds-check index, select(cond, new_val, old_val), always execute ArraySet.
-/// - **Desugar with overflow check** (pure inputs only, can fail):
+/// - **Lower with overflow check** (pure inputs only, can fail):
 ///   Integer Add/Sub/Mul/Shl — widen, compute, check overflow, constrain !cond on fail.
-/// - **Desugar with div-zero check** (pure inputs only, can fail):
+/// - **Lower with div-zero check** (pure inputs only, can fail):
 ///   Integer Div/Mod.
-/// - **Desugar with range check** (pure inputs only, can fail):
+/// - **Lower with range check** (pure inputs only, can fail):
 ///   Truncate.
 /// - **Keep as Guard** (side-effectful or generates constraints):
 ///   Store, Call, WriteWitness, AssertEq, AssertR1C, Constrain, Rangecheck,
@@ -74,11 +74,11 @@ impl LowerPureGuards {
     ) {
         let block_ids: Vec<_> = function.get_blocks().map(|(bid, _)| *bid).collect();
         for block_id in block_ids {
-            self.desugar_block(function, block_id, type_info);
+            self.lower_block(function, block_id, type_info);
         }
     }
 
-    fn desugar_block(
+    fn lower_block(
         &self,
         function: &mut HLFunction,
         block_id: BlockId,
@@ -97,7 +97,7 @@ impl LowerPureGuards {
         for instruction in instructions {
             match instruction {
                 OpCode::Guard { condition, inner } => {
-                    self.desugar_guard(&mut emitter, condition, *inner, type_info);
+                    self.lower_guard(&mut emitter, condition, *inner, type_info);
                 }
                 other => {
                     emitter.emit(other);
@@ -122,8 +122,8 @@ impl LowerPureGuards {
         })
     }
 
-    /// Desugar a single Guard instruction.
-    fn desugar_guard(
+    /// Lower a single Guard instruction.
+    fn lower_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -148,9 +148,13 @@ impl LowerPureGuards {
                 });
             }
 
-            // -- Integer arith that can overflow: desugar only if all inputs pure --
+            // -- Integer arith that can overflow: lower only if all inputs pure --
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub | BinaryArithOpKind::Mul | BinaryArithOpKind::Shl),
+                kind:
+                    kind @ (BinaryArithOpKind::Add
+                    | BinaryArithOpKind::Sub
+                    | BinaryArithOpKind::Mul
+                    | BinaryArithOpKind::Shl),
                 result,
                 lhs,
                 rhs,
@@ -158,30 +162,40 @@ impl LowerPureGuards {
                 let lhs_type = type_info.get_value_type(lhs);
                 match &lhs_type.strip_witness().expr {
                     TypeExpr::U(bits) if self.all_inputs_pure(&inner, type_info) => {
-                        self.desugar_overflow_guard(
+                        self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, false,
                         );
                     }
                     TypeExpr::I(bits) if self.all_inputs_pure(&inner, type_info) => {
-                        self.desugar_overflow_guard(
+                        self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, true,
                         );
                     }
                     // Field arith can't overflow — always unwrap
                     TypeExpr::Field => {
-                        emitter.emit(OpCode::BinaryArithOp { kind, result, lhs, rhs });
+                        emitter.emit(OpCode::BinaryArithOp {
+                            kind,
+                            result,
+                            lhs,
+                            rhs,
+                        });
                     }
                     // Witness inputs on integer arith: keep as Guard for ExplicitWitness
                     _ => {
                         emitter.emit(OpCode::Guard {
                             condition,
-                            inner: Box::new(OpCode::BinaryArithOp { kind, result, lhs, rhs }),
+                            inner: Box::new(OpCode::BinaryArithOp {
+                                kind,
+                                result,
+                                lhs,
+                                rhs,
+                            }),
                         });
                     }
                 }
             }
 
-            // -- Div/Mod: can fail on division by zero, desugar only if pure inputs --
+            // -- Div/Mod: can fail on division by zero, lower only if pure inputs --
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
                 result,
@@ -191,27 +205,44 @@ impl LowerPureGuards {
                 let lhs_type = type_info.get_value_type(lhs);
                 match &lhs_type.strip_witness().expr {
                     TypeExpr::U(_) | TypeExpr::I(_) if self.all_inputs_pure(&inner, type_info) => {
-                        self.desugar_divmod_guard(emitter, condition, kind, result, lhs, rhs, lhs_type);
+                        self.lower_divmod_guard(
+                            emitter, condition, kind, result, lhs, rhs, lhs_type,
+                        );
                     }
                     // Field div can't fail — always unwrap
                     TypeExpr::Field => {
-                        emitter.emit(OpCode::BinaryArithOp { kind, result, lhs, rhs });
+                        emitter.emit(OpCode::BinaryArithOp {
+                            kind,
+                            result,
+                            lhs,
+                            rhs,
+                        });
                     }
                     // Witness inputs: keep as Guard
                     _ => {
                         emitter.emit(OpCode::Guard {
                             condition,
-                            inner: Box::new(OpCode::BinaryArithOp { kind, result, lhs, rhs }),
+                            inner: Box::new(OpCode::BinaryArithOp {
+                                kind,
+                                result,
+                                lhs,
+                                rhs,
+                            }),
                         });
                     }
                 }
             }
 
-            // -- Truncate: lossy narrowing, desugar only if pure inputs --
-            OpCode::Truncate { result, value, to_bits, from_bits }
-                if self.all_inputs_pure(&inner, type_info) =>
-            {
-                self.desugar_truncate_guard(emitter, condition, result, value, to_bits, from_bits, type_info);
+            // -- Truncate: lossy narrowing, lower only if pure inputs --
+            OpCode::Truncate {
+                result,
+                value,
+                to_bits,
+                from_bits,
+            } if self.all_inputs_pure(&inner, type_info) => {
+                self.lower_truncate_guard(
+                    emitter, condition, result, value, to_bits, from_bits, type_info,
+                );
             }
 
             // -- SExt: keep as Guard (ExplicitWitness handles it) --
@@ -230,7 +261,7 @@ impl LowerPureGuards {
                 });
             }
 
-            // -- ArraySet: desugar with OOB check only if index is pure.
+            // -- ArraySet: lower with OOB check only if index is pure.
             // Witness index → keep as Guard (can't branch on witness OOB condition).
             OpCode::ArraySet {
                 result,
@@ -238,16 +269,18 @@ impl LowerPureGuards {
                 index,
                 value,
             } if !type_info.get_value_type(index).is_witness_of() => {
-                self.desugar_array_set_guard(emitter, condition, result, array, index, value, type_info);
+                self.lower_array_set_guard(
+                    emitter, condition, result, array, index, value, type_info,
+                );
             }
 
-            // -- ArrayGet: desugar with OOB check only if index is pure.
+            // -- ArrayGet: lower with OOB check only if index is pure.
             OpCode::ArrayGet {
                 result,
                 array,
                 index,
             } if !type_info.get_value_type(index).is_witness_of() => {
-                self.desugar_array_get_guard(emitter, condition, result, array, index, type_info);
+                self.lower_array_get_guard(emitter, condition, result, array, index, type_info);
             }
 
             // ArrayGet/ArraySet with witness index: keep as Guard
@@ -268,11 +301,11 @@ impl LowerPureGuards {
         }
     }
 
-    /// Desugar `Guard(cond, arith_op(lhs, rhs) -> result)` for integer overflow.
+    /// Lower `Guard(cond, arith_op(lhs, rhs) -> result)` for integer overflow.
     ///
     /// Widens to double-width, performs the op, checks if it fits in the original width.
     /// On overflow: constrains !cond, produces a default 0.
-    fn desugar_overflow_guard(
+    fn lower_overflow_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -319,9 +352,13 @@ impl LowerPureGuards {
         };
 
         let result_type = if signed {
-            Type { expr: TypeExpr::I(bits) }
+            Type {
+                expr: TypeExpr::I(bits),
+            }
         } else {
-            Type { expr: TypeExpr::U(bits) }
+            Type {
+                expr: TypeExpr::U(bits),
+            }
         };
 
         self.emit_guarded_branch(
@@ -343,8 +380,8 @@ impl LowerPureGuards {
         );
     }
 
-    /// Desugar `Guard(cond, div/mod(lhs, rhs) -> result)` for division by zero.
-    fn desugar_divmod_guard(
+    /// Lower `Guard(cond, div/mod(lhs, rhs) -> result)` for division by zero.
+    fn lower_divmod_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -390,8 +427,8 @@ impl LowerPureGuards {
         );
     }
 
-    /// Desugar `Guard(cond, Truncate(value, to_bits, from_bits) -> result)`.
-    fn desugar_truncate_guard(
+    /// Lower `Guard(cond, Truncate(value, to_bits, from_bits) -> result)`.
+    fn lower_truncate_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -411,7 +448,9 @@ impl LowerPureGuards {
         let fits = emitter.lt(value, max_val);
         let overflow = emitter.not(fits);
 
-        let result_type = Type { expr: TypeExpr::U(to_bits) };
+        let result_type = Type {
+            expr: TypeExpr::U(to_bits),
+        };
 
         self.emit_guarded_branch(
             emitter,
@@ -425,13 +464,13 @@ impl LowerPureGuards {
         );
     }
 
-    /// Desugar `Guard(cond, ArraySet(array, idx, val) -> result)`.
+    /// Lower `Guard(cond, ArraySet(array, idx, val) -> result)`.
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
     ///   if oob { assert !cond; result = array }
     ///   else   { result = array_set(array, idx, value) }
-    fn desugar_array_set_guard(
+    fn lower_array_set_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -458,7 +497,10 @@ impl LowerPureGuards {
         // OOB: assert !cond, pass through original array
         let not_cond = emitter.not(condition);
         let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
+        emitter.emit(OpCode::AssertEq {
+            lhs: not_cond,
+            rhs: one,
+        });
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![array]), ok_block);
 
         // In-bounds: do the set
@@ -472,13 +514,13 @@ impl LowerPureGuards {
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![set_result]), merge_block);
     }
 
-    /// Desugar `Guard(cond, ArrayGet(array, idx) -> result)`.
+    /// Lower `Guard(cond, ArrayGet(array, idx) -> result)`.
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
     ///   if oob { assert !cond; result = default }
     ///   else   { result = array_get(array, idx) }
-    fn desugar_array_get_guard(
+    fn lower_array_get_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -508,7 +550,10 @@ impl LowerPureGuards {
         // OOB: assert !cond, produce default value
         let not_cond = emitter.not(condition);
         let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
+        emitter.emit(OpCode::AssertEq {
+            lhs: not_cond,
+            rhs: one,
+        });
         let default_val = self.default_scalar(emitter, &elem_type);
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
 
@@ -583,16 +628,16 @@ impl LowerPureGuards {
         // Fail block: constrain !cond, produce default
         let not_cond = emitter.not(condition);
         let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
+        emitter.emit(OpCode::AssertEq {
+            lhs: not_cond,
+            rhs: one,
+        });
         let default_val = if signed {
             emitter.i_const(bits, 0)
         } else {
             emitter.u_const(bits, 0)
         };
-        emitter.seal_and_switch(
-            Terminator::Jmp(merge_block, vec![default_val]),
-            ok_block,
-        );
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
 
         // Ok block: execute the operation
         let ok_val = ok_path(emitter);
