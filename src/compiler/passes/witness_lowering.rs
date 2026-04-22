@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::compiler::{
     analysis::types::TypeInfo,
     block_builder::{HLBlockEmitter, HLEmitter},
+    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -17,11 +18,11 @@ impl Pass for WitnessLowering {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
+        vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
     fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
+        self.do_run(ssa, store.get::<TypeInfo>(), store.get::<FlowAnalysis>());
     }
 }
 
@@ -34,9 +35,11 @@ impl WitnessLowering {
         &self,
         ssa: &mut crate::compiler::ssa::HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
+        flow_analysis: &FlowAnalysis,
     ) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let type_info = type_info.get_function(*function_id);
+            let cfg = flow_analysis.get_function_cfg(*function_id);
             for rtp in function.iter_returns_mut() {
                 *rtp = self.witness_lowering_in_type(rtp);
             }
@@ -53,7 +56,7 @@ impl WitnessLowering {
                 .collect();
 
             let mut replacements = ValueReplacements::new();
-            let block_ids: Vec<BlockId> = function.get_blocks().map(|(bid, _)| *bid).collect();
+            let block_ids: Vec<BlockId> = cfg.get_domination_pre_order().collect();
             for bid in block_ids {
                 // Convert block parameters in-place
                 let old_params = function.get_block_mut(bid).take_parameters();

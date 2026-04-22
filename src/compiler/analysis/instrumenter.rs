@@ -730,13 +730,20 @@ impl Value {
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
-            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v),
-            (Value::U(_, v), CastTarget::I(s2)) => Value::U(*s2, *v),
+            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
+            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
+            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
+            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
+            (Value::I(s, v), CastTarget::Field) => Value::Field(Field::from(Self::to_signed(*v, *s) as u64)),
             (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
-            (Value::Field(f), CastTarget::U(s) | CastTarget::I(s)) => {
+            (Value::Field(f), CastTarget::U(s)) => {
                 let bigint = f.into_bigint();
-                Value::U(*s, bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64))
+                Value::U(*s, (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s))
+            }
+            (Value::Field(f), CastTarget::I(s)) => {
+                let bigint = f.into_bigint();
+                Value::I(*s, (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s))
             }
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
             _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
