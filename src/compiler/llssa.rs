@@ -1191,7 +1191,12 @@ impl Instruction for LLOp {
                 format!("witgen_buf_add.{} {}, {}", buf, vr(*idx), vr(*value))
             }
             LLOp::WitgenBufAddLowU64 { buf, idx, value } => {
-                format!("witgen_buf_add_low_u64.{} {}, {}", buf, vr(*idx), vr(*value))
+                format!(
+                    "witgen_buf_add_low_u64.{} {}, {}",
+                    buf,
+                    vr(*idx),
+                    vr(*value)
+                )
             }
             LLOp::FieldInverse { src, result } => {
                 format!("{} = field.inverse {}", v(*result), vr(*src))

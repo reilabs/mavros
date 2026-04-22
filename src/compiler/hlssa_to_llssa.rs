@@ -1573,8 +1573,7 @@ fn generate_all_lookup_functions(
     ad_fns: &mut AdFunctions,
 ) {
     if let Some(id) = lookup_fns.rngchk_8 {
-        let layout =
-            layout.expect("R1CS layout required to generate __rngchk_8 (witgen path)");
+        let layout = layout.expect("R1CS layout required to generate __rngchk_8 (witgen path)");
         let func = generate_rngchk_8_function(layout);
         let _old = llssa.take_function(id);
         llssa.put_function(id, func);
@@ -1718,11 +1717,6 @@ fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
             let zero_field = emit_small_u64_as_field(e, zero_i64);
             let minus_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
             e.ad_write_const(DMatrix::B, minus_i_field, coeff);
-            // Nudge out_db[0] itself: ad_write_const writes to out_db[0],
-            // which matches VM behaviour. `wit_zero_i32` isn't used by
-            // ad_write_const; the index argument here is only for the
-            // witness-indexed bumps above.
-            let _ = wit_zero_i32;
 
             // out_dc[mults_wit_start + i] += coeff
             let dc_idx = e.int_arith(IntArithOp::Add, mults_wit_start_i32, i_i32);
@@ -1798,33 +1792,7 @@ fn generate_drngchk_8_ad_call(
     func
 }
 
-/// Generate __run_phase2():
-///
-/// Finalizes the LogUp lookup argument after Phase 1 has written raw values
-/// into the tape and multiplicity buffers. For the rangecheck-8 table only:
-///
-///   1. Fix multiplicities: Phase 1 wrote raw u64 values into the low limb of
-///      the multiplicity Field slots (via `__bump_rngchk8_multiplicity`).
-///      Convert each to a proper Montgomery-form Field.
-///
-///   2. Forward pass over the table: for each entry i in 0..256, store
-///      `denom = α - i` into out_b and the multiplicity into out_c. If the
-///      multiplicity is non-zero, store the running_prod into out_a and
-///      multiply running_prod by denom.
-///
-///   3. Do the one batch-inversion: running_inv = 1 / running_prod.
-///
-///   4. Backward pass: recover per-entry inverses by multiplying running_inv
-///      with the stored running_prod, then updating running_inv *= denom.
-///
-///   5. Lookup tape walk: for each entry written during Phase 1, either zero
-///      out (flag == 0) or copy the pre-inverted y-value from the table slot
-///      and accumulate into the table's sum constraint (flag == 1).
-///
-///   6. Final consolidation: multiply each per-entry inverse by its
-///      multiplicity, write to the post-commit witness, and accumulate into
-///      the table's sum constraint. Finally set B on the sum constraint to 1.
-/// Generate __run_phase2():
+// Generate __run_phase2():
 ///
 /// Finalizes the LogUp lookup argument after Phase 1 has written raw values
 /// into the tape and multiplicity buffers. For the rangecheck-8 table only:

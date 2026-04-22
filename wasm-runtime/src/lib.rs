@@ -259,12 +259,7 @@ pub unsafe extern "C" fn __witgen_add(
 /// later re-encodes each slot into Montgomery form. Upper limbs are left
 /// untouched (callers guarantee they're zero on first use).
 #[no_mangle]
-pub unsafe extern "C" fn __witgen_add_low_u64(
-    vm_ptr: *mut u8,
-    buf_id: i32,
-    idx: i32,
-    value: i64,
-) {
+pub unsafe extern "C" fn __witgen_add_low_u64(vm_ptr: *mut u8, buf_id: i32, idx: i32, value: i64) {
     let base = witgen_buf_base(vm_ptr, buf_id);
     let slot = base.add((idx as usize) * FIELD_LIMBS);
     *slot = (*slot).wrapping_add(value as u64);
