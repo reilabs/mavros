@@ -25,7 +25,7 @@ use crate::{
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
-            desugar_pure_guards::DesugarPureGuards,
+            lower_pure_guards::LowerPureGuards,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
             lower_guards::LowerGuards,
@@ -261,7 +261,7 @@ impl Driver {
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(DesugarPureGuards::new()),
+                Box::new(LowerPureGuards::new()),
                 Box::new(FixDoubleJumps::new()),
                 Box::new(ArithmeticSimplifier::new()),
                 Box::new(CSE::new()),

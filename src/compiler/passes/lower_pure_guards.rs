@@ -9,7 +9,7 @@ use crate::compiler::{
     },
 };
 
-/// Desugars Guard instructions into plain control flow where possible.
+/// Lowers pure Guard instructions into plain control flow where possible.
 ///
 /// After UntaintControlFlow, Guards wrap operations in witness-conditional
 /// blocks. Many of these Guards are unnecessary because the inner operation
@@ -18,7 +18,9 @@ use crate::compiler::{
 /// Classification:
 /// - **Always unwrap** (no constraints, no side effects, can't fail):
 ///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, ExtractTupleField, MkTuple,
-///   MkSeq, ArrayGet, Load, Select, Field arith, etc.
+///   MkSeq, Load, Select, Field arith, etc.
+/// - **Desugar with OOB check** (can fail on out-of-bounds index):
+///   ArrayGet — bounds-check index, assert !cond on OOB, then execute unconditionally.
 /// - **Desugar with OOB check + value select** (RC-tracked allocation):
 ///   ArraySet — bounds-check index, select(cond, new_val, old_val), always execute ArraySet.
 /// - **Desugar with overflow check** (pure inputs only, can fail):
@@ -30,11 +32,11 @@ use crate::compiler::{
 /// - **Keep as Guard** (side-effectful or generates constraints):
 ///   Store, Call, WriteWitness, AssertEq, AssertR1C, Constrain, Rangecheck,
 ///   and failable ops with witness inputs (Truncate, SExt, integer arith).
-pub struct DesugarPureGuards {}
+pub struct LowerPureGuards {}
 
-impl Pass for DesugarPureGuards {
+impl Pass for LowerPureGuards {
     fn name(&self) -> &'static str {
-        "desugar_pure_guards"
+        "lower_pure_guards"
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
@@ -50,7 +52,7 @@ impl Pass for DesugarPureGuards {
     }
 }
 
-impl DesugarPureGuards {
+impl LowerPureGuards {
     pub fn new() -> Self {
         Self {}
     }
@@ -239,9 +241,18 @@ impl DesugarPureGuards {
                 self.desugar_array_set_guard(emitter, condition, result, array, index, value, type_info);
             }
 
+            // -- ArrayGet: can fail with OOB. Desugar with OOB check.
+            OpCode::ArrayGet {
+                result,
+                array,
+                index,
+            } => {
+                self.desugar_array_get_guard(emitter, condition, result, array, index, type_info);
+            }
+
             // -- Everything else: pure computation, no constraints, can't fail → unwrap --
             // This covers: Const, Cmp, Not, And, Or, Xor, Shr, Cast, ExtractTupleField,
-            // MkTuple, MkSeq, ArrayGet, Load, Select, SlicePush, SliceLen,
+            // MkTuple, MkSeq, Load, Select, SlicePush, SliceLen,
             // ToBits, ToRadix, ValueOf, etc.
             other => {
                 emitter.emit(other);
@@ -420,34 +431,7 @@ impl DesugarPureGuards {
         value: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
-        // Get static array length from type
-        let array_type = type_info.get_value_type(array);
-        let arr_len = match &array_type.strip_witness().expr {
-            TypeExpr::Array(_, len) => *len,
-            other => panic!("DesugarPureGuards: ArraySet on non-array type: {:?}", other),
-        };
-
-        // OOB check: idx >= len
-        let len_val = emitter.u_const(32, arr_len as u128);
-        let idx_type = type_info.get_value_type(index);
-        let idx_as_u32 = if matches!(idx_type.strip_witness().expr, TypeExpr::U(32)) {
-            index
-        } else {
-            emitter.cast_to(CastTarget::U(32), index)
-        };
-        let in_bounds = emitter.lt(idx_as_u32, len_val);
-        let oob = emitter.not(in_bounds);
-
-        // if oob { assert !cond }
-        let (fail_block, _) = emitter.add_block();
-        let (continue_block, _) = emitter.add_block();
-
-        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, continue_block), fail_block);
-
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
-        emitter.seal_and_switch(Terminator::Jmp(continue_block, vec![]), continue_block);
+        self.emit_oob_check(emitter, condition, array, index, type_info);
 
         // old_val = array_get(array, idx)
         let old_val = emitter.array_get(array, index);
@@ -462,6 +446,67 @@ impl DesugarPureGuards {
             index,
             value: selected_val,
         });
+    }
+
+    /// Desugar `Guard(cond, ArrayGet(array, idx) -> result)`.
+    ///
+    /// Pattern:
+    ///   oob = idx >= len(array)
+    ///   if oob { assert !cond }
+    ///   result = array_get(array, idx)
+    fn desugar_array_get_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        original_result: ValueId,
+        array: ValueId,
+        index: ValueId,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+    ) {
+        self.emit_oob_check(emitter, condition, array, index, type_info);
+
+        // Execute the get unconditionally (if OOB, assert already failed)
+        emitter.emit(OpCode::ArrayGet {
+            result: original_result,
+            array,
+            index,
+        });
+    }
+
+    /// Emit an OOB bounds check: if idx >= len(array), assert !cond.
+    fn emit_oob_check(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        array: ValueId,
+        index: ValueId,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+    ) {
+        let array_type = type_info.get_value_type(array);
+        let arr_len = match &array_type.strip_witness().expr {
+            TypeExpr::Array(_, len) => *len,
+            other => panic!("LowerPureGuards: array op on non-array type: {:?}", other),
+        };
+
+        let len_val = emitter.u_const(32, arr_len as u128);
+        let idx_type = type_info.get_value_type(index);
+        let idx_as_u32 = if matches!(idx_type.strip_witness().expr, TypeExpr::U(32)) {
+            index
+        } else {
+            emitter.cast_to(CastTarget::U(32), index)
+        };
+        let in_bounds = emitter.lt(idx_as_u32, len_val);
+        let oob = emitter.not(in_bounds);
+
+        let (fail_block, _) = emitter.add_block();
+        let (continue_block, _) = emitter.add_block();
+
+        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, continue_block), fail_block);
+
+        let not_cond = emitter.not(condition);
+        let one = emitter.u_const(1, 1);
+        emitter.emit(OpCode::AssertEq { lhs: not_cond, rhs: one });
+        emitter.seal_and_switch(Terminator::Jmp(continue_block, vec![]), continue_block);
     }
 
     /// Common pattern: branch on a failure condition, constraining !cond in the fail
