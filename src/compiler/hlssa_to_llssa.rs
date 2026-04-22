@@ -1573,7 +1573,9 @@ fn generate_all_lookup_functions(
     ad_fns: &mut AdFunctions,
 ) {
     if let Some(id) = lookup_fns.rngchk_8 {
-        let func = generate_rngchk_8_function();
+        let layout =
+            layout.expect("R1CS layout required to generate __rngchk_8 (witgen path)");
+        let func = generate_rngchk_8_function(layout);
         let _old = llssa.take_function(id);
         llssa.put_function(id, func);
     }
@@ -1610,7 +1612,12 @@ fn generate_all_lookup_functions(
 /// Emits one entry into the LogUp lookup argument for the 8-bit rangecheck
 /// table. Extracts the lowest u64 limb of both `val` and `flag`, bumps the
 /// multiplicity for the indexed table slot, and appends to the lookup tape.
-fn generate_rngchk_8_function() -> LLFunction {
+///
+/// `layout.mults_wit_start` is the absolute witness index where the
+/// rangecheck-8 table's multiplicities begin (rangecheck-8 currently occupies
+/// slot 0 of the multiplicities section, so this equals `multiplicities_start`;
+/// a future second table with its own multiplicities would shift).
+fn generate_rngchk_8_function(layout: R1csLayoutInfo) -> LLFunction {
     let mut func = LLFunction::empty("__rngchk_8".to_string());
     let entry = func.get_entry_id();
 
@@ -1625,8 +1632,14 @@ fn generate_rngchk_8_function() -> LLFunction {
         let flag_limbs = e.field_to_limbs(flag);
         let flag_u64 = e.extract_field(flag_limbs, LLStruct::limbs(), 0);
 
-        // Bump multiplicities[rngchk_8_base + key] += flag_u64
-        e.bump_rngchk8_multiplicity(key, flag_u64);
+        // multiplicities[mults_wit_start + key].low_u64 += flag_u64
+        // Layout knowledge (where the rangecheck-8 multiplicities live in the
+        // pre-commit witness buffer) is baked in at codegen time via `layout`;
+        // the primitive itself is a generic "add to low u64 of buf[idx]".
+        let key_i32 = e.truncate(key, 32);
+        let mults_base_i32 = e.int_const(32, layout.mults_wit_start as u64);
+        let mults_idx = e.int_arith(IntArithOp::Add, mults_base_i32, key_i32);
+        e.witgen_buf_add_low_u64(WitgenBuf::WitnessPreComm, mults_idx, flag_u64);
 
         // Append one tape entry: (table_id=0, key, flag_u64) to (a, b, c).
         // The rangecheck-8 table is always the first table, so its id is the

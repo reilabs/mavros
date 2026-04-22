@@ -543,13 +543,15 @@ pub enum LLOp {
         stream: LookupStream,
         value: ValueId,
     },
-    /// Bump the multiplicity count for the 8-bit rangecheck table:
-    /// `multiplicities_wit[rngchk_8_offset + key] += flag`
-    /// Both `key` and `flag` are u64. The runtime lazily allocates the
-    /// rangecheck-8 table slot on first call.
-    BumpRngchk8Multiplicity {
-        key: ValueId,
-        flag: ValueId,
+    /// In-place accumulate on the low u64 limb of a witgen-buffer slot as
+    /// integer arithmetic (NOT field add): `buf[idx].low_u64 += value`.
+    ///
+    /// Used by Phase 1 to accumulate lookup multiplicities as raw u64 counts,
+    /// which Phase 2 later re-encodes to Montgomery form. `value` is i64.
+    WitgenBufAddLowU64 {
+        buf: WitgenBuf,
+        idx: ValueId,
+        value: ValueId,
     },
 
     // ── Phase 2 primitives (witgen-buffer random access + misc) ─────────
@@ -668,12 +670,12 @@ impl Instruction for LLOp {
 
             // Lookups
             LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
-            LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
 
             // Phase 2
             LLOp::WitgenBufLoad { idx, .. } => vec![idx].into_iter(),
             LLOp::WitgenBufStore { idx, value, .. } => vec![idx, value].into_iter(),
             LLOp::WitgenBufAdd { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::WitgenBufAddLowU64 { idx, value, .. } => vec![idx, value].into_iter(),
             LLOp::FieldInverse { src, .. } => vec![src].into_iter(),
             LLOp::LookupTapeLen { .. } => vec![].into_iter(),
         }
@@ -724,9 +726,9 @@ impl Instruction for LLOp {
             | LLOp::ADWriteConst { .. }
             | LLOp::ADWriteWitness { .. }
             | LLOp::LookupTapeWriteU64 { .. }
-            | LLOp::BumpRngchk8Multiplicity { .. }
             | LLOp::WitgenBufStore { .. }
             | LLOp::WitgenBufAdd { .. }
+            | LLOp::WitgenBufAddLowU64 { .. }
             | LLOp::Trap => vec![].into_iter(),
         }
     }
@@ -809,12 +811,12 @@ impl Instruction for LLOp {
 
             // Lookups
             LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
-            LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
 
             // Phase 2
             LLOp::WitgenBufLoad { idx, .. } => vec![idx].into_iter(),
             LLOp::WitgenBufStore { idx, value, .. } => vec![idx, value].into_iter(),
             LLOp::WitgenBufAdd { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::WitgenBufAddLowU64 { idx, value, .. } => vec![idx, value].into_iter(),
             LLOp::FieldInverse { src, .. } => vec![src].into_iter(),
             LLOp::LookupTapeLen { .. } => vec![].into_iter(),
         }
@@ -912,12 +914,12 @@ impl Instruction for LLOp {
 
             // Lookups
             LLOp::LookupTapeWriteU64 { value, .. } => vec![value].into_iter(),
-            LLOp::BumpRngchk8Multiplicity { key, flag } => vec![key, flag].into_iter(),
 
             // Phase 2 (operands_mut must include result for ops that produce one)
             LLOp::WitgenBufLoad { idx, result, .. } => vec![result, idx].into_iter(),
             LLOp::WitgenBufStore { idx, value, .. } => vec![idx, value].into_iter(),
             LLOp::WitgenBufAdd { idx, value, .. } => vec![idx, value].into_iter(),
+            LLOp::WitgenBufAddLowU64 { idx, value, .. } => vec![idx, value].into_iter(),
             LLOp::FieldInverse { src, result } => vec![result, src].into_iter(),
             LLOp::LookupTapeLen { result } => vec![result].into_iter(),
         }
@@ -1177,9 +1179,6 @@ impl Instruction for LLOp {
             LLOp::LookupTapeWriteU64 { stream, value } => {
                 format!("lookup_tape_write_u64.{} {}", stream, vr(*value))
             }
-            LLOp::BumpRngchk8Multiplicity { key, flag } => {
-                format!("bump_rngchk8_multiplicity {}, {}", vr(*key), vr(*flag))
-            }
 
             // Phase 2
             LLOp::WitgenBufLoad { buf, idx, result } => {
@@ -1190,6 +1189,9 @@ impl Instruction for LLOp {
             }
             LLOp::WitgenBufAdd { buf, idx, value } => {
                 format!("witgen_buf_add.{} {}, {}", buf, vr(*idx), vr(*value))
+            }
+            LLOp::WitgenBufAddLowU64 { buf, idx, value } => {
+                format!("witgen_buf_add_low_u64.{} {}, {}", buf, vr(*idx), vr(*value))
             }
             LLOp::FieldInverse { src, result } => {
                 format!("{} = field.inverse {}", v(*result), vr(*src))

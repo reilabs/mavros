@@ -845,10 +845,6 @@ pub trait LLEmitter {
         self.emit_ll(LLOp::LookupTapeWriteU64 { stream, value });
     }
 
-    fn bump_rngchk8_multiplicity(&mut self, key: ValueId, flag: ValueId) {
-        self.emit_ll(LLOp::BumpRngchk8Multiplicity { key, flag });
-    }
-
     // -- Phase 2 primitives --
 
     fn witgen_buf_load(&mut self, buf: WitgenBuf, idx: ValueId) -> ValueId {
@@ -867,6 +863,11 @@ pub trait LLEmitter {
 
     fn witgen_buf_add(&mut self, buf: WitgenBuf, idx: ValueId, value: ValueId) {
         self.emit_ll(LLOp::WitgenBufAdd { buf, idx, value });
+    }
+
+    /// Integer (not field) low-u64 add: `buf[idx].low_u64 += value`.
+    fn witgen_buf_add_low_u64(&mut self, buf: WitgenBuf, idx: ValueId, value: ValueId) {
+        self.emit_ll(LLOp::WitgenBufAddLowU64 { buf, idx, value });
     }
 
     fn field_inverse(&mut self, src: ValueId) -> ValueId {

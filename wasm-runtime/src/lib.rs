@@ -121,13 +121,12 @@ const WVM_C_CURSOR: usize = 3;
 const WVM_LOOKUPS_A_CURSOR: usize = 4;
 const WVM_LOOKUPS_B_CURSOR: usize = 5;
 const WVM_LOOKUPS_C_CURSOR: usize = 6;
-const WVM_MULTIPLICITIES_BASE: usize = 7;
-const WVM_WITNESS_PRE_BASE: usize = 8;
-const WVM_WITNESS_POST_BASE: usize = 9;
-const WVM_A_BASE: usize = 10;
-const WVM_B_BASE: usize = 11;
-const WVM_C_BASE: usize = 12;
-const WVM_LOOKUPS_A_BASE: usize = 13;
+const WVM_WITNESS_PRE_BASE: usize = 7;
+const WVM_WITNESS_POST_BASE: usize = 8;
+const WVM_A_BASE: usize = 9;
+const WVM_B_BASE: usize = 10;
+const WVM_C_BASE: usize = 11;
+const WVM_LOOKUPS_A_BASE: usize = 12;
 
 // WitgenBuf tags — keep in sync with `witgen_buf_id` in the LLVM codegen.
 const WBUF_WIT_PRE: i32 = 0;
@@ -251,6 +250,24 @@ pub unsafe extern "C" fn __witgen_add(
         *slot.add(3) as i64,
     );
     write_field(slot, old + limbs_to_fr(v0, v1, v2, v3));
+}
+
+/// In-place low-u64 add: `buf[idx].low_u64 += value` as *integer* arithmetic.
+///
+/// NOT field arithmetic: treats the slot's low limb as a plain u64 counter.
+/// Used by Phase 1 to accumulate lookup multiplicities as raw counts; Phase 2
+/// later re-encodes each slot into Montgomery form. Upper limbs are left
+/// untouched (callers guarantee they're zero on first use).
+#[no_mangle]
+pub unsafe extern "C" fn __witgen_add_low_u64(
+    vm_ptr: *mut u8,
+    buf_id: i32,
+    idx: i32,
+    value: i64,
+) {
+    let base = witgen_buf_base(vm_ptr, buf_id);
+    let slot = base.add((idx as usize) * FIELD_LIMBS);
+    *slot = (*slot).wrapping_add(value as u64);
 }
 
 /// Compute `1 / x` in the prime field.

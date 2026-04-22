@@ -37,15 +37,14 @@ const VM_C_PTR_OFFSET: u32 = 12;
 const VM_LOOKUPS_A_PTR_OFFSET: u32 = 16;
 const VM_LOOKUPS_B_PTR_OFFSET: u32 = 20;
 const VM_LOOKUPS_C_PTR_OFFSET: u32 = 24;
-const VM_MULTIPLICITIES_PTR_OFFSET: u32 = 28;
-const VM_WITNESS_PRE_BASE_OFFSET: u32 = 32;
-const VM_WITNESS_POST_BASE_OFFSET: u32 = 36;
-const VM_A_BASE_OFFSET: u32 = 40;
-const VM_B_BASE_OFFSET: u32 = 44;
-const VM_C_BASE_OFFSET: u32 = 48;
-const VM_LOOKUPS_A_BASE_OFFSET: u32 = 52;
+const VM_WITNESS_PRE_BASE_OFFSET: u32 = 28;
+const VM_WITNESS_POST_BASE_OFFSET: u32 = 32;
+const VM_A_BASE_OFFSET: u32 = 36;
+const VM_B_BASE_OFFSET: u32 = 40;
+const VM_C_BASE_OFFSET: u32 = 44;
+const VM_LOOKUPS_A_BASE_OFFSET: u32 = 48;
 /// Total size of the wasm32 witgen VM struct in bytes.
-pub const VM_STRUCT_SIZE: u32 = 56;
+pub const VM_STRUCT_SIZE: u32 = 52;
 
 /// Integer tag the runtime uses to select a witgen buffer in `__witgen_load`
 /// and friends. Kept in sync with the ordering in `wasm-runtime/src/lib.rs`.
@@ -101,11 +100,11 @@ pub struct LLVMCodeGen<'ctx> {
     lookup_tape_write_u64_a_fn: Option<FunctionValue<'ctx>>,
     lookup_tape_write_u64_b_fn: Option<FunctionValue<'ctx>>,
     lookup_tape_write_u64_c_fn: Option<FunctionValue<'ctx>>,
-    bump_rngchk8_multiplicity_fn: Option<FunctionValue<'ctx>>,
     // Phase 2 runtime functions (external, declared in wasm-runtime)
     witgen_load_fn: Option<FunctionValue<'ctx>>,
     witgen_store_fn: Option<FunctionValue<'ctx>>,
     witgen_add_fn: Option<FunctionValue<'ctx>>,
+    witgen_add_low_u64_fn: Option<FunctionValue<'ctx>>,
     field_inverse_fn: Option<FunctionValue<'ctx>>,
     lookup_tape_len_fn: Option<FunctionValue<'ctx>>,
     // AD runtime functions
@@ -153,10 +152,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             lookup_tape_write_u64_a_fn: None,
             lookup_tape_write_u64_b_fn: None,
             lookup_tape_write_u64_c_fn: None,
-            bump_rngchk8_multiplicity_fn: None,
             witgen_load_fn: None,
             witgen_store_fn: None,
             witgen_add_fn: None,
+            witgen_add_low_u64_fn: None,
             field_inverse_fn: None,
             lookup_tape_len_fn: None,
             ad_next_d_coeff_fn: None,
@@ -418,6 +417,23 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Some(Linkage::External),
         ));
 
+        // __witgen_add_low_u64(vm*, buf_id: i32, idx: i32, value: i64) -> void
+        //   computes: buf[idx].low_u64 += value  (integer add, not field)
+        let witgen_add_low_u64_type = void_type.fn_type(
+            &[
+                ptr_type.into(),
+                i32_type.into(),
+                i32_type.into(),
+                self.context.i64_type().into(),
+            ],
+            false,
+        );
+        self.witgen_add_low_u64_fn = Some(self.module.add_function(
+            "__witgen_add_low_u64",
+            witgen_add_low_u64_type,
+            Some(Linkage::External),
+        ));
+
         // __field_inverse(FieldElem) -> FieldElem
         let field_inverse_type = field_type.fn_type(&[field_type.into()], false);
         self.field_inverse_fn = Some(self.module.add_function(
@@ -458,7 +474,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "__lookup_tape_write_u64_c",
                 VM_LOOKUPS_C_PTR_OFFSET,
             ));
-        self.bump_rngchk8_multiplicity_fn = Some(self.define_bump_rngchk8_multiplicity_fn());
     }
 
     /// Define __lookup_tape_write_u64_{a,b,c}(vm*, value: i64):
@@ -520,80 +535,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // *write_pos_ptr = new_ptr
         builder.build_store(write_pos_ptr, new_ptr).unwrap();
-        builder.build_return(None).unwrap();
-
-        function
-    }
-
-    /// Define __bump_rngchk8_multiplicity(vm*, key: i64, flag: i64):
-    ///
-    /// Computes `multiplicities_base[key].low_u64 += flag`. The multiplicities
-    /// buffer is a contiguous array of field elements. For the 8-bit rangecheck
-    /// table, its base pointer is stored at VM_MULTIPLICITIES_PTR_OFFSET and
-    /// always refers to slot 0 of the witness multiplicities section (because
-    /// the rangecheck-8 table is the first — and currently only — lookup table).
-    fn define_bump_rngchk8_multiplicity_fn(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let field_type = self.field_llvm_type();
-        let i64_type = self.context.i64_type();
-        let i32_type = self.context.i32_type();
-
-        let fn_type =
-            void_type.fn_type(&[ptr_type.into(), i64_type.into(), i64_type.into()], false);
-        let function = self.module.add_function(
-            "__bump_rngchk8_multiplicity",
-            fn_type,
-            Some(Linkage::Internal),
-        );
-
-        let entry = self.context.append_basic_block(function, "entry");
-        let builder = self.context.create_builder();
-        builder.position_at_end(entry);
-
-        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-        let key = function.get_nth_param(1).unwrap().into_int_value();
-        let flag = function.get_nth_param(2).unwrap().into_int_value();
-
-        // mults_base = vm->multiplicities_ptr  (read-only; never advances)
-        let mults_base_ptr = unsafe {
-            builder
-                .build_gep(
-                    ptr_type,
-                    vm_ptr,
-                    &[i32_type.const_int((VM_MULTIPLICITIES_PTR_OFFSET / 4) as u64, false)],
-                    "mults_base_ptr_ptr",
-                )
-                .unwrap()
-        };
-        let mults_base = builder
-            .build_load(ptr_type, mults_base_ptr, "mults_base")
-            .unwrap()
-            .into_pointer_value();
-
-        // Narrow key to i32 for GEP (wasm32 indexing).
-        let key_i32 = builder
-            .build_int_truncate(key, i32_type, "key_i32")
-            .unwrap();
-
-        // slot_ptr = &mults_base[key]  (field-element-sized stride)
-        let slot_ptr = unsafe {
-            builder
-                .build_gep(field_type, mults_base, &[key_i32], "slot_ptr")
-                .unwrap()
-        };
-
-        // Read the current low u64 of the slot.
-        let old = builder
-            .build_load(i64_type, slot_ptr, "old")
-            .unwrap()
-            .into_int_value();
-
-        // new = old + flag
-        let new = builder.build_int_add(old, flag, "new").unwrap();
-
-        // Write back.
-        builder.build_store(slot_ptr, new).unwrap();
         builder.build_return(None).unwrap();
 
         function
@@ -1418,17 +1359,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .unwrap();
             }
 
-            LLOp::BumpRngchk8Multiplicity { key, flag } => {
+            LLOp::WitgenBufAddLowU64 { buf, idx, value } => {
                 let vm_ptr = self.vm_ptr.unwrap();
-                let key_val = self.value_map[key];
-                let flag_val = self.value_map[flag];
-                let bump_fn = self
-                    .bump_rngchk8_multiplicity_fn
-                    .expect("bump_rngchk8_multiplicity fn not declared");
+                let i32_type = self.context.i32_type();
+                let buf_id = i32_type.const_int(witgen_buf_id(*buf) as u64, false);
+                let idx_val = self.value_map[idx];
+                let v = self.value_map[value];
+                let add_fn = self
+                    .witgen_add_low_u64_fn
+                    .expect("__witgen_add_low_u64 not declared");
                 self.builder
                     .build_call(
-                        bump_fn,
-                        &[vm_ptr.into(), key_val.into(), flag_val.into()],
+                        add_fn,
+                        &[vm_ptr.into(), buf_id.into(), idx_val.into(), v.into()],
                         "",
                     )
                     .unwrap();

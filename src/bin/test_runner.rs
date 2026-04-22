@@ -11,8 +11,9 @@ use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
 use mavros::{
-    Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
-    vm::interpreter,
+    Project, abi_helpers, compiler::Field,
+    compiler::llssa_llvm_codegen::VM_STRUCT_SIZE as WITGEN_VM_STRUCT_SIZE,
+    compiler::r1cs_gen::R1CS, driver::Driver, vm::interpreter,
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -438,17 +439,18 @@ fn run_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    // 14 u32 pointers = 56 bytes. Cursors (witness, a, b, c, lookups_a/b/c) and
-    // bases (multiplicities, wit_pre, wit_post, a_base, b_base, c_base,
-    // lookups_a_base). Phase 2 needs the bases for random-access reads.
-    let vm_struct_size: u32 = 56;
+    // 13 u32 pointers. Cursors (witness, a, b, c, lookups_a/b/c) and
+    // bases (wit_pre, wit_post, a_base, b_base, c_base, lookups_a_base).
+    // Phase 2 needs the bases for random-access reads. Kept in sync with
+    // `VM_STRUCT_SIZE` in `src/compiler/llssa_llvm_codegen.rs`.
+    let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
 
-    // Offsets (in field elements) into the shared buffers for lookups/multiplicities.
+    // Offset (in field elements) into the shared a/b/c buffers for lookup tapes,
+    // and into witness for the post-commitment section.
     let lookups_offset_bytes = (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
-    let mults_offset_bytes = (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
     let wit_post_offset_bytes = (r1cs.witness_layout.challenges_start() * FIELD_SIZE) as u32;
 
     // Create wasmtime engine and store
@@ -497,15 +499,14 @@ fn run_wasm(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
-    // Lookups/multiplicities share buffers with a/b/c/witness at known offsets.
+    // Lookup tapes share buffers with a/b/c at known offsets.
     let lookups_a_ptr = a_ptr + lookups_offset_bytes;
     let lookups_b_ptr = b_ptr + lookups_offset_bytes;
     let lookups_c_ptr = c_ptr + lookups_offset_bytes;
-    let multiplicities_ptr = witness_ptr + mults_offset_bytes;
     let wit_post_ptr = witness_ptr + wit_post_offset_bytes;
 
     // Initialize VM struct with buffer pointers. The first 7 slots are cursors
-    // Phase 1 advances; the remaining 7 are immutable bases Phase 2 reads.
+    // Phase 1 advances; the remaining 6 are immutable bases Phase 2 reads.
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
@@ -518,13 +519,12 @@ fn run_wasm(
         data[off + 20..off + 24].copy_from_slice(&lookups_b_ptr.to_le_bytes());
         data[off + 24..off + 28].copy_from_slice(&lookups_c_ptr.to_le_bytes());
         // Immutable bases for Phase 2 random access.
-        data[off + 28..off + 32].copy_from_slice(&multiplicities_ptr.to_le_bytes());
-        data[off + 32..off + 36].copy_from_slice(&witness_ptr.to_le_bytes()); // wit_pre base
-        data[off + 36..off + 40].copy_from_slice(&wit_post_ptr.to_le_bytes()); // wit_post base
-        data[off + 40..off + 44].copy_from_slice(&a_ptr.to_le_bytes());
-        data[off + 44..off + 48].copy_from_slice(&b_ptr.to_le_bytes());
-        data[off + 48..off + 52].copy_from_slice(&c_ptr.to_le_bytes());
-        data[off + 52..off + 56].copy_from_slice(&lookups_a_ptr.to_le_bytes()); // tape A base
+        data[off + 28..off + 32].copy_from_slice(&witness_ptr.to_le_bytes()); // wit_pre base
+        data[off + 32..off + 36].copy_from_slice(&wit_post_ptr.to_le_bytes()); // wit_post base
+        data[off + 36..off + 40].copy_from_slice(&a_ptr.to_le_bytes());
+        data[off + 40..off + 44].copy_from_slice(&b_ptr.to_le_bytes());
+        data[off + 44..off + 48].copy_from_slice(&c_ptr.to_le_bytes());
+        data[off + 48..off + 52].copy_from_slice(&lookups_a_ptr.to_le_bytes()); // tape A base
     }
 
     // Write Fiat-Shamir challenges into the post-commitment witness slot(s)
