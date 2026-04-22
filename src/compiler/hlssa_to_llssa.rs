@@ -671,6 +671,54 @@ fn lower_instruction(
             }
         }
 
+        OpCode::Truncate {
+            result,
+            value,
+            to_bits,
+            from_bits: _,
+        } => {
+            assert!(*to_bits <= 64, "Truncate to_bits > 64 not supported");
+            let ll_value = val_map[value];
+            let source_type = fn_type_info.get_value_type(*value);
+            let to_bits = *to_bits as u32;
+            let mask64: u64 = if to_bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << to_bits) - 1
+            };
+
+            let ll_result = match &source_type.expr {
+                TypeExpr::Field => {
+                    let limbs = e.field_to_limbs(ll_value);
+                    let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
+                    let masked_low = if to_bits == 64 {
+                        limb0
+                    } else {
+                        let mask = e.int_const(64, mask64);
+                        e.int_arith(IntArithOp::And, limb0, mask)
+                    };
+                    let zero = e.int_const(64, 0);
+                    let new_limbs =
+                        e.mk_struct(LLStruct::limbs(), vec![masked_low, zero, zero, zero]);
+                    e.field_from_limbs(new_limbs)
+                }
+                TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                    let bits = *bits as u32;
+                    if to_bits >= bits {
+                        ll_value
+                    } else {
+                        let mask = e.int_const(bits, mask64);
+                        e.int_arith(IntArithOp::And, ll_value, mask)
+                    }
+                }
+                _ => panic!(
+                    "Unsupported source type for Truncate in HLSSA->LLSSA lowering: {}",
+                    source_type
+                ),
+            };
+            val_map.insert(*result, ll_result);
+        }
+
         OpCode::Spread { result, value, .. }
         | OpCode::Unspread {
             result_odd: result,
