@@ -118,6 +118,26 @@ impl Value {
         }
     }
 
+    /// Interpret a u128 two's-complement value as signed i128 for `bits` width.
+    fn to_signed(val: u128, bits: usize) -> i128 {
+        let mask = Self::bit_mask(bits);
+        let val = val & mask;
+        if bits == 128 {
+            return val as i128;
+        }
+        let sign_bit = 1u128 << (bits - 1);
+        if val & sign_bit != 0 {
+            (val | !mask) as i128
+        } else {
+            val as i128
+        }
+    }
+
+    /// Store a signed result back as u128 masked to `bits` width.
+    fn from_signed(val: i128, bits: usize) -> u128 {
+        (val as u128) & Self::bit_mask(bits)
+    }
+
     fn unwrap_witness(&self) -> &Value {
         match self {
             Value::WitnessOf(inner) => inner.as_ref(),
@@ -133,7 +153,8 @@ impl Value {
     ) -> Value {
         match cmp_kind {
             CmpKind::Eq => match (self, b) {
-                (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a == b { 1 } else { 0 }),
+                (Value::U(_, a), Value::U(_, b))
+                | (Value::I(_, a), Value::I(_, b)) => Value::U(1, if a == b { 1 } else { 0 }),
                 (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     instrumenter.record_constraints(1);
@@ -148,6 +169,10 @@ impl Value {
             },
             CmpKind::Lt => match (self, b) {
                 (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
+                (Value::I(s, a), Value::I(_, b)) => {
+                    let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
+                    Value::U(1, if sa < sb { 1 } else { 0 })
+                }
                 (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     instrumenter.record_constraints(1);
@@ -172,6 +197,7 @@ impl Value {
         match binary_arith_op_kind {
             BinaryArithOpKind::Add => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a + b),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, Self::from_signed(Self::to_signed(*a, *s).wrapping_add(Self::to_signed(*b, *s)), *s)),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -185,6 +211,7 @@ impl Value {
             },
             BinaryArithOpKind::Sub => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a - b),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, Self::from_signed(Self::to_signed(*a, *s).wrapping_sub(Self::to_signed(*b, *s)), *s)),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a - b),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -201,6 +228,7 @@ impl Value {
                 (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a * b),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, Self::from_signed(Self::to_signed(*a, *s).wrapping_mul(Self::to_signed(*b, *s)), *s)),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
                 (Value::WitnessOf(a), Value::WitnessOf(b)) => match (a.as_ref(), b.as_ref()) {
                     (Value::Unknown(_), Value::Unknown(_)) => {
@@ -229,6 +257,10 @@ impl Value {
             },
             BinaryArithOpKind::Div => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a / b),
+                (Value::I(s, a), Value::I(_, b)) => {
+                    let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
+                    Value::I(*s, Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_div(sb) }, *s))
+                }
                 (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
                 (_, Value::WitnessOf(b)) => match b.as_ref() {
                     Value::Unknown(_) => {
@@ -255,6 +287,10 @@ impl Value {
             },
             BinaryArithOpKind::Mod => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a % b),
+                (Value::I(s, a), Value::I(_, b)) => {
+                    let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
+                    Value::I(*s, Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s))
+                }
                 (_, Value::WitnessOf(b)) => match b.as_ref() {
                     Value::Unknown(_) => {
                         instrumenter.record_constraints(1);
@@ -280,6 +316,7 @@ impl Value {
             },
             BinaryArithOpKind::And => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a & b) & Self::bit_mask(*s)),
                 (Value::Field(_), Value::Field(_)) => todo!(),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -293,6 +330,7 @@ impl Value {
             },
             BinaryArithOpKind::Or => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a | b),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a | b) & Self::bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -305,6 +343,7 @@ impl Value {
             },
             BinaryArithOpKind::Xor => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a ^ b),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a ^ b) & Self::bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -317,6 +356,10 @@ impl Value {
             },
             BinaryArithOpKind::Shl => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a << b),
+                (Value::I(s, a), Value::I(_, b)) => {
+                    let shift = Self::to_signed(*b, *s) as u32;
+                    Value::I(*s, if shift as usize >= *s { 0 } else { (a << shift) & Self::bit_mask(*s) })
+                }
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -329,6 +372,16 @@ impl Value {
             },
             BinaryArithOpKind::Shr => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a >> b),
+                (Value::I(s, a), Value::I(_, b)) => {
+                    let sa = Self::to_signed(*a, *s);
+                    let shift = Self::to_signed(*b, *s);
+                    Value::I(*s, if shift < 0 || shift as usize >= *s {
+                        // Over-shift: result is 0 or -1 depending on sign
+                        Self::from_signed(if sa < 0 { -1 } else { 0 }, *s)
+                    } else {
+                        Self::from_signed(sa >> (shift as u32), *s)
+                    })
+                }
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),

@@ -211,7 +211,7 @@ impl LowerPureGuards {
             OpCode::Truncate { result, value, to_bits, from_bits }
                 if self.all_inputs_pure(&inner, type_info) =>
             {
-                self.desugar_truncate_guard(emitter, condition, result, value, to_bits, from_bits);
+                self.desugar_truncate_guard(emitter, condition, result, value, to_bits, from_bits, type_info);
             }
 
             // -- SExt: keep as Guard (ExplicitWitness handles it) --
@@ -399,8 +399,15 @@ impl LowerPureGuards {
         value: ValueId,
         to_bits: usize,
         from_bits: usize,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
-        let max_val = emitter.u_const(from_bits, 1u128 << to_bits);
+        let value_type = type_info.get_value_type(value);
+        let signed = matches!(value_type.strip_witness().expr, TypeExpr::I(_));
+        let max_val = if signed {
+            emitter.i_const(from_bits, 1u128 << to_bits)
+        } else {
+            emitter.u_const(from_bits, 1u128 << to_bits)
+        };
         let fits = emitter.lt(value, max_val);
         let overflow = emitter.not(fits);
 
