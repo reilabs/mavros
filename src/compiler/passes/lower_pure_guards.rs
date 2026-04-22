@@ -261,29 +261,32 @@ impl LowerPureGuards {
                 });
             }
 
-            // -- ArraySet: lower with OOB check only if index is pure.
-            // Witness index → keep as Guard (can't branch on witness OOB condition).
+            // -- ArraySet: lower with OOB check only if index is pure and type is array (not slice).
             OpCode::ArraySet {
                 result,
                 array,
                 index,
                 value,
-            } if !type_info.get_value_type(index).is_witness_of() => {
+            } if !type_info.get_value_type(index).is_witness_of()
+                && type_info.get_value_type(array).strip_witness().is_array() =>
+            {
                 self.lower_array_set_guard(
                     emitter, condition, result, array, index, value, type_info,
                 );
             }
 
-            // -- ArrayGet: lower with OOB check only if index is pure.
+            // -- ArrayGet: lower with OOB check only if index is pure and type is array (not slice).
             OpCode::ArrayGet {
                 result,
                 array,
                 index,
-            } if !type_info.get_value_type(index).is_witness_of() => {
+            } if !type_info.get_value_type(index).is_witness_of()
+                && type_info.get_value_type(array).strip_witness().is_array() =>
+            {
                 self.lower_array_get_guard(emitter, condition, result, array, index, type_info);
             }
 
-            // ArrayGet/ArraySet with witness index: keep as Guard
+            // ArrayGet/ArraySet with witness index or slice type: keep as Guard
             OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => {
                 emitter.emit(OpCode::Guard {
                     condition,
@@ -593,7 +596,10 @@ impl LowerPureGuards {
             TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
             TypeExpr::U(bits) => emitter.u_const(*bits, 0),
             TypeExpr::I(bits) => emitter.i_const(*bits, 0),
-            // Bool is represented as U(1)
+            TypeExpr::WitnessOf(inner) => {
+                let inner_val = self.default_scalar(emitter, inner);
+                emitter.cast_to(CastTarget::WitnessOf, inner_val)
+            }
             other => panic!(
                 "LowerPureGuards: cannot produce default for non-scalar element type: {:?}",
                 other
