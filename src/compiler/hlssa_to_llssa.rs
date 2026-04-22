@@ -1960,6 +1960,23 @@ fn generate_run_phase2_function(layout: R1csLayoutInfo) -> LLFunction {
                     },
                     |else_e| {
                         let ix_u64 = load_raw_low_u64(else_e, WitgenBuf::B, cnst_off);
+                        // Bounds-check: the tape is prover-internal state, so
+                        // an out-of-range index here means a compiler bug in
+                        // whichever pass produced this tape entry (there is
+                        // no trust boundary to defend against). Trap with a
+                        // crisp failure rather than letting the index alias
+                        // some unrelated witness slot or OOB the buffer.
+                        let table_len_u64 = else_e.int_const(64, table_len as u64);
+                        let in_bounds = else_e.int_ult(ix_u64, table_len_u64);
+                        else_e.build_if_else(
+                            in_bounds,
+                            vec![],
+                            |_ok_e| vec![],
+                            |bad_e| {
+                                bad_e.trap();
+                                vec![]
+                            },
+                        );
                         let ix_i32 = else_e.truncate(ix_u64, 32);
                         let tbl_idx = else_e.int_arith(IntArithOp::Add, base_cnst_i32, ix_i32);
                         let y_a = else_e.witgen_buf_load(WitgenBuf::A, tbl_idx);

@@ -1192,6 +1192,18 @@ mod def {
         unsafe { ad_kv_lookup_emit(table_idx, val, result, flag, vm) };
     }
 
+    /// Emit one entry into the 8-bit LogUp rangecheck table.
+    ///
+    /// `flag` is a LogUp multiplicity/weight, not a boolean gate:
+    /// - `flag = 0` means inactive lookup (no contribution to the sum);
+    /// - `flag = k != 0` means the lookup contributes weight `k` and the
+    ///   prover must set `multiplicities[val] += k` to balance.
+    ///
+    /// Booleanity of `flag` — when the caller's source-level semantics
+    /// require it, e.g. a Noir `if cond { ... }` guard — is enforced
+    /// upstream at the lowering level (via the u1 cast's `v² = v`
+    /// rangecheck), not here. Passing a non-boolean weight is well-defined
+    /// for the lookup argument itself.
     #[opcode]
     fn rngchk_8_field(#[frame] val: Field, #[frame] flag: Field, vm: &mut VM) {
         if vm.rgchk_8.is_none() {
@@ -1216,8 +1228,22 @@ mod def {
                 vm.data.as_forward.elem_inverses_witness_section_offset += 256;
             }
         }
-        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
+        let flag_bigint = ark_ff::PrimeField::into_bigint(flag);
+        let val_bigint = ark_ff::PrimeField::into_bigint(val);
+        // Guard callers from silently losing high bits: this opcode only
+        // looks at the low u64 limb. Soundness is already enforced by the
+        // per-query R1CS constraint, but a non-small input here would
+        // offset `multiplicities_wit` out of bounds, so fail loudly.
+        assert!(
+            val_bigint.0[0] < 256 && val_bigint.0[1..] == [0u64; 3],
+            "rngchk_8_field: val {val} does not fit in 8 bits",
+        );
+        assert!(
+            flag_bigint.0[1..] == [0u64; 3],
+            "rngchk_8_field: flag {flag} does not fit in a u64",
+        );
+        let flag_u64 = flag_bigint.0[0];
+        let val_u64 = val_bigint.0[0];
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
         unsafe {
