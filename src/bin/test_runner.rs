@@ -235,7 +235,7 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.into_path().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, Some((wasm_path.clone(), r1cs))) {
+        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)

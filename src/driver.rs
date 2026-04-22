@@ -430,7 +430,8 @@ impl Driver {
     pub fn compile_llvm_targets(
         &mut self,
         emit_llvm: bool,
-        wasm_config: Option<(std::path::PathBuf, &R1CS)>,
+        r1cs: &R1CS,
+        wasm_path: Option<std::path::PathBuf>,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::hlssa_to_llssa;
         use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
@@ -451,28 +452,23 @@ impl Driver {
         )
         .unwrap();
 
-        // If we have R1CS in hand, pass its layout through so the lowering can
-        // generate the Phase 2 helper. (Witgen only — the AD path has its own
-        // separate layout wiring below.)
-        let witgen_layout = wasm_config
-            .as_ref()
-            .map(|(_, r1cs)| hlssa_to_llssa::R1csLayoutInfo {
-                tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
-                tables_wit_start: r1cs.witness_layout.tables_data_start(),
-                mults_wit_start: r1cs.witness_layout.multiplicities_start(),
-                logup_challenge_off: r1cs.witness_layout.challenges_start(),
-                lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
-                lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
-                mode: hlssa_to_llssa::LoweringMode::Witgen,
-            });
-
-        // Lower HLSSA → LLSSA
-        let llssa = match witgen_layout {
-            Some(layout) => {
-                hlssa_to_llssa::lower_with_layout(ssa, &flow_analysis, &type_info, layout)
-            }
-            None => hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info),
+        // Layout is required whenever the program contains lookup opcodes —
+        // whether or not we're emitting WASM. Thread it through unconditionally
+        // now that `r1cs` is a required parameter; previously this was gated
+        // on the WASM path and `--emit-llvm` alone would panic on lookup-using
+        // programs.
+        let witgen_layout = hlssa_to_llssa::R1csLayoutInfo {
+            tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
+            tables_wit_start: r1cs.witness_layout.tables_data_start(),
+            mults_wit_start: r1cs.witness_layout.multiplicities_start(),
+            logup_challenge_off: r1cs.witness_layout.challenges_start(),
+            lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
+            lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
+            mode: hlssa_to_llssa::LoweringMode::Witgen,
         };
+
+        let llssa =
+            hlssa_to_llssa::lower_with_layout(ssa, &flow_analysis, &type_info, witgen_layout);
 
         // Dump LLSSA after lowering
         fs::write(
@@ -496,7 +492,7 @@ impl Driver {
             None
         };
 
-        if let Some((wasm_path, r1cs)) = wasm_config {
+        if let Some(wasm_path) = wasm_path {
             codegen.write_ir(&wasm_path.with_extension("ll"));
             codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
             info!(message = %"WASM object generated", path = %wasm_path.display());

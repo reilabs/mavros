@@ -366,6 +366,17 @@ fn lower_inner(
     // Third pass: generate drop function bodies
     generate_all_drop_functions(&mut llssa, &drop_fns);
 
+    // If the DLookup AD-call helper was registered during the second pass, it
+    // will need the AD bump dispatch functions. `generate_drngchk_8_ad_call`
+    // calls `ad_fns.get_bump_fn(...)` inside `generate_all_lookup_functions`,
+    // which lazily allocates the bump FunctionIds. If we let that happen
+    // *after* `generate_all_ad_functions` runs, the bumps would get
+    // FunctionIds but never bodies. Pre-allocate them now so the body-emit
+    // pass sees them.
+    if lookup_fns.drngchk_8_call.is_some() {
+        ad_fns.ensure_bumps(&mut llssa);
+    }
+
     // Fourth pass: generate AD dispatch function bodies
     generate_all_ad_functions(&mut llssa, &ad_fns);
 
