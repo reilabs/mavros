@@ -605,6 +605,7 @@ impl Value {
                 Value::WitnessOf(Box::new(inner.truncate_op(_from, to, _instrumenter)))
             }
             Value::U(_, v) => Value::U(to, v & ((1 << to) - 1)),
+            Value::I(_, v) => Value::I(to, v & ((1 << to) - 1)),
             Value::Field(f) => {
                 let bits = f
                     .into_bigint()
