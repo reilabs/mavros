@@ -197,7 +197,7 @@ impl Value {
     ) -> Value {
         match binary_arith_op_kind {
             BinaryArithOpKind::Add => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a + b),
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_add(*b) & Self::bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -217,7 +217,7 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             BinaryArithOpKind::Sub => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a - b),
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_sub(*b) & Self::bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -240,7 +240,7 @@ impl Value {
                 (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
                 (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a * b),
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_mul(*b) & Self::bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -380,7 +380,7 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             BinaryArithOpKind::Shl => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a << b),
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, if *b as usize >= *s { 0 } else { (a << b) & Self::bit_mask(*s) }),
                 (Value::I(s, a), Value::I(_, b)) => {
                     let shift = Self::to_signed(*b, *s) as u32;
                     Value::I(
