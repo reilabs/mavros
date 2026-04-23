@@ -17,8 +17,8 @@ use crate::compiler::{
 ///
 /// Classification:
 /// - **Always unwrap** (no constraints, no side effects, can't fail):
-///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, ExtractTupleField, MkTuple,
-///   MkSeq, Load, Select, Field arith, etc.
+///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, Truncate, ExtractTupleField,
+///   MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 /// - **Lower with OOB check** (can fail on out-of-bounds index):
 ///   ArrayGet — bounds-check index, assert !cond on OOB, then execute unconditionally.
 /// - **Lower with OOB check + value select** (RC-tracked allocation):
@@ -26,12 +26,10 @@ use crate::compiler::{
 /// - **Lower with overflow check** (pure inputs only, can fail):
 ///   Integer Add/Sub/Mul/Shl — widen, compute, check overflow, constrain !cond on fail.
 /// - **Lower with div-zero check** (pure inputs only, can fail):
-///   Integer Div/Mod.
-/// - **Lower with range check** (pure inputs only, can fail):
-///   Truncate.
+///   Div/Mod (integer and Field).
 /// - **Keep as Guard** (side-effectful or generates constraints):
 ///   Store, Call, WriteWitness, AssertEq, AssertR1C, Constrain, Rangecheck,
-///   and failable ops with witness inputs (Truncate, SExt, integer arith).
+///   and failable ops with witness inputs (SExt, integer arith).
 pub struct LowerPureGuards {}
 
 impl Pass for LowerPureGuards {
@@ -226,16 +224,9 @@ impl LowerPureGuards {
                 }
             }
 
-            // -- Truncate: lossy narrowing, lower only if pure inputs --
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits,
-                from_bits,
-            } if self.all_inputs_pure(&inner, type_info) => {
-                self.lower_truncate_guard(
-                    emitter, condition, result, value, to_bits, from_bits, type_info,
-                );
+            // -- Truncate: pure bit-narrowing, can't fail → always unwrap --
+            OpCode::Truncate { .. } => {
+                emitter.emit(inner);
             }
 
             // -- SExt: keep as Guard (ExplicitWitness handles it) --
@@ -246,40 +237,28 @@ impl LowerPureGuards {
                 });
             }
 
-            // Truncate with witness inputs: keep as Guard
-            OpCode::Truncate { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
-
-            // -- ArraySet: lower with OOB check only if index is pure and type is array (not slice).
+            // -- ArraySet: lower with OOB check if index is pure.
             OpCode::ArraySet {
                 result,
                 array,
                 index,
                 value,
-            } if !type_info.get_value_type(index).is_witness_of()
-                && type_info.get_value_type(array).strip_witness().is_array() =>
-            {
+            } if !type_info.get_value_type(index).is_witness_of() => {
                 self.lower_array_set_guard(
                     emitter, condition, result, array, index, value, type_info,
                 );
             }
 
-            // -- ArrayGet: lower with OOB check only if index is pure and type is array (not slice).
+            // -- ArrayGet: lower with OOB check if index is pure.
             OpCode::ArrayGet {
                 result,
                 array,
                 index,
-            } if !type_info.get_value_type(index).is_witness_of()
-                && type_info.get_value_type(array).strip_witness().is_array() =>
-            {
+            } if !type_info.get_value_type(index).is_witness_of() => {
                 self.lower_array_get_guard(emitter, condition, result, array, index, type_info);
             }
 
-            // ArrayGet/ArraySet with witness index or slice type: keep as Guard
+            // ArrayGet/ArraySet with witness index: keep as Guard
             OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => {
                 emitter.emit(OpCode::Guard {
                     condition,
@@ -469,49 +448,6 @@ impl LowerPureGuards {
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![r]), merge_block);
     }
 
-    /// Lower `Guard(cond, Truncate(value, to_bits, from_bits) -> result)`.
-    fn lower_truncate_guard(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        condition: ValueId,
-        original_result: ValueId,
-        value: ValueId,
-        to_bits: usize,
-        from_bits: usize,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-    ) {
-        let value_type = type_info.get_value_type(value);
-        let (bits, signed) = match &value_type.strip_witness().expr {
-            TypeExpr::I(b) => (*b, true),
-            TypeExpr::U(b) => (*b, false),
-            _ => panic!(
-                "LowerPureGuards: Truncate on non-integer type: {:?}",
-                value_type
-            ),
-        };
-        let max_val = if signed {
-            emitter.i_const(from_bits, 1u128 << to_bits)
-        } else {
-            emitter.u_const(from_bits, 1u128 << to_bits)
-        };
-        let fits = emitter.lt(value, max_val);
-        let overflow = emitter.not(fits);
-
-        // Truncate preserves source type in TypeInfo, so the merge block must match.
-        let result_type = value_type.strip_witness().clone();
-
-        self.emit_guarded_branch(
-            emitter,
-            condition,
-            overflow,
-            original_result,
-            &result_type,
-            |e| e.truncate(value, to_bits, from_bits),
-            signed,
-            bits,
-        );
-    }
-
     /// Lower `Guard(cond, ArraySet(array, idx, val) -> result)`.
     ///
     /// Pattern:
@@ -579,8 +515,8 @@ impl LowerPureGuards {
     ) {
         let array_type = type_info.get_value_type(array);
         let elem_type = match &array_type.strip_witness().expr {
-            TypeExpr::Array(elem, _) => (**elem).clone(),
-            other => panic!("LowerPureGuards: ArrayGet on non-array type: {:?}", other),
+            TypeExpr::Array(elem, _) | TypeExpr::Slice(elem) => (**elem).clone(),
+            other => panic!("LowerPureGuards: ArrayGet on non-seq type: {:?}", other),
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
@@ -610,21 +546,22 @@ impl LowerPureGuards {
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![get_result]), merge_block);
     }
 
-    /// Compute the OOB condition: idx >= len(array). Returns a bool ValueId.
+    /// Compute the OOB condition: idx >= len(seq). Returns a bool ValueId.
+    /// Works for both arrays (static length) and slices (runtime SliceLen).
     fn emit_oob_cond(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
-        array: ValueId,
+        seq: ValueId,
         index: ValueId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) -> ValueId {
-        let array_type = type_info.get_value_type(array);
-        let arr_len = match &array_type.strip_witness().expr {
-            TypeExpr::Array(_, len) => *len,
-            other => panic!("LowerPureGuards: array op on non-array type: {:?}", other),
+        let seq_type = type_info.get_value_type(seq);
+        let len_val = match &seq_type.strip_witness().expr {
+            TypeExpr::Array(_, len) => emitter.u_const(32, *len as u128),
+            TypeExpr::Slice(_) => emitter.slice_len(seq),
+            other => panic!("LowerPureGuards: seq op on non-seq type: {:?}", other),
         };
 
-        let len_val = emitter.u_const(32, arr_len as u128);
         let idx_type = type_info.get_value_type(index);
         let idx_as_u32 = if matches!(idx_type.strip_witness().expr, TypeExpr::U(32)) {
             index
