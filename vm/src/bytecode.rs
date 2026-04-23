@@ -632,7 +632,11 @@ mod def {
     #[opcode]
     fn truncate_u64(#[out] res: *mut u64, #[frame] a: u64, to_bits: u64) {
         unsafe {
-            let mask = if to_bits >= 64 { u64::MAX } else { (1u64 << to_bits) - 1 };
+            let mask = if to_bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << to_bits) - 1
+            };
             *res = a & mask;
         }
     }
@@ -641,7 +645,11 @@ mod def {
     fn truncate_f_to_u(#[out] res: *mut Field, #[frame] a: Field, to_bits: u64) {
         unsafe {
             let limb0 = ark_ff::PrimeField::into_bigint(a).0[0];
-            let mask = if to_bits >= 64 { u64::MAX } else { (1u64 << to_bits) - 1 };
+            let mask = if to_bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << to_bits) - 1
+            };
             *res = From::from(limb0 & mask);
         }
     }

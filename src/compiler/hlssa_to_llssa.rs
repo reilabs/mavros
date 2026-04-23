@@ -629,6 +629,15 @@ fn lower_instruction(
         } => {
             let ll_value = val_map[value];
             let source_type = fn_type_info.get_value_type(*value);
+            let result_type = fn_type_info.get_value_type(*result);
+            if source_type.is_witness_of()
+                && result_type.is_witness_of()
+                && !matches!(target, CastTarget::WitnessOf)
+            {
+                // WitnessOf(A) → WitnessOf(B): no-op at runtime (both are AD refs)
+                val_map.insert(*result, ll_value);
+                return;
+            }
             match target {
                 CastTarget::WitnessOf => {
                     // Pure value → AD constant node

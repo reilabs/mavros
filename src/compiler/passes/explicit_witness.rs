@@ -231,8 +231,10 @@ impl ExplicitWitness {
                                 let always_flag = b.field_const(Field::ONE);
 
                                 // Extract sign bits (always active, not gated)
-                                let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
-                                let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
+                                let sign_a =
+                                    self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
+                                let sign_b =
+                                    self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
 
                                 // signs_differ = sign_a XOR sign_b = sign_a + sign_b - 2*sign_a*sign_b
                                 let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
