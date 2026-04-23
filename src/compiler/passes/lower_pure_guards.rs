@@ -401,43 +401,25 @@ impl LowerPureGuards {
         lhs_type: &Type,
     ) {
         let stripped = lhs_type.strip_witness();
-        let zero = match &stripped.expr {
+        let zero_val = match &stripped.expr {
             TypeExpr::U(b) => emitter.u_const(*b, 0),
             TypeExpr::I(b) => emitter.i_const(*b, 0),
             TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
             _ => unreachable!(),
         };
-        let is_zero = emitter.eq(rhs, zero);
+        let is_zero = emitter.eq(rhs, zero_val);
 
-        let result_type = stripped.clone();
-
-        let (fail_block, _) = emitter.add_block();
-        let (ok_block, _) = emitter.add_block();
-        let (merge_block, _) = emitter.add_block();
-
-        emitter
-            .function
-            .get_block_mut(merge_block)
-            .push_parameter(original_result, result_type);
-
-        emitter.seal_and_switch(Terminator::JmpIf(is_zero, fail_block, ok_block), fail_block);
-
-        // Fail: constrain !cond, produce default zero
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
+        // Assert unconditionally: is_zero && condition must be false
+        let failure_and_cond = emitter.and(is_zero, condition);
+        let zero_u1 = emitter.u_const(1, 0);
         emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
+            lhs: failure_and_cond,
+            rhs: zero_u1,
         });
-        let default_val = match &stripped.expr {
-            TypeExpr::U(b) => emitter.u_const(*b, 0),
-            TypeExpr::I(b) => emitter.i_const(*b, 0),
-            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
-            _ => unreachable!(),
-        };
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
 
-        // Ok: perform the div/mod
+        // Perform the div/mod unconditionally (divisor may be zero, but the
+        // assertion above guarantees this only happens in dead code where
+        // condition is false).
         let r = emitter.fresh_value();
         emitter.emit(OpCode::BinaryArithOp {
             kind,
@@ -445,15 +427,29 @@ impl LowerPureGuards {
             lhs,
             rhs,
         });
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![r]), merge_block);
+
+        // Select: use computed result if divisor is non-zero, otherwise default
+        let not_zero = emitter.not(is_zero);
+        let default_val = match &stripped.expr {
+            TypeExpr::U(b) => emitter.u_const(*b, 0),
+            TypeExpr::I(b) => emitter.i_const(*b, 0),
+            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
+            _ => unreachable!(),
+        };
+        emitter.emit(OpCode::Select {
+            result: original_result,
+            cond: not_zero,
+            if_t: r,
+            if_f: default_val,
+        });
     }
 
     /// Lower `Guard(cond, ArraySet(array, idx, val) -> result)`.
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
-    ///   if oob { assert !cond; result = array }
-    ///   else   { result = array_set(array, idx, value) }
+    ///   assert !(oob && cond)
+    ///   if oob { result = array } else { result = array_set(array, idx, value) }
     fn lower_array_set_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -467,6 +463,14 @@ impl LowerPureGuards {
         let array_type = type_info.get_value_type(array).strip_witness().clone();
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
+        // Assert unconditionally: oob && condition must be false
+        let oob_and_cond = emitter.and(oob, condition);
+        let zero = emitter.u_const(1, 0);
+        emitter.emit(OpCode::AssertEq {
+            lhs: oob_and_cond,
+            rhs: zero,
+        });
+
         let (fail_block, _) = emitter.add_block();
         let (ok_block, _) = emitter.add_block();
         let (merge_block, _) = emitter.add_block();
@@ -478,13 +482,7 @@ impl LowerPureGuards {
 
         emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, ok_block), fail_block);
 
-        // OOB: assert !cond, pass through original array
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
-        });
+        // OOB: pass through original array (assertion already emitted above)
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![array]), ok_block);
 
         // In-bounds: do the set
@@ -501,9 +499,8 @@ impl LowerPureGuards {
     /// Lower `Guard(cond, ArrayGet(array, idx) -> result)`.
     ///
     /// Pattern:
-    ///   oob = idx >= len(array)
-    ///   if oob { assert !cond; result = default }
-    ///   else   { result = array_get(array, idx) }
+    ///   assert !(oob && cond)
+    ///   if oob { result = default } else { result = array_get(array, idx) }
     fn lower_array_get_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -520,6 +517,14 @@ impl LowerPureGuards {
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
+        // Assert unconditionally: oob && condition must be false
+        let oob_and_cond = emitter.and(oob, condition);
+        let zero = emitter.u_const(1, 0);
+        emitter.emit(OpCode::AssertEq {
+            lhs: oob_and_cond,
+            rhs: zero,
+        });
+
         let (fail_block, _) = emitter.add_block();
         let (ok_block, _) = emitter.add_block();
         let (merge_block, _) = emitter.add_block();
@@ -531,13 +536,7 @@ impl LowerPureGuards {
 
         emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, ok_block), fail_block);
 
-        // OOB: assert !cond, produce default value
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
-        });
+        // OOB: produce default value (assertion already emitted above)
         let default_val = self.default_scalar(emitter, &elem_type);
         emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
 
@@ -591,6 +590,11 @@ impl LowerPureGuards {
 
     /// Common pattern: branch on a failure condition, constraining !cond in the fail
     /// block and producing a default value, or executing the ok path.
+    ///
+    /// The assertion `failure && condition == false` is emitted unconditionally
+    /// (not inside a conditional block). This ensures the R1CS constraint count
+    /// matches the witgen VM's constraint emission regardless of which branch
+    /// the VM takes at runtime.
     fn emit_guarded_branch(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -602,34 +606,32 @@ impl LowerPureGuards {
         signed: bool,
         bits: usize,
     ) {
-        let (fail_block, _) = emitter.add_block();
-        let (ok_block, _) = emitter.add_block();
-        let (merge_block, _) = emitter.add_block();
-
-        emitter
-            .function
-            .get_block_mut(merge_block)
-            .push_parameter(original_result, result_type.clone());
-
-        emitter.seal_and_switch(Terminator::JmpIf(failure, fail_block, ok_block), fail_block);
-
-        // Fail block: constrain !cond, produce default
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
+        // Assert unconditionally: failure && condition must be false.
+        // This is equivalent to "if failure then !condition".
+        let failure_and_cond = emitter.and(failure, condition);
+        let zero = emitter.u_const(1, 0);
         emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
+            lhs: failure_and_cond,
+            rhs: zero,
         });
+
+        // Compute the ok value unconditionally (the operation was already
+        // performed in wider type, so we just narrow it here).
+        let ok_val = ok_path(emitter);
+
+        // Select: if no failure, use ok_val; otherwise use default.
+        let not_failure = emitter.not(failure);
         let default_val = if signed {
             emitter.i_const(bits, 0)
         } else {
             emitter.u_const(bits, 0)
         };
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
-
-        // Ok block: execute the operation
-        let ok_val = ok_path(emitter);
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![ok_val]), merge_block);
+        emitter.emit(OpCode::Select {
+            result: original_result,
+            cond: not_failure,
+            if_t: ok_val,
+            if_f: default_val,
+        });
     }
 }
 
