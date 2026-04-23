@@ -723,7 +723,8 @@ impl CodeGen {
                     }
                     let is_nop =
                         matches!(tgt, ssa::CastTarget::Nop | ssa::CastTarget::ArrayToSlice)
-                            || l_type.expr == r_type.expr;
+                            || l_type.expr == r_type.expr
+                            || (l_type.is_witness_of() && r_type.is_witness_of());
                     if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);

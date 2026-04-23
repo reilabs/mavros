@@ -80,10 +80,13 @@ impl WitnessLowering {
                         OpCode::Cast {
                             result: r,
                             value: v,
-                            target: _,
+                            target,
                         } => {
                             let v_type = type_info.get_value_type(v);
-                            if v_type.is_witness_of() {
+                            if v_type.is_witness_of()
+                                && matches!(target, crate::compiler::ssa::CastTarget::WitnessOf)
+                            {
+                                // Already WitnessOf — don't double-wrap
                                 replacements.insert(r, v);
                             } else {
                                 emitter.emit(instruction);
