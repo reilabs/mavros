@@ -440,7 +440,7 @@ fn lower_instruction(
             let ll_rhs = val_map[rhs];
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
-            let ll_result = match &lhs_type.expr {
+            let ll_result = match &lhs_type.strip_witness().expr {
                 TypeExpr::U(_) => {
                     let op = match kind {
                         CmpKind::Lt => IntCmpOp::ULt,
@@ -450,7 +450,7 @@ fn lower_instruction(
                 }
                 TypeExpr::I(_) => match kind {
                     CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
-                    CmpKind::Lt => panic!("Signed Lt not yet implemented in LLSSA"),
+                    CmpKind::Lt => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
                 },
                 TypeExpr::Field => match kind {
                     CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),

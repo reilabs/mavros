@@ -564,6 +564,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let predicate = match kind {
                     IntCmpOp::Eq => IntPredicate::EQ,
                     IntCmpOp::ULt => IntPredicate::ULT,
+                    IntCmpOp::SLt => IntPredicate::SLT,
                 };
                 let val = self
                     .builder
