@@ -204,19 +204,12 @@ impl LowerPureGuards {
             } => {
                 let lhs_type = type_info.get_value_type(lhs);
                 match &lhs_type.strip_witness().expr {
-                    TypeExpr::U(_) | TypeExpr::I(_) if self.all_inputs_pure(&inner, type_info) => {
+                    TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field
+                        if self.all_inputs_pure(&inner, type_info) =>
+                    {
                         self.lower_divmod_guard(
                             emitter, condition, kind, result, lhs, rhs, lhs_type,
                         );
-                    }
-                    // Field div can't fail — always unwrap
-                    TypeExpr::Field => {
-                        emitter.emit(OpCode::BinaryArithOp {
-                            kind,
-                            result,
-                            lhs,
-                            rhs,
-                        });
                     }
                     // Witness inputs: keep as Guard
                     _ => {
@@ -294,12 +287,46 @@ impl LowerPureGuards {
                 });
             }
 
-            // -- Everything else: pure computation, no constraints, can't fail → unwrap --
-            // This covers: Const, Cmp, Not, And, Or, Xor, Shr, Cast, ExtractTupleField,
-            // MkTuple, MkSeq, Load, Select, SlicePush, SliceLen,
-            // ToBits, ToRadix, ValueOf, etc.
-            other => {
-                emitter.emit(other);
+            // -- Pure computation, no constraints, can't fail → unwrap --
+            OpCode::Const { .. }
+            | OpCode::Cmp { .. }
+            | OpCode::Not { .. }
+            | OpCode::BinaryArithOp {
+                kind:
+                    BinaryArithOpKind::And
+                    | BinaryArithOpKind::Or
+                    | BinaryArithOpKind::Xor
+                    | BinaryArithOpKind::Shr,
+                ..
+            }
+            | OpCode::Cast { .. }
+            | OpCode::MkSeq { .. }
+            | OpCode::MkTuple { .. }
+            | OpCode::TupleProj { .. }
+            | OpCode::Load { .. }
+            | OpCode::Select { .. }
+            | OpCode::SlicePush { .. }
+            | OpCode::SliceLen { .. }
+            | OpCode::ToBits { .. }
+            | OpCode::ToRadix { .. }
+            | OpCode::ValueOf { .. }
+            | OpCode::MulConst { .. }
+            | OpCode::Alloc { .. }
+            | OpCode::ReadGlobal { .. }
+            | OpCode::InitGlobal { .. }
+            | OpCode::DropGlobal { .. }
+            | OpCode::Spread { .. }
+            | OpCode::Unspread { .. }
+            | OpCode::FreshWitness { .. }
+            | OpCode::NextDCoeff { .. }
+            | OpCode::BumpD { .. }
+            | OpCode::Todo { .. } => {
+                emitter.emit(inner);
+            }
+
+            // Guard-within-Guard should not happen
+            OpCode::Guard { .. } => {
+                panic!("LowerPureGuards: nested Guard not expected");
             }
         }
     }
@@ -394,40 +421,52 @@ impl LowerPureGuards {
         rhs: ValueId,
         lhs_type: &Type,
     ) {
-        let (bits, signed) = match &lhs_type.strip_witness().expr {
-            TypeExpr::U(b) => (*b, false),
-            TypeExpr::I(b) => (*b, true),
+        let stripped = lhs_type.strip_witness();
+        let zero = match &stripped.expr {
+            TypeExpr::U(b) => emitter.u_const(*b, 0),
+            TypeExpr::I(b) => emitter.i_const(*b, 0),
+            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
             _ => unreachable!(),
-        };
-
-        let zero = if signed {
-            emitter.i_const(bits, 0)
-        } else {
-            emitter.u_const(bits, 0)
         };
         let is_zero = emitter.eq(rhs, zero);
 
-        let result_type = lhs_type.strip_witness().clone();
+        let result_type = stripped.clone();
 
-        self.emit_guarded_branch(
-            emitter,
-            condition,
-            is_zero,
-            original_result,
-            &result_type,
-            |e| {
-                let r = e.fresh_value();
-                e.emit(OpCode::BinaryArithOp {
-                    kind,
-                    result: r,
-                    lhs,
-                    rhs,
-                });
-                r
-            },
-            signed,
-            bits,
-        );
+        let (fail_block, _) = emitter.add_block();
+        let (ok_block, _) = emitter.add_block();
+        let (merge_block, _) = emitter.add_block();
+
+        emitter
+            .function
+            .get_block_mut(merge_block)
+            .push_parameter(original_result, result_type);
+
+        emitter.seal_and_switch(Terminator::JmpIf(is_zero, fail_block, ok_block), fail_block);
+
+        // Fail: constrain !cond, produce default zero
+        let not_cond = emitter.not(condition);
+        let one = emitter.u_const(1, 1);
+        emitter.emit(OpCode::AssertEq {
+            lhs: not_cond,
+            rhs: one,
+        });
+        let default_val = match &stripped.expr {
+            TypeExpr::U(b) => emitter.u_const(*b, 0),
+            TypeExpr::I(b) => emitter.i_const(*b, 0),
+            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
+            _ => unreachable!(),
+        };
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
+
+        // Ok: perform the div/mod
+        let r = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result: r,
+            lhs,
+            rhs,
+        });
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![r]), merge_block);
     }
 
     /// Lower `Guard(cond, Truncate(value, to_bits, from_bits) -> result)`.
