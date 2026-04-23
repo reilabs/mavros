@@ -10,6 +10,10 @@
 
 use ark_bn254::Fr;
 use ark_ff::BigInt;
+use mavros_wasm_layout::{
+    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET,
+    AD_OUT_DC_PTR_OFFSET, WASM_PTR_SIZE,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
@@ -244,19 +248,15 @@ pub unsafe extern "C" fn __field_div(
 // ═══════════════════════════════════════════════════════════════════════════════
 // AD (Automatic Differentiation) runtime functions
 //
-// AD VM struct layout (wasm32 offsets):
-//   Offset 0:  out_da       (ptr to dA array, not advanced)
-//   Offset 4:  out_db       (ptr to dB array)
-//   Offset 8:  out_dc       (ptr to dC array)
-//   Offset 12: ad_coeffs    (ptr, advanced on each read)
-//   Offset 16: current_wit_off (i32, next witness index)
+// Byte offsets come from `mavros-wasm-layout`. Slot indices below are those
+// offsets divided by the pointer size, used when indexing `*mut *mut u64`.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const AD_VM_OUT_DA: usize = 0;
-const AD_VM_OUT_DB: usize = 1;
-const AD_VM_OUT_DC: usize = 2;
-const AD_VM_COEFFS: usize = 3;
-const AD_VM_WIT_OFF: usize = 4;
+const AD_VM_OUT_DA: usize = (AD_OUT_DA_PTR_OFFSET / WASM_PTR_SIZE) as usize;
+const AD_VM_OUT_DB: usize = (AD_OUT_DB_PTR_OFFSET / WASM_PTR_SIZE) as usize;
+const AD_VM_OUT_DC: usize = (AD_OUT_DC_PTR_OFFSET / WASM_PTR_SIZE) as usize;
+const AD_VM_COEFFS: usize = (AD_COEFFS_PTR_OFFSET / WASM_PTR_SIZE) as usize;
+const AD_VM_WIT_OFF: usize = (AD_CURRENT_WIT_OFF_OFFSET / WASM_PTR_SIZE) as usize;
 
 /// Read the next sensitivity coefficient from the AD input tape.
 /// Returns 4 limbs via result pointer (sret convention on wasm32).

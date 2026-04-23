@@ -9,6 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 ark-bn254 = "0.5.0"
 ark-ff = "0.5.0"
+mavros-wasm-layout = { path = "../wasm-layout" }
 
 [profile.release]
 opt-level = "z"

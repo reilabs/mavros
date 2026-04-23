@@ -24,18 +24,10 @@ use crate::compiler::llssa::{
 };
 use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
-/// Witgen VM struct layout (offsets in bytes):
-const VM_WITNESS_PTR_OFFSET: u32 = 0;
-const VM_A_PTR_OFFSET: u32 = 4;
-const VM_B_PTR_OFFSET: u32 = 8;
-const VM_C_PTR_OFFSET: u32 = 12;
-
-/// AD VM struct layout (offsets in bytes, wasm32):
-const AD_VM_OUT_DA_OFFSET: u32 = 0;
-const AD_VM_OUT_DB_OFFSET: u32 = 4;
-const AD_VM_OUT_DC_OFFSET: u32 = 8;
-const AD_VM_COEFFS_OFFSET: u32 = 12;
-const AD_VM_WIT_OFF_OFFSET: u32 = 16;
+use mavros_wasm_layout::{
+    WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET,
+    WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET, WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
+};
 
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
