@@ -28,6 +28,7 @@ use crate::{
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
             lower_guards::LowerGuards,
+            lower_pure_guards::LowerPureGuards,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             pull_into_assert::PullIntoAssert,
@@ -260,6 +261,7 @@ impl Driver {
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(LowerPureGuards::new()),
                 Box::new(FixDoubleJumps::new()),
                 Box::new(ArithmeticSimplifier::new()),
                 Box::new(CSE::new()),
@@ -422,7 +424,6 @@ impl Driver {
         );
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         pass_manager.run(&mut ssa);
-
         self.base_witgen_ssa = Some(ssa);
     }
 

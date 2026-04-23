@@ -501,6 +501,8 @@ impl BoxedValue {
 
             unsafe {
                 ptr::copy_nonoverlapping(self.data(), new_array.data(), layout.array_size());
+                // Decrement RC of the old array since we've cloned it.
+                *rc -= 1;
             }
             new_array
         }

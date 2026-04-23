@@ -528,12 +528,6 @@ impl RCInsertion {
                                 kind: MemOp::Bump(1),
                                 value: *array,
                             });
-                            if self.needs_rc(type_info, array) {
-                                new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
-                                    value: *array,
-                                });
-                            }
                         }
                         if self.needs_rc(type_info, value) && currently_live.contains(value) {
                             new_instructions.push(OpCode::MemOp {

@@ -654,13 +654,31 @@ fn lower_instruction(
                     }
                 }
                 CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
-                    // Field → U(n)/I(n): FieldToLimbs, extract limb 0, truncate
-                    let limbs = e.field_to_limbs(ll_value);
-                    let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
-                    let ll_result = if *target_bits < 64 {
-                        e.truncate(limb0, *target_bits as u32)
-                    } else {
-                        limb0
+                    let ll_result = match &source_type.expr {
+                        TypeExpr::Field => {
+                            // Field → U(n)/I(n): FieldToLimbs, extract limb 0, truncate
+                            let limbs = e.field_to_limbs(ll_value);
+                            let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
+                            if *target_bits < 64 {
+                                e.truncate(limb0, *target_bits as u32)
+                            } else {
+                                limb0
+                            }
+                        }
+                        TypeExpr::U(source_bits) | TypeExpr::I(source_bits) => {
+                            // Integer → Integer: zext or truncate
+                            if *target_bits > *source_bits {
+                                e.zext(ll_value, *target_bits as u32)
+                            } else if *target_bits < *source_bits {
+                                e.truncate(ll_value, *target_bits as u32)
+                            } else {
+                                ll_value
+                            }
+                        }
+                        _ => panic!(
+                            "Cast to U({})/I({}) from unsupported type: {}",
+                            target_bits, target_bits, source_type
+                        ),
                     };
                     val_map.insert(*result, ll_result);
                 }
