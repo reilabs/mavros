@@ -11,8 +11,7 @@
 use ark_bn254::Fr;
 use ark_ff::BigInt;
 use mavros_wasm_layout::{
-    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET,
-    AD_OUT_DC_PTR_OFFSET, WASM_PTR_SIZE,
+    AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, WASM_PTR_SIZE,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -255,35 +254,6 @@ pub unsafe extern "C" fn __field_div(
 const AD_VM_OUT_DA: usize = (AD_OUT_DA_PTR_OFFSET / WASM_PTR_SIZE) as usize;
 const AD_VM_OUT_DB: usize = (AD_OUT_DB_PTR_OFFSET / WASM_PTR_SIZE) as usize;
 const AD_VM_OUT_DC: usize = (AD_OUT_DC_PTR_OFFSET / WASM_PTR_SIZE) as usize;
-const AD_VM_COEFFS: usize = (AD_COEFFS_PTR_OFFSET / WASM_PTR_SIZE) as usize;
-const AD_VM_WIT_OFF: usize = (AD_CURRENT_WIT_OFF_OFFSET / WASM_PTR_SIZE) as usize;
-
-/// Read the next sensitivity coefficient from the AD input tape.
-/// Returns 4 limbs via result pointer (sret convention on wasm32).
-#[no_mangle]
-pub unsafe extern "C" fn __ad_next_d_coeff(result_ptr: *mut u64, vm_ptr: *mut u8) {
-    let coeffs_ptr_ptr = (vm_ptr as *mut *const u64).add(AD_VM_COEFFS);
-    let coeffs_ptr = *coeffs_ptr_ptr;
-    // Read 4 limbs
-    let fr = limbs_to_fr(
-        *coeffs_ptr as i64,
-        *coeffs_ptr.add(1) as i64,
-        *coeffs_ptr.add(2) as i64,
-        *coeffs_ptr.add(3) as i64,
-    );
-    write_field(result_ptr, fr);
-    // Advance by 4 u64s (one field element)
-    *coeffs_ptr_ptr = coeffs_ptr.add(4);
-}
-
-/// Allocate a fresh AD witness index, returns the index as i32.
-#[no_mangle]
-pub unsafe extern "C" fn __ad_fresh_witness_index(vm_ptr: *mut u8) -> i32 {
-    let wit_off_ptr = (vm_ptr as *mut i32).add(AD_VM_WIT_OFF);
-    let index = *wit_off_ptr;
-    *wit_off_ptr = index + 1;
-    index
-}
 
 /// Helper: read field from memory, add value, write back.
 #[inline]

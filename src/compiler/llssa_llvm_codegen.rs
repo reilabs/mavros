@@ -25,6 +25,7 @@ use crate::compiler::llssa::{
 use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
 use mavros_wasm_layout::{
+    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, WASM_PTR_SIZE,
     WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET,
     WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET, WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
 };
@@ -204,22 +205,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .add_function("__field_div", field_div_type, None),
         );
 
-        // __ad_next_d_coeff(vm*) -> FieldElem
-        let ad_next_d_coeff_type = field_type.fn_type(&[ptr_type.into()], false);
-        self.ad_next_d_coeff_fn = Some(self.module.add_function(
-            "__ad_next_d_coeff",
-            ad_next_d_coeff_type,
-            Some(Linkage::External),
-        ));
-
-        // __ad_fresh_witness_index(vm*) -> i32
-        let ad_fresh_wit_type = i32_type.fn_type(&[ptr_type.into()], false);
-        self.ad_fresh_witness_index_fn = Some(self.module.add_function(
-            "__ad_fresh_witness_index",
-            ad_fresh_wit_type,
-            Some(Linkage::External),
-        ));
-
         // __ad_accum_{da,db,dc}(vm*, const_value: FieldElem, sensitivity: FieldElem) -> void
         let ad_accum_type = void_type.fn_type(
             &[ptr_type.into(), field_type.into(), field_type.into()],
@@ -285,6 +270,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.write_a_fn = Some(self.define_write_fn("__write_a", VM_A_PTR_OFFSET));
         self.write_b_fn = Some(self.define_write_fn("__write_b", VM_B_PTR_OFFSET));
         self.write_c_fn = Some(self.define_write_fn("__write_c", VM_C_PTR_OFFSET));
+        self.ad_next_d_coeff_fn = Some(self.define_ad_next_d_coeff_fn());
+        self.ad_fresh_witness_index_fn = Some(self.define_ad_fresh_witness_index_fn());
     }
 
     fn define_write_fn(&self, name: &str, ptr_offset: u32) -> FunctionValue<'ctx> {
@@ -336,6 +323,107 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         builder.build_store(write_pos_ptr, new_ptr).unwrap();
         builder.build_return(None).unwrap();
+
+        function
+    }
+
+    /// Internal helper that replaces the old extern `__ad_next_d_coeff`:
+    /// load the Field element that `ad_coeffs` currently points at, advance
+    /// `ad_coeffs` by one Field, return the loaded value.
+    fn define_ad_next_d_coeff_fn(&self) -> FunctionValue<'ctx> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let field_type = self.field_llvm_type();
+
+        let fn_type = field_type.fn_type(&[ptr_type.into()], false);
+        let function = self
+            .module
+            .add_function("__ad_next_d_coeff", fn_type, Some(Linkage::Internal));
+
+        let entry = self.context.append_basic_block(function, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(entry);
+
+        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
+
+        let coeffs_slot_ptr = unsafe {
+            builder
+                .build_gep(
+                    ptr_type,
+                    vm_ptr,
+                    &[i32_type.const_int((AD_COEFFS_PTR_OFFSET / WASM_PTR_SIZE) as u64, false)],
+                    "coeffs_slot",
+                )
+                .unwrap()
+        };
+
+        let coeffs_ptr = builder
+            .build_load(ptr_type, coeffs_slot_ptr, "coeffs_ptr")
+            .unwrap()
+            .into_pointer_value();
+
+        let value = builder
+            .build_load(field_type, coeffs_ptr, "d_coeff")
+            .unwrap();
+
+        let next_coeffs_ptr = unsafe {
+            builder
+                .build_gep(
+                    field_type,
+                    coeffs_ptr,
+                    &[i32_type.const_int(1, false)],
+                    "next_coeffs_ptr",
+                )
+                .unwrap()
+        };
+        builder.build_store(coeffs_slot_ptr, next_coeffs_ptr).unwrap();
+
+        builder.build_return(Some(&value)).unwrap();
+
+        function
+    }
+
+    /// Internal helper that replaces the old extern `__ad_fresh_witness_index`:
+    /// return the current witness counter, post-increment it.
+    fn define_ad_fresh_witness_index_fn(&self) -> FunctionValue<'ctx> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+
+        let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
+        let function = self
+            .module
+            .add_function("__ad_fresh_witness_index", fn_type, Some(Linkage::Internal));
+
+        let entry = self.context.append_basic_block(function, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(entry);
+
+        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
+
+        let wit_off_ptr = unsafe {
+            builder
+                .build_gep(
+                    i32_type,
+                    vm_ptr,
+                    &[i32_type.const_int(
+                        (AD_CURRENT_WIT_OFF_OFFSET / WASM_PTR_SIZE) as u64,
+                        false,
+                    )],
+                    "wit_off_slot",
+                )
+                .unwrap()
+        };
+
+        let index = builder
+            .build_load(i32_type, wit_off_ptr, "wit_idx")
+            .unwrap()
+            .into_int_value();
+        let next_index = builder
+            .build_int_add(index, i32_type.const_int(1, false), "next_wit_idx")
+            .unwrap();
+        builder.build_store(wit_off_ptr, next_index).unwrap();
+
+        builder.build_return(Some(&index)).unwrap();
 
         function
     }
