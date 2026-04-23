@@ -305,6 +305,11 @@ impl Driver {
         r1cs_phase_1.set_debug_output_dir(self.get_debug_output_dir().clone());
         r1cs_phase_1.run(&mut r1cs_ssa);
 
+        fs::write(
+            self.get_debug_output_dir().join("r1cs_ssa.txt"),
+            r1cs_ssa.to_string(&DefaultSsaAnnotator),
+        ).unwrap();
+
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
@@ -424,6 +429,12 @@ impl Driver {
         );
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         pass_manager.run(&mut ssa);
+
+        fs::write(
+            self.get_debug_output_dir().join("witgen_ssa.txt"),
+            ssa.to_string(&DefaultSsaAnnotator),
+        ).unwrap();
+
         self.base_witgen_ssa = Some(ssa);
     }
 
