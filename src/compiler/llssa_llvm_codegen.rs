@@ -304,9 +304,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_type = self.field_llvm_type();
 
         let fn_type = field_type.fn_type(&[ptr_type.into()], false);
-        let function = self
-            .module
-            .add_function("__ad_next_d_coeff", fn_type, Some(Linkage::Internal));
+        let function =
+            self.module
+                .add_function("__ad_next_d_coeff", fn_type, Some(Linkage::Internal));
 
         let entry = self.context.append_basic_block(function, "entry");
         let builder = self.context.create_builder();
@@ -344,7 +344,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 )
                 .unwrap()
         };
-        builder.build_store(coeffs_slot_ptr, next_coeffs_ptr).unwrap();
+        builder
+            .build_store(coeffs_slot_ptr, next_coeffs_ptr)
+            .unwrap();
 
         builder.build_return(Some(&value)).unwrap();
 
@@ -358,9 +360,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let i32_type = self.context.i32_type();
 
         let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
-        let function = self
-            .module
-            .add_function("__ad_fresh_witness_index", fn_type, Some(Linkage::Internal));
+        let function =
+            self.module
+                .add_function("__ad_fresh_witness_index", fn_type, Some(Linkage::Internal));
 
         let entry = self.context.append_basic_block(function, "entry");
         let builder = self.context.create_builder();
@@ -373,10 +375,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .build_gep(
                     i32_type,
                     vm_ptr,
-                    &[i32_type.const_int(
-                        (AD_CURRENT_WIT_OFF_OFFSET / WASM_PTR_SIZE) as u64,
-                        false,
-                    )],
+                    &[i32_type
+                        .const_int((AD_CURRENT_WIT_OFF_OFFSET / WASM_PTR_SIZE) as u64, false)],
                     "wit_off_slot",
                 )
                 .unwrap()

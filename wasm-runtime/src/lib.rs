@@ -200,4 +200,3 @@ pub unsafe extern "C" fn __field_div(
     let result = if b == Fr::ZERO { Fr::ZERO } else { a / b };
     write_field(result_ptr, result);
 }
-
