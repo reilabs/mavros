@@ -417,9 +417,27 @@ impl LowerPureGuards {
             rhs: zero_u1,
         });
 
-        // Perform the div/mod unconditionally (divisor may be zero, but the
-        // assertion above guarantees this only happens in dead code where
-        // condition is false).
+        let (fail_block, _) = emitter.add_block();
+        let (ok_block, _) = emitter.add_block();
+        let (merge_block, _) = emitter.add_block();
+
+        emitter
+            .function
+            .get_block_mut(merge_block)
+            .push_parameter(original_result, stripped.clone());
+
+        emitter.seal_and_switch(Terminator::JmpIf(is_zero, fail_block, ok_block), fail_block);
+
+        // Divisor is zero: produce default value
+        let default_val = match &stripped.expr {
+            TypeExpr::U(b) => emitter.u_const(*b, 0),
+            TypeExpr::I(b) => emitter.i_const(*b, 0),
+            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
+            _ => unreachable!(),
+        };
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
+
+        // Divisor is non-zero: perform the div/mod
         let r = emitter.fresh_value();
         emitter.emit(OpCode::BinaryArithOp {
             kind,
@@ -427,21 +445,7 @@ impl LowerPureGuards {
             lhs,
             rhs,
         });
-
-        // Select: use computed result if divisor is non-zero, otherwise default
-        let not_zero = emitter.not(is_zero);
-        let default_val = match &stripped.expr {
-            TypeExpr::U(b) => emitter.u_const(*b, 0),
-            TypeExpr::I(b) => emitter.i_const(*b, 0),
-            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
-            _ => unreachable!(),
-        };
-        emitter.emit(OpCode::Select {
-            result: original_result,
-            cond: not_zero,
-            if_t: r,
-            if_f: default_val,
-        });
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![r]), merge_block);
     }
 
     /// Lower `Guard(cond, ArraySet(array, idx, val) -> result)`.
@@ -607,7 +611,6 @@ impl LowerPureGuards {
         bits: usize,
     ) {
         // Assert unconditionally: failure && condition must be false.
-        // This is equivalent to "if failure then !condition".
         let failure_and_cond = emitter.and(failure, condition);
         let zero = emitter.u_const(1, 0);
         emitter.emit(OpCode::AssertEq {
@@ -615,23 +618,28 @@ impl LowerPureGuards {
             rhs: zero,
         });
 
-        // Compute the ok value unconditionally (the operation was already
-        // performed in wider type, so we just narrow it here).
-        let ok_val = ok_path(emitter);
+        let (fail_block, _) = emitter.add_block();
+        let (ok_block, _) = emitter.add_block();
+        let (merge_block, _) = emitter.add_block();
 
-        // Select: if no failure, use ok_val; otherwise use default.
-        let not_failure = emitter.not(failure);
+        emitter
+            .function
+            .get_block_mut(merge_block)
+            .push_parameter(original_result, result_type.clone());
+
+        emitter.seal_and_switch(Terminator::JmpIf(failure, fail_block, ok_block), fail_block);
+
+        // Failure: produce default value
         let default_val = if signed {
             emitter.i_const(bits, 0)
         } else {
             emitter.u_const(bits, 0)
         };
-        emitter.emit(OpCode::Select {
-            result: original_result,
-            cond: not_failure,
-            if_t: ok_val,
-            if_f: default_val,
-        });
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
+
+        // Ok: compute the result
+        let ok_val = ok_path(emitter);
+        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![ok_val]), merge_block);
     }
 }
 

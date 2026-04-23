@@ -949,11 +949,11 @@ impl Value {
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
-            Value::U(_, 0) => if_true.clone(),
-            Value::U(_, _) => if_false.clone(),
+            Value::U(_, 0) => if_false.clone(),
+            Value::U(_, _) => if_true.clone(),
             Value::WitnessOf(inner) => match inner.as_ref() {
-                Value::U(_, 0) => if_true.clone(),
-                Value::U(_, _) => if_false.clone(),
+                Value::U(_, 0) => if_false.clone(),
+                Value::U(_, _) => if_true.clone(),
                 _ => {
                     if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
                         instrumenter.record_constraints(1);
