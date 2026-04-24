@@ -1148,16 +1148,33 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         then_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
         else_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
+        let results: Vec<_> = result_types
+            .into_iter()
+            .map(|ty| (self.function.fresh_value(), ty))
+            .collect();
+        let merge_params: Vec<_> = results.iter().map(|(v, _)| *v).collect();
+        self.build_if_else_into(cond, results, then_branch, else_branch);
+        merge_params
+    }
+
+    /// Like `build_if_else`, but uses pre-allocated `ValueId`s for the merge
+    /// block parameters instead of creating fresh ones.  This is useful when
+    /// the caller already has a `ValueId` that downstream code references
+    /// (e.g. the result of a Guard being lowered).
+    pub fn build_if_else_into(
+        &mut self,
+        cond: ValueId,
+        results: Vec<(ValueId, Ty)>,
+        then_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
+        else_branch: impl FnOnce(&mut Self) -> Vec<ValueId>,
+    ) {
         let (then_blk, _) = self.add_block();
         let (else_blk, _) = self.add_block();
         let (merge_blk, _) = self.add_block();
 
-        // Add merge parameters
-        let mut merge_params = vec![];
-        for ty in result_types {
-            let v = self.function.fresh_value();
+        // Add merge parameters with pre-allocated IDs
+        for (v, ty) in results {
             self.function.get_block_mut(merge_blk).push_parameter(v, ty);
-            merge_params.push(v);
         }
 
         // Seal current block → JmpIf
@@ -1170,9 +1187,6 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         // Build else branch
         let else_results = else_branch(self);
         self.seal_and_switch(Terminator::Jmp(merge_blk, else_results), merge_blk);
-
-        // Emitter is now at merge block
-        merge_params
     }
 }
 

@@ -7,8 +7,7 @@ use crate::compiler::{
     },
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix,
-        SliceOpDir,
+        self as ssa_mod, BinaryArithOpKind, BlockId, FunctionId, HLSSA, MemOp, Radix, SliceOpDir,
     },
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
@@ -475,11 +474,22 @@ impl symbolic_executor::Context<Value> for R1CGen {
 }
 
 impl symbolic_executor::Value<R1CGen> for Value {
-    fn cmp(&self, b: &Self, cmp_kind: CmpKind, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        match cmp_kind {
-            CmpKind::Eq => self.eq(b),
-            CmpKind::Lt => self.lt(b),
+    fn ult(&self, b: &Self, _ctx: &mut R1CGen) -> Self {
+        self.lt(b)
+    }
+
+    fn slt(&self, b: &Self, bits: usize, _ctx: &mut R1CGen) -> Self {
+        let a = Self::decode_signed(self.expect_u128(), bits);
+        let b_val = Self::decode_signed(b.expect_u128(), bits);
+        if a < b_val {
+            Value::Const(ark_bn254::Fr::ONE)
+        } else {
+            Value::Const(ark_bn254::Fr::ZERO)
         }
+    }
+
+    fn eq(&self, b: &Self, _ctx: &mut R1CGen) -> Self {
+        self.eq(b)
     }
 
     fn arith(

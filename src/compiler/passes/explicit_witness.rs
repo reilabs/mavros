@@ -180,9 +180,9 @@ impl ExplicitWitness {
                         CmpKind::Lt => {
                             let rhs_stripped =
                                 function_type_info.get_value_type(rhs).strip_witness().expr;
-                            let s = match rhs_stripped {
-                                TypeExpr::U(s) => s,
-                                TypeExpr::I(_) => panic!("Signed Lt not yet implemented"),
+                            let (s, is_signed) = match rhs_stripped {
+                                TypeExpr::U(s) => (s, false),
+                                TypeExpr::I(s) => (s, true),
                                 _ => panic!("ICE: rhs is not an integer type"),
                             };
                             let u1 = CastTarget::U(1);
@@ -211,8 +211,54 @@ impl ExplicitWitness {
                             let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
                             b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
-                            let rc_flag = b.field_const(Field::from(1));
-                            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
+                            if is_signed {
+                                // Signed Lt: decompose into sign bits + unsigned Lt.
+                                //
+                                // For same-sign values, unsigned Lt on two's complement
+                                // field representations gives the correct answer:
+                                //   both positive: field values = actual values, ult works
+                                //   both negative: field values preserve ordering, ult works
+                                //
+                                // For different-sign values, the negative operand is always
+                                // less than the positive one, so result = sign_a.
+                                //
+                                // Combined: result = ult + signs_differ * (sign_a - ult)
+                                //
+                                // The unsigned Lt range check is gated by signs_same so it's
+                                // only enforced when both operands have the same sign.
+                                // A separate constraint enforces result = sign_a when signs differ.
+
+                                let always_flag = b.field_const(Field::ONE);
+
+                                // Extract sign bits (always active, not gated)
+                                let sign_a =
+                                    self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
+                                let sign_b =
+                                    self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
+
+                                // signs_differ = sign_a XOR sign_b = sign_a + sign_b - 2*sign_a*sign_b
+                                let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
+                                let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
+                                let sa_sb_hint = b.mul(sa_pure, sb_pure);
+                                let sa_sb = b.write_witness(sa_sb_hint);
+                                b.constrain(sign_a, sign_b, sa_sb);
+
+                                let two_sa_sb = b.mul(sa_sb, two);
+                                let sa_plus_sb = b.add(sign_a, sign_b);
+                                let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
+                                let signs_same = b.sub(one, signs_differ);
+
+                                // Range check adjusted_diff only when signs are the same
+                                self.gen_witness_rangecheck(b, adjusted_diff_wit, s, signs_same);
+
+                                // When signs differ, result must equal sign_a
+                                let zero = b.field_const(Field::ZERO);
+                                let diff_r_sa = b.sub(result_field, sign_a);
+                                b.constrain(signs_differ, diff_r_sa, zero);
+                            } else {
+                                let rc_flag = b.field_const(Field::from(1));
+                                self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
+                            }
                         }
                     }
                 } else {
@@ -1942,8 +1988,10 @@ impl ExplicitWitness {
         result: ValueId,
         flag: ValueId,
     ) {
-        let idx_type = function_type_info.get_value_type(idx);
-        let back_cast_target = match &idx_type.expr {
+        let result_type = function_type_info
+            .get_value_type(result)
+            .strip_all_witness();
+        let back_cast_target = match &result_type.expr {
             TypeExpr::U(s) => CastTarget::U(*s),
             TypeExpr::I(s) => CastTarget::I(*s),
             TypeExpr::Field => CastTarget::Field,

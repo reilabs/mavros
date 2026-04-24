@@ -53,32 +53,54 @@ impl HLEmitter for SpecializationState {
 }
 
 impl symbolic_executor::Value<SpecializationState> for Val {
-    fn cmp(
-        &self,
-        b: &Self,
-        cmp_kind: crate::compiler::ssa::CmpKind,
-        _out_type: &crate::compiler::ir::r#type::Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
+    fn ult(&self, b: &Self, ctx: &mut SpecializationState) -> Self {
         let l_const = ctx.const_vals.get(&self.0).cloned();
         let r_const = ctx.const_vals.get(&b.0).cloned();
         match (l_const, r_const) {
-            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => match cmp_kind {
-                crate::compiler::ssa::CmpKind::Lt => {
-                    let res_u = if l_val < r_val { 1 } else { 0 };
-                    let res = ctx.u_const(1, res_u);
-                    ctx.const_vals.insert(res, ConstVal::U(1, res_u));
-                    Self(res)
-                }
-                crate::compiler::ssa::CmpKind::Eq => {
-                    let res_u = if l_val == r_val { 1 } else { 0 };
-                    let res = ctx.u_const(1, res_u);
-                    ctx.const_vals.insert(res, ConstVal::U(1, res_u));
-                    Self(res)
-                }
-            },
+            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
+                let res_u = if l_val < r_val { 1 } else { 0 };
+                let res = ctx.u_const(1, res_u);
+                ctx.const_vals.insert(res, ConstVal::U(1, res_u));
+                Self(res)
+            }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, cmp_kind);
+                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::CmpKind::Lt);
+                Self(res)
+            }
+            _ => todo!(),
+        }
+    }
+
+    fn slt(&self, b: &Self, _bits: usize, ctx: &mut SpecializationState) -> Self {
+        let l_const = ctx.const_vals.get(&self.0).cloned();
+        let r_const = ctx.const_vals.get(&b.0).cloned();
+        match (l_const, r_const) {
+            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
+                let res_u = if l_val < r_val { 1 } else { 0 };
+                let res = ctx.u_const(1, res_u);
+                ctx.const_vals.insert(res, ConstVal::U(1, res_u));
+                Self(res)
+            }
+            (None, _) | (_, None) => {
+                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::CmpKind::Lt);
+                Self(res)
+            }
+            _ => todo!(),
+        }
+    }
+
+    fn eq(&self, b: &Self, ctx: &mut SpecializationState) -> Self {
+        let l_const = ctx.const_vals.get(&self.0).cloned();
+        let r_const = ctx.const_vals.get(&b.0).cloned();
+        match (l_const, r_const) {
+            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
+                let res_u = if l_val == r_val { 1 } else { 0 };
+                let res = ctx.u_const(1, res_u);
+                ctx.const_vals.insert(res, ConstVal::U(1, res_u));
+                Self(res)
+            }
+            (None, _) | (_, None) => {
+                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::CmpKind::Eq);
                 Self(res)
             }
             _ => todo!(),
