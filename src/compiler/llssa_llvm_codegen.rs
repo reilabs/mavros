@@ -4,7 +4,6 @@
 //! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no TypeInfo needed.
 
 use std::collections::{HashMap, HashSet};
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -973,7 +972,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         for instruction in instructions {
             match instruction {
                 LLOp::IntConst { result, bits, .. } => {
-                    types.insert(*result, self.context.custom_width_int_type(*bits).into());
+                    types.insert(
+                        *result,
+                        self.context
+                            .custom_width_int_type(NonZeroU32::new(*bits).unwrap())
+                            .unwrap()
+                            .into(),
+                    );
                 }
                 LLOp::NullPtr { result }
                 | LLOp::HeapAlloc { result, .. }
@@ -1003,7 +1008,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 | LLOp::ZExt {
                     result, to_bits, ..
                 } => {
-                    types.insert(*result, self.context.custom_width_int_type(*to_bits).into());
+                    types.insert(
+                        *result,
+                        self.context
+                            .custom_width_int_type(NonZeroU32::new(*to_bits).unwrap())
+                            .unwrap()
+                            .into(),
+                    );
                 }
                 LLOp::FieldArith { result, .. }
                 | LLOp::FieldNeg { result, .. }
@@ -1155,13 +1166,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         if live_outs.len() == 1 {
             let value = call_result
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .expect("outlined chunk should return a value");
             self.value_map.insert(live_outs[0], value);
         } else if live_outs.len() > 1 {
             let ret_struct = call_result
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .expect("outlined chunk should return values")
                 .into_struct_value();
             for (i, value_id) in live_outs.iter().enumerate() {
