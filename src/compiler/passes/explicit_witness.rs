@@ -1988,8 +1988,8 @@ impl ExplicitWitness {
         result: ValueId,
         flag: ValueId,
     ) {
-        let idx_type = function_type_info.get_value_type(idx);
-        let back_cast_target = match &idx_type.expr {
+        let result_type = function_type_info.get_value_type(result).strip_all_witness();
+        let back_cast_target = match &result_type.expr {
             TypeExpr::U(s) => CastTarget::U(*s),
             TypeExpr::I(s) => CastTarget::I(*s),
             TypeExpr::Field => CastTarget::Field,
