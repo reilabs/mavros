@@ -19,13 +19,13 @@ use crate::compiler::{
 ///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, Truncate, ExtractTupleField,
 ///   MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 /// - **Lower with OOB check** (can fail on out-of-bounds index):
-///   ArrayGet — bounds-check index, assert !cond on OOB, then execute unconditionally.
-/// - **Lower with OOB check + value select** (RC-tracked allocation):
-///   ArraySet — bounds-check index, select(cond, new_val, old_val), always execute ArraySet.
+///   ArrayGet — if OOB, assert !cond and produce default; else array_get.
+/// - **Lower with OOB check + passthrough** (RC-tracked allocation):
+///   ArraySet — if OOB, assert !cond and pass through array; else array_set.
 /// - **Lower with overflow check** (pure inputs only, can fail):
-///   Integer Add/Sub/Mul/Shl — widen, compute, check overflow, constrain !cond on fail.
+///   Integer Add/Sub/Mul/Shl — widen, compute, if overflow assert !cond and produce 0; else narrow.
 /// - **Lower with div-zero check** (pure inputs only, can fail):
-///   Div/Mod (integer and Field).
+///   Div/Mod — if divisor==0 assert !cond and produce 0; else compute.
 /// - **Keep as Guard** (side-effectful or generates constraints):
 ///   Store, Call, WriteWitness, AssertEq, AssertR1C, Constrain, Rangecheck,
 ///   and failable ops with witness inputs (SExt, integer arith).
@@ -443,8 +443,7 @@ impl LowerPureGuards {
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
-    ///   assert !(oob && cond)
-    ///   if oob { result = array } else { result = array_set(array, idx, value) }
+    ///   if oob { assert !cond; result = array } else { result = array_set(array, idx, value) }
     fn lower_array_set_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -478,8 +477,7 @@ impl LowerPureGuards {
     /// Lower `Guard(cond, ArrayGet(array, idx) -> result)`.
     ///
     /// Pattern:
-    ///   assert !(oob && cond)
-    ///   if oob { result = default } else { result = array_get(array, idx) }
+    ///   if oob { assert !cond; result = default } else { result = array_get(array, idx) }
     fn lower_array_get_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -556,8 +554,9 @@ impl LowerPureGuards {
         }
     }
 
-    /// Common pattern: branch on a failure condition, asserting condition==false
-    /// in the fail block and producing a default value, or executing the ok path.
+    /// Common pattern: branch on a failure condition. In the fail branch,
+    /// assert condition==false and produce a default value. In the ok branch,
+    /// execute the actual computation.
     fn emit_guarded_branch(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
