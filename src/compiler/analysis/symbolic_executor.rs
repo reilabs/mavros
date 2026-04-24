@@ -190,8 +190,7 @@ impl SymbolicExecutor {
                         let lhs_type = fn_type_info.get_value_type(*a);
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         let b = scope[b.0 as usize].as_ref().unwrap();
-                        scope[r.0 as usize] =
-                            Some(a.cmp(b, *cmp_kind, &lhs_type, ctx));
+                        scope[r.0 as usize] = Some(a.cmp(b, *cmp_kind, &lhs_type, ctx));
                     }
                     crate::compiler::ssa::OpCode::BinaryArithOp {
                         kind: binary_arith_op_kind,

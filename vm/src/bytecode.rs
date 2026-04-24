@@ -453,7 +453,6 @@ mod def {
         #[frame] b: Field,
         #[frame] c: Field,
     ) {
-
         unsafe {
             *vm.data.as_forward.out_a = a;
             *vm.data.as_forward.out_b = b;
