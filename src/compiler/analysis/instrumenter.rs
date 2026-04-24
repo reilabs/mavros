@@ -12,8 +12,8 @@ use crate::compiler::{
     },
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
-        MemOp, Radix, SeqType, SliceOpDir,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLSSA, MemOp,
+        Radix, SeqType, SliceOpDir,
     },
 };
 
@@ -145,47 +145,62 @@ impl Value {
         }
     }
 
-    fn cmp_op(
-        &self,
-        b: &Value,
-        cmp_kind: &crate::compiler::ssa::CmpKind,
-        instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
-        match cmp_kind {
-            CmpKind::Eq => match (self, b) {
-                (Value::U(_, a), Value::U(_, b)) | (Value::I(_, a), Value::I(_, b)) => {
-                    Value::U(1, if a == b { 1 } else { 0 })
-                }
-                (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    instrumenter.record_constraints(1);
-                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(
-                        b.unwrap_witness(),
-                        cmp_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
-                _ => panic!("Cannot compare {:?} and {:?}", self, b),
-            },
-            CmpKind::Lt => match (self, b) {
-                (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
-                (Value::I(s, a), Value::I(_, b)) => {
-                    let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
-                    Value::U(1, if sa < sb { 1 } else { 0 })
-                }
-                (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    instrumenter.record_constraints(1);
-                    Value::WitnessOf(Box::new(self.unwrap_witness().cmp_op(
-                        b.unwrap_witness(),
-                        cmp_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
-                _ => panic!("Cannot compare {:?} and {:?}", self, b),
-            },
+    fn ult_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
+        match (self, b) {
+            (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
+            (Value::I(_, a), Value::I(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
+            (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                instrumenter.record_constraints(1);
+                Value::WitnessOf(Box::new(
+                    self.unwrap_witness()
+                        .ult_op(b.unwrap_witness(), instrumenter),
+                ))
+            }
+            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+            _ => panic!("Cannot compare {:?} and {:?}", self, b),
+        }
+    }
+
+    fn slt_op(&self, b: &Value, bits: usize, instrumenter: &mut dyn OpInstrumenter) -> Value {
+        match (self, b) {
+            (Value::U(_, a), Value::U(_, b)) => {
+                let (sa, sb) = (Self::to_signed(*a, bits), Self::to_signed(*b, bits));
+                Value::U(1, if sa < sb { 1 } else { 0 })
+            }
+            (Value::I(s, a), Value::I(_, b)) => {
+                let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
+                Value::U(1, if sa < sb { 1 } else { 0 })
+            }
+            (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                instrumenter.record_constraints(1);
+                Value::WitnessOf(Box::new(self.unwrap_witness().slt_op(
+                    b.unwrap_witness(),
+                    bits,
+                    instrumenter,
+                )))
+            }
+            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+            _ => panic!("Cannot compare {:?} and {:?}", self, b),
+        }
+    }
+
+    fn eq_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
+        match (self, b) {
+            (Value::U(_, a), Value::U(_, b)) | (Value::I(_, a), Value::I(_, b)) => {
+                Value::U(1, if a == b { 1 } else { 0 })
+            }
+            (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                instrumenter.record_constraints(1);
+                Value::WitnessOf(Box::new(
+                    self.unwrap_witness()
+                        .eq_op(b.unwrap_witness(), instrumenter),
+                ))
+            }
+            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+            _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
@@ -992,14 +1007,12 @@ impl SpecSplitValue {
 
 impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn ult(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        let unspecialized = self.unspecialized.cmp_op(
-            &b.unspecialized,
-            &CmpKind::Lt,
-            instrumenter.get_unspecialized(),
-        );
-        let specialized =
-            self.specialized
-                .cmp_op(&b.specialized, &CmpKind::Lt, instrumenter.get_specialized());
+        let unspecialized = self
+            .unspecialized
+            .ult_op(&b.unspecialized, instrumenter.get_unspecialized());
+        let specialized = self
+            .specialized
+            .ult_op(&b.specialized, instrumenter.get_specialized());
         SpecSplitValue {
             unspecialized,
             specialized,
@@ -1009,17 +1022,15 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn slt(
         &self,
         b: &SpecSplitValue,
-        _bits: usize,
+        bits: usize,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
-        let unspecialized = self.unspecialized.cmp_op(
-            &b.unspecialized,
-            &CmpKind::Lt,
-            instrumenter.get_unspecialized(),
-        );
+        let unspecialized =
+            self.unspecialized
+                .slt_op(&b.unspecialized, bits, instrumenter.get_unspecialized());
         let specialized =
             self.specialized
-                .cmp_op(&b.specialized, &CmpKind::Lt, instrumenter.get_specialized());
+                .slt_op(&b.specialized, bits, instrumenter.get_specialized());
         SpecSplitValue {
             unspecialized,
             specialized,
@@ -1027,14 +1038,12 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn eq(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        let unspecialized = self.unspecialized.cmp_op(
-            &b.unspecialized,
-            &CmpKind::Eq,
-            instrumenter.get_unspecialized(),
-        );
-        let specialized =
-            self.specialized
-                .cmp_op(&b.specialized, &CmpKind::Eq, instrumenter.get_specialized());
+        let unspecialized = self
+            .unspecialized
+            .eq_op(&b.unspecialized, instrumenter.get_unspecialized());
+        let specialized = self
+            .specialized
+            .eq_op(&b.specialized, instrumenter.get_specialized());
         SpecSplitValue {
             unspecialized,
             specialized,
