@@ -400,8 +400,7 @@ impl LowerPureGuards {
         rhs: ValueId,
         lhs_type: &Type,
     ) {
-        let stripped = lhs_type.strip_witness();
-        let zero_val = match &stripped.expr {
+        let zero_val = match &lhs_type.expr {
             TypeExpr::U(b) => emitter.u_const(*b, 0),
             TypeExpr::I(b) => emitter.i_const(*b, 0),
             TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
@@ -424,12 +423,12 @@ impl LowerPureGuards {
         emitter
             .function
             .get_block_mut(merge_block)
-            .push_parameter(original_result, stripped.clone());
+            .push_parameter(original_result, lhs_type.clone());
 
         emitter.seal_and_switch(Terminator::JmpIf(is_zero, fail_block, ok_block), fail_block);
 
         // Divisor is zero: produce default value
-        let default_val = match &stripped.expr {
+        let default_val = match &lhs_type.expr {
             TypeExpr::U(b) => emitter.u_const(*b, 0),
             TypeExpr::I(b) => emitter.i_const(*b, 0),
             TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
