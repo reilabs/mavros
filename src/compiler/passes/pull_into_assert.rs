@@ -144,14 +144,15 @@ impl PullIntoAssert {
         }
         let def = defs.get(&value)?;
         match def {
-            // assert(cmp .op a b) → assert_cmp .op a b
+            // assert(cmp .eq a b) → assert_cmp .eq a b
+            // Only pull Eq; Lt needs type-aware lowering that r1cs_gen can't do.
             OpCode::Cmp {
-                kind,
+                kind: CmpKind::Eq,
                 result: _,
                 lhs,
                 rhs,
             } => Some(vec![OpCode::AssertCmp {
-                kind: *kind,
+                kind: CmpKind::Eq,
                 lhs: *lhs,
                 rhs: *rhs,
             }]),

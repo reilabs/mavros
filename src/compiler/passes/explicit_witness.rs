@@ -178,87 +178,15 @@ impl ExplicitWitness {
                             b.constrain(lr_diff, result_field, field_zero);
                         }
                         CmpKind::Lt => {
-                            let rhs_stripped =
-                                function_type_info.get_value_type(rhs).strip_witness().expr;
-                            let (s, is_signed) = match rhs_stripped {
-                                TypeExpr::U(s) => (s, false),
-                                TypeExpr::I(s) => (s, true),
-                                _ => panic!("ICE: rhs is not an integer type"),
-                            };
-                            let u1 = CastTarget::U(1);
-                            let res_hint = b.lt(lhs, rhs);
-                            let res_hint_field = b.cast_to_field(res_hint);
-                            let res_hint_plain = b.value_of(res_hint_field);
-                            let res_witness = b.write_witness(res_hint_plain);
-                            b.push(OpCode::Cast {
+                            self.lower_witness_lt(
+                                b,
+                                function_type_info,
+                                lhs,
+                                rhs,
                                 result,
-                                value: res_witness,
-                                target: u1,
-                            });
-
-                            let l_field = b.cast_to_field(lhs);
-                            let r_field = b.cast_to_field(rhs);
-                            let lr_diff = b.sub(l_field, r_field);
-
-                            let two = b.field_const(Field::from(2));
-                            let result_field = b.cast_to_field(result);
-                            let two_res = b.mul(result_field, two);
-                            let one = b.field_const(Field::ONE);
-                            let adjustment = b.sub(one, two_res);
-
-                            let adjusted_diff = b.mul(lr_diff, adjustment);
-                            let adjusted_diff_plain = b.value_of(adjusted_diff);
-                            let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
-                            b.constrain(lr_diff, adjustment, adjusted_diff_wit);
-
-                            if is_signed {
-                                // Signed Lt: decompose into sign bits + unsigned Lt.
-                                //
-                                // For same-sign values, unsigned Lt on two's complement
-                                // field representations gives the correct answer:
-                                //   both positive: field values = actual values, ult works
-                                //   both negative: field values preserve ordering, ult works
-                                //
-                                // For different-sign values, the negative operand is always
-                                // less than the positive one, so result = sign_a.
-                                //
-                                // Combined: result = ult + signs_differ * (sign_a - ult)
-                                //
-                                // The unsigned Lt range check is gated by signs_same so it's
-                                // only enforced when both operands have the same sign.
-                                // A separate constraint enforces result = sign_a when signs differ.
-
-                                let always_flag = b.field_const(Field::ONE);
-
-                                // Extract sign bits (always active, not gated)
-                                let sign_a =
-                                    self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
-                                let sign_b =
-                                    self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
-
-                                // signs_differ = sign_a XOR sign_b = sign_a + sign_b - 2*sign_a*sign_b
-                                let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
-                                let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
-                                let sa_sb_hint = b.mul(sa_pure, sb_pure);
-                                let sa_sb = b.write_witness(sa_sb_hint);
-                                b.constrain(sign_a, sign_b, sa_sb);
-
-                                let two_sa_sb = b.mul(sa_sb, two);
-                                let sa_plus_sb = b.add(sign_a, sign_b);
-                                let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
-                                let signs_same = b.sub(one, signs_differ);
-
-                                // Range check adjusted_diff only when signs are the same
-                                self.gen_witness_rangecheck(b, adjusted_diff_wit, s, signs_same);
-
-                                // When signs differ, result must equal sign_a
-                                let zero = b.field_const(Field::ZERO);
-                                let diff_r_sa = b.sub(result_field, sign_a);
-                                b.constrain(signs_differ, diff_r_sa, zero);
-                            } else {
-                                let rc_flag = b.field_const(Field::from(1));
-                                self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
-                            }
+                                l_taint,
+                                r_taint,
+                            );
                         }
                     }
                 } else {
@@ -502,11 +430,8 @@ impl ExplicitWitness {
                     b.push(instruction);
                     return;
                 }
-                // assert(v) with witness → constrain(v, 1, v)
-                // i.e. v * 1 - v == 0 is trivially true, but we need the witness
-                // assertion. Actually: constrain(v_field, 1, v_field) asserts v == v
-                // which is trivial. Instead, we convert to assert_cmp eq against 1.
-                let one_u1 = b.u_const(1, 1);
+                // assert(v) with witness → constrain(v_field, 1, 1)
+                // i.e. v * 1 = 1, meaning v = 1
                 let one_field = b.field_const(Field::ONE);
                 let v_field = if v_type.strip_witness().is_field() {
                     value
@@ -539,10 +464,21 @@ impl ExplicitWitness {
                         };
                         b.constrain(l, one, r);
                     }
-                    _ => {
-                        // For non-eq comparisons with witness taint, keep as-is.
-                        // The comparison result is constrained elsewhere.
-                        b.push(instruction);
+                    CmpKind::Lt => {
+                        // Lower the comparison and assert result == 1
+                        let result = b.fresh_value();
+                        self.lower_witness_lt(
+                            b,
+                            function_type_info,
+                            l,
+                            r,
+                            result,
+                            l_taint,
+                            r_taint,
+                        );
+                        let result_field = b.cast_to_field(result);
+                        let one = b.field_const(Field::ONE);
+                        b.constrain(result_field, one, one);
                     }
                 }
             }
@@ -1472,6 +1408,78 @@ impl ExplicitWitness {
         let diff = b.sub(result, value);
         let zero = b.field_const(Field::ZERO);
         b.constrain(flag, diff, zero);
+    }
+
+    /// Lower a witness-tainted Lt comparison, emitting the result into `result`.
+    /// Generates range-check constraints to prove the comparison.
+    fn lower_witness_lt(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        lhs: ValueId,
+        rhs: ValueId,
+        result: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+    ) {
+        let rhs_stripped = function_type_info.get_value_type(rhs).strip_witness().expr;
+        let (s, is_signed) = match rhs_stripped {
+            TypeExpr::U(s) => (s, false),
+            TypeExpr::I(s) => (s, true),
+            _ => panic!("ICE: rhs is not an integer type"),
+        };
+        let u1 = CastTarget::U(1);
+        let res_hint = b.lt(lhs, rhs);
+        let res_hint_field = b.cast_to_field(res_hint);
+        let res_hint_plain = b.value_of(res_hint_field);
+        let res_witness = b.write_witness(res_hint_plain);
+        b.push(OpCode::Cast {
+            result,
+            value: res_witness,
+            target: u1,
+        });
+
+        let l_field = b.cast_to_field(lhs);
+        let r_field = b.cast_to_field(rhs);
+        let lr_diff = b.sub(l_field, r_field);
+
+        let two = b.field_const(Field::from(2));
+        let result_field = b.cast_to_field(result);
+        let two_res = b.mul(result_field, two);
+        let one = b.field_const(Field::ONE);
+        let adjustment = b.sub(one, two_res);
+
+        let adjusted_diff = b.mul(lr_diff, adjustment);
+        let adjusted_diff_plain = b.value_of(adjusted_diff);
+        let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
+        b.constrain(lr_diff, adjustment, adjusted_diff_wit);
+
+        if is_signed {
+            let always_flag = b.field_const(Field::ONE);
+
+            let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
+            let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
+
+            let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
+            let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
+            let sa_sb_hint = b.mul(sa_pure, sb_pure);
+            let sa_sb = b.write_witness(sa_sb_hint);
+            b.constrain(sign_a, sign_b, sa_sb);
+
+            let two_sa_sb = b.mul(sa_sb, two);
+            let sa_plus_sb = b.add(sign_a, sign_b);
+            let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
+            let signs_same = b.sub(one, signs_differ);
+
+            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, signs_same);
+
+            let zero = b.field_const(Field::ZERO);
+            let diff_r_sa = b.sub(result_field, sign_a);
+            b.constrain(signs_differ, diff_r_sa, zero);
+        } else {
+            let rc_flag = b.field_const(Field::from(1));
+            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
+        }
     }
 
     /// Extract the sign bit (MSB) of an n-bit value.
