@@ -14,9 +14,11 @@ use mavros::{
     vm::interpreter,
 };
 use mavros_wasm_layout::{
-    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET,
-    AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET,
-    WITGEN_C_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
+    AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
+    AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
+    AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET,
+    WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -238,7 +240,7 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.into_path().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, Some((wasm_path.clone(), r1cs))) {
+        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -287,6 +289,38 @@ fn run_single(root: PathBuf) {
             &result.out_b,
             &result.out_c,
         );
+        if !correct {
+            if let Some(vm_res) = &witgen_result {
+                eprintln!(
+                    "r1cs layout: algebraic={} tables_data={} lookups_data={} total_constraints={}",
+                    r1cs.constraints_layout.algebraic_size,
+                    r1cs.constraints_layout.tables_data_size,
+                    r1cs.constraints_layout.lookups_data_size,
+                    r1cs.constraints.len()
+                );
+                eprintln!(
+                    "witness layout: algebraic={} mults={} challenges={} tables_data={} lookups_data={}",
+                    r1cs.witness_layout.algebraic_size,
+                    r1cs.witness_layout.multiplicities_size,
+                    r1cs.witness_layout.challenges_size,
+                    r1cs.witness_layout.tables_data_size,
+                    r1cs.witness_layout.lookups_data_size
+                );
+                debug_diff_witgen(
+                    "pre_comm",
+                    &vm_res.out_wit_pre_comm,
+                    &result.out_wit_pre_comm,
+                );
+                debug_diff_witgen(
+                    "post_comm",
+                    &vm_res.out_wit_post_comm,
+                    &result.out_wit_post_comm,
+                );
+                debug_diff_witgen("a", &vm_res.out_a, &result.out_a);
+                debug_diff_witgen("b", &vm_res.out_b, &result.out_b);
+                debug_diff_witgen("c", &vm_res.out_c, &result.out_c);
+            }
+        }
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -355,6 +389,13 @@ fn run_single(root: PathBuf) {
     if let (Some((coeffs, result)), Some(r1cs)) = (&ad_wasm_result, &r1cs) {
         emit("START:AD_WASM_CORRECT");
         let correct = r1cs.check_ad_output(coeffs, &result.out_da, &result.out_db, &result.out_dc);
+        if !correct {
+            if let Some((_vm_coeffs, vm_a, vm_b, vm_c, _)) = &ad_result {
+                debug_diff_witgen("ad_a", vm_a, &result.out_da);
+                debug_diff_witgen("ad_b", vm_b, &result.out_db);
+                debug_diff_witgen("ad_c", vm_c, &result.out_dc);
+            }
+        }
         emit(if correct {
             "END:AD_WASM_CORRECT:ok"
         } else {
@@ -492,6 +533,16 @@ fn run_wasm(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
+    // Per-path offsets for lookup helpers to find their buffers.
+    let mults_base_ptr =
+        witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
+    let lookups_a_cursor =
+        a_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let lookups_b_cursor =
+        b_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let lookups_c_cursor =
+        c_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+
     // Initialize VM struct with buffer pointers
     {
         let data = memory.data_mut(&mut store);
@@ -500,10 +551,18 @@ fn run_wasm(
         let a = WITGEN_A_PTR_OFFSET as usize;
         let b = WITGEN_B_PTR_OFFSET as usize;
         let c = WITGEN_C_PTR_OFFSET as usize;
+        let mb = WITGEN_MULTS_BASE_PTR_OFFSET as usize;
+        let la = WITGEN_LOOKUPS_A_PTR_OFFSET as usize;
+        let lb = WITGEN_LOOKUPS_B_PTR_OFFSET as usize;
+        let lc = WITGEN_LOOKUPS_C_PTR_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + c..off + c + 4].copy_from_slice(&c_ptr.to_le_bytes());
+        data[off + mb..off + mb + 4].copy_from_slice(&mults_base_ptr.to_le_bytes());
+        data[off + la..off + la + 4].copy_from_slice(&lookups_a_cursor.to_le_bytes());
+        data[off + lb..off + lb + 4].copy_from_slice(&lookups_b_cursor.to_le_bytes());
+        data[off + lc..off + lc + 4].copy_from_slice(&lookups_c_cursor.to_le_bytes());
     }
 
     let func = instance
@@ -569,8 +628,31 @@ fn run_wasm(
 
     // Split witness into pre-commit and post-commit sections
     let pre_comm_count = r1cs.witness_layout.pre_commitment_size();
-    let out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
-    let out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
+    let mut out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
+    let mut out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
+
+    // Phase 2 — finalize the LogUp argument on the host.
+    //
+    // Phase 1 (inside WASM) populated raw u64 multiplicities (low limb only),
+    // advanced the lookup-tape cursors through the a/b/c buffers, and wrote
+    // raw (table_id, key, flag) triples at each tape slot. Phase 2 encodes
+    // multiplicities to Montgomery, derives the LogUp denominators from
+    // alpha, computes per-table inverses via a single batch inversion, fills
+    // the per-lookup constraints, and accumulates into the sum slots.
+    //
+    // Done on the host so WASM stays a tight Phase-1-only kernel (one big
+    // one-shot loop would otherwise never inline and would dwarf the rest
+    // of the generated code).
+    if r1cs.witness_layout.challenges_size > 0 {
+        witgen_phase2(
+            r1cs,
+            &mut out_wit_pre_comm,
+            &mut out_wit_post_comm,
+            &mut out_a,
+            &mut out_b,
+            &mut out_c,
+        );
+    }
 
     Ok(WasmResult {
         out_wit_pre_comm,
@@ -580,6 +662,169 @@ fn run_wasm(
         out_c,
         live_bytes,
     })
+}
+
+/// Debug helper: print the first few differences between a VM witgen vector
+/// and the corresponding WASM witgen vector.
+fn debug_diff_witgen(label: &str, vm: &[Field], wasm: &[Field]) {
+    if vm.len() != wasm.len() {
+        eprintln!(
+            "debug_diff {}: len mismatch vm={} wasm={}",
+            label,
+            vm.len(),
+            wasm.len()
+        );
+        return;
+    }
+    let mut shown = 0;
+    for i in 0..vm.len() {
+        if vm[i] != wasm[i] {
+            eprintln!(
+                "debug_diff {} idx {}: vm={} wasm={}",
+                label, i, vm[i], wasm[i]
+            );
+            shown += 1;
+            if shown >= 8 {
+                eprintln!("debug_diff {}: ... (truncated)", label);
+                return;
+            }
+        }
+    }
+    if shown == 0 {
+        eprintln!("debug_diff {}: identical", label);
+    }
+}
+
+/// Host-side Phase 2 of witgen for the rangecheck-8 LogUp argument.
+///
+/// Matches `vm::interpreter::run_phase2` for the width-1 table case. Uses the
+/// same deterministic fake challenges as `vm::interpreter::run` so the
+/// resulting witness is comparable across backends.
+fn witgen_phase2(
+    r1cs: &R1CS,
+    out_wit_pre_comm: &mut [Field],
+    out_wit_post_comm: &mut [Field],
+    out_a: &mut [Field],
+    out_b: &mut [Field],
+    out_c: &mut [Field],
+) {
+    use ark_ff::AdditiveGroup as _;
+    use ark_ff::Field as _;
+    use ark_ff::{BigInt, PrimeField};
+    use std::str::FromStr;
+
+    let witness_layout = &r1cs.witness_layout;
+    let constraints_layout = &r1cs.constraints_layout;
+
+    // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
+    for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
+        out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
+    }
+
+    // Fake challenges — same sequence as `vm::interpreter::run`.
+    let mut random =
+        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
+            .unwrap();
+    let mut fake_challenges = vec![Field::ZERO; witness_layout.challenges_size];
+    for challenge in fake_challenges.iter_mut() {
+        *challenge = random;
+        random = (random + Field::from(17)) * random;
+    }
+    for (i, challenge) in fake_challenges.iter().enumerate() {
+        out_wit_post_comm[i] = *challenge;
+    }
+
+    // Per-table inverses (width-1 tables only — only rangecheck-8 is supported
+    // in the WASM pipeline right now).
+    let alpha = out_wit_post_comm[0];
+    let mut running_prod = Field::from(1u64);
+    let table_len: usize = 256;
+    let table_cnst_base = constraints_layout.tables_data_start();
+    let table_mults_base = witness_layout.multiplicities_start();
+
+    // Forward pass: write denom / m into out_b / out_c, accumulate running
+    // product of non-zero-multiplicity denoms into out_a.
+    for i in 0..table_len {
+        let multiplicity = out_wit_pre_comm[table_mults_base + i];
+        let denom = alpha - Field::from(i as u64);
+        out_b[table_cnst_base + i] = denom;
+        out_c[table_cnst_base + i] = multiplicity;
+        if multiplicity != Field::ZERO {
+            out_a[table_cnst_base + i] = running_prod;
+            running_prod *= denom;
+        }
+    }
+
+    // Single batch inversion.
+    let mut running_inv = running_prod
+        .inverse()
+        .expect("batch-inverse denominator was zero — prover-internal bug");
+
+    // Backward pass: unroll inverses into out_a.
+    for i in (0..table_len).rev() {
+        let multiplicity = out_c[table_cnst_base + i];
+        let denom = out_b[table_cnst_base + i];
+        if multiplicity != Field::ZERO {
+            let rp = out_a[table_cnst_base + i];
+            let elem = rp * running_inv;
+            out_a[table_cnst_base + i] = elem;
+            running_inv *= denom;
+        }
+    }
+
+    // Walk the lookup tape: each tape entry holds raw (table_id, key, flag)
+    // triples in the low limb of the a/b/c slots at `lookups_cnst_start + j`.
+    let lookups_cnst_base = constraints_layout.lookups_data_start();
+    let lookups_wit_rel = witness_layout.lookups_data_start() - witness_layout.challenges_start();
+    let sum_cnst = table_cnst_base + table_len;
+
+    for j in 0..constraints_layout.lookups_data_size {
+        let cnst_off = lookups_cnst_base + j;
+        let wit_off = lookups_wit_rel + j;
+
+        // Tape entries store raw u64 in the low limb.
+        let _table_ix = out_a[cnst_off].0.0[0]; // always 0 for the single-table case
+        let key_raw = out_b[cnst_off].0.0[0];
+        let flag_raw = out_c[cnst_off].0.0[0];
+
+        if flag_raw == 0 {
+            let b_val = alpha - Field::from(key_raw);
+            out_a[cnst_off] = Field::ZERO;
+            out_b[cnst_off] = b_val;
+            out_c[cnst_off] = Field::ZERO;
+            out_wit_post_comm[wit_off] = Field::ZERO;
+        } else {
+            assert!(
+                key_raw < table_len as u64,
+                "lookup tape key {} out of range for rangecheck-8",
+                key_raw
+            );
+            let tbl_slot = table_cnst_base + key_raw as usize;
+            let y_a = out_a[tbl_slot];
+            let y_b = out_b[tbl_slot];
+            out_a[cnst_off] = y_a;
+            out_b[cnst_off] = y_b;
+            out_c[cnst_off] = Field::from(flag_raw);
+            out_wit_post_comm[wit_off] = y_a;
+            out_c[sum_cnst] += y_a;
+        }
+    }
+
+    // Sum-constraint finalization: for each table entry with non-zero
+    // multiplicity, accumulate y*m into the sum slot and write y*m into the
+    // corresponding post-commit witness slot.
+    let tables_wit_rel = witness_layout.tables_data_start() - witness_layout.challenges_start();
+    for i in 0..table_len {
+        let m = out_c[table_cnst_base + i];
+        if m != Field::ZERO {
+            let y = out_a[table_cnst_base + i];
+            let ym = y * m;
+            out_a[table_cnst_base + i] = ym;
+            out_wit_post_comm[tables_wit_rel + i] = ym;
+            out_a[sum_cnst] += ym;
+        }
+    }
+    out_b[sum_cnst] = Field::from(1u64);
 }
 
 // ── AD WASM Runner ───────────────────────────────────────────────────
@@ -682,6 +927,10 @@ fn run_ad_wasm(
         );
     }
 
+    // AD lookups need an absolute base for random-access coefficient reads
+    // and a fresh-witness counter seeded at the lookups-section start.
+    let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
+
     // Initialize AD VM struct
     {
         let data = memory.data_mut(&mut store);
@@ -691,11 +940,15 @@ fn run_ad_wasm(
         let dc = AD_OUT_DC_PTR_OFFSET as usize;
         let coeffs = AD_COEFFS_PTR_OFFSET as usize;
         let wit = AD_CURRENT_WIT_OFF_OFFSET as usize;
+        let cbase = AD_COEFFS_BASE_PTR_OFFSET as usize;
+        let lwit = AD_CURRENT_LOOKUP_WIT_OFF_OFFSET as usize;
         data[off + da..off + da + 4].copy_from_slice(&da_ptr.to_le_bytes());
         data[off + db..off + db + 4].copy_from_slice(&db_ptr.to_le_bytes());
         data[off + dc..off + dc + 4].copy_from_slice(&dc_ptr.to_le_bytes());
         data[off + coeffs..off + coeffs + 4].copy_from_slice(&coeffs_ptr.to_le_bytes());
         data[off + wit..off + wit + 4].copy_from_slice(&0u32.to_le_bytes());
+        data[off + cbase..off + cbase + 4].copy_from_slice(&coeffs_ptr.to_le_bytes());
+        data[off + lwit..off + lwit + 4].copy_from_slice(&lookups_wit_start.to_le_bytes());
     }
 
     let func: wasmtime::Func = instance

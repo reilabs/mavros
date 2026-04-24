@@ -1,6 +1,6 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
-    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType},
+    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType, VmField},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
         Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
@@ -882,6 +882,17 @@ pub trait LLEmitter {
     fn ad_fresh_witness(&mut self) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::ADFreshWitness { result: r });
+        r
+    }
+
+    // -- Transparent VM struct access --
+
+    /// Compute a pointer to a named VM-struct field (see `VmField`).
+    /// Returns an LLType::Ptr regardless of field kind — use ll_load/ll_store
+    /// with the appropriate type to read/write through it.
+    fn vm_field_ptr(&mut self, field: VmField) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::VmFieldPtr { result: r, field });
         r
     }
 }

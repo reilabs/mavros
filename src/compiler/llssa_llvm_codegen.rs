@@ -21,15 +21,38 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
+    VmField,
 };
 use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 
 use mavros_wasm_layout::{
-    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET,
-    AD_OUT_DC_PTR_OFFSET, WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET,
+    AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
+    AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
+    WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET,
     WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET,
-    WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
+    WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET,
+    WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
 };
+
+fn vm_field_byte_offset(field: VmField) -> u32 {
+    match field {
+        VmField::WitgenWitness => VM_WITNESS_PTR_OFFSET,
+        VmField::WitgenA => VM_A_PTR_OFFSET,
+        VmField::WitgenB => VM_B_PTR_OFFSET,
+        VmField::WitgenC => VM_C_PTR_OFFSET,
+        VmField::WitgenMultsBase => WITGEN_MULTS_BASE_PTR_OFFSET,
+        VmField::WitgenLookupsA => WITGEN_LOOKUPS_A_PTR_OFFSET,
+        VmField::WitgenLookupsB => WITGEN_LOOKUPS_B_PTR_OFFSET,
+        VmField::WitgenLookupsC => WITGEN_LOOKUPS_C_PTR_OFFSET,
+        VmField::AdOutDa => AD_OUT_DA_PTR_OFFSET,
+        VmField::AdOutDb => AD_OUT_DB_PTR_OFFSET,
+        VmField::AdOutDc => AD_OUT_DC_PTR_OFFSET,
+        VmField::AdCoeffs => AD_COEFFS_PTR_OFFSET,
+        VmField::AdCoeffsBase => AD_COEFFS_BASE_PTR_OFFSET,
+        VmField::AdCurrentWitOff => AD_CURRENT_WIT_OFF_OFFSET,
+        VmField::AdCurrentLookupWitOff => AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
+    }
+}
 
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
@@ -1211,6 +1234,27 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let global = self.globals[*global_id];
                 let ptr = global.as_pointer_value();
                 self.value_map.insert(*result, ptr.into());
+            }
+
+            LLOp::VmFieldPtr { result, field } => {
+                // Byte offset from vm_ptr to the named field. Layout is fixed
+                // and shared with the host via `mavros-wasm-layout`.
+                let offset = vm_field_byte_offset(*field);
+                let vm_ptr = self.vm_ptr.unwrap();
+                let i8_ty = self.context.i8_type();
+                let i32_ty = self.context.i32_type();
+                // GEP on i8 so the increment is exactly `offset` bytes.
+                let gep = unsafe {
+                    self.builder
+                        .build_gep(
+                            i8_ty,
+                            vm_ptr,
+                            &[i32_ty.const_int(offset as u64, false)],
+                            &format!("v{}", result.0),
+                        )
+                        .unwrap()
+                };
+                self.value_map.insert(*result, gep.into());
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),

@@ -287,6 +287,58 @@ impl Display for FieldArithOp {
     }
 }
 
+/// A named field of the (transparent) VM struct. The codegen maps each one to
+/// a known byte offset from `vm_ptr` and emits a GEP. This is what lets
+/// generated SSA helpers access VM-struct pointers (cursors, bases, counters)
+/// inline without calling an opaque runtime function — LLVM sees the whole
+/// thing and can CSE, hoist, inline, etc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmField {
+    // Witgen forward-pass cursors
+    WitgenWitness,
+    WitgenA,
+    WitgenB,
+    WitgenC,
+    // Witgen lookup support
+    WitgenMultsBase,
+    WitgenLookupsA,
+    WitgenLookupsB,
+    WitgenLookupsC,
+    // AD output matrix bases (pointers, not cursors)
+    AdOutDa,
+    AdOutDb,
+    AdOutDc,
+    // AD coefficient cursor (advances) + fixed base for random access
+    AdCoeffs,
+    AdCoeffsBase,
+    // AD counters (i32 slots)
+    AdCurrentWitOff,
+    AdCurrentLookupWitOff,
+}
+
+impl Display for VmField {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            VmField::WitgenWitness => "vm.witgen.witness",
+            VmField::WitgenA => "vm.witgen.a",
+            VmField::WitgenB => "vm.witgen.b",
+            VmField::WitgenC => "vm.witgen.c",
+            VmField::WitgenMultsBase => "vm.witgen.mults_base",
+            VmField::WitgenLookupsA => "vm.witgen.lookups_a",
+            VmField::WitgenLookupsB => "vm.witgen.lookups_b",
+            VmField::WitgenLookupsC => "vm.witgen.lookups_c",
+            VmField::AdOutDa => "vm.ad.out_da",
+            VmField::AdOutDb => "vm.ad.out_db",
+            VmField::AdOutDc => "vm.ad.out_dc",
+            VmField::AdCoeffs => "vm.ad.coeffs",
+            VmField::AdCoeffsBase => "vm.ad.coeffs_base",
+            VmField::AdCurrentWitOff => "vm.ad.current_wit_off",
+            VmField::AdCurrentLookupWitOff => "vm.ad.current_lookup_wit_off",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LLOp
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -468,6 +520,21 @@ pub enum LLOp {
         result: ValueId,
     },
 
+    // ── Transparent VM struct access ────────────────────────────────────
+    /// Compute a pointer to a named field of the VM struct.
+    ///
+    /// The VM struct has a known layout (see `mavros-wasm-layout`), so this
+    /// lowers to a single GEP at codegen time — no runtime call. Once the
+    /// pointer is in hand, generated SSA code uses ordinary Load/Store/GEP
+    /// against it, and LLVM sees everything.
+    ///
+    /// Result type depends on the field: pointer slots yield Ptr, the i32
+    /// counter slots yield Ptr (to i32). Loaders/stores pick the right width.
+    VmFieldPtr {
+        result: ValueId,
+        field: VmField,
+    },
+
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -485,6 +552,7 @@ impl Instruction for LLOp {
             | LLOp::GlobalAddr { .. }
             | LLOp::NextDCoeff { .. }
             | LLOp::ADFreshWitness { .. }
+            | LLOp::VmFieldPtr { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -572,7 +640,8 @@ impl Instruction for LLOp {
             | LLOp::Select { result, .. }
             | LLOp::GlobalAddr { result, .. }
             | LLOp::NextDCoeff { result, .. }
-            | LLOp::ADFreshWitness { result, .. } => vec![result].into_iter(),
+            | LLOp::ADFreshWitness { result, .. }
+            | LLOp::VmFieldPtr { result, .. } => vec![result].into_iter(),
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
@@ -597,6 +666,7 @@ impl Instruction for LLOp {
             | LLOp::GlobalAddr { .. }
             | LLOp::NextDCoeff { .. }
             | LLOp::ADFreshWitness { .. }
+            | LLOp::VmFieldPtr { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -668,7 +738,8 @@ impl Instruction for LLOp {
             | LLOp::NullPtr { result }
             | LLOp::GlobalAddr { result, .. }
             | LLOp::NextDCoeff { result }
-            | LLOp::ADFreshWitness { result } => vec![result].into_iter(),
+            | LLOp::ADFreshWitness { result }
+            | LLOp::VmFieldPtr { result, .. } => vec![result].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
 
@@ -986,6 +1057,9 @@ impl Instruction for LLOp {
             }
             LLOp::ADFreshWitness { result } => {
                 format!("{} = ad_fresh_witness", v(*result))
+            }
+            LLOp::VmFieldPtr { result, field } => {
+                format!("{} = vm_field_ptr {}", v(*result), field)
             }
         }
     }
