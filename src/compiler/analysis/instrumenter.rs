@@ -991,21 +991,50 @@ impl SpecSplitValue {
 }
 
 impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
-    fn cmp(
-        &self,
-        b: &SpecSplitValue,
-        cmp_kind: CmpKind,
-        _tp: &Type,
-        instrumenter: &mut CostAnalysis,
-    ) -> SpecSplitValue {
+    fn ult(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         let unspecialized = self.unspecialized.cmp_op(
             &b.unspecialized,
-            &cmp_kind,
+            &CmpKind::Lt,
             instrumenter.get_unspecialized(),
         );
         let specialized =
             self.specialized
-                .cmp_op(&b.specialized, &cmp_kind, instrumenter.get_specialized());
+                .cmp_op(&b.specialized, &CmpKind::Lt, instrumenter.get_specialized());
+        SpecSplitValue {
+            unspecialized,
+            specialized,
+        }
+    }
+
+    fn slt(
+        &self,
+        b: &SpecSplitValue,
+        _bits: usize,
+        instrumenter: &mut CostAnalysis,
+    ) -> SpecSplitValue {
+        let unspecialized = self.unspecialized.cmp_op(
+            &b.unspecialized,
+            &CmpKind::Lt,
+            instrumenter.get_unspecialized(),
+        );
+        let specialized =
+            self.specialized
+                .cmp_op(&b.specialized, &CmpKind::Lt, instrumenter.get_specialized());
+        SpecSplitValue {
+            unspecialized,
+            specialized,
+        }
+    }
+
+    fn eq(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
+        let unspecialized = self.unspecialized.cmp_op(
+            &b.unspecialized,
+            &CmpKind::Eq,
+            instrumenter.get_unspecialized(),
+        );
+        let specialized =
+            self.specialized
+                .cmp_op(&b.specialized, &CmpKind::Eq, instrumenter.get_specialized());
         SpecSplitValue {
             unspecialized,
             specialized,
