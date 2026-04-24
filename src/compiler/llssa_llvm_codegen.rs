@@ -295,8 +295,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         function
     }
 
-    /// Internal helper that replaces the old extern `__ad_next_d_coeff`:
-    /// load the Field element that `ad_coeffs` currently points at, advance
+    /// Load the Field element that `ad_coeffs` currently points at, advance
     /// `ad_coeffs` by one Field, return the loaded value.
     fn define_ad_next_d_coeff_fn(&self) -> FunctionValue<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -353,8 +352,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         function
     }
 
-    /// Internal helper that replaces the old extern `__ad_fresh_witness_index`:
-    /// return the current witness counter, post-increment it.
+    /// Return the current witness counter, post-increment it.
     fn define_ad_fresh_witness_index_fn(&self) -> FunctionValue<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
@@ -396,8 +394,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         function
     }
 
-    /// Internal helper that replaces the old extern `__ad_accum_d{a,b,c}`:
-    /// load `out_d{matrix}` from the VM struct, read the field at position 0,
+    /// Load `out_d{matrix}` from the VM struct, read the field at position 0,
     /// add `sensitivity * const_value`, write it back. Pointer is NOT advanced.
     fn define_ad_accum_fn(&self, name: &str, out_d_offset: u32) -> FunctionValue<'ctx> {
         let void_type = self.context.void_type();
@@ -468,8 +465,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         function
     }
 
-    /// Internal helper that replaces the old extern `__ad_accum_at_d{a,b,c}`:
-    /// load `out_d{matrix}` from the VM struct, read the field at position
+    /// Load `out_d{matrix}` from the VM struct, read the field at position
     /// `witness_index`, add `sensitivity`, write it back.
     fn define_ad_accum_at_fn(&self, name: &str, out_d_offset: u32) -> FunctionValue<'ctx> {
         let void_type = self.context.void_type();
