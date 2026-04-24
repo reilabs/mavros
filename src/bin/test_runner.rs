@@ -13,6 +13,11 @@ use mavros::{
     Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
     vm::interpreter,
 };
+use mavros_wasm_layout::{
+    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET,
+    AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET,
+    WITGEN_C_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
+};
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
 use wasmtime::{Engine, Linker, Memory, Module, Store};
@@ -436,7 +441,7 @@ fn run_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    let vm_struct_size: u32 = 16; // 4 x u32 pointers
+    let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
@@ -491,10 +496,14 @@ fn run_wasm(
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
-        data[off..off + 4].copy_from_slice(&witness_ptr.to_le_bytes());
-        data[off + 4..off + 8].copy_from_slice(&a_ptr.to_le_bytes());
-        data[off + 8..off + 12].copy_from_slice(&b_ptr.to_le_bytes());
-        data[off + 12..off + 16].copy_from_slice(&c_ptr.to_le_bytes());
+        let w = WITGEN_WITNESS_PTR_OFFSET as usize;
+        let a = WITGEN_A_PTR_OFFSET as usize;
+        let b = WITGEN_B_PTR_OFFSET as usize;
+        let c = WITGEN_C_PTR_OFFSET as usize;
+        data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
+        data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
+        data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
+        data[off + c..off + c + 4].copy_from_slice(&c_ptr.to_le_bytes());
     }
 
     let func = instance
@@ -607,13 +616,7 @@ fn run_ad_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    // AD VM struct layout (wasm32, 5 fields × 4 bytes = 20 bytes):
-    //   offset 0:  out_da ptr
-    //   offset 4:  out_db ptr
-    //   offset 8:  out_dc ptr
-    //   offset 12: ad_coeffs ptr
-    //   offset 16: current_wit_off (i32)
-    let vm_struct_size: u32 = 20;
+    let vm_struct_size: u32 = AD_VM_STRUCT_SIZE;
     let da_bytes = (witness_count * FIELD_SIZE) as u32;
     let db_bytes = da_bytes;
     let dc_bytes = da_bytes;
@@ -683,12 +686,16 @@ fn run_ad_wasm(
     {
         let data = memory.data_mut(&mut store);
         let off = vm_struct_ptr as usize;
-        data[off..off + 4].copy_from_slice(&da_ptr.to_le_bytes());
-        data[off + 4..off + 8].copy_from_slice(&db_ptr.to_le_bytes());
-        data[off + 8..off + 12].copy_from_slice(&dc_ptr.to_le_bytes());
-        data[off + 12..off + 16].copy_from_slice(&coeffs_ptr.to_le_bytes());
-        // current_wit_off = 0
-        data[off + 16..off + 20].copy_from_slice(&0u32.to_le_bytes());
+        let da = AD_OUT_DA_PTR_OFFSET as usize;
+        let db = AD_OUT_DB_PTR_OFFSET as usize;
+        let dc = AD_OUT_DC_PTR_OFFSET as usize;
+        let coeffs = AD_COEFFS_PTR_OFFSET as usize;
+        let wit = AD_CURRENT_WIT_OFF_OFFSET as usize;
+        data[off + da..off + da + 4].copy_from_slice(&da_ptr.to_le_bytes());
+        data[off + db..off + db + 4].copy_from_slice(&db_ptr.to_le_bytes());
+        data[off + dc..off + dc + 4].copy_from_slice(&dc_ptr.to_le_bytes());
+        data[off + coeffs..off + coeffs + 4].copy_from_slice(&coeffs_ptr.to_le_bytes());
+        data[off + wit..off + wit + 4].copy_from_slice(&0u32.to_le_bytes());
     }
 
     let func: wasmtime::Func = instance

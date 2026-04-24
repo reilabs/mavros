@@ -2153,6 +2153,7 @@ dependencies = [
  "itertools 0.14.0",
  "mavros-artifacts",
  "mavros-vm",
+ "mavros-wasm-layout",
  "nargo",
  "nargo_toml",
  "noirc_abi",
@@ -2191,6 +2192,10 @@ dependencies = [
  "opcode-gen",
  "tracing",
 ]
+
+[[package]]
+name = "mavros-wasm-layout"
+version = "0.1.0"
 
 [[package]]
 name = "mavros-wasm-runtime"
