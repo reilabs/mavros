@@ -407,19 +407,16 @@ impl LowerPureGuards {
         };
         let is_zero = emitter.eq(rhs, zero_val);
 
-        // Assert unconditionally: is_zero && condition must be false
-        let failure_and_cond = emitter.and(is_zero, condition);
-        let zero_u1 = emitter.u_const(1, 0);
-        emitter.emit(OpCode::AssertEq {
-            lhs: failure_and_cond,
-            rhs: zero_u1,
-        });
-
         emitter.build_if_else_into(
             is_zero,
             vec![(original_result, lhs_type.clone())],
-            // Divisor is zero: produce default value
+            // Divisor is zero: assert condition is false, produce default
             |e| {
+                let zero_u1 = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero_u1,
+                });
                 let default_val = match &lhs_type.expr {
                     TypeExpr::U(b) => e.u_const(*b, 0),
                     TypeExpr::I(b) => e.i_const(*b, 0),
@@ -461,19 +458,18 @@ impl LowerPureGuards {
         let array_type = type_info.get_value_type(array).strip_witness().clone();
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
-        // Assert unconditionally: oob && condition must be false
-        let oob_and_cond = emitter.and(oob, condition);
-        let zero = emitter.u_const(1, 0);
-        emitter.emit(OpCode::AssertEq {
-            lhs: oob_and_cond,
-            rhs: zero,
-        });
-
         emitter.build_if_else_into(
             oob,
             vec![(original_result, array_type)],
-            // OOB: pass through original array
-            |_| vec![array],
+            // OOB: assert condition is false, pass through original array
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![array]
+            },
             // In-bounds: do the set
             |e| vec![e.array_set(array, index, value)],
         );
@@ -500,19 +496,18 @@ impl LowerPureGuards {
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
-        // Assert unconditionally: oob && condition must be false
-        let oob_and_cond = emitter.and(oob, condition);
-        let zero = emitter.u_const(1, 0);
-        emitter.emit(OpCode::AssertEq {
-            lhs: oob_and_cond,
-            rhs: zero,
-        });
-
         emitter.build_if_else_into(
             oob,
             vec![(original_result, elem_type.clone())],
-            // OOB: produce default value
-            |e| vec![self.default_scalar(e, &elem_type)],
+            // OOB: assert condition is false, produce default value
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![self.default_scalar(e, &elem_type)]
+            },
             // In-bounds: do the get
             |e| vec![e.array_get(array, index)],
         );
@@ -561,13 +556,8 @@ impl LowerPureGuards {
         }
     }
 
-    /// Common pattern: branch on a failure condition, constraining !cond in the fail
-    /// block and producing a default value, or executing the ok path.
-    ///
-    /// The assertion `failure && condition == false` is emitted unconditionally
-    /// (not inside a conditional block). This ensures the R1CS constraint count
-    /// matches the witgen VM's constraint emission regardless of which branch
-    /// the VM takes at runtime.
+    /// Common pattern: branch on a failure condition, asserting condition==false
+    /// in the fail block and producing a default value, or executing the ok path.
     fn emit_guarded_branch(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -579,19 +569,16 @@ impl LowerPureGuards {
         signed: bool,
         bits: usize,
     ) {
-        // Assert unconditionally: failure && condition must be false.
-        let failure_and_cond = emitter.and(failure, condition);
-        let zero = emitter.u_const(1, 0);
-        emitter.emit(OpCode::AssertEq {
-            lhs: failure_and_cond,
-            rhs: zero,
-        });
-
         emitter.build_if_else_into(
             failure,
             vec![(original_result, result_type.clone())],
-            // Failure: produce default value
+            // Failure: assert condition is false, produce default value
             |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero,
+                });
                 vec![if signed {
                     e.i_const(bits, 0)
                 } else {
