@@ -828,16 +828,31 @@ fn lower_instruction(
         OpCode::ToRadix {
             result,
             value,
-            radix: Radix::Bytes,
+            radix,
             endianness,
             count,
         } => {
+            match radix {
+                Radix::Bytes => {}
+                Radix::Dyn(_) => panic!(
+                    "ToRadix(Dyn) is not yet supported by HLSSA->LLSSA lowering: {:?}",
+                    instruction
+                ),
+            }
             let value_type = fn_type_info.get_value_type(*value);
-            assert!(
-                matches!(value_type.expr, TypeExpr::Field),
-                "ToRadix(Bytes) lowering only supports Field inputs, got {}",
-                value_type
-            );
+            match &value_type.expr {
+                TypeExpr::Field => {}
+                TypeExpr::WitnessOf(_) => panic!(
+                    "ToRadix on a witness value is not supported by HLSSA->LLSSA lowering; \
+                     witness byte decomposition must be lowered via constrained byte \
+                     decomposition before this pass: {:?}",
+                    instruction
+                ),
+                _ => panic!(
+                    "ToRadix(Bytes) only supports Field inputs, got {}: {:?}",
+                    value_type, instruction
+                ),
+            }
             lower_to_bytes(e, val_map, *result, *value, *endianness, *count);
         }
 
