@@ -196,13 +196,17 @@ impl RCInsertion {
                     OpCode::Cast {
                         result: r,
                         value: v,
-                        target: CastTarget::Nop | CastTarget::ArrayToSlice,
-                    } => {
-                        // Nop cast aliases result to input in codegen (same frame position).
+                        target,
+                    } if matches!(target, CastTarget::Nop | CastTarget::ArrayToSlice)
+                        || (type_info.get_value_type(*v).is_witness_of()
+                            && type_info.get_value_type(*r).is_witness_of()) =>
+                    {
+                        // Nop/alias cast: result aliases input in codegen (same frame position).
+                        // WitnessOf(A) -> WitnessOf(B) casts are also no-ops at runtime.
                         if self.needs_rc(type_info, v) {
                             if !currently_live.contains(r) {
                                 panic!(
-                                    "ICE: Result of Cast::Nop is immediately dropped. This is a bug."
+                                    "ICE: Result of aliasing Cast is immediately dropped. This is a bug."
                                 );
                             }
                             if currently_live.contains(v) {

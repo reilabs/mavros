@@ -563,7 +563,7 @@ fn lower_instruction(
             let ll_rhs = val_map[rhs];
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
-            let ll_result = match &lhs_type.expr {
+            let ll_result = match &lhs_type.strip_witness().expr {
                 TypeExpr::U(_) => {
                     let op = match kind {
                         CmpKind::Lt => IntCmpOp::ULt,
@@ -573,7 +573,7 @@ fn lower_instruction(
                 }
                 TypeExpr::I(_) => match kind {
                     CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
-                    CmpKind::Lt => panic!("Signed Lt not yet implemented in LLSSA"),
+                    CmpKind::Lt => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
                 },
                 TypeExpr::Field => match kind {
                     CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
@@ -752,6 +752,15 @@ fn lower_instruction(
         } => {
             let ll_value = val_map[value];
             let source_type = fn_type_info.get_value_type(*value);
+            let result_type = fn_type_info.get_value_type(*result);
+            if source_type.is_witness_of()
+                && result_type.is_witness_of()
+                && !matches!(target, CastTarget::WitnessOf)
+            {
+                // WitnessOf(A) → WitnessOf(B): no-op at runtime (both are AD refs)
+                val_map.insert(*result, ll_value);
+                return;
+            }
             match target {
                 CastTarget::WitnessOf => {
                     // Pure value → AD constant node
