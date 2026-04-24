@@ -6,8 +6,8 @@ use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction,
-        HLSSA, OpCode, SeqType, ValueId,
+        BinaryArithOpKind, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, FunctionId,
+        HLFunction, HLSSA, OpCode, SeqType, ValueId,
     },
 };
 
@@ -320,7 +320,8 @@ impl PrepareEntryPoint {
                         lhs: ww_result,
                         rhs: x_sub_1,
                     });
-                    instructions.push(OpCode::AssertEq {
+                    instructions.push(OpCode::AssertCmp {
+                        kind: CmpKind::Eq,
                         lhs: x_times_x_sub_1,
                         rhs: zero,
                     });
@@ -478,7 +479,8 @@ impl PrepareEntryPoint {
                         lhs: new_field_id,
                         rhs: x_sub_1,
                     });
-                    new_instructions.push(OpCode::AssertEq {
+                    new_instructions.push(OpCode::AssertCmp {
+                        kind: CmpKind::Eq,
                         lhs: x_times_x_sub_1,
                         rhs: zero,
                     });

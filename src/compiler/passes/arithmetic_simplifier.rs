@@ -92,8 +92,11 @@ impl ArithmeticSimplifier {
                                                 lhs: *v,
                                                 rhs: cst,
                                             });
-                                            new_instructions
-                                                .push(OpCode::AssertEq { lhs: r, rhs: t });
+                                            new_instructions.push(OpCode::AssertCmp {
+                                                kind: CmpKind::Eq,
+                                                lhs: r,
+                                                rhs: t,
+                                            });
                                         }
                                         _ => panic!(
                                             "Rangecheck on a cast of a non-u value {}",

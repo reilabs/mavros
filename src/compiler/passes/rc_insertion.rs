@@ -222,7 +222,8 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                     }
                     // These need to mark their inputs as live, but do not need to bump RCs
-                    OpCode::AssertEq { lhs: _, rhs: _ }
+                    OpCode::Assert { .. }
+                    | OpCode::AssertCmp { .. }
                     | OpCode::Cast {
                         result: _,
                         value: _,

@@ -920,20 +920,8 @@ impl<'a> ExpressionConverter<'a> {
         constraint_expr: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        // Special case: if the constraint is a binary equality, emit AssertEq directly
-        if let Expression::Binary(binary) = constraint_expr {
-            if binary.operator == BinaryOpKind::Equal {
-                let lhs = self.convert_expression(&binary.lhs, b).unwrap();
-                let rhs = self.convert_expression(&binary.rhs, b).unwrap();
-                b.block(self.current_block).assert_eq(lhs, rhs);
-                return None;
-            }
-        }
-
-        // General case: the constraint expression must evaluate to true (1)
         let result = self.convert_expression(constraint_expr, b).unwrap();
-        let one = self.get_or_create_const(b, ConstValue::U(1, 1));
-        b.block(self.current_block).assert_eq(result, one);
+        b.block(self.current_block).assert_bool(result);
         None
     }
 
@@ -1212,8 +1200,7 @@ impl<'a> ExpressionConverter<'a> {
             "static_assert" => {
                 // static_assert(condition, message) - drop the string message
                 let cond = self.convert_expression(&call.arguments[0], b).unwrap();
-                let t = self.get_or_create_const(b, ConstValue::U(1, 1));
-                b.block(self.current_block).assert_eq(cond, t);
+                b.block(self.current_block).assert_bool(cond);
                 None
             }
             "array_len" => {

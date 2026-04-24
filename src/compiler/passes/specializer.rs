@@ -14,8 +14,8 @@ use crate::compiler::{
     ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLFunction, HLSSA,
-        MemOp, OpCode, Radix, SeqType, ValueId,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId,
+        HLFunction, HLSSA, MemOp, OpCode, Radix, SeqType, ValueId,
     },
 };
 
@@ -237,17 +237,35 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         }
     }
 
-    fn assert_eq(&self, other: &Self, ctx: &mut SpecializationState) {
-        let l_const = ctx.const_vals.get(&self.0);
-        let r_const = ctx.const_vals.get(&other.0);
-        match (l_const, r_const) {
-            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
-                assert_eq!(l_val, r_val);
+    fn assert_bool(&self, ctx: &mut SpecializationState) {
+        let v_const = ctx.const_vals.get(&self.0);
+        match v_const {
+            Some(ConstVal::U(_, val)) => {
+                assert!(*val != 0, "assert failed: value is zero");
             }
-            (None, _) | (_, None) => {
-                HLEmitter::assert_eq(ctx, self.0, other.0);
+            None => {
+                HLEmitter::assert_bool(ctx, self.0);
             }
-            _ => panic!("Not yet implemented {:?}", (l_const, r_const)),
+            _ => panic!("Not yet implemented {:?}", v_const),
+        }
+    }
+
+    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, ctx: &mut SpecializationState) {
+        let l_const = ctx.const_vals.get(&a.0);
+        let r_const = ctx.const_vals.get(&b.0);
+        match kind {
+            CmpKind::Eq => match (l_const, r_const) {
+                (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
+                    assert_eq!(l_val, r_val);
+                }
+                (None, _) | (_, None) => {
+                    HLEmitter::assert_cmp(ctx, kind, a.0, b.0);
+                }
+                _ => panic!("Not yet implemented {:?}", (l_const, r_const)),
+            },
+            _ => {
+                HLEmitter::assert_cmp(ctx, kind, a.0, b.0);
+            }
         }
     }
 

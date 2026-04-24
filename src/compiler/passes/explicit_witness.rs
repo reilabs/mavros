@@ -495,7 +495,27 @@ impl ExplicitWitness {
                 assert!(!ptr_taint);
                 b.push(instruction);
             }
-            OpCode::AssertEq { lhs: l, rhs: r } => {
+            OpCode::Assert { value } => {
+                let v_type = function_type_info.get_value_type(value);
+                let v_taint = v_type.is_witness_of();
+                if !v_taint {
+                    b.push(instruction);
+                    return;
+                }
+                // assert(v) with witness → constrain(v, 1, v)
+                // i.e. v * 1 - v == 0 is trivially true, but we need the witness
+                // assertion. Actually: constrain(v_field, 1, v_field) asserts v == v
+                // which is trivial. Instead, we convert to assert_cmp eq against 1.
+                let one_u1 = b.u_const(1, 1);
+                let one_field = b.field_const(Field::ONE);
+                let v_field = if v_type.strip_witness().is_field() {
+                    value
+                } else {
+                    b.cast_to(CastTarget::Field, value)
+                };
+                b.constrain(v_field, one_field, one_field);
+            }
+            OpCode::AssertCmp { kind, lhs: l, rhs: r } => {
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
                 let l_taint = l_type.is_witness_of();
@@ -504,18 +524,27 @@ impl ExplicitWitness {
                     b.push(instruction);
                     return;
                 }
-                let one = b.field_const(Field::ONE);
-                let l = if l_type.strip_witness().is_field() {
-                    l
-                } else {
-                    b.cast_to(CastTarget::Field, l)
-                };
-                let r = if r_type.strip_witness().is_field() {
-                    r
-                } else {
-                    b.cast_to(CastTarget::Field, r)
-                };
-                b.constrain(l, one, r);
+                match kind {
+                    CmpKind::Eq => {
+                        let one = b.field_const(Field::ONE);
+                        let l = if l_type.strip_witness().is_field() {
+                            l
+                        } else {
+                            b.cast_to(CastTarget::Field, l)
+                        };
+                        let r = if r_type.strip_witness().is_field() {
+                            r
+                        } else {
+                            b.cast_to(CastTarget::Field, r)
+                        };
+                        b.constrain(l, one, r);
+                    }
+                    _ => {
+                        // For non-eq comparisons with witness taint, keep as-is.
+                        // The comparison result is constrained elsewhere.
+                        b.push(instruction);
+                    }
+                }
             }
             OpCode::AssertR1C { a, b: r1c_b, c } => {
                 let a_taint = function_type_info.get_value_type(a).is_witness_of();
@@ -951,8 +980,29 @@ impl ExplicitWitness {
         inner: OpCode,
     ) {
         match inner {
-            OpCode::AssertEq { lhs: l, rhs: r } => {
-                // Guard(cond, AssertEq(l, r)) → constrain(cond_field, l_sub_r, zero)
+            OpCode::Assert { value: v } => {
+                // Guard(cond, Assert(v)) → constrain(cond_field, v_field, cond_field)
+                // i.e., cond * v == cond, meaning if cond then v == 1
+                let v_type = function_type_info.get_value_type(v);
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                let v_field = if v_type.strip_witness().is_field() {
+                    v
+                } else {
+                    b.cast_to(CastTarget::Field, v)
+                };
+                b.constrain(cond_field, v_field, cond_field);
+            }
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: l,
+                rhs: r,
+            } => {
+                // Guard(cond, AssertCmp(Eq, l, r)) → constrain(cond_field, l_sub_r, zero)
                 // This asserts cond * (l - r) = 0, i.e., if cond then l == r
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);

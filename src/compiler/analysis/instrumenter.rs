@@ -12,8 +12,8 @@ use crate::compiler::{
     },
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, CastTarget, Endianness, FunctionId, HLSSA, MemOp,
-        Radix, SeqType, SliceOpDir,
+        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
+        MemOp, Radix, SeqType, SliceOpDir,
     },
 };
 
@@ -527,8 +527,14 @@ impl Value {
         }
     }
 
-    fn assert_eq(&self, other: &Value, instrumenter: &mut dyn OpInstrumenter) {
-        if self.is_witness() || other.is_witness() {
+    fn assert_bool(&self, instrumenter: &mut dyn OpInstrumenter) {
+        if self.is_witness() {
+            instrumenter.record_constraints(1);
+        }
+    }
+
+    fn assert_cmp(_kind: CmpKind, a: &Self, b: &Self, instrumenter: &mut dyn OpInstrumenter) {
+        if a.is_witness() || b.is_witness() {
             instrumenter.record_constraints(1);
         }
     }
@@ -1301,11 +1307,26 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         );
     }
 
-    fn assert_eq(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) {
+    fn assert_bool(&self, instrumenter: &mut CostAnalysis) {
         self.specialized
-            .assert_eq(&b.specialized, instrumenter.get_specialized());
+            .assert_bool(instrumenter.get_specialized());
         self.unspecialized
-            .assert_eq(&b.unspecialized, instrumenter.get_unspecialized());
+            .assert_bool(instrumenter.get_unspecialized());
+    }
+
+    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, instrumenter: &mut CostAnalysis) {
+        Value::assert_cmp(
+            kind,
+            &a.specialized,
+            &b.specialized,
+            instrumenter.get_specialized(),
+        );
+        Value::assert_cmp(
+            kind,
+            &a.unspecialized,
+            &b.unspecialized,
+            instrumenter.get_unspecialized(),
+        );
     }
 
     fn rangecheck(&self, max_bits: usize, instrumenter: &mut CostAnalysis) {
