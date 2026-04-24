@@ -356,7 +356,7 @@ fn lower_instruction(
     ad_fns: &mut AdFunctions,
     hlssa_global_types: &[Type],
 ) {
-    use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, SeqType};
+    use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, Radix, SeqType};
 
     match instruction {
         OpCode::BinaryArithOp {
@@ -825,6 +825,35 @@ fn lower_instruction(
             e.call(drop_fn_id, vec![ll_value], 0);
         }
 
+        // Supported ToRadix: Radix::Bytes on a pure Field input.
+        // All other ToRadix shapes are rejected by the explicit catch-all below.
+        OpCode::ToRadix {
+            result,
+            value,
+            radix: Radix::Bytes,
+            endianness,
+            count,
+        } if matches!(fn_type_info.get_value_type(*value).expr, TypeExpr::Field) => {
+            lower_to_bytes(e, val_map, *result, *value, *endianness, *count);
+        }
+
+        OpCode::ToRadix { value, radix, .. } => {
+            let value_type = fn_type_info.get_value_type(*value);
+            let reason = match (radix, &value_type.expr) {
+                (Radix::Dyn(_), _) => "ToRadix with a dynamic radix is not supported".to_string(),
+                (Radix::Bytes, TypeExpr::WitnessOf(_)) => {
+                    "ToRadix on a witness value is not supported; witness byte decomposition \
+                     must be lowered via constrained byte decomposition before this pass"
+                        .to_string()
+                }
+                (Radix::Bytes, _) => format!(
+                    "ToRadix(Bytes) only supports Field inputs, got {}",
+                    value_type
+                ),
+            };
+            panic!("HLSSA->LLSSA lowering: {}: {:?}", reason, instruction);
+        }
+
         _ => panic!(
             "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
@@ -864,6 +893,79 @@ fn lower_mk_array(
         let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
         let ll_elem = val_map[elem];
         e.ll_store(elem_ptr, ll_elem);
+    }
+
+    val_map.insert(result, arr);
+}
+
+fn lower_to_bytes(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    value: ValueId,
+    endianness: crate::compiler::ssa::Endianness,
+    count: usize,
+) {
+    use crate::compiler::ssa::Endianness;
+
+    let ll_value = val_map[&value];
+
+    // Decompose field → 4 × u64 limbs (little-endian: limb 0 = least significant)
+    let limbs_val = e.field_to_limbs(ll_value);
+    let limb = [
+        e.extract_field(limbs_val, LLStruct::limbs(), 0),
+        e.extract_field(limbs_val, LLStruct::limbs(), 1),
+        e.extract_field(limbs_val, LLStruct::limbs(), 2),
+        e.extract_field(limbs_val, LLStruct::limbs(), 3),
+    ];
+
+    // Extract `count` bytes in little-endian order (byte 0 = LSB).
+    // Byte i lives in limb[i/8] at bit offset (i%8)*8 for i < 32.
+    // Byte positions i >= 32 are structurally zero: the field representation
+    // is only 32 bytes, so any higher byte is definitionally 0. Matches the
+    // old VM `to_bytes_be` behavior of zero-padding past the field width.
+    let zero_byte = e.int_const(8, 0);
+    let mut bytes_le = Vec::with_capacity(count);
+    for i in 0..count {
+        if i >= 32 {
+            bytes_le.push(zero_byte);
+            continue;
+        }
+        let limb_idx = i / 8;
+        let byte_offset = (i % 8) * 8;
+        let shifted = if byte_offset == 0 {
+            limb[limb_idx]
+        } else {
+            let shift = e.int_const(64, byte_offset as u64);
+            e.int_arith(IntArithOp::UShr, limb[limb_idx], shift)
+        };
+        let byte_val = e.truncate(shifted, 8);
+        bytes_le.push(byte_val);
+    }
+
+    // Allocate RC'd array of u8
+    let u8_type = Type::u(8);
+    let rc_struct = rc_array_struct(&u8_type, count);
+    let es = elem_struct(&u8_type);
+
+    let arr = e.heap_alloc(rc_struct.clone(), None);
+
+    // Init RC to 1
+    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // Store bytes into the array
+    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    for i in 0..count {
+        let src_idx = match endianness {
+            Endianness::Big => count - 1 - i,
+            Endianness::Little => i,
+        };
+        let idx = e.int_const(64, i as u64);
+        let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
+        e.ll_store(elem_ptr, bytes_le[src_idx]);
     }
 
     val_map.insert(result, arr);
