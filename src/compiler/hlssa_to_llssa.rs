@@ -825,35 +825,33 @@ fn lower_instruction(
             e.call(drop_fn_id, vec![ll_value], 0);
         }
 
+        // Supported ToRadix: Radix::Bytes on a pure Field input.
+        // All other ToRadix shapes are rejected by the explicit catch-all below.
         OpCode::ToRadix {
             result,
             value,
-            radix,
+            radix: Radix::Bytes,
             endianness,
             count,
-        } => {
-            match radix {
-                Radix::Bytes => {}
-                Radix::Dyn(_) => panic!(
-                    "ToRadix(Dyn) is not yet supported by HLSSA->LLSSA lowering: {:?}",
-                    instruction
-                ),
-            }
-            let value_type = fn_type_info.get_value_type(*value);
-            match &value_type.expr {
-                TypeExpr::Field => {}
-                TypeExpr::WitnessOf(_) => panic!(
-                    "ToRadix on a witness value is not supported by HLSSA->LLSSA lowering; \
-                     witness byte decomposition must be lowered via constrained byte \
-                     decomposition before this pass: {:?}",
-                    instruction
-                ),
-                _ => panic!(
-                    "ToRadix(Bytes) only supports Field inputs, got {}: {:?}",
-                    value_type, instruction
-                ),
-            }
+        } if matches!(fn_type_info.get_value_type(*value).expr, TypeExpr::Field) => {
             lower_to_bytes(e, val_map, *result, *value, *endianness, *count);
+        }
+
+        OpCode::ToRadix { value, radix, .. } => {
+            let value_type = fn_type_info.get_value_type(*value);
+            let reason = match (radix, &value_type.expr) {
+                (Radix::Dyn(_), _) => "ToRadix with a dynamic radix is not supported".to_string(),
+                (Radix::Bytes, TypeExpr::WitnessOf(_)) => {
+                    "ToRadix on a witness value is not supported; witness byte decomposition \
+                     must be lowered via constrained byte decomposition before this pass"
+                        .to_string()
+                }
+                (Radix::Bytes, _) => format!(
+                    "ToRadix(Bytes) only supports Field inputs, got {}",
+                    value_type
+                ),
+            };
+            panic!("HLSSA->LLSSA lowering: {}: {:?}", reason, instruction);
         }
 
         _ => panic!(
