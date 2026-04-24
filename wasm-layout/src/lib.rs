@@ -25,6 +25,7 @@ pub const WASM_PTR_SIZE: u32 = 4;
 //   5: lookup-tape a cursor    (one Field per Lookup call)
 //   6: lookup-tape b cursor    (one Field per Lookup call)
 //   7: lookup-tape c cursor    (one Field per Lookup call)
+//   8: input base pointer      (immutable pointer to flattened ABI inputs)
 
 pub const WITGEN_WITNESS_PTR_OFFSET: u32 = 0;
 pub const WITGEN_A_PTR_OFFSET: u32 = 4;
@@ -34,7 +35,8 @@ pub const WITGEN_MULTS_BASE_PTR_OFFSET: u32 = 16;
 pub const WITGEN_LOOKUPS_A_PTR_OFFSET: u32 = 20;
 pub const WITGEN_LOOKUPS_B_PTR_OFFSET: u32 = 24;
 pub const WITGEN_LOOKUPS_C_PTR_OFFSET: u32 = 28;
-pub const WITGEN_VM_STRUCT_SIZE: u32 = 32;
+pub const WITGEN_INPUTS_PTR_OFFSET: u32 = 32;
+pub const WITGEN_VM_STRUCT_SIZE: u32 = 36;
 
 // ── AD VM struct ────────────────────────────────────────────────────────
 // Layout:
@@ -59,7 +61,7 @@ pub const AD_VM_STRUCT_SIZE: u32 = 28;
 
 // Static shape checks — if someone renumbers a field, the build breaks here
 // rather than at runtime in WASM.
-const _: () = assert!(WITGEN_VM_STRUCT_SIZE == 8 * WASM_PTR_SIZE);
+const _: () = assert!(WITGEN_VM_STRUCT_SIZE == 9 * WASM_PTR_SIZE);
 const _: () = assert!(AD_VM_STRUCT_SIZE == 6 * WASM_PTR_SIZE + 4);
 const _: () = assert!(WITGEN_A_PTR_OFFSET == WITGEN_WITNESS_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(WITGEN_B_PTR_OFFSET == WITGEN_A_PTR_OFFSET + WASM_PTR_SIZE);
@@ -68,6 +70,7 @@ const _: () = assert!(WITGEN_MULTS_BASE_PTR_OFFSET == WITGEN_C_PTR_OFFSET + WASM
 const _: () = assert!(WITGEN_LOOKUPS_A_PTR_OFFSET == WITGEN_MULTS_BASE_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(WITGEN_LOOKUPS_B_PTR_OFFSET == WITGEN_LOOKUPS_A_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(WITGEN_LOOKUPS_C_PTR_OFFSET == WITGEN_LOOKUPS_B_PTR_OFFSET + WASM_PTR_SIZE);
+const _: () = assert!(WITGEN_INPUTS_PTR_OFFSET == WITGEN_LOOKUPS_C_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(AD_OUT_DB_PTR_OFFSET == AD_OUT_DA_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(AD_OUT_DC_PTR_OFFSET == AD_OUT_DB_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(AD_COEFFS_PTR_OFFSET == AD_OUT_DC_PTR_OFFSET + WASM_PTR_SIZE);

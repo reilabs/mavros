@@ -2077,10 +2077,7 @@ fn generate_all_lookup_functions(
 }
 
 /// Extract the four raw limbs of a Field value.
-fn field_limbs(
-    e: &mut LLBlockEmitter<'_>,
-    val: ValueId,
-) -> (ValueId, ValueId, ValueId, ValueId) {
+fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> (ValueId, ValueId, ValueId, ValueId) {
     let limbs = e.field_to_limbs(val);
     let l0 = e.extract_field(limbs.clone(), LLStruct::limbs(), 0);
     let l1 = e.extract_field(limbs.clone(), LLStruct::limbs(), 1);
@@ -2117,11 +2114,7 @@ fn small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
 /// Emit: `bump_u64_at(cursor, delta)` — advance the cursor stored at
 /// `cursor_slot_ptr` by one Field, writing `(value, 0, 0, 0)` as raw limbs
 /// into the slot the old cursor pointed at.
-fn write_tape_entry_u64(
-    e: &mut LLBlockEmitter<'_>,
-    cursor_field: VmField,
-    value_u64: ValueId,
-) {
+fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: VmField, value_u64: ValueId) {
     let cursor_slot = e.vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);
     // Store value into low limb via struct_field_ptr.

@@ -436,7 +436,6 @@ impl Driver {
     ) -> Result<Option<String>, Error> {
         use crate::compiler::hlssa_to_llssa;
         use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         self.prepare_base_witgen_ssa();
@@ -459,9 +458,11 @@ impl Driver {
         let llssa = hlssa_to_llssa::lower_with_layout(ssa, &flow_analysis, &type_info, layout);
 
         // Dump LLSSA after lowering
+        let llssa_dump = llssa.to_string(&DefaultSsaAnnotator);
+        let llvm_optimization = wasm_optimization_for_llssa(&llssa_dump);
         fs::write(
             self.get_debug_output_dir().join("llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSsaAnnotator),
+            &llssa_dump,
         )
         .unwrap();
 
@@ -482,7 +483,7 @@ impl Driver {
 
         if let Some(wasm_path) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
-            codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+            codegen.compile_to_wasm(&wasm_path, llvm_optimization);
             info!(message = %"WASM object generated", path = %wasm_path.display());
             self.write_wasm_metadata(&wasm_path, r1cs)?;
         }
@@ -498,7 +499,6 @@ impl Driver {
     ) -> Result<(), Error> {
         use crate::compiler::hlssa_to_llssa;
         use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         // Prepare AD SSA: same pass pipeline as compile_ad()
@@ -533,10 +533,12 @@ impl Driver {
         let llssa = hlssa_to_llssa::lower_with_layout(&ssa, &flow_analysis, &type_info, layout);
 
         // Dump LLSSA after lowering
+        let llssa_dump = llssa.to_string(&DefaultSsaAnnotator);
+        let llvm_optimization = wasm_optimization_for_llssa(&llssa_dump);
         fs::write(
             self.get_debug_output_dir()
                 .join("ad_llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSsaAnnotator),
+            &llssa_dump,
         )
         .unwrap();
 
@@ -547,7 +549,7 @@ impl Driver {
         codegen.compile(&llssa, &ll_flow_analysis);
 
         codegen.write_ir(&wasm_path.with_extension("ll"));
-        codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+        codegen.compile_to_wasm(&wasm_path, llvm_optimization);
         info!(message = %"AD WASM object generated", path = %wasm_path.display());
         self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
 
@@ -611,6 +613,16 @@ impl Driver {
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
         Ok(())
+    }
+}
+
+fn wasm_optimization_for_llssa(llssa_dump: &str) -> inkwell::OptimizationLevel {
+    const LARGE_LLSSA_LINE_THRESHOLD: usize = 100_000;
+
+    if llssa_dump.lines().count() > LARGE_LLSSA_LINE_THRESHOLD {
+        inkwell::OptimizationLevel::None
+    } else {
+        inkwell::OptimizationLevel::Aggressive
     }
 }
 

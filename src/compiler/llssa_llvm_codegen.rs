@@ -3,7 +3,7 @@
 //! Translates LLSSA into LLVM IR, which can then be compiled to WebAssembly.
 //! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no TypeInfo needed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use inkwell::AddressSpace;
@@ -23,15 +23,15 @@ use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
     VmField,
 };
-use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
+use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Instruction, Terminator, ValueId};
 
 use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
-    WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET,
-    WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET,
-    WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET,
-    WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
+    WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET,
+    WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET, WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET,
+    WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_BASE_PTR_OFFSET,
+    WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
 };
 
 fn vm_field_byte_offset(field: VmField) -> u32 {
@@ -52,6 +52,141 @@ fn vm_field_byte_offset(field: VmField) -> u32 {
         VmField::AdCurrentWitOff => AD_CURRENT_WIT_OFF_OFFSET,
         VmField::AdCurrentLookupWitOff => AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
     }
+}
+
+const OUTLINE_MIN_INSTRUCTIONS: usize = 64;
+const OUTLINE_MAX_INSTRUCTIONS: usize = 256;
+const OUTLINE_MAX_LIVE_INS: usize = 16;
+const OUTLINE_MAX_LIVE_OUTS: usize = 16;
+
+struct OutlinedChunk {
+    end: usize,
+    live_ins: Vec<ValueId>,
+    live_outs: Vec<ValueId>,
+}
+
+fn instruction_use_counts(
+    instructions: &[LLOp],
+    terminator: Option<&Terminator>,
+) -> HashMap<ValueId, usize> {
+    let mut counts = HashMap::new();
+    for instruction in instructions {
+        for input in instruction.get_inputs() {
+            *counts.entry(*input).or_insert(0) += 1;
+        }
+    }
+
+    if let Some(terminator) = terminator {
+        for input in terminator_inputs(terminator) {
+            *counts.entry(input).or_insert(0) += 1;
+        }
+    }
+
+    counts
+}
+
+fn terminator_inputs(terminator: &Terminator) -> Vec<ValueId> {
+    match terminator {
+        Terminator::Jmp(_, args) => args.clone(),
+        Terminator::JmpIf(cond, _, _) => vec![*cond],
+        Terminator::Return(values) => values.clone(),
+    }
+}
+
+fn decrement_instruction_uses(remaining_uses: &mut HashMap<ValueId, usize>, instruction: &LLOp) {
+    for input in instruction.get_inputs() {
+        if let Some(count) = remaining_uses.get_mut(input) {
+            *count = count.saturating_sub(1);
+        }
+    }
+}
+
+fn ll_type_size_bytes(ty: &LLType) -> u32 {
+    match ty {
+        LLType::Int(bits) => bits.div_ceil(8),
+        LLType::Ptr => WASM_PTR_SIZE,
+        LLType::Struct(s) => ll_struct_size_bytes(s),
+    }
+}
+
+fn ll_struct_size_bytes(s: &LLStruct) -> u32 {
+    s.fields.iter().map(ll_field_type_size_bytes).sum()
+}
+
+fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
+    match ft {
+        LLFieldType::Int(bits) => bits.div_ceil(8),
+        LLFieldType::Ptr => WASM_PTR_SIZE,
+        LLFieldType::Inline(s) => ll_struct_size_bytes(s),
+        LLFieldType::InlineArray(s, n) => ll_struct_size_bytes(s) * *n as u32,
+        LLFieldType::FlexArray(_) => {
+            panic!("FlexArray is not supported for WASM input parameters")
+        }
+    }
+}
+
+fn find_outlinable_chunk(
+    start: usize,
+    instructions: &[LLOp],
+    remaining_uses: &HashMap<ValueId, usize>,
+    result_types: &HashMap<ValueId, BasicTypeEnum>,
+) -> Option<OutlinedChunk> {
+    let mut local_remaining = remaining_uses.clone();
+    let mut defined_inside = HashSet::new();
+    let mut defined_order = Vec::new();
+    let mut live_in_seen = HashSet::new();
+    let mut live_ins = Vec::new();
+    let mut best = None;
+
+    for (offset, instruction) in instructions[start..]
+        .iter()
+        .take(OUTLINE_MAX_INSTRUCTIONS)
+        .enumerate()
+    {
+        if matches!(instruction, LLOp::Trap) {
+            break;
+        }
+
+        for input in instruction.get_inputs() {
+            if !defined_inside.contains(input) && live_in_seen.insert(*input) {
+                live_ins.push(*input);
+                if live_ins.len() > OUTLINE_MAX_LIVE_INS {
+                    return best;
+                }
+            }
+            if let Some(count) = local_remaining.get_mut(input) {
+                *count = count.saturating_sub(1);
+            }
+        }
+
+        for result in instruction.get_results() {
+            defined_inside.insert(*result);
+            defined_order.push(*result);
+        }
+
+        let len = offset + 1;
+        if len >= OUTLINE_MIN_INSTRUCTIONS {
+            let live_outs: Vec<ValueId> = defined_order
+                .iter()
+                .copied()
+                .filter(|value| local_remaining.get(value).copied().unwrap_or(0) > 0)
+                .collect();
+
+            if live_outs.len() <= OUTLINE_MAX_LIVE_OUTS
+                && live_outs
+                    .iter()
+                    .all(|value| result_types.contains_key(value))
+            {
+                best = Some(OutlinedChunk {
+                    end: start + len,
+                    live_ins: live_ins.clone(),
+                    live_outs,
+                });
+            }
+        }
+    }
+
+    best
 }
 
 /// LLSSA → LLVM Code Generator
@@ -87,6 +222,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
     // Globals
     globals: Vec<inkwell::values::GlobalValue<'ctx>>,
+    outlined_chunk_counter: u64,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -123,6 +259,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
             globals: Vec::new(),
+            outlined_chunk_counter: 0,
         };
 
         codegen.declare_runtime_functions();
@@ -576,7 +713,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // Second pass: generate function bodies
         for (fn_id, function) in llssa.iter_functions() {
             let cfg = flow_analysis.get_function_cfg(*fn_id);
-            self.compile_function(*fn_id, function, cfg);
+            self.compile_function(*fn_id, function, cfg, main_id);
         }
     }
 
@@ -587,8 +724,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // First parameter is always VM*
         let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
 
-        for (_, tp) in entry.get_parameters() {
-            param_types.push(self.convert_type(tp).into());
+        if fn_id != main_id {
+            for (_, tp) in entry.get_parameters() {
+                param_types.push(self.convert_type(tp).into());
+            }
         }
 
         let return_types: Vec<BasicTypeEnum> = function
@@ -621,6 +760,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         fn_id: FunctionId,
         function: &LLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
+        main_id: FunctionId,
     ) {
         self.value_map.clear();
         self.block_map.clear();
@@ -649,9 +789,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
         let entry = function.get_entry();
-        for (i, (param_id, _)) in entry.get_parameters().enumerate() {
-            let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
-            self.value_map.insert(*param_id, param_value);
+        if fn_id == main_id {
+            self.load_main_params_from_memory(entry.get_parameters());
+        } else {
+            for (i, (param_id, _)) in entry.get_parameters().enumerate() {
+                let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
+                self.value_map.insert(*param_id, param_value);
+            }
         }
 
         // Track phi nodes
@@ -683,6 +827,56 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
+    fn load_main_params_from_memory<'a>(
+        &mut self,
+        parameters: impl Iterator<Item = &'a (ValueId, LLType)>,
+    ) {
+        let vm_ptr = self
+            .vm_ptr
+            .expect("main parameters are loaded relative to the VM pointer");
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let i8_type = self.context.i8_type();
+        let input_slot =
+            unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        vm_ptr,
+                        &[i32_type
+                            .const_int((WITGEN_INPUTS_PTR_OFFSET / WASM_PTR_SIZE) as u64, false)],
+                        "inputs_slot",
+                    )
+                    .unwrap()
+            };
+        let mut input_ptr = self
+            .builder
+            .build_load(ptr_type, input_slot, "inputs_ptr")
+            .unwrap()
+            .into_pointer_value();
+
+        for (param_id, param_type) in parameters {
+            let llvm_type = self.convert_type(param_type);
+            let value = self
+                .builder
+                .build_load(llvm_type, input_ptr, &format!("v{}", param_id.0))
+                .unwrap();
+            self.value_map.insert(*param_id, value);
+
+            let offset = ll_type_size_bytes(param_type);
+            input_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        i8_type,
+                        input_ptr,
+                        &[i32_type.const_int(offset as u64, false)],
+                        "next_input",
+                    )
+                    .unwrap()
+            };
+        }
+    }
+
     fn compile_block(
         &mut self,
         function: &LLFunction,
@@ -709,12 +903,263 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         self.builder.position_at_end(bb);
 
-        for instruction in block.get_instructions() {
-            self.compile_instruction(instruction);
-        }
+        let instructions: Vec<LLOp> = block.get_instructions().cloned().collect();
+        self.compile_block_instructions(function, &instructions, block.get_terminator());
 
         if let Some(terminator) = block.get_terminator() {
             self.compile_terminator(terminator);
+        }
+    }
+
+    fn compile_block_instructions(
+        &mut self,
+        function: &LLFunction,
+        instructions: &[LLOp],
+        terminator: Option<&Terminator>,
+    ) {
+        if function.get_blocks().count() != 1 || instructions.len() < OUTLINE_MIN_INSTRUCTIONS {
+            for instruction in instructions {
+                self.compile_instruction(instruction);
+            }
+            return;
+        }
+
+        let mut remaining_uses = instruction_use_counts(instructions, terminator);
+        let result_types = self.instruction_result_types(instructions);
+        let mut i = 0;
+        while i < instructions.len() {
+            if let Some(chunk) =
+                find_outlinable_chunk(i, instructions, &remaining_uses, &result_types)
+            {
+                self.compile_outlined_chunk(
+                    &instructions[i..chunk.end],
+                    &chunk.live_ins,
+                    &chunk.live_outs,
+                    &result_types,
+                );
+                for instruction in &instructions[i..chunk.end] {
+                    decrement_instruction_uses(&mut remaining_uses, instruction);
+                }
+                i = chunk.end;
+            } else {
+                self.compile_instruction(&instructions[i]);
+                decrement_instruction_uses(&mut remaining_uses, &instructions[i]);
+                i += 1;
+            }
+        }
+    }
+
+    fn instruction_result_types(
+        &self,
+        instructions: &[LLOp],
+    ) -> HashMap<ValueId, BasicTypeEnum<'ctx>> {
+        let mut types: HashMap<ValueId, BasicTypeEnum> = self
+            .value_map
+            .iter()
+            .map(|(value_id, value)| (*value_id, value.get_type()))
+            .collect();
+
+        for instruction in instructions {
+            match instruction {
+                LLOp::IntConst { result, bits, .. } => {
+                    types.insert(*result, self.context.custom_width_int_type(*bits).into());
+                }
+                LLOp::NullPtr { result }
+                | LLOp::HeapAlloc { result, .. }
+                | LLOp::StructFieldPtr { result, .. }
+                | LLOp::ArrayElemPtr { result, .. }
+                | LLOp::GlobalAddr { result, .. }
+                | LLOp::VmFieldPtr { result, .. } => {
+                    types.insert(
+                        *result,
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    );
+                }
+                LLOp::ADFreshWitness { result } => {
+                    types.insert(*result, self.context.i32_type().into());
+                }
+                LLOp::IntArith { result, a, .. } | LLOp::Not { result, value: a } => {
+                    if let Some(ty) = types.get(a).copied() {
+                        types.insert(*result, ty);
+                    }
+                }
+                LLOp::IntCmp { result, .. } | LLOp::FieldEq { result, .. } => {
+                    types.insert(*result, self.context.bool_type().into());
+                }
+                LLOp::Truncate {
+                    result, to_bits, ..
+                }
+                | LLOp::ZExt {
+                    result, to_bits, ..
+                } => {
+                    types.insert(*result, self.context.custom_width_int_type(*to_bits).into());
+                }
+                LLOp::FieldArith { result, .. }
+                | LLOp::FieldNeg { result, .. }
+                | LLOp::FieldFromLimbs { result, .. }
+                | LLOp::NextDCoeff { result } => {
+                    types.insert(*result, self.field_llvm_type());
+                }
+                LLOp::FieldToLimbs { result, .. } => {
+                    types.insert(*result, self.limbs_llvm_type());
+                }
+                LLOp::MkStruct {
+                    result,
+                    struct_type,
+                    ..
+                } => {
+                    types.insert(*result, self.convert_struct_type(struct_type));
+                }
+                LLOp::ExtractField {
+                    result,
+                    struct_type,
+                    field,
+                    ..
+                } => {
+                    types.insert(
+                        *result,
+                        self.convert_field_type(&struct_type.fields[*field]),
+                    );
+                }
+                LLOp::Load { result, ty, .. } => {
+                    types.insert(*result, self.convert_type(ty));
+                }
+                LLOp::Select { result, if_t, .. } => {
+                    if let Some(ty) = types.get(if_t).copied() {
+                        types.insert(*result, ty);
+                    }
+                }
+                LLOp::Call { results, func, .. } => {
+                    let callee = self.function_map[func];
+                    if results.len() == 1 {
+                        if let Some(ty) = callee.get_type().get_return_type() {
+                            types.insert(results[0], ty);
+                        }
+                    } else if results.len() > 1
+                        && let Some(ret_ty) = callee.get_type().get_return_type()
+                    {
+                        let field_types = ret_ty.into_struct_type().get_field_types();
+                        for (result, ty) in results.iter().zip(field_types) {
+                            types.insert(*result, ty);
+                        }
+                    }
+                }
+                LLOp::Free { .. }
+                | LLOp::Store { .. }
+                | LLOp::Memcpy { .. }
+                | LLOp::Constrain { .. }
+                | LLOp::WriteWitness { .. }
+                | LLOp::ADWriteConst { .. }
+                | LLOp::ADWriteWitness { .. }
+                | LLOp::Trap => {}
+            }
+        }
+
+        types
+    }
+
+    fn compile_outlined_chunk(
+        &mut self,
+        instructions: &[LLOp],
+        live_ins: &[ValueId],
+        live_outs: &[ValueId],
+        result_types: &HashMap<ValueId, BasicTypeEnum<'ctx>>,
+    ) {
+        let parent_bb = self
+            .builder
+            .get_insert_block()
+            .expect("outlined chunk must be emitted from a parent block");
+        let parent_vm_ptr = self
+            .vm_ptr
+            .expect("outlined chunk must be emitted inside a VM function");
+
+        let mut param_types: Vec<BasicMetadataTypeEnum> =
+            vec![self.context.ptr_type(AddressSpace::default()).into()];
+        let mut call_args: Vec<BasicMetadataValueEnum> = vec![parent_vm_ptr.into()];
+        for value_id in live_ins {
+            let value = self.value_map[value_id];
+            param_types.push(value.get_type().into());
+            call_args.push(value.into());
+        }
+
+        let live_out_types: Vec<BasicTypeEnum> = live_outs
+            .iter()
+            .map(|value_id| result_types[value_id])
+            .collect();
+        let fn_type = if live_out_types.is_empty() {
+            self.context.void_type().fn_type(&param_types, false)
+        } else if live_out_types.len() == 1 {
+            live_out_types[0].fn_type(&param_types, false)
+        } else {
+            let return_struct = self.context.struct_type(&live_out_types, false);
+            return_struct.fn_type(&param_types, false)
+        };
+        let chunk_id = self.outlined_chunk_counter;
+        self.outlined_chunk_counter += 1;
+        let function = self.module.add_function(
+            &format!("__mavros_chunk_{}", chunk_id),
+            fn_type,
+            Some(Linkage::Internal),
+        );
+
+        let entry = self.context.append_basic_block(function, "entry");
+        let parent_value_map = std::mem::take(&mut self.value_map);
+        let parent_vm_ptr_slot = self.vm_ptr;
+
+        self.builder.position_at_end(entry);
+        self.vm_ptr = Some(function.get_nth_param(0).unwrap().into_pointer_value());
+        for (i, value_id) in live_ins.iter().enumerate() {
+            self.value_map
+                .insert(*value_id, function.get_nth_param((i + 1) as u32).unwrap());
+        }
+
+        for instruction in instructions {
+            self.compile_instruction(instruction);
+        }
+        if live_outs.is_empty() {
+            self.builder.build_return(None).unwrap();
+        } else if live_outs.len() == 1 {
+            let ret_val = self.value_map[&live_outs[0]];
+            self.builder.build_return(Some(&ret_val)).unwrap();
+        } else {
+            let mut struct_val = self.context.struct_type(&live_out_types, false).get_undef();
+            for (i, value_id) in live_outs.iter().enumerate() {
+                let value = self.value_map[value_id];
+                struct_val = self
+                    .builder
+                    .build_insert_value(struct_val, value, i as u32, "chunk_ret")
+                    .unwrap()
+                    .into_struct_value();
+            }
+            self.builder.build_return(Some(&struct_val)).unwrap();
+        }
+
+        self.value_map = parent_value_map;
+        self.vm_ptr = parent_vm_ptr_slot;
+        self.builder.position_at_end(parent_bb);
+        let call_result = self
+            .builder
+            .build_call(function, &call_args, &format!("chunk_{}", chunk_id))
+            .unwrap();
+        if live_outs.len() == 1 {
+            let value = call_result
+                .try_as_basic_value()
+                .left()
+                .expect("outlined chunk should return a value");
+            self.value_map.insert(live_outs[0], value);
+        } else if live_outs.len() > 1 {
+            let ret_struct = call_result
+                .try_as_basic_value()
+                .left()
+                .expect("outlined chunk should return values")
+                .into_struct_value();
+            for (i, value_id) in live_outs.iter().enumerate() {
+                let value = self
+                    .builder
+                    .build_extract_value(ret_struct, i as u32, &format!("v{}", value_id.0))
+                    .unwrap();
+                self.value_map.insert(*value_id, value);
+            }
         }
     }
 

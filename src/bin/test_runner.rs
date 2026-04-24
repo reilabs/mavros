@@ -17,8 +17,9 @@ use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
     AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
-    WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET,
-    WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
+    WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
+    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
+    WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -271,7 +272,8 @@ fn run_single(root: PathBuf) {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("Witgen WASM run error: {:?}", e);
                 emit("END:WITGEN_WASM_RUN:fail");
                 None
             }
@@ -481,11 +483,13 @@ fn run_wasm(
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
+    let input_fields: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
-    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
+    let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
+    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes;
 
     // Create wasmtime engine and store
     let engine = Engine::default();
@@ -524,7 +528,8 @@ fn run_wasm(
     let a_ptr = witness_ptr + witness_bytes;
     let b_ptr = a_ptr + constraint_bytes;
     let c_ptr = b_ptr + constraint_bytes;
-    let total_bytes = c_ptr + constraint_bytes;
+    let inputs_ptr = c_ptr + constraint_bytes;
+    let total_bytes = inputs_ptr + input_bytes;
 
     // Grow memory if needed
     let needed_pages = ((total_bytes as usize + 65535) / 65536) as u32;
@@ -555,6 +560,7 @@ fn run_wasm(
         let la = WITGEN_LOOKUPS_A_PTR_OFFSET as usize;
         let lb = WITGEN_LOOKUPS_B_PTR_OFFSET as usize;
         let lc = WITGEN_LOOKUPS_C_PTR_OFFSET as usize;
+        let inputs = WITGEN_INPUTS_PTR_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
@@ -563,25 +569,23 @@ fn run_wasm(
         data[off + la..off + la + 4].copy_from_slice(&lookups_a_cursor.to_le_bytes());
         data[off + lb..off + lb + 4].copy_from_slice(&lookups_b_cursor.to_le_bytes());
         data[off + lc..off + lc + 4].copy_from_slice(&lookups_c_cursor.to_le_bytes());
+        data[off + inputs..off + inputs + 4].copy_from_slice(&inputs_ptr.to_le_bytes());
+    }
+
+    for (i, field) in input_fields.iter().enumerate() {
+        write_field_to_memory(
+            &memory,
+            &mut store,
+            inputs_ptr + (i * FIELD_SIZE) as u32,
+            field,
+        );
     }
 
     let func = instance
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
 
-    // Prepare arguments: vmPtr followed by all input field element limbs
-    let mut args: Vec<wasmtime::Val> = Vec::new();
-    args.push(wasmtime::Val::I32(vm_struct_ptr as i32)); // vmPtr
-
-    for param in params {
-        for field in flatten_input_value(param) {
-            let limbs = field.0.0;
-            args.push(wasmtime::Val::I64(limbs[0] as i64));
-            args.push(wasmtime::Val::I64(limbs[1] as i64));
-            args.push(wasmtime::Val::I64(limbs[2] as i64));
-            args.push(wasmtime::Val::I64(limbs[3] as i64));
-        }
-    }
+    let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
 
     // Call the function
     let mut results = vec![];
