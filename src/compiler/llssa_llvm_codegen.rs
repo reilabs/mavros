@@ -28,10 +28,10 @@ use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
 use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
-    WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET,
-    WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET,
-    WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET,
-    WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
+    WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET,
+    WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET, WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET,
+    WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_BASE_PTR_OFFSET,
+    WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
 };
 
 fn vm_field_byte_offset(field: VmField) -> u32 {
@@ -51,6 +51,30 @@ fn vm_field_byte_offset(field: VmField) -> u32 {
         VmField::AdCoeffsBase => AD_COEFFS_BASE_PTR_OFFSET,
         VmField::AdCurrentWitOff => AD_CURRENT_WIT_OFF_OFFSET,
         VmField::AdCurrentLookupWitOff => AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
+    }
+}
+
+fn ll_type_size_bytes(ty: &LLType) -> u32 {
+    match ty {
+        LLType::Int(bits) => bits.div_ceil(8),
+        LLType::Ptr => WASM_PTR_SIZE,
+        LLType::Struct(s) => ll_struct_size_bytes(s),
+    }
+}
+
+fn ll_struct_size_bytes(s: &LLStruct) -> u32 {
+    s.fields.iter().map(ll_field_type_size_bytes).sum()
+}
+
+fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
+    match ft {
+        LLFieldType::Int(bits) => bits.div_ceil(8),
+        LLFieldType::Ptr => WASM_PTR_SIZE,
+        LLFieldType::Inline(s) => ll_struct_size_bytes(s),
+        LLFieldType::InlineArray(s, n) => ll_struct_size_bytes(s) * *n as u32,
+        LLFieldType::FlexArray(_) => {
+            panic!("FlexArray is not supported for WASM input parameters")
+        }
     }
 }
 
@@ -576,7 +600,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // Second pass: generate function bodies
         for (fn_id, function) in llssa.iter_functions() {
             let cfg = flow_analysis.get_function_cfg(*fn_id);
-            self.compile_function(*fn_id, function, cfg);
+            self.compile_function(*fn_id, function, cfg, main_id);
         }
     }
 
@@ -587,8 +611,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // First parameter is always VM*
         let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
 
-        for (_, tp) in entry.get_parameters() {
-            param_types.push(self.convert_type(tp).into());
+        if fn_id != main_id {
+            for (_, tp) in entry.get_parameters() {
+                param_types.push(self.convert_type(tp).into());
+            }
         }
 
         let return_types: Vec<BasicTypeEnum> = function
@@ -621,6 +647,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         fn_id: FunctionId,
         function: &LLFunction,
         cfg: &crate::compiler::flow_analysis::CFG,
+        main_id: FunctionId,
     ) {
         self.value_map.clear();
         self.block_map.clear();
@@ -649,9 +676,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
         let entry = function.get_entry();
-        for (i, (param_id, _)) in entry.get_parameters().enumerate() {
-            let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
-            self.value_map.insert(*param_id, param_value);
+        if fn_id == main_id {
+            self.load_main_params_from_memory(entry.get_parameters());
+        } else {
+            for (i, (param_id, _)) in entry.get_parameters().enumerate() {
+                let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
+                self.value_map.insert(*param_id, param_value);
+            }
         }
 
         // Track phi nodes
@@ -680,6 +711,56 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     Terminator::JmpIf(..) | Terminator::Return(_) => {}
                 }
             }
+        }
+    }
+
+    fn load_main_params_from_memory<'a>(
+        &mut self,
+        parameters: impl Iterator<Item = &'a (ValueId, LLType)>,
+    ) {
+        let vm_ptr = self
+            .vm_ptr
+            .expect("main parameters are loaded relative to the VM pointer");
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let i8_type = self.context.i8_type();
+        let input_slot =
+            unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        vm_ptr,
+                        &[i32_type
+                            .const_int((WITGEN_INPUTS_PTR_OFFSET / WASM_PTR_SIZE) as u64, false)],
+                        "inputs_slot",
+                    )
+                    .unwrap()
+            };
+        let mut input_ptr = self
+            .builder
+            .build_load(ptr_type, input_slot, "inputs_ptr")
+            .unwrap()
+            .into_pointer_value();
+
+        for (param_id, param_type) in parameters {
+            let llvm_type = self.convert_type(param_type);
+            let value = self
+                .builder
+                .build_load(llvm_type, input_ptr, &format!("v{}", param_id.0))
+                .unwrap();
+            self.value_map.insert(*param_id, value);
+
+            let offset = ll_type_size_bytes(param_type);
+            input_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        i8_type,
+                        input_ptr,
+                        &[i32_type.const_int(offset as u64, false)],
+                        "next_input",
+                    )
+                    .unwrap()
+            };
         }
     }
 

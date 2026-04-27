@@ -243,17 +243,23 @@ impl AdFunctions {
 struct LookupFunctions {
     /// Forward-pass rangecheck-8 helper: `__rngchk_8(val, flag)`.
     rngchk_8: Option<FunctionId>,
+    /// Forward-pass u64 witness rangecheck helper.
+    rngchk_u64: Option<FunctionId>,
     /// AD-path rangecheck-8 helpers.
     drngchk_8_init: Option<FunctionId>,
     drngchk_8_call: Option<FunctionId>,
+    /// AD-path u64 witness rangecheck helper.
+    drngchk_u64_call: Option<FunctionId>,
 }
 
 impl LookupFunctions {
     fn new() -> Self {
         Self {
             rngchk_8: None,
+            rngchk_u64: None,
             drngchk_8_init: None,
             drngchk_8_call: None,
+            drngchk_u64_call: None,
         }
     }
 
@@ -263,6 +269,16 @@ impl LookupFunctions {
         }
         let id = llssa.add_function("__rngchk_8".to_string());
         self.rngchk_8 = Some(id);
+        id
+    }
+
+    fn get_rngchk_u64_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.rngchk_u64 {
+            return id;
+        }
+        self.get_rngchk_8_fn(llssa);
+        let id = llssa.add_function("__rngchk_u64".to_string());
+        self.rngchk_u64 = Some(id);
         id
     }
 
@@ -277,6 +293,16 @@ impl LookupFunctions {
         self.drngchk_8_init = Some(init);
         self.drngchk_8_call = Some(call);
         call
+    }
+
+    fn get_drngchk_u64_call_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.drngchk_u64_call {
+            return id;
+        }
+        self.get_drngchk_8_call_fn(llssa);
+        let id = llssa.add_function("__drngchk_u64_ad_call".to_string());
+        self.drngchk_u64_call = Some(id);
+        id
     }
 }
 
@@ -384,6 +410,324 @@ fn lower_inner(
 // Per-function lowering
 // =============================================================================
 
+struct ForwardU64Rangecheck {
+    len: usize,
+    value: ValueId,
+    flag: ValueId,
+}
+
+struct AdU64Rangecheck {
+    len: usize,
+    value: ValueId,
+    flag: ValueId,
+}
+
+fn is_drop_of(instruction: &crate::compiler::ssa::OpCode, value: ValueId) -> bool {
+    matches!(
+        instruction,
+        crate::compiler::ssa::OpCode::MemOp {
+            kind: crate::compiler::ssa::MemOp::Drop,
+            value: dropped,
+        } if *dropped == value
+    )
+}
+
+fn is_bump_of(instruction: &crate::compiler::ssa::OpCode, value: ValueId) -> bool {
+    matches!(
+        instruction,
+        crate::compiler::ssa::OpCode::MemOp {
+            kind: crate::compiler::ssa::MemOp::Bump(_),
+            value: bumped,
+        } if *bumped == value
+    )
+}
+
+fn is_forward_u64_rangecheck_op(instruction: &crate::compiler::ssa::OpCode) -> bool {
+    use crate::compiler::ssa::OpCode;
+
+    matches!(
+        instruction,
+        OpCode::Const { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::Cast { .. }
+            | OpCode::WriteWitness { .. }
+            | OpCode::Lookup { .. }
+            | OpCode::BinaryArithOp { .. }
+            | OpCode::MemOp { .. }
+            | OpCode::Constrain { .. }
+    )
+}
+
+fn try_match_forward_u64_rangecheck(
+    instructions: &[crate::compiler::ssa::OpCode],
+    start: usize,
+) -> Option<ForwardU64Rangecheck> {
+    use crate::compiler::ssa::{Endianness, LookupTarget, OpCode, Radix};
+
+    let (array, value) = match instructions.get(start)? {
+        OpCode::ToRadix {
+            result,
+            value,
+            radix: Radix::Bytes,
+            endianness: Endianness::Big,
+            count: 8,
+        } => (*result, *value),
+        _ => return None,
+    };
+
+    let mut pos = start + 1;
+    let mut lookups = 0;
+    let mut flag = None;
+    let mut saw_array_get = false;
+
+    while pos < instructions.len() && pos < start + 96 {
+        let instruction = &instructions[pos];
+        if !is_forward_u64_rangecheck_op(instruction) {
+            return None;
+        }
+
+        match instruction {
+            OpCode::ArrayGet {
+                array: candidate, ..
+            } if *candidate == array => {
+                saw_array_get = true;
+            }
+            OpCode::Lookup {
+                target: LookupTarget::Rangecheck(8),
+                keys,
+                results,
+                flag: lookup_flag,
+            } if keys.len() == 1 && results.is_empty() => {
+                if let Some(existing) = flag {
+                    if existing != *lookup_flag {
+                        return None;
+                    }
+                } else {
+                    flag = Some(*lookup_flag);
+                }
+                lookups += 1;
+            }
+            OpCode::Constrain { a, .. } if lookups == 8 && Some(*a) == flag => {
+                if saw_array_get {
+                    return Some(ForwardU64Rangecheck {
+                        len: pos - start + 1,
+                        value,
+                        flag: flag?,
+                    });
+                }
+                return None;
+            }
+            OpCode::ToRadix { .. } => return None,
+            _ => {}
+        }
+
+        pos += 1;
+    }
+
+    None
+}
+
+fn is_ad_reconstruct_op(instruction: &crate::compiler::ssa::OpCode) -> bool {
+    use crate::compiler::ssa::OpCode;
+
+    matches!(
+        instruction,
+        OpCode::Const { .. }
+            | OpCode::Cast { .. }
+            | OpCode::FreshWitness { .. }
+            | OpCode::DLookup { .. }
+            | OpCode::BinaryArithOp { .. }
+            | OpCode::MulConst { .. }
+            | OpCode::MemOp { .. }
+    )
+}
+
+fn try_match_ad_u64_rangecheck(
+    instructions: &[crate::compiler::ssa::OpCode],
+    start: usize,
+) -> Option<AdU64Rangecheck> {
+    use crate::compiler::ssa::{CastTarget, DMatrix, LookupTarget, OpCode};
+
+    let mut pos = start;
+    let mut lookups = 0;
+    let mut flag_source = None;
+
+    while lookups < 8 {
+        let byte = match instructions.get(pos)? {
+            OpCode::FreshWitness { result, .. } => *result,
+            _ => return None,
+        };
+        pos += 1;
+
+        let (flag_node, flag_value) = match instructions.get(pos)? {
+            OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::WitnessOf,
+            } => (*result, *value),
+            _ => return None,
+        };
+        if let Some(existing) = flag_source {
+            if existing != flag_value {
+                return None;
+            }
+        } else {
+            flag_source = Some(flag_value);
+        }
+        pos += 1;
+
+        match instructions.get(pos)? {
+            OpCode::DLookup {
+                target: LookupTarget::Rangecheck(8),
+                keys,
+                results,
+                flag,
+            } if keys.as_slice() == [byte] && results.is_empty() && *flag == flag_node => {}
+            _ => return None,
+        }
+        pos += 1;
+
+        if matches!(instructions.get(pos), Some(instruction) if is_drop_of(instruction, flag_node))
+        {
+            pos += 1;
+        }
+
+        if lookups < 7 {
+            while pos < instructions.len() {
+                if matches!(instructions.get(pos), Some(OpCode::FreshWitness { .. })) {
+                    break;
+                }
+                if !is_ad_reconstruct_op(&instructions[pos]) {
+                    return None;
+                }
+                pos += 1;
+            }
+        }
+
+        lookups += 1;
+    }
+
+    let (value, diff) = loop {
+        if pos >= instructions.len() || pos >= start + 96 {
+            return None;
+        }
+
+        let (neg_value, value) = match &instructions[pos] {
+            OpCode::MulConst { result, var, .. } => (*result, *var),
+            instruction if is_ad_reconstruct_op(instruction) => {
+                pos += 1;
+                continue;
+            }
+            _ => return None,
+        };
+
+        let mut candidate_pos = pos + 1;
+        let mut bumped_value = false;
+        if matches!(
+            instructions.get(candidate_pos),
+            Some(instruction) if is_bump_of(instruction, value)
+        ) {
+            bumped_value = true;
+            candidate_pos += 1;
+        }
+
+        match instructions.get(candidate_pos) {
+            Some(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result,
+                lhs,
+                rhs,
+            }) if bumped_value && (*lhs == neg_value || *rhs == neg_value) => {
+                pos = candidate_pos + 1;
+                break (value, *result);
+            }
+            _ => {
+                pos += 1;
+            }
+        }
+    };
+
+    let (flag_node, flag_value) = match instructions.get(pos)? {
+        OpCode::Cast {
+            result,
+            value,
+            target: CastTarget::WitnessOf,
+        } => (*result, *value),
+        _ => return None,
+    };
+    if Some(flag_value) != flag_source {
+        return None;
+    }
+    pos += 1;
+
+    let zero_node = match instructions.get(pos)? {
+        OpCode::Cast {
+            result,
+            target: CastTarget::WitnessOf,
+            ..
+        } => *result,
+        _ => return None,
+    };
+    pos += 1;
+
+    let coeff = match instructions.get(pos)? {
+        OpCode::NextDCoeff { result } => *result,
+        _ => return None,
+    };
+    pos += 1;
+
+    match instructions.get(pos)? {
+        OpCode::BumpD {
+            matrix: DMatrix::A,
+            variable,
+            sensitivity,
+        } if *variable == flag_node && *sensitivity == coeff => {}
+        _ => return None,
+    }
+    pos += 1;
+
+    if !matches!(instructions.get(pos), Some(instruction) if is_drop_of(instruction, flag_node)) {
+        return None;
+    }
+    pos += 1;
+
+    match instructions.get(pos)? {
+        OpCode::BumpD {
+            matrix: DMatrix::B,
+            variable,
+            sensitivity,
+        } if *variable == diff && *sensitivity == coeff => {}
+        _ => return None,
+    }
+    pos += 1;
+
+    if !matches!(instructions.get(pos), Some(instruction) if is_drop_of(instruction, diff)) {
+        return None;
+    }
+    pos += 1;
+
+    match instructions.get(pos)? {
+        OpCode::BumpD {
+            matrix: DMatrix::C,
+            variable,
+            sensitivity,
+        } if *variable == zero_node && *sensitivity == coeff => {}
+        _ => return None,
+    }
+    pos += 1;
+
+    if !matches!(instructions.get(pos), Some(instruction) if is_drop_of(instruction, zero_node)) {
+        return None;
+    }
+    pos += 1;
+
+    Some(AdU64Rangecheck {
+        len: pos - start,
+        value,
+        flag: flag_source?,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_function(
     function: &HLFunction,
@@ -436,10 +780,74 @@ fn lower_function(
         // Create a BlockEmitter for this block
         let mut emitter = LLBlockEmitter::new(&mut ll_func, ll_block_id);
 
-        // Lower instructions
-        for instruction in block.get_instructions() {
+        // Lower instructions. Peepholes here only affect the executable
+        // witgen/AD targets, after R1CS generation has already consumed HLSSA.
+        let instructions: Vec<_> = block.get_instructions().cloned().collect();
+        let mut index = 0;
+        while index < instructions.len() {
+            if let Some(matched) = try_match_forward_u64_rangecheck(&instructions, index) {
+                for instruction in &instructions[index..index + matched.len] {
+                    if matches!(instruction, crate::compiler::ssa::OpCode::Const { .. }) {
+                        lower_instruction(
+                            instruction,
+                            &mut emitter,
+                            &mut val_map,
+                            fn_type_info,
+                            fn_map,
+                            llssa,
+                            drop_fns,
+                            ad_fns,
+                            lookup_fns,
+                            hlssa_global_types,
+                        );
+                    }
+                }
+                let ll_value = val_map[&matched.value];
+                let ll_flag = val_map[&matched.flag];
+                let helper = lookup_fns.get_rngchk_u64_fn(llssa);
+                emitter.call(helper, vec![ll_value, ll_flag], 0);
+                index += matched.len;
+                continue;
+            }
+
+            if let Some(matched) = try_match_ad_u64_rangecheck(&instructions, index) {
+                for instruction in &instructions[index..index + matched.len] {
+                    if matches!(instruction, crate::compiler::ssa::OpCode::Const { .. }) {
+                        lower_instruction(
+                            instruction,
+                            &mut emitter,
+                            &mut val_map,
+                            fn_type_info,
+                            fn_map,
+                            llssa,
+                            drop_fns,
+                            ad_fns,
+                            lookup_fns,
+                            hlssa_global_types,
+                        );
+                    }
+                }
+                let ll_value = val_map[&matched.value];
+                let helper = lookup_fns.get_drngchk_u64_call_fn(llssa);
+                let flag_type = fn_type_info.get_value_type(matched.flag);
+                let (ll_flag, drop_flag) = if flag_type.is_witness_of() {
+                    (val_map[&matched.flag], None)
+                } else {
+                    let flag_node =
+                        lower_ad_const_node(&mut emitter, &val_map, matched.flag, &flag_type);
+                    (flag_node, Some(flag_node))
+                };
+                emitter.call(helper, vec![ll_value, ll_flag], 0);
+                if let Some(flag_node) = drop_flag {
+                    let drop_fn = ad_fns.get_drop_fn(llssa);
+                    emitter.call(drop_fn, vec![flag_node], 0);
+                }
+                index += matched.len;
+                continue;
+            }
+
             lower_instruction(
-                instruction,
+                &instructions[index],
                 &mut emitter,
                 &mut val_map,
                 fn_type_info,
@@ -450,6 +858,7 @@ fn lower_function(
                 lookup_fns,
                 hlssa_global_types,
             );
+            index += 1;
         }
 
         // Lower terminator (into current block, which may have changed due to block splits)
@@ -1431,6 +1840,16 @@ fn lower_ad_const_wrap(
     value: ValueId,
     source_type: &Type,
 ) {
+    let node = lower_ad_const_node(e, val_map, value, source_type);
+    val_map.insert(result, node);
+}
+
+fn lower_ad_const_node(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &HashMap<ValueId, ValueId>,
+    value: ValueId,
+    source_type: &Type,
+) -> ValueId {
     let ll_val = ensure_field_sized(e, val_map[&value], source_type);
     let node_struct = LLStruct::ad_const_node();
     let node = e.heap_alloc(node_struct.clone(), None);
@@ -1450,7 +1869,7 @@ fn lower_ad_const_wrap(
     let val_ptr = e.struct_field_ptr(node, node_struct, 2);
     e.ll_store(val_ptr, ll_val);
 
-    val_map.insert(result, node);
+    node
 }
 
 /// Allocate an ADWitnessNode with the next witness index.
@@ -1459,6 +1878,11 @@ fn lower_ad_fresh_witness(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
 ) {
+    let node = lower_ad_fresh_witness_node(e);
+    val_map.insert(result, node);
+}
+
+fn lower_ad_fresh_witness_node(e: &mut LLBlockEmitter<'_>) -> ValueId {
     let node_struct = LLStruct::ad_witness_node();
     let node = e.heap_alloc(node_struct.clone(), None);
 
@@ -1479,7 +1903,7 @@ fn lower_ad_fresh_witness(
     let idx_ptr = e.struct_field_ptr(node, node_struct, 2);
     e.ll_store(idx_ptr, index64);
 
-    val_map.insert(result, node);
+    node
 }
 
 /// Allocate an ADSumNode for two AD values.
@@ -2062,6 +2486,12 @@ fn generate_all_lookup_functions(
         llssa.put_function(id, func);
     }
 
+    if let (Some(id), Some(rngchk_8_id)) = (lookup_fns.rngchk_u64, lookup_fns.rngchk_8) {
+        let func = generate_rngchk_u64_function(rngchk_8_id);
+        let _old = llssa.take_function(id);
+        llssa.put_function(id, func);
+    }
+
     if let (Some(init_id), Some(call_id)) = (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call) {
         let layout = layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
         let init_fn = generate_drngchk_8_ad_init(layout);
@@ -2074,13 +2504,22 @@ fn generate_all_lookup_functions(
         let _old = llssa.take_function(call_id);
         llssa.put_function(call_id, call_fn);
     }
+
+    if let (Some(id), Some(drngchk_8_call_id)) =
+        (lookup_fns.drngchk_u64_call, lookup_fns.drngchk_8_call)
+    {
+        let bump_da_id = ad_fns.get_bump_fn(DMatrix::A, llssa);
+        let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
+        let ad_drop_id = ad_fns.get_drop_fn(llssa);
+        let func =
+            generate_drngchk_u64_ad_call(drngchk_8_call_id, bump_da_id, bump_db_id, ad_drop_id);
+        let _old = llssa.take_function(id);
+        llssa.put_function(id, func);
+    }
 }
 
 /// Extract the four raw limbs of a Field value.
-fn field_limbs(
-    e: &mut LLBlockEmitter<'_>,
-    val: ValueId,
-) -> (ValueId, ValueId, ValueId, ValueId) {
+fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> (ValueId, ValueId, ValueId, ValueId) {
     let limbs = e.field_to_limbs(val);
     let l0 = e.extract_field(limbs.clone(), LLStruct::limbs(), 0);
     let l1 = e.extract_field(limbs.clone(), LLStruct::limbs(), 1);
@@ -2117,11 +2556,7 @@ fn small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
 /// Emit: `bump_u64_at(cursor, delta)` — advance the cursor stored at
 /// `cursor_slot_ptr` by one Field, writing `(value, 0, 0, 0)` as raw limbs
 /// into the slot the old cursor pointed at.
-fn write_tape_entry_u64(
-    e: &mut LLBlockEmitter<'_>,
-    cursor_field: VmField,
-    value_u64: ValueId,
-) {
+fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: VmField, value_u64: ValueId) {
     let cursor_slot = e.vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);
     // Store value into low limb via struct_field_ptr.
@@ -2191,6 +2626,55 @@ fn generate_rngchk_8_function(layout: R1csLayoutInfo) -> LLFunction {
         write_tape_entry_u64(&mut e, VmField::WitgenLookupsA, table_id);
         write_tape_entry_u64(&mut e, VmField::WitgenLookupsB, key);
         write_tape_entry_u64(&mut e, VmField::WitgenLookupsC, flag_u64);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate __rngchk_u64(value: FieldElem, flag: FieldElem):
+///
+/// Equivalent to the canonical witness rangecheck expansion for a 64-bit
+/// integer: byte-decompose `value`, write each byte as a witness, rangecheck
+/// each byte, then constrain the big-endian reconstruction to equal `value`.
+fn generate_rngchk_u64_function(rngchk_8_fn: FunctionId) -> LLFunction {
+    let mut func = LLFunction::empty("__rngchk_u64".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let value = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+        let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        let (l0, _, _, _) = field_limbs(&mut e, value);
+        let zero_i64 = e.int_const(64, 0);
+        let mut reconstructed = small_u64_as_field(&mut e, zero_i64);
+        let radix = e.int_const(64, 256);
+        let radix_field = small_u64_as_field(&mut e, radix);
+
+        for i in 0..8 {
+            let shift_amount = (7 - i) * 8;
+            let shifted = if shift_amount == 0 {
+                l0
+            } else {
+                let shift = e.int_const(64, shift_amount as u64);
+                e.int_arith(IntArithOp::UShr, l0, shift)
+            };
+            let byte_i8 = e.truncate(shifted, 8);
+            let byte_i64 = e.zext(byte_i8, 64);
+            let byte_field = small_u64_as_field(&mut e, byte_i64);
+            e.write_witness(byte_field);
+            e.call(rngchk_8_fn, vec![byte_field, flag], 0);
+
+            let shifted_reconstructed =
+                e.field_arith(FieldArithOp::Mul, reconstructed, radix_field);
+            reconstructed = e.field_arith(FieldArithOp::Add, shifted_reconstructed, byte_field);
+        }
+
+        let diff = e.field_arith(FieldArithOp::Sub, reconstructed, value);
+        let zero = small_u64_as_field(&mut e, zero_i64);
+        e.constrain(flag, diff, zero);
 
         e.terminate_return(vec![]);
     }
@@ -2354,6 +2838,62 @@ fn generate_drngchk_8_ad_call(
 
         // flag.bump_dc(inv_coeff)
         e.call(bump_dc_fn, vec![flag_ptr, inv_coeff], 0);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate __drngchk_u64_ad_call(value: AdNode*, flag: AdNode*):
+///
+/// AD equivalent of the 64-bit witness rangecheck helper. It allocates the
+/// same eight byte witnesses and performs the same eight rangecheck lookups,
+/// then applies the derivative of:
+///   flag * (sum(bytes[i] * 256^(7-i)) - value) = 0
+/// directly, without materializing the reconstruction AD expression graph.
+fn generate_drngchk_u64_ad_call(
+    drngchk_8_call_fn: FunctionId,
+    bump_da_fn: FunctionId,
+    bump_db_fn: FunctionId,
+    ad_drop_fn: FunctionId,
+) -> LLFunction {
+    let mut func = LLFunction::empty("__drngchk_u64_ad_call".to_string());
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let value = e.add_parameter(LLType::Ptr);
+        let flag = e.add_parameter(LLType::Ptr);
+        let mut bytes = Vec::with_capacity(8);
+
+        for _ in 0..8 {
+            let byte = lower_ad_fresh_witness_node(&mut e);
+            e.call(drngchk_8_call_fn, vec![byte, flag], 0);
+            bytes.push(byte);
+        }
+
+        let coeff = e.next_d_coeff();
+        e.call(bump_da_fn, vec![flag, coeff], 0);
+
+        for (i, byte) in bytes.into_iter().enumerate() {
+            let power = 256u64.pow((7 - i) as u32);
+            let sensitivity = if power == 1 {
+                coeff
+            } else {
+                let power_i64 = e.int_const(64, power);
+                let power_field = small_u64_as_field(&mut e, power_i64);
+                e.field_arith(FieldArithOp::Mul, coeff, power_field)
+            };
+            e.call(bump_db_fn, vec![byte, sensitivity], 0);
+            e.call(ad_drop_fn, vec![byte], 0);
+        }
+
+        let zero_i64 = e.int_const(64, 0);
+        let zero_field = small_u64_as_field(&mut e, zero_i64);
+        let neg_coeff = e.field_arith(FieldArithOp::Sub, zero_field, coeff);
+        e.call(bump_db_fn, vec![value, neg_coeff], 0);
+        e.ad_write_const(DMatrix::C, zero_field, coeff);
 
         e.terminate_return(vec![]);
     }
