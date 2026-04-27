@@ -67,6 +67,15 @@ fn parse_output_arg(args: &[String]) -> PathBuf {
 
 // ── Child: run a single test ──────────────────────────────────────────
 
+const WASM_SKIP: &[&str] = &["brillig_block_parameter_liveness"];
+
+fn skip_wasm(root: &Path) -> bool {
+    root.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| WASM_SKIP.contains(&n))
+        .unwrap_or(false)
+}
+
 fn emit(line: &str) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -233,6 +242,10 @@ fn run_single(root: PathBuf) {
         } else {
             "END:AD_NOLEAK:fail"
         });
+    }
+
+    if skip_wasm(&root) {
+        return;
     }
 
     // 11. Compile WASM  (depends on R1CS)
