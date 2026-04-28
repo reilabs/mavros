@@ -67,13 +67,53 @@ impl Pass for DCE {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<FlowAnalysis>());
+        if !self.config.witness_shape_frozen {
+            self.do_run(ssa, store.get::<FlowAnalysis>());
+            return;
+        }
+
+        for iteration in 0..16 {
+            let before = Self::ssa_size(ssa);
+            if iteration == 0 {
+                self.do_run(ssa, store.get::<FlowAnalysis>());
+            } else {
+                let cfg = FlowAnalysis::run(ssa);
+                self.do_run(ssa, &cfg);
+            }
+
+            if Self::ssa_size(ssa) == before {
+                break;
+            }
+        }
     }
 }
 
 impl DCE {
     pub fn new(config: Config) -> Self {
         Self { config }
+    }
+
+    fn ssa_size(ssa: &HLSSA) -> usize {
+        ssa.iter_functions()
+            .map(|(_, function)| {
+                let returns = function.get_returns().len();
+                let blocks = function.get_blocks().map(|(_, block)| {
+                    let params = block.get_parameters().count();
+                    let instructions = block
+                        .get_instructions()
+                        .map(|instruction| instruction.get_inputs().count() + 1)
+                        .sum::<usize>();
+                    let terminator = match block.get_terminator() {
+                        Some(Terminator::Jmp(_, args)) => args.len() + 1,
+                        Some(Terminator::JmpIf(_, _, _)) => 2,
+                        Some(Terminator::Return(values)) => values.len() + 1,
+                        None => 0,
+                    };
+                    params + instructions + terminator
+                });
+                returns + blocks.sum::<usize>()
+            })
+            .sum()
     }
 
     fn is_initially_live(&self, instruction: &OpCode) -> bool {
