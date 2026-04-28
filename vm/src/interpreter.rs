@@ -504,6 +504,31 @@ pub fn run_phase2(
     }
 }
 
+fn fake_challenges(count: usize) -> Vec<Field> {
+    let mut fake_challenges = vec![Field::ZERO; count];
+    let mut random =
+        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
+            .unwrap();
+    for challenge in fake_challenges.iter_mut() {
+        *challenge = random;
+        random = (random + Field::from(17)) * random;
+    }
+    fake_challenges
+}
+
+pub fn run_phase2_with_fake_challenges(
+    phase1: Phase1Result,
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+) -> WitgenResult {
+    run_phase2(
+        phase1,
+        &fake_challenges(witness_layout.challenges_size),
+        witness_layout,
+        constraints_layout,
+    )
+}
+
 // Old method implementation, for posterity
 // Do not use in production
 #[instrument(skip_all, name = "Interpreter::run")]
@@ -515,17 +540,7 @@ pub fn run(
 ) -> WitgenResult {
     let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs);
 
-    // Generate fake challenges (matches the old hardcoded behaviour).
-    let mut fake_challenges = vec![Field::ZERO; witness_layout.challenges_size];
-    let mut random =
-        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
-            .unwrap();
-    for challenge in fake_challenges.iter_mut() {
-        *challenge = random;
-        random = (random + Field::from(17)) * random;
-    }
-
-    run_phase2(phase1, &fake_challenges, witness_layout, constraints_layout)
+    run_phase2_with_fake_challenges(phase1, witness_layout, constraints_layout)
 }
 
 #[instrument(skip_all, name = "Interpreter::run_ad")]

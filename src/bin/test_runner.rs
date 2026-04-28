@@ -593,31 +593,29 @@ fn run_wasm(
 
     // Split witness into pre-commit and post-commit sections
     let pre_comm_count = r1cs.witness_layout.pre_commitment_size();
-    let mut out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
-    let mut out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
+    let out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
+    let out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
 
-    // Phase 2 — finalize the LogUp argument on the host.
-    //
-    // Phase 1 (inside WASM) populated raw u64 multiplicities (low limb only),
-    // advanced the lookup-tape cursors through the a/b/c buffers, and wrote
-    // raw (table_id, key, flag) triples at each tape slot. Phase 2 encodes
-    // multiplicities to Montgomery, derives the LogUp denominators from
-    // alpha, computes per-table inverses via a single batch inversion, fills
-    // the per-lookup constraints, and accumulates into the sum slots.
-    //
-    // Done on the host so WASM stays a tight Phase-1-only kernel (one big
-    // one-shot loop would otherwise never inline and would dwarf the rest
-    // of the generated code).
-    if r1cs.witness_layout.challenges_size > 0 {
-        witgen_phase2(
-            r1cs,
-            &mut out_wit_pre_comm,
-            &mut out_wit_post_comm,
-            &mut out_a,
-            &mut out_b,
-            &mut out_c,
-        );
-    }
+    let (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c) =
+        if r1cs.witness_layout.challenges_size > 0 {
+            let result = witgen_phase2(
+                r1cs,
+                out_wit_pre_comm,
+                out_wit_post_comm,
+                out_a,
+                out_b,
+                out_c,
+            );
+            (
+                result.out_wit_pre_comm,
+                result.out_wit_post_comm,
+                result.out_a,
+                result.out_b,
+                result.out_c,
+            )
+        } else {
+            (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c)
+        };
 
     Ok(WasmResult {
         out_wit_pre_comm,
@@ -629,136 +627,66 @@ fn run_wasm(
     })
 }
 
-/// Host-side Phase 2 of witgen for the rangecheck-8 LogUp argument.
-///
-/// Matches `vm::interpreter::run_phase2` for the width-1 table case. Uses the
-/// same deterministic fake challenges as `vm::interpreter::run` so the
-/// resulting witness is comparable across backends.
 fn witgen_phase2(
     r1cs: &R1CS,
-    out_wit_pre_comm: &mut [Field],
-    out_wit_post_comm: &mut [Field],
-    out_a: &mut [Field],
-    out_b: &mut [Field],
-    out_c: &mut [Field],
-) {
-    use ark_ff::AdditiveGroup as _;
-    use ark_ff::Field as _;
-    use ark_ff::{BigInt, PrimeField};
-    use std::str::FromStr;
+    mut out_wit_pre_comm: Vec<Field>,
+    out_wit_post_comm: Vec<Field>,
+    out_a: Vec<Field>,
+    out_b: Vec<Field>,
+    out_c: Vec<Field>,
+) -> interpreter::WitgenResult {
+    use mavros::vm::bytecode::{AllocationInstrumenter, TableInfo};
 
     let witness_layout = &r1cs.witness_layout;
-    let constraints_layout = &r1cs.constraints_layout;
+
+    assert_eq!(
+        witness_layout.challenges_size, 1,
+        "WASM witgen phase 2 currently expects only the rangecheck-8 alpha challenge"
+    );
+    assert_eq!(
+        witness_layout.multiplicities_size, 256,
+        "WASM witgen phase 2 currently reconstructs only the rangecheck-8 table metadata"
+    );
+    assert_eq!(
+        witness_layout.tables_data_size, 256,
+        "WASM witgen phase 2 currently expects 256 rangecheck-8 table witness slots"
+    );
+    assert_eq!(
+        r1cs.constraints_layout.tables_data_size, 257,
+        "WASM witgen phase 2 currently expects 256 rangecheck-8 table constraints plus one sum"
+    );
 
     // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
     }
 
-    // Fake challenges — same sequence as `vm::interpreter::run`.
-    let mut random =
-        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
-            .unwrap();
-    let mut fake_challenges = vec![Field::ZERO; witness_layout.challenges_size];
-    for challenge in fake_challenges.iter_mut() {
-        *challenge = random;
-        random = (random + Field::from(17)) * random;
-    }
-    for (i, challenge) in fake_challenges.iter().enumerate() {
-        out_wit_post_comm[i] = *challenge;
-    }
+    let multiplicities_ptr = out_wit_pre_comm
+        .as_mut_ptr()
+        .wrapping_add(witness_layout.multiplicities_start());
+    let phase1 = interpreter::Phase1Result {
+        out_wit_pre_comm,
+        out_wit_post_comm,
+        out_a,
+        out_b,
+        out_c,
+        tables: vec![TableInfo {
+            multiplicities_wit: multiplicities_ptr,
+            num_indices: 1,
+            num_values: 0,
+            length: 256,
+            elem_inverses_witness_section_offset: witness_layout.tables_data_start()
+                - witness_layout.challenges_start(),
+            elem_inverses_constraint_section_offset: r1cs.constraints_layout.tables_data_start(),
+        }],
+        instrumenter: AllocationInstrumenter::new(),
+    };
 
-    // Per-table inverses (width-1 tables only — only rangecheck-8 is supported
-    // in the WASM pipeline right now).
-    let alpha = out_wit_post_comm[0];
-    let mut running_prod = Field::from(1u64);
-    let table_len: usize = 256;
-    let table_cnst_base = constraints_layout.tables_data_start();
-    let table_mults_base = witness_layout.multiplicities_start();
-
-    // Forward pass: write denom / m into out_b / out_c, accumulate running
-    // product of non-zero-multiplicity denoms into out_a.
-    for i in 0..table_len {
-        let multiplicity = out_wit_pre_comm[table_mults_base + i];
-        let denom = alpha - Field::from(i as u64);
-        out_b[table_cnst_base + i] = denom;
-        out_c[table_cnst_base + i] = multiplicity;
-        if multiplicity != Field::ZERO {
-            out_a[table_cnst_base + i] = running_prod;
-            running_prod *= denom;
-        }
-    }
-
-    // Single batch inversion.
-    let mut running_inv = running_prod
-        .inverse()
-        .expect("batch-inverse denominator was zero — prover-internal bug");
-
-    // Backward pass: unroll inverses into out_a.
-    for i in (0..table_len).rev() {
-        let multiplicity = out_c[table_cnst_base + i];
-        let denom = out_b[table_cnst_base + i];
-        if multiplicity != Field::ZERO {
-            let rp = out_a[table_cnst_base + i];
-            let elem = rp * running_inv;
-            out_a[table_cnst_base + i] = elem;
-            running_inv *= denom;
-        }
-    }
-
-    // Walk the lookup tape: each tape entry holds raw (table_id, key, flag)
-    // triples in the low limb of the a/b/c slots at `lookups_cnst_start + j`.
-    let lookups_cnst_base = constraints_layout.lookups_data_start();
-    let lookups_wit_rel = witness_layout.lookups_data_start() - witness_layout.challenges_start();
-    let sum_cnst = table_cnst_base + table_len;
-
-    for j in 0..constraints_layout.lookups_data_size {
-        let cnst_off = lookups_cnst_base + j;
-        let wit_off = lookups_wit_rel + j;
-
-        // Tape entries store raw u64 in the low limb.
-        let _table_ix = out_a[cnst_off].0.0[0]; // always 0 for the single-table case
-        let key_raw = out_b[cnst_off].0.0[0];
-        let flag_raw = out_c[cnst_off].0.0[0];
-
-        if flag_raw == 0 {
-            let b_val = alpha - Field::from(key_raw);
-            out_a[cnst_off] = Field::ZERO;
-            out_b[cnst_off] = b_val;
-            out_c[cnst_off] = Field::ZERO;
-            out_wit_post_comm[wit_off] = Field::ZERO;
-        } else {
-            assert!(
-                key_raw < table_len as u64,
-                "lookup tape key {} out of range for rangecheck-8",
-                key_raw
-            );
-            let tbl_slot = table_cnst_base + key_raw as usize;
-            let y_a = out_a[tbl_slot];
-            let y_b = out_b[tbl_slot];
-            out_a[cnst_off] = y_a;
-            out_b[cnst_off] = y_b;
-            out_c[cnst_off] = Field::from(flag_raw);
-            out_wit_post_comm[wit_off] = y_a;
-            out_c[sum_cnst] += y_a;
-        }
-    }
-
-    // Sum-constraint finalization: for each table entry with non-zero
-    // multiplicity, accumulate y*m into the sum slot and write y*m into the
-    // corresponding post-commit witness slot.
-    let tables_wit_rel = witness_layout.tables_data_start() - witness_layout.challenges_start();
-    for i in 0..table_len {
-        let m = out_c[table_cnst_base + i];
-        if m != Field::ZERO {
-            let y = out_a[table_cnst_base + i];
-            let ym = y * m;
-            out_a[table_cnst_base + i] = ym;
-            out_wit_post_comm[tables_wit_rel + i] = ym;
-            out_a[sum_cnst] += ym;
-        }
-    }
-    out_b[sum_cnst] = Field::from(1u64);
+    interpreter::run_phase2_with_fake_challenges(
+        phase1,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+    )
 }
 
 // ── AD WASM Runner ───────────────────────────────────────────────────
