@@ -67,53 +67,13 @@ impl Pass for DCE {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        if !self.config.witness_shape_frozen {
-            self.do_run(ssa, store.get::<FlowAnalysis>());
-            return;
-        }
-
-        for iteration in 0..16 {
-            let before = Self::ssa_size(ssa);
-            if iteration == 0 {
-                self.do_run(ssa, store.get::<FlowAnalysis>());
-            } else {
-                let cfg = FlowAnalysis::run(ssa);
-                self.do_run(ssa, &cfg);
-            }
-
-            if Self::ssa_size(ssa) == before {
-                break;
-            }
-        }
+        self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 }
 
 impl DCE {
     pub fn new(config: Config) -> Self {
         Self { config }
-    }
-
-    fn ssa_size(ssa: &HLSSA) -> usize {
-        ssa.iter_functions()
-            .map(|(_, function)| {
-                let returns = function.get_returns().len();
-                let blocks = function.get_blocks().map(|(_, block)| {
-                    let params = block.get_parameters().count();
-                    let instructions = block
-                        .get_instructions()
-                        .map(|instruction| instruction.get_inputs().count() + 1)
-                        .sum::<usize>();
-                    let terminator = match block.get_terminator() {
-                        Some(Terminator::Jmp(_, args)) => args.len() + 1,
-                        Some(Terminator::JmpIf(_, _, _)) => 2,
-                        Some(Terminator::Return(values)) => values.len() + 1,
-                        None => 0,
-                    };
-                    params + instructions + terminator
-                });
-                returns + blocks.sum::<usize>()
-            })
-            .sum()
     }
 
     fn is_initially_live(&self, instruction: &OpCode) -> bool {
@@ -394,20 +354,16 @@ impl DCE {
 
                     let function = ssa.get_function(function_id);
                     let instruction = function.get_block(block_id).get_instruction(i);
-                    for input in instruction.get_inputs() {
-                        worklist.push(WorkItem::LiveValue(function_id, *input));
-                    }
 
-                    // When a Call becomes live, propagate already-live callee entry
-                    // params to the corresponding args. This is the reverse direction
-                    // of the callee-param-to-caller-arg propagation above, needed for
-                    // calls that weren't initially live (e.g. unconstrained calls).
                     if let OpCode::Call {
                         function: CallTarget::Static(callee),
                         args,
                         ..
                     } = instruction
                     {
+                        // Static call arguments are only live when their callee
+                        // entry parameters are live. Treating every call input as
+                        // live makes signature pruning require another DCE pass.
                         if let Some(live_params) = live_entry_params.get(callee) {
                             for param_idx in live_params.iter() {
                                 if *param_idx < args.len() {
@@ -415,6 +371,10 @@ impl DCE {
                                         .push(WorkItem::LiveValue(function_id, args[*param_idx]));
                                 }
                             }
+                        }
+                    } else {
+                        for input in instruction.get_inputs() {
+                            worklist.push(WorkItem::LiveValue(function_id, *input));
                         }
                     }
                 }
