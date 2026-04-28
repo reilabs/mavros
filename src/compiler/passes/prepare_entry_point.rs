@@ -137,10 +137,10 @@ impl PrepareEntryPoint {
         let entry_id = main.get_entry_id();
 
         // Collect entry params
-        let params: Vec<ValueId> = main
+        let params: Vec<(ValueId, Type)> = main
             .get_entry()
             .get_parameters()
-            .map(|(id, _)| *id)
+            .map(|(id, typ)| (*id, typ.clone()))
             .collect();
 
         // witness[0] must be constant one, emitted by the program.
@@ -162,7 +162,10 @@ impl PrepareEntryPoint {
         // These must be pinned so they survive DCE even when their results become unused
         // (e.g. when inter-procedural DCE prunes call args to original_main).
         let mut replacements = ValueReplacements::new();
-        for param_id in &params {
+        for (param_id, param_type) in &params {
+            if param_type.is_witness_of() {
+                continue;
+            }
             let witness_val = main.fresh_value();
             write_witness_instructions.push(OpCode::WriteWitness {
                 result: Some(witness_val),
@@ -373,17 +376,18 @@ impl PrepareEntryPoint {
 
                 e.cast_to(cast_back, witness)
             }
-            TypeExpr::Array(_, size) => {
+            TypeExpr::Array(inner, size) => {
                 let child_fn = child_fns
                     .first()
                     .copied()
                     .expect("array prepare function should have child function");
+                let initial_array = Self::emit_default_array(e, inner, *size);
                 let prepared_array = e.build_counted_loop(
                     *size,
-                    vec![(value_id, typ.clone())],
+                    vec![(initial_array, typ.clone())],
                     |e, index, accumulators| {
                         let current_array = accumulators[0];
-                        let elem = e.array_get(current_array, index);
+                        let elem = e.array_get(value_id, index);
                         let prepared = e.call(child_fn, vec![elem], 1);
                         let updated_array = e.array_set(current_array, index, prepared[0]);
                         vec![updated_array]
@@ -400,6 +404,7 @@ impl PrepareEntryPoint {
                 }
                 e.mk_tuple(elems, element_types.clone())
             }
+            TypeExpr::WitnessOf(_) => value_id,
             _ => e.write_witness(value_id),
         }
     }
@@ -458,6 +463,9 @@ impl PrepareEntryPoint {
 
         match &typ.expr {
             TypeExpr::Array(inner, _) => {
+                Self::get_or_create_reconstruct_fn(inner, ssa, reconstruct_fns);
+            }
+            TypeExpr::WitnessOf(inner) => {
                 Self::get_or_create_reconstruct_fn(inner, ssa, reconstruct_fns);
             }
             TypeExpr::Tuple(element_types) => {
@@ -561,6 +569,11 @@ impl PrepareEntryPoint {
                 }
                 e.mk_tuple(elems, element_types.clone())
             }
+            TypeExpr::WitnessOf(inner) => {
+                let inner_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
+                let reconstructed = e.call(inner_fn, vec![input_array], 1);
+                e.cast_to_witness_of(reconstructed[0])
+            }
             _ => todo!("Not implemented yet"),
         }
     }
@@ -571,6 +584,10 @@ impl PrepareEntryPoint {
             TypeExpr::U(size) => e.u_const(*size, 0),
             TypeExpr::I(size) => e.i_const(*size, 0),
             TypeExpr::Array(inner, size) => Self::emit_default_array(e, inner, *size),
+            TypeExpr::WitnessOf(_) => {
+                let field = e.field_const(ark_bn254::Fr::from(0));
+                e.cast_to_witness_of(field)
+            }
             TypeExpr::Tuple(element_types) => {
                 let elems = element_types
                     .iter()

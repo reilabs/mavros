@@ -472,13 +472,6 @@ impl ExplicitWitness {
                 b.constrain(l, one, r);
             }
             OpCode::AssertR1C { a, b: r1c_b, c } => {
-                let a_taint = function_type_info.get_value_type(a).is_witness_of();
-                let b_taint = function_type_info.get_value_type(r1c_b).is_witness_of();
-                let c_taint = function_type_info.get_value_type(c).is_witness_of();
-                if !a_taint && !b_taint && !c_taint {
-                    b.push(instruction);
-                    return;
-                }
                 b.constrain(a, r1c_b, c);
             }
             OpCode::NextDCoeff { result: _ } => {

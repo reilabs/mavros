@@ -291,38 +291,6 @@ fn run_single(root: PathBuf) {
             &result.out_b,
             &result.out_c,
         );
-        if !correct {
-            if let Some(vm_res) = &witgen_result {
-                eprintln!(
-                    "r1cs layout: algebraic={} tables_data={} lookups_data={} total_constraints={}",
-                    r1cs.constraints_layout.algebraic_size,
-                    r1cs.constraints_layout.tables_data_size,
-                    r1cs.constraints_layout.lookups_data_size,
-                    r1cs.constraints.len()
-                );
-                eprintln!(
-                    "witness layout: algebraic={} mults={} challenges={} tables_data={} lookups_data={}",
-                    r1cs.witness_layout.algebraic_size,
-                    r1cs.witness_layout.multiplicities_size,
-                    r1cs.witness_layout.challenges_size,
-                    r1cs.witness_layout.tables_data_size,
-                    r1cs.witness_layout.lookups_data_size
-                );
-                debug_diff_witgen(
-                    "pre_comm",
-                    &vm_res.out_wit_pre_comm,
-                    &result.out_wit_pre_comm,
-                );
-                debug_diff_witgen(
-                    "post_comm",
-                    &vm_res.out_wit_post_comm,
-                    &result.out_wit_post_comm,
-                );
-                debug_diff_witgen("a", &vm_res.out_a, &result.out_a);
-                debug_diff_witgen("b", &vm_res.out_b, &result.out_b);
-                debug_diff_witgen("c", &vm_res.out_c, &result.out_c);
-            }
-        }
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -391,13 +359,6 @@ fn run_single(root: PathBuf) {
     if let (Some((coeffs, result)), Some(r1cs)) = (&ad_wasm_result, &r1cs) {
         emit("START:AD_WASM_CORRECT");
         let correct = r1cs.check_ad_output(coeffs, &result.out_da, &result.out_db, &result.out_dc);
-        if !correct {
-            if let Some((_vm_coeffs, vm_a, vm_b, vm_c, _)) = &ad_result {
-                debug_diff_witgen("ad_a", vm_a, &result.out_da);
-                debug_diff_witgen("ad_b", vm_b, &result.out_db);
-                debug_diff_witgen("ad_c", vm_c, &result.out_dc);
-            }
-        }
         emit(if correct {
             "END:AD_WASM_CORRECT:ok"
         } else {
@@ -666,37 +627,6 @@ fn run_wasm(
         out_c,
         live_bytes,
     })
-}
-
-/// Debug helper: print the first few differences between a VM witgen vector
-/// and the corresponding WASM witgen vector.
-fn debug_diff_witgen(label: &str, vm: &[Field], wasm: &[Field]) {
-    if vm.len() != wasm.len() {
-        eprintln!(
-            "debug_diff {}: len mismatch vm={} wasm={}",
-            label,
-            vm.len(),
-            wasm.len()
-        );
-        return;
-    }
-    let mut shown = 0;
-    for i in 0..vm.len() {
-        if vm[i] != wasm[i] {
-            eprintln!(
-                "debug_diff {} idx {}: vm={} wasm={}",
-                label, i, vm[i], wasm[i]
-            );
-            shown += 1;
-            if shown >= 8 {
-                eprintln!("debug_diff {}: ... (truncated)", label);
-                return;
-            }
-        }
-    }
-    if shown == 0 {
-        eprintln!("debug_diff {}: identical", label);
-    }
 }
 
 /// Host-side Phase 2 of witgen for the rangecheck-8 LogUp argument.
