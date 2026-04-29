@@ -284,12 +284,6 @@ impl LookupFunctions {
 // Main entry point
 // =============================================================================
 
-/// Lower an entire HLSSA program to LLSSA. Use this when the program contains
-/// no lookup-related opcodes.
-pub fn lower(hlssa: &HLSSA, flow_analysis: &FlowAnalysis, type_info: &TypeInfo) -> LLSSA {
-    lower_inner(hlssa, flow_analysis, type_info, None)
-}
-
 /// Lower with R1CS layout info — required when the program contains
 /// `OpCode::Lookup` or `OpCode::DLookup`, since the generated helpers bake
 /// absolute witness/constraint offsets into their bodies.
@@ -2102,10 +2096,8 @@ fn assert_or_trap(e: &mut LLBlockEmitter<'_>, ok: ValueId) {
     );
 }
 
-/// Build a Field whose low limb is `lo` and upper limbs are zero. Correct only
-/// for small non-negative integers (value < 2^64). Do not use for arbitrary
-/// Field constants.
-fn small_u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
+/// Build a Field whose low limb is `lo` and upper limbs are zero.
+fn u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
     let zero = e.int_const(64, 0);
     let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, zero, zero, zero]);
     e.field_from_limbs(limbs)
@@ -2268,9 +2260,9 @@ fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
             // `field_neg` isn't wired up in LLVM codegen (no runtime helper
             // for unary negation) — express as `0 - i` so the pipeline goes
             // through `__field_sub`.
-            let i_field = small_u64_as_field(e, i_i64);
+            let i_field = u64_as_field(e, i_i64);
             let zero_i64_f = e.int_const(64, 0);
-            let zero_field = small_u64_as_field(e, zero_i64_f);
+            let zero_field = u64_as_field(e, zero_i64_f);
             let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
             e.ad_write_const(DMatrix::B, neg_i_field, coeff);
 
@@ -2286,7 +2278,7 @@ fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
 
         // After the loop: out_db[0] += inv_sum_coeff
         let one_i64 = e.int_const(64, 1);
-        let one_field = small_u64_as_field(&mut e, one_i64);
+        let one_field = u64_as_field(&mut e, one_i64);
         e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
 
         e.terminate_return(vec![]);
@@ -2341,7 +2333,7 @@ fn generate_drngchk_8_ad_call(
         // val.bump_db(-inv_coeff) — `0 - inv_coeff` via the Sub runtime
         // helper, matching the lowering of FieldArithOp::Sub.
         let zero_i64 = e.int_const(64, 0);
-        let zero_field = small_u64_as_field(&mut e, zero_i64);
+        let zero_field = u64_as_field(&mut e, zero_i64);
         let neg_inv = e.field_arith(FieldArithOp::Sub, zero_field, inv_coeff);
         e.call(bump_db_fn, vec![val_ptr, neg_inv], 0);
 

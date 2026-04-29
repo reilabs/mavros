@@ -361,9 +361,10 @@ impl DCE {
                         ..
                     } = instruction
                     {
-                        // Static call arguments are only live when their callee
-                        // entry parameters are live. Treating every call input as
-                        // live makes signature pruning require another DCE pass.
+                        // When a Call becomes live, propagate already-live callee entry
+                        // params back to the corresponding callsite args. Other callee
+                        // params may become live later; ValueDefinition::Param handles
+                        // those by revisiting already-live callsites.
                         if let Some(live_params) = live_entry_params.get(callee) {
                             for param_idx in live_params.iter() {
                                 if *param_idx < args.len() {
