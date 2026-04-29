@@ -831,6 +831,23 @@ fn lower_instruction(
             );
         }
 
+        OpCode::AssertR1C { a, b, c } => {
+            let ll_a = val_map[a];
+            let ll_b = val_map[b];
+            let ll_c = val_map[c];
+            let product = e.field_arith(FieldArithOp::Mul, ll_a, ll_b);
+            let cmp_result = e.field_eq(product, ll_c);
+            e.build_if_else(
+                cmp_result,
+                vec![],
+                |_| vec![],
+                |te| {
+                    te.trap();
+                    vec![]
+                },
+            );
+        }
+
         OpCode::InitGlobal { global, value } => {
             let ll_value = val_map[value];
             let r = e.fresh_value();

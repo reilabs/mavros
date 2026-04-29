@@ -1033,6 +1033,18 @@ impl CodeGen {
                         }
                     }
                 }
+                ssa::OpCode::AssertR1C { a, b, c } => {
+                    let tmp = layouter.alloc_scratch(4);
+                    emitter.push_op(bytecode::OpCode::MulField {
+                        res: tmp,
+                        a: layouter.get_value(*a),
+                        b: layouter.get_value(*b),
+                    });
+                    emitter.push_op(bytecode::OpCode::AssertEqField {
+                        a: tmp,
+                        b: layouter.get_value(*c),
+                    });
+                }
                 ssa::OpCode::ToBits {
                     result: r,
                     value,
