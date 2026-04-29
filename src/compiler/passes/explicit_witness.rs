@@ -1244,10 +1244,11 @@ impl ExplicitWitness {
 
         // Extract each byte, write as witness, range-check.
         // Simultaneously accumulate 4 x 64-bit limbs and the full 256-bit sum.
+        // Witness only 31 bytes; compute byte[31] = value - partial*256 (saves 1 witness + 1 constraint).
         let mut bytes = Vec::with_capacity(32);
         let mut limbs = [zero; 4]; // 64-bit limbs, big-endian
         let mut full_sum = zero;
-        for i in 0..32 {
+        for i in 0..31 {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_arr, idx);
             let byte_field = b.cast_to_field(byte);
@@ -1263,10 +1264,17 @@ impl ExplicitWitness {
             full_sum = b.add(shifted_full, byte_wit);
         }
 
-        // Step 2: Constrain reconstruction == input value (conditional)
-        // flag * (full_sum - value) = 0
-        let recon_diff = b.sub(full_sum, value);
-        b.constrain(flag, recon_diff, zero);
+        // Compute last byte as value - partial*256; rangecheck proves it's a byte,
+        // implicitly constraining reconstruction (no separate constraint needed).
+        let full_sum_shifted = b.mul(full_sum, two_to_8);
+        let lsb = b.sub(value, full_sum_shifted);
+        b.lookup_rngchk_8(lsb, flag);
+        bytes.push(lsb);
+
+        let shifted_limb = b.mul(limbs[3], two_to_8);
+        limbs[3] = b.add(shifted_limb, lsb);
+
+        // full_sum is no longer needed (reconstruction is implicit)
 
         // Step 3: Reconstruct hi (limbs[0..2]) and lo (limbs[2..4]) as 128-bit values
         let hi_upper = b.mul(limbs[0], two_to_64);
@@ -1360,7 +1368,6 @@ impl ExplicitWitness {
         let hi_pre = b.sub(byte_pure, lo_hint_field);
         let hi_hint = b.div(hi_pre, two_to_lo);
 
-        let lo_wit = b.write_witness(lo_hint_field);
         let hi_wit = b.write_witness(hi_hint);
 
         // Rangecheck hi: prove 2^hi_size - 1 - hi fits in 8 bits
@@ -1368,18 +1375,16 @@ impl ExplicitWitness {
         let hi_gap = b.sub(hi_bound, hi_wit);
         b.lookup_rngchk_8(hi_gap, flag);
 
+        // Compute lo = byte_wit - hi * 2^lo_size (saves 1 witness + 1 constraint)
+        let hi_shifted = b.mul(hi_wit, two_to_lo);
+        let lo = b.sub(byte_wit, hi_shifted);
+
         // Rangecheck lo: prove 2^lo_size - 1 - lo fits in 8 bits
         let lo_bound = b.field_const(Field::from((1u128 << lo_size) - 1));
-        let lo_gap = b.sub(lo_bound, lo_wit);
+        let lo_gap = b.sub(lo_bound, lo);
         b.lookup_rngchk_8(lo_gap, flag);
 
-        // Constrain split correctness: hi * 2^lo_size + lo = byte_wit
-        let hi_shifted = b.mul(hi_wit, two_to_lo);
-        let recon = b.add(hi_shifted, lo_wit);
-        let split_diff = b.sub(recon, byte_wit);
-        b.constrain(flag, split_diff, zero);
-
-        lo_wit
+        lo
     }
 
     fn gen_witness_rangecheck(
@@ -1533,23 +1538,20 @@ impl ExplicitWitness {
         }
 
         let sign_wit = b.write_witness(sign_hint);
-        let low_wit = b.write_witness(low_hint);
 
         // sign ∈ {0, 1}
         self.gen_witness_rangecheck(b, sign_wit, 1, flag);
+
+        // Compute low = value - sign * 2^(n-1) (saves 1 witness + 1 constraint)
+        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
+        let low = b.sub(value, sign_shifted);
+
         // low ∈ [0, 2^n) — excludes field-wrapped values
-        self.gen_witness_rangecheck(b, low_wit, bits, flag);
+        self.gen_witness_rangecheck(b, low, bits, flag);
         // low < 2^(n-1)
         let bound = b.field_const(Field::from((1u128 << (bits - 1)) - 1));
-        let gap = b.sub(bound, low_wit);
+        let gap = b.sub(bound, low);
         self.gen_witness_rangecheck(b, gap, bits, flag);
-
-        // Constrain decomposition: sign * 2^(n-1) + low = value
-        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
-        let reconstructed = b.add(sign_shifted, low_wit);
-        let diff = b.sub(reconstructed, value);
-        let zero = b.field_const(Field::ZERO);
-        b.constrain(flag, diff, zero);
 
         sign_wit
     }
@@ -1942,40 +1944,54 @@ impl ExplicitWitness {
         let r_field = b.cast_to_field(r);
 
         // Step 1: Byte decomposition + spread for each operand.
-        let (a_pure_bytes, a_spread_word) = self.spread_decompose(b, l_pure, l_field, chunks, one);
-        let (b_pure_bytes, b_spread_word) = self.spread_decompose(b, r_pure, r_field, chunks, one);
+        let (a_pure_bytes, a_spread_word) =
+            self.spread_decompose(b, l_pure, l_field, chunks, one, l_taint);
+        let (b_pure_bytes, b_spread_word) =
+            self.spread_decompose(b, r_pure, r_field, chunks, one, r_taint);
 
         // Step 2: Per-byte witness generation, while reconstructing full-word values.
+        // For the last xor byte, compute its spread from the bitwise identity
+        // spread(a)+spread(b) = 2*spread(and)+spread(xor), saving 1 witness + 1 constraint.
         let mut and_word = zero;
         let mut xor_word = zero;
         let mut and_spread_word = zero;
         let mut xor_spread_word = zero;
         for i in 0..chunks {
-            // Compute pure integer hints for this byte.
             let a_byte_u8 = b.cast_to(CastTarget::U(8), a_pure_bytes[i]);
             let b_byte_u8 = b.cast_to(CastTarget::U(8), b_pure_bytes[i]);
             let and_hint = b.and(a_byte_u8, b_byte_u8);
             let xor_hint = b.xor(a_byte_u8, b_byte_u8);
-            let (and_byte_wit, and_spread_wit) = self.write_spread_byte_witness(b, and_hint, one);
-            let (xor_byte_wit, xor_spread_wit) = self.write_spread_byte_witness(b, xor_hint, one);
 
+            // And byte: always fully witnessed
+            let (and_byte_wit, and_spread_wit) = self.write_spread_byte_witness(b, and_hint, one);
             let shifted_and_word = b.mul(and_word, two_to_8);
             and_word = b.add(shifted_and_word, and_byte_wit);
-
-            let shifted_xor_word = b.mul(xor_word, two_to_8);
-            xor_word = b.add(shifted_xor_word, xor_byte_wit);
-
             let shifted_and_spread = b.mul(and_spread_word, two_to_16);
             and_spread_word = b.add(shifted_and_spread, and_spread_wit);
 
-            let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
-            xor_spread_word = b.add(shifted_xor_spread, xor_spread_wit);
-        }
+            if i < chunks - 1 {
+                // Xor byte: fully witnessed for non-last bytes
+                let (xor_byte_wit, xor_spread_wit) =
+                    self.write_spread_byte_witness(b, xor_hint, one);
+                let shifted_xor_word = b.mul(xor_word, two_to_8);
+                xor_word = b.add(shifted_xor_word, xor_byte_wit);
+                let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
+                xor_spread_word = b.add(shifted_xor_spread, xor_spread_wit);
+            } else {
+                // Last xor byte: witness byte only, derive spread from identity
+                let xor_byte_field = b.cast_to_field(xor_hint);
+                let xor_byte_wit = b.write_witness(xor_byte_field);
+                let shifted_xor_word = b.mul(xor_word, two_to_8);
+                xor_word = b.add(shifted_xor_word, xor_byte_wit);
 
-        let input_spread_sum = b.add(a_spread_word, b_spread_word);
-        let two_and_spread_word = b.mul(two, and_spread_word);
-        let bitwise_spread_sum = b.add(two_and_spread_word, xor_spread_word);
-        b.constrain(one, bitwise_spread_sum, input_spread_sum);
+                let input_spread_sum = b.add(a_spread_word, b_spread_word);
+                let two_and = b.mul(two, and_spread_word);
+                let remainder = b.sub(input_spread_sum, two_and);
+                let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
+                let xor_spread_last = b.sub(remainder, shifted_xor_spread);
+                b.lookup_spread(8, xor_byte_wit, xor_spread_last, one);
+            }
+        }
 
         let result_word = match kind {
             BinaryArithOpKind::And => and_word,
@@ -1994,6 +2010,9 @@ impl ExplicitWitness {
     /// Decompose an operand into bytes and their spreads.
     /// Returns (pure_bytes, reconstructed_spread) in big-endian order.
     /// pure_bytes: for use in hint computations (never witness-typed).
+    ///
+    /// When `is_witness` is false, the operand is pure (e.g. a constant in `a & 0xff`),
+    /// so we compute spreads purely without witnesses or lookups.
     fn spread_decompose(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2001,6 +2020,7 @@ impl ExplicitWitness {
         field_val: ValueId,
         chunks: usize,
         flag: ValueId,
+        is_witness: bool,
     ) -> (Vec<ValueId>, ValueId) {
         let zero = b.field_const(Field::ZERO);
         let two_to_8 = b.field_const(Field::from(256u128));
@@ -2012,29 +2032,53 @@ impl ExplicitWitness {
 
         let mut pure_bytes = Vec::with_capacity(chunks);
 
-        // Always use witness path: write bytes as witnesses and verify via spread lookups.
-        // Even for pure operands we need witnesses so the spread constraint works in R1CS
-        // (ToRadix is hint-only, not available in R1CS).
+        if !is_witness {
+            // Pure operand: compute spread directly, no witnesses or lookups needed.
+            // No byte decomposition — just spread the whole value at once.
+            let n = chunks * 8;
+            let spread_word = b.spread(pure_val, n as u8);
+            let spread_field = b.cast_to_field(spread_word);
+            for i in 0..chunks {
+                let idx = b.u_const(32, i as u128);
+                let byte_i = b.array_get(bytes_arr, idx);
+                pure_bytes.push(byte_i);
+            }
+            return (pure_bytes, spread_field);
+        }
+
+        // Witness path: witness chunks-1 bytes with spread lookups, then compute
+        // last byte as field_val - partial*256 (saves 1 witness + 1 constraint).
         let mut recon_value = zero;
         let mut recon_spread = zero;
-        for i in 0..chunks {
+        for i in 0..chunks - 1 {
             let idx = b.u_const(32, i as u128);
             let byte_i = b.array_get(bytes_arr, idx);
             let (byte_wit, spread_wit) = self.write_spread_byte_witness(b, byte_i, flag);
 
-            // Accumulate reconstruction
             let shifted_value = b.mul(recon_value, two_to_8);
             recon_value = b.add(shifted_value, byte_wit);
 
             let shifted_spread = b.mul(recon_spread, two_to_16);
             recon_spread = b.add(shifted_spread, spread_wit);
 
-            pure_bytes.push(byte_i); // pure integer byte for hints
+            pure_bytes.push(byte_i);
         }
 
-        // Constrain reconstruction equals original: flag * (recon - field_val) = 0
-        let diff = b.sub(recon_value, field_val);
-        b.constrain(flag, diff, zero);
+        // Last byte: compute from reconstruction remainder, only witness spread
+        let last_idx = b.u_const(32, (chunks - 1) as u128);
+        let last_byte_pure = b.array_get(bytes_arr, last_idx);
+        let recon_shifted = b.mul(recon_value, two_to_8);
+        let last_byte = b.sub(field_val, recon_shifted);
+
+        let spread_hint = b.spread(last_byte_pure, 8);
+        let spread_hint_field = b.cast_to_field(spread_hint);
+        let last_spread_wit = b.write_witness(spread_hint_field);
+        b.lookup_spread(8, last_byte, last_spread_wit, flag);
+
+        let shifted_spread = b.mul(recon_spread, two_to_16);
+        recon_spread = b.add(shifted_spread, last_spread_wit);
+
+        pure_bytes.push(last_byte_pure);
 
         (pure_bytes, recon_spread)
     }
