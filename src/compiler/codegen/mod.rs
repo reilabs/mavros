@@ -628,18 +628,31 @@ impl CodeGen {
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::LtU64 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                } => {
+                    let result_bits = match &type_info.get_value_type(*val).expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => *bits,
+                        t => panic!("Unsupported result type for comparison: {:?}", t),
+                    };
+                    let result = layouter.alloc_u64(*val, result_bits);
+                    let lhs_type = &type_info.get_value_type(*op1).expr;
+                    match lhs_type {
+                        TypeExpr::I(bits) => {
+                            emitter.push_op(bytecode::OpCode::LtS64 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                                bits: *bits as u64,
+                            });
+                        }
+                        _ => {
+                            emitter.push_op(bytecode::OpCode::LtU64 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
+                        }
                     }
-                    TypeExpr::I(_) => panic!("Signed Lt not yet implemented"),
-                    t => panic!("Unsupported type for comparison: {:?}", t),
-                },
+                }
                 ssa::OpCode::Cmp {
                     kind: CmpKind::Eq,
                     result: val,
@@ -710,7 +723,8 @@ impl CodeGen {
                     }
                     let is_nop =
                         matches!(tgt, ssa::CastTarget::Nop | ssa::CastTarget::ArrayToSlice)
-                            || l_type.expr == r_type.expr;
+                            || l_type.expr == r_type.expr
+                            || (l_type.is_witness_of() && r_type.is_witness_of());
                     if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);

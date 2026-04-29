@@ -196,13 +196,17 @@ impl RCInsertion {
                     OpCode::Cast {
                         result: r,
                         value: v,
-                        target: CastTarget::Nop | CastTarget::ArrayToSlice,
-                    } => {
-                        // Nop cast aliases result to input in codegen (same frame position).
+                        target,
+                    } if matches!(target, CastTarget::Nop | CastTarget::ArrayToSlice)
+                        || (type_info.get_value_type(*v).is_witness_of()
+                            && type_info.get_value_type(*r).is_witness_of()) =>
+                    {
+                        // Nop/alias cast: result aliases input in codegen (same frame position).
+                        // WitnessOf(A) -> WitnessOf(B) casts are also no-ops at runtime.
                         if self.needs_rc(type_info, v) {
                             if !currently_live.contains(r) {
                                 panic!(
-                                    "ICE: Result of Cast::Nop is immediately dropped. This is a bug."
+                                    "ICE: Result of aliasing Cast is immediately dropped. This is a bug."
                                 );
                             }
                             if currently_live.contains(v) {
@@ -366,10 +370,17 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                     }
                     OpCode::Store { ptr, value } => {
-                        // In forward order: bump value if still live (aliased into cell), then store
-                        // In reverse: push store first, then bump
+                        // In forward order: bump value if still live (aliased into cell),
+                        // store, then drop ptr if it dies here.
+                        // In reverse: push the drop first, then store, then bump.
                         let ptr = *ptr;
                         let value = *value;
+                        if !currently_live.contains(&ptr) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Drop,
+                                value: ptr,
+                            });
+                        }
                         new_instructions.push(instruction);
                         if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
                             new_instructions.push(OpCode::MemOp {

@@ -453,8 +453,6 @@ mod def {
         #[frame] b: Field,
         #[frame] c: Field,
     ) {
-        // println!("r1cs");
-
         unsafe {
             *vm.data.as_forward.out_a = a;
             *vm.data.as_forward.out_b = b;
@@ -619,16 +617,38 @@ mod def {
     }
 
     #[opcode]
+    fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+        unsafe {
+            // Sign-extend from `bits` to 64 bits, then compare as signed
+            let shift = 64 - bits;
+            let sa = ((a << shift) as i64) >> shift;
+            let sb = ((b << shift) as i64) >> shift;
+            *res = (sa < sb) as u64;
+        }
+    }
+
+    #[opcode]
     fn truncate_u64(#[out] res: *mut u64, #[frame] a: u64, to_bits: u64) {
         unsafe {
-            *res = a & ((1 << to_bits) - 1);
+            let mask = if to_bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << to_bits) - 1
+            };
+            *res = a & mask;
         }
     }
 
     #[opcode]
     fn truncate_f_to_u(#[out] res: *mut Field, #[frame] a: Field, to_bits: u64) {
         unsafe {
-            *res = From::from(ark_ff::PrimeField::into_bigint(a).0[0] & ((1 << to_bits) - 1));
+            let limb0 = ark_ff::PrimeField::into_bigint(a).0[0];
+            let mask = if to_bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << to_bits) - 1
+            };
+            *res = From::from(limb0 & mask);
         }
     }
 

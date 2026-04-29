@@ -4,8 +4,7 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, Instruction, OpCode, Terminator,
-        ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, Instruction, OpCode, ValueId,
     },
 };
 
@@ -20,13 +19,13 @@ use crate::compiler::{
 ///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, Truncate, ExtractTupleField,
 ///   MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 /// - **Lower with OOB check** (can fail on out-of-bounds index):
-///   ArrayGet — bounds-check index, assert !cond on OOB, then execute unconditionally.
-/// - **Lower with OOB check + value select** (RC-tracked allocation):
-///   ArraySet — bounds-check index, select(cond, new_val, old_val), always execute ArraySet.
+///   ArrayGet — if OOB, assert !cond and produce default; else array_get.
+/// - **Lower with OOB check + passthrough** (RC-tracked allocation):
+///   ArraySet — if OOB, assert !cond and pass through array; else array_set.
 /// - **Lower with overflow check** (pure inputs only, can fail):
-///   Integer Add/Sub/Mul/Shl — widen, compute, check overflow, constrain !cond on fail.
+///   Integer Add/Sub/Mul/Shl — widen, compute, if overflow assert !cond and produce 0; else narrow.
 /// - **Lower with div-zero check** (pure inputs only, can fail):
-///   Div/Mod (integer and Field).
+///   Div/Mod — if divisor==0 assert !cond and produce 0; else compute.
 /// - **Keep as Guard** (side-effectful or generates constraints):
 ///   Store, Call, WriteWitness, AssertEq, AssertR1C, Constrain, Rangecheck,
 ///   and failable ops with witness inputs (SExt, integer arith).
@@ -400,60 +399,51 @@ impl LowerPureGuards {
         rhs: ValueId,
         lhs_type: &Type,
     ) {
-        let stripped = lhs_type.strip_witness();
-        let zero = match &stripped.expr {
+        let zero_val = match &lhs_type.expr {
             TypeExpr::U(b) => emitter.u_const(*b, 0),
             TypeExpr::I(b) => emitter.i_const(*b, 0),
             TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
             _ => unreachable!(),
         };
-        let is_zero = emitter.eq(rhs, zero);
+        let is_zero = emitter.eq(rhs, zero_val);
 
-        let result_type = stripped.clone();
-
-        let (fail_block, _) = emitter.add_block();
-        let (ok_block, _) = emitter.add_block();
-        let (merge_block, _) = emitter.add_block();
-
-        emitter
-            .function
-            .get_block_mut(merge_block)
-            .push_parameter(original_result, result_type);
-
-        emitter.seal_and_switch(Terminator::JmpIf(is_zero, fail_block, ok_block), fail_block);
-
-        // Fail: constrain !cond, produce default zero
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
-        });
-        let default_val = match &stripped.expr {
-            TypeExpr::U(b) => emitter.u_const(*b, 0),
-            TypeExpr::I(b) => emitter.i_const(*b, 0),
-            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
-            _ => unreachable!(),
-        };
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
-
-        // Ok: perform the div/mod
-        let r = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind,
-            result: r,
-            lhs,
-            rhs,
-        });
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![r]), merge_block);
+        emitter.build_if_else_into(
+            is_zero,
+            vec![(original_result, lhs_type.clone())],
+            // Divisor is zero: assert condition is false, produce default
+            |e| {
+                let zero_u1 = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero_u1,
+                });
+                let default_val = match &lhs_type.expr {
+                    TypeExpr::U(b) => e.u_const(*b, 0),
+                    TypeExpr::I(b) => e.i_const(*b, 0),
+                    TypeExpr::Field => e.field_const(ark_bn254::Fr::from(0u64)),
+                    _ => unreachable!(),
+                };
+                vec![default_val]
+            },
+            // Divisor is non-zero: perform the div/mod
+            |e| {
+                let r = e.fresh_value();
+                e.emit(OpCode::BinaryArithOp {
+                    kind,
+                    result: r,
+                    lhs,
+                    rhs,
+                });
+                vec![r]
+            },
+        );
     }
 
     /// Lower `Guard(cond, ArraySet(array, idx, val) -> result)`.
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
-    ///   if oob { assert !cond; result = array }
-    ///   else   { result = array_set(array, idx, value) }
+    ///   if oob { assert !cond; result = array } else { result = array_set(array, idx, value) }
     fn lower_array_set_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -467,43 +457,27 @@ impl LowerPureGuards {
         let array_type = type_info.get_value_type(array).strip_witness().clone();
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
-        let (fail_block, _) = emitter.add_block();
-        let (ok_block, _) = emitter.add_block();
-        let (merge_block, _) = emitter.add_block();
-
-        emitter
-            .function
-            .get_block_mut(merge_block)
-            .push_parameter(original_result, array_type);
-
-        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, ok_block), fail_block);
-
-        // OOB: assert !cond, pass through original array
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
-        });
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![array]), ok_block);
-
-        // In-bounds: do the set
-        let set_result = emitter.fresh_value();
-        emitter.emit(OpCode::ArraySet {
-            result: set_result,
-            array,
-            index,
-            value,
-        });
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![set_result]), merge_block);
+        emitter.build_if_else_into(
+            oob,
+            vec![(original_result, array_type)],
+            // OOB: assert condition is false, pass through original array
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![array]
+            },
+            // In-bounds: do the set
+            |e| vec![e.array_set(array, index, value)],
+        );
     }
 
     /// Lower `Guard(cond, ArrayGet(array, idx) -> result)`.
     ///
     /// Pattern:
-    ///   oob = idx >= len(array)
-    ///   if oob { assert !cond; result = default }
-    ///   else   { result = array_get(array, idx) }
+    ///   if oob { assert !cond; result = default } else { result = array_get(array, idx) }
     fn lower_array_get_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -520,30 +494,21 @@ impl LowerPureGuards {
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
-        let (fail_block, _) = emitter.add_block();
-        let (ok_block, _) = emitter.add_block();
-        let (merge_block, _) = emitter.add_block();
-
-        emitter
-            .function
-            .get_block_mut(merge_block)
-            .push_parameter(original_result, elem_type.clone());
-
-        emitter.seal_and_switch(Terminator::JmpIf(oob, fail_block, ok_block), fail_block);
-
-        // OOB: assert !cond, produce default value
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
-        });
-        let default_val = self.default_scalar(emitter, &elem_type);
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
-
-        // In-bounds: do the get
-        let get_result = emitter.array_get(array, index);
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![get_result]), merge_block);
+        emitter.build_if_else_into(
+            oob,
+            vec![(original_result, elem_type.clone())],
+            // OOB: assert condition is false, produce default value
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![self.default_scalar(e, &elem_type)]
+            },
+            // In-bounds: do the get
+            |e| vec![e.array_get(array, index)],
+        );
     }
 
     /// Compute the OOB condition: idx >= len(seq). Returns a bool ValueId.
@@ -589,8 +554,9 @@ impl LowerPureGuards {
         }
     }
 
-    /// Common pattern: branch on a failure condition, constraining !cond in the fail
-    /// block and producing a default value, or executing the ok path.
+    /// Common pattern: branch on a failure condition. In the fail branch,
+    /// assert condition==false and produce a default value. In the ok branch,
+    /// execute the actual computation.
     fn emit_guarded_branch(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -602,34 +568,25 @@ impl LowerPureGuards {
         signed: bool,
         bits: usize,
     ) {
-        let (fail_block, _) = emitter.add_block();
-        let (ok_block, _) = emitter.add_block();
-        let (merge_block, _) = emitter.add_block();
-
-        emitter
-            .function
-            .get_block_mut(merge_block)
-            .push_parameter(original_result, result_type.clone());
-
-        emitter.seal_and_switch(Terminator::JmpIf(failure, fail_block, ok_block), fail_block);
-
-        // Fail block: constrain !cond, produce default
-        let not_cond = emitter.not(condition);
-        let one = emitter.u_const(1, 1);
-        emitter.emit(OpCode::AssertEq {
-            lhs: not_cond,
-            rhs: one,
-        });
-        let default_val = if signed {
-            emitter.i_const(bits, 0)
-        } else {
-            emitter.u_const(bits, 0)
-        };
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![default_val]), ok_block);
-
-        // Ok block: execute the operation
-        let ok_val = ok_path(emitter);
-        emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![ok_val]), merge_block);
+        emitter.build_if_else_into(
+            failure,
+            vec![(original_result, result_type.clone())],
+            // Failure: assert condition is false, produce default value
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertEq {
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![if signed {
+                    e.i_const(bits, 0)
+                } else {
+                    e.u_const(bits, 0)
+                }]
+            },
+            // Ok: compute the result
+            |e| vec![ok_path(e)],
+        );
     }
 }
 

@@ -4,6 +4,7 @@
 //! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no TypeInfo needed.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use inkwell::AddressSpace;
@@ -105,7 +106,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Convert an LLType to the corresponding LLVM type.
     fn convert_type(&self, ty: &LLType) -> BasicTypeEnum<'ctx> {
         match ty {
-            LLType::Int(bits) => self.context.custom_width_int_type(*bits).into(),
+            LLType::Int(bits) => self
+                .context
+                .custom_width_int_type(
+                    NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
+                )
+                .expect("A basic integer type can be created")
+                .into(),
             LLType::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
             LLType::Struct(s) => self.convert_struct_type(s),
         }
@@ -124,7 +131,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Convert an LLFieldType to the corresponding LLVM type.
     fn convert_field_type(&self, ft: &LLFieldType) -> BasicTypeEnum<'ctx> {
         match ft {
-            LLFieldType::Int(bits) => self.context.custom_width_int_type(*bits).into(),
+            LLFieldType::Int(bits) => self
+                .context
+                .custom_width_int_type(
+                    NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
+                )
+                .expect("A basic integer type can be created")
+                .into(),
             LLFieldType::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
             LLFieldType::Inline(s) => self.convert_struct_type(s),
             LLFieldType::InlineArray(s, n) => {
@@ -452,7 +465,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 bits,
                 value,
             } => {
-                let int_type = self.context.custom_width_int_type(*bits);
+                let int_type = self
+                    .context
+                    .custom_width_int_type(
+                        NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
+                    )
+                    .expect("A basic integer type can be created");
                 let val = int_type.const_int(*value, false);
                 self.value_map.insert(*result, val.into());
             }
@@ -491,6 +509,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let predicate = match kind {
                     IntCmpOp::Eq => IntPredicate::EQ,
                     IntCmpOp::ULt => IntPredicate::ULT,
+                    IntCmpOp::SLt => IntPredicate::SLT,
                 };
                 let val = self
                     .builder
@@ -521,8 +540,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .unwrap();
                         call_site
                             .try_as_basic_value()
-                            .left()
-                            .expect("field_mul should return a value")
+                            .expect_basic("field_mul should return a value")
                     }
                     FieldArithOp::Add => {
                         let add_fn = self.field_add_fn.expect("__field_add not declared");
@@ -532,8 +550,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .unwrap();
                         call_site
                             .try_as_basic_value()
-                            .left()
-                            .expect("field_add should return a value")
+                            .expect_basic("field_add should return a value")
                     }
                     FieldArithOp::Sub => {
                         let sub_fn = self.field_sub_fn.expect("__field_sub not declared");
@@ -543,8 +560,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .unwrap();
                         call_site
                             .try_as_basic_value()
-                            .left()
-                            .expect("field_sub should return a value")
+                            .expect_basic("field_sub should return a value")
                     }
                     FieldArithOp::Div => {
                         let div_fn = self.field_div_fn.expect("__field_div not declared");
@@ -554,8 +570,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .unwrap();
                         call_site
                             .try_as_basic_value()
-                            .left()
-                            .expect("field_div should return a value")
+                            .expect_basic("field_div should return a value")
                     }
                     _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
@@ -616,7 +631,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 to_bits,
             } => {
                 let val = self.value_map[value].into_int_value();
-                let target_type = self.context.custom_width_int_type(*to_bits);
+                let target_type = self
+                    .context
+                    .custom_width_int_type(
+                        NonZeroU32::new(*to_bits).expect("Cannot have zero-width integer"),
+                    )
+                    .expect("The target type for truncation is valid");
                 let truncated = self
                     .builder
                     .build_int_truncate(val, target_type, &format!("v{}", result.0))
@@ -630,7 +650,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 to_bits,
             } => {
                 let val = self.value_map[value].into_int_value();
-                let target_type = self.context.custom_width_int_type(*to_bits);
+                let target_type = self
+                    .context
+                    .custom_width_int_type(
+                        NonZeroU32::new(*to_bits).expect("Cannot have zero-width integer"),
+                    )
+                    .expect("The target type for zero-extension is valid");
                 let extended = self
                     .builder
                     .build_int_z_extend(val, target_type, &format!("v{}", result.0))
@@ -675,8 +700,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .unwrap();
                 let field = call
                     .try_as_basic_value()
-                    .left()
-                    .expect("__field_from_limbs should return a value");
+                    .expect_basic("__field_from_limbs should return a value");
                 self.value_map.insert(*result, field);
             }
 
@@ -692,8 +716,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .unwrap();
                 let limb_vals = call
                     .try_as_basic_value()
-                    .left()
-                    .expect("__field_to_limbs should return a value");
+                    .expect_basic("__field_to_limbs should return a value");
                 self.value_map.insert(*result, limb_vals);
             }
 
@@ -723,8 +746,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .unwrap();
                 let ptr_val = call_site
                     .try_as_basic_value()
-                    .left()
-                    .expect("malloc should return a value");
+                    .expect_basic("malloc should return a value");
                 self.value_map.insert(*result, ptr_val);
             }
 
@@ -845,14 +867,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .unwrap();
 
                 if results.len() == 1 {
-                    if let Some(val) = call_result.try_as_basic_value().left() {
+                    if let Some(val) = call_result.try_as_basic_value().basic() {
                         self.value_map.insert(results[0], val);
                     }
                 } else if results.len() > 1 {
                     let ret_struct = call_result
                         .try_as_basic_value()
-                        .left()
-                        .expect("Expected return value from multi-return call");
+                        .expect_basic("Expected return value from multi-return call");
                     for (i, result_id) in results.iter().enumerate() {
                         let val = self
                             .builder

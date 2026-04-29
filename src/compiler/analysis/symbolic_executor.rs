@@ -3,7 +3,7 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     Field,
     analysis::types::TypeInfo,
-    ir::r#type::Type,
+    ir::r#type::{Type, TypeExpr},
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
         Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir, Terminator,
@@ -14,7 +14,9 @@ pub trait Value<Context>
 where
     Self: Sized + Clone,
 {
-    fn cmp(&self, b: &Self, cmp_kind: CmpKind, out_type: &Type, ctx: &mut Context) -> Self;
+    fn ult(&self, b: &Self, ctx: &mut Context) -> Self;
+    fn slt(&self, b: &Self, bits: usize, ctx: &mut Context) -> Self;
+    fn eq(&self, b: &Self, ctx: &mut Context) -> Self;
     fn arith(
         &self,
         b: &Self,
@@ -187,10 +189,17 @@ impl SymbolicExecutor {
                         lhs: a,
                         rhs: b,
                     } => {
+                        let lhs_type = fn_type_info.get_value_type(*a);
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         let b = scope[b.0 as usize].as_ref().unwrap();
-                        scope[r.0 as usize] =
-                            Some(a.cmp(b, *cmp_kind, &fn_type_info.get_value_type(*r), ctx));
+                        let stripped = lhs_type.strip_witness();
+                        scope[r.0 as usize] = Some(match cmp_kind {
+                            CmpKind::Eq => a.eq(b, ctx),
+                            CmpKind::Lt => match &stripped.expr {
+                                TypeExpr::I(bits) => a.slt(b, *bits, ctx),
+                                _ => a.ult(b, ctx),
+                            },
+                        });
                     }
                     crate::compiler::ssa::OpCode::BinaryArithOp {
                         kind: binary_arith_op_kind,

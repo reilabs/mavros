@@ -424,6 +424,7 @@ impl Driver {
         );
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         pass_manager.run(&mut ssa);
+
         self.base_witgen_ssa = Some(ssa);
     }
 

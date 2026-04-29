@@ -305,6 +305,7 @@ impl Display for IntArithOp {
 pub enum IntCmpOp {
     Eq,
     ULt,
+    SLt,
 }
 
 impl Display for IntCmpOp {
@@ -312,6 +313,7 @@ impl Display for IntCmpOp {
         let s = match self {
             IntCmpOp::Eq => "eq",
             IntCmpOp::ULt => "ult",
+            IntCmpOp::SLt => "slt",
         };
         write!(f, "{}", s)
     }
