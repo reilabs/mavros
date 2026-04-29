@@ -90,6 +90,17 @@ fn emit_assert(
             rhs,
         }) => emit_assert_eq(*lhs, *rhs, defs, function_type_info),
 
+        Some(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: _,
+            lhs,
+            rhs,
+        }) => vec![OpCode::AssertCmp {
+            kind: CmpKind::Lt,
+            lhs: *lhs,
+            rhs: *rhs,
+        }],
+
         Some(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::And,
             result,

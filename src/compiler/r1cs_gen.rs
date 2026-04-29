@@ -595,16 +595,33 @@ impl symbolic_executor::Value<R1CGen> for Value {
         assert!(v != ark_bn254::Fr::from(0u64), "assert failed: value is zero");
     }
 
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, _ctx: &mut R1CGen) {
+    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, _ctx: &mut R1CGen) {
         match kind {
             CmpKind::Eq => {
                 assert_eq!(a.expect_constant(), b.expect_constant());
             }
             CmpKind::Lt => {
-                // For symbolic execution / constant folding, just check the constraint
                 let a_val = a.expect_constant();
                 let b_val = b.expect_constant();
-                assert!(a_val < b_val, "assert_cmp lt failed: {:?} >= {:?}", a_val, b_val);
+                match &lhs_type.strip_witness().expr {
+                    TypeExpr::I(bits) => {
+                        // Signed comparison: interpret as two's complement
+                        let a_int = a_val.into_bigint();
+                        let b_int = b_val.into_bigint();
+                        let half = ark_bn254::Fr::from(1u64 << (bits - 1)).into_bigint();
+                        let a_neg = a_int >= half;
+                        let b_neg = b_int >= half;
+                        let result = match (a_neg, b_neg) {
+                            (true, false) => true,   // negative < positive
+                            (false, true) => false,  // positive >= negative
+                            _ => a_int < b_int,      // same sign: compare directly
+                        };
+                        assert!(result, "assert_cmp lt (signed) failed: {:?} >= {:?}", a_val, b_val);
+                    }
+                    _ => {
+                        assert!(a_val < b_val, "assert_cmp lt failed: {:?} >= {:?}", a_val, b_val);
+                    }
+                }
             }
         }
     }

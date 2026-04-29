@@ -250,7 +250,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         }
     }
 
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, ctx: &mut SpecializationState) {
+    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, _lhs_type: &Type, ctx: &mut SpecializationState) {
         let l_const = ctx.const_vals.get(&a.0);
         let r_const = ctx.const_vals.get(&b.0);
         match kind {
