@@ -479,8 +479,7 @@ impl ExplicitWitness {
                     b.push(instruction);
                     return;
                 }
-                let product = b.mul(a, r1c_b);
-                b.assert_eq(product, c);
+                b.constrain(a, r1c_b, c);
             }
             OpCode::NextDCoeff { result: _ } => {
                 panic!("ICE: should not be present at this stage");
