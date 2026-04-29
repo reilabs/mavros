@@ -867,15 +867,7 @@ fn lower_instruction(
                 ),
             };
 
-            e.build_if_else(
-                eq,
-                vec![],
-                |_| vec![],
-                |te| {
-                    te.trap();
-                    vec![]
-                },
-            );
+            assert(e, eq);
         }
 
         OpCode::AssertR1C { a, b, c } => {
@@ -894,15 +886,7 @@ fn lower_instruction(
 
             let product = e.field_arith(FieldArithOp::Mul, ll_a, ll_b);
             let eq = e.field_eq(product, ll_c);
-            e.build_if_else(
-                eq,
-                vec![],
-                |_| vec![],
-                |te| {
-                    te.trap();
-                    vec![]
-                },
-            );
+            assert(e, eq);
         }
 
         OpCode::InitGlobal { global, value } => {
@@ -2083,11 +2067,8 @@ fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> (ValueId, ValueId, V
     (l0, l1, l2, l3)
 }
 
-/// Trap if `ok` is false. The lookup helpers use this to enforce Field-element
-/// invariants (high limbs zero, key in range) that are prover-internal — a
-/// violation here is a compiler bug, not user input, so we abort cleanly
-/// instead of leaving corrupted state.
-fn assert_or_trap(e: &mut LLBlockEmitter<'_>, ok: ValueId) {
+/// Assert that `ok` is true.
+fn assert(e: &mut LLBlockEmitter<'_>, ok: ValueId) {
     e.build_if_else(
         ok,
         vec![],
@@ -2150,10 +2131,10 @@ fn generate_rngchk_8_function() -> LLFunction {
         let zero_i64 = e.int_const(64, 0);
         let table_len_i64 = e.int_const(64, 256);
         let in_range = e.int_ult(val_l0, table_len_i64);
-        assert_or_trap(&mut e, in_range);
+        assert(&mut e, in_range);
         for high in [val_l1, val_l2, val_l3, flag_l1, flag_l2, flag_l3] {
             let ok = e.int_eq(high, zero_i64);
-            assert_or_trap(&mut e, ok);
+            assert(&mut e, ok);
         }
 
         // Bump: multiplicities[key].low_u64 += flag_u64
