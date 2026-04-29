@@ -976,6 +976,11 @@ mod def {
     }
 
     #[opcode]
+    fn assert_r1c(#[frame] a: Field, #[frame] b: Field, #[frame] c: Field) {
+        assert_eq!(a * b, c);
+    }
+
+    #[opcode]
     #[inline(never)] // TODO better impl
     fn rangecheck(#[frame] val: Field, max_bits: usize) {
         // Convert field to bigint and check if it fits in max_bits

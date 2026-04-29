@@ -971,6 +971,22 @@ impl CodeGen {
                         t => panic!("Unsupported type for AssertEq in vm: {:?}", t),
                     }
                 }
+                ssa::OpCode::AssertR1C { a, b, c } => {
+                    let a_type = type_info.get_value_type(*a);
+                    let b_type = type_info.get_value_type(*b);
+                    let c_type = type_info.get_value_type(*c);
+                    if !a_type.is_field() || !b_type.is_field() || !c_type.is_field() {
+                        panic!(
+                            "Unsupported type for AssertR1C in vm: {:?}, {:?}, {:?}",
+                            a_type, b_type, c_type
+                        );
+                    }
+                    emitter.push_op(bytecode::OpCode::AssertR1C {
+                        a: layouter.get_value(*a),
+                        b: layouter.get_value(*b),
+                        c: layouter.get_value(*c),
+                    });
+                }
                 ssa::OpCode::ToBits {
                     result: r,
                     value,

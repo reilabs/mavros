@@ -903,6 +903,33 @@ fn lower_instruction(
             );
         }
 
+        OpCode::AssertR1C { a, b, c } => {
+            let ll_a = val_map[a];
+            let ll_b = val_map[b];
+            let ll_c = val_map[c];
+            let a_type = fn_type_info.get_value_type(*a);
+            let b_type = fn_type_info.get_value_type(*b);
+            let c_type = fn_type_info.get_value_type(*c);
+            if !a_type.is_field() || !b_type.is_field() || !c_type.is_field() {
+                panic!(
+                    "Unsupported type for AssertR1C in HLSSA->LLSSA lowering: {:?}, {:?}, {:?}",
+                    a_type, b_type, c_type
+                );
+            }
+
+            let product = e.field_arith(FieldArithOp::Mul, ll_a, ll_b);
+            let eq = e.field_eq(product, ll_c);
+            e.build_if_else(
+                eq,
+                vec![],
+                |_| vec![],
+                |te| {
+                    te.trap();
+                    vec![]
+                },
+            );
+        }
+
         OpCode::InitGlobal { global, value } => {
             let ll_value = val_map[value];
             let r = e.fresh_value();
