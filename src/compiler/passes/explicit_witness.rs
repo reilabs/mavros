@@ -2033,17 +2033,24 @@ impl ExplicitWitness {
         let mut pure_bytes = Vec::with_capacity(chunks);
 
         if !is_witness {
-            // Pure operand: compute spread directly, no witnesses or lookups needed.
-            // No byte decomposition — just spread the whole value at once.
-            let n = chunks * 8;
-            let spread_word = b.spread(pure_val, n as u8);
-            let spread_field = b.cast_to_field(spread_word);
+            // Pure operand: no per-byte lookups needed.
+            // Compute per-byte spreads as hints and accumulate, then witness
+            // the accumulated spread. The identity constraint implicitly
+            // constrains it; in R1CS the hint chain gets DCE'd behind
+            // write_witness→FreshWitness.
+            let mut spread_acc = zero;
             for i in 0..chunks {
                 let idx = b.u_const(32, i as u128);
                 let byte_i = b.array_get(bytes_arr, idx);
                 pure_bytes.push(byte_i);
+
+                let byte_spread = b.spread(byte_i, 8);
+                let byte_spread_field = b.cast_to_field(byte_spread);
+                let shifted_spread = b.mul(spread_acc, two_to_16);
+                spread_acc = b.add(shifted_spread, byte_spread_field);
             }
-            return (pure_bytes, spread_field);
+            let spread_wit = b.write_witness(spread_acc);
+            return (pure_bytes, spread_wit);
         }
 
         // Witness path: witness chunks-1 bytes with spread lookups, then compute
