@@ -761,7 +761,11 @@ pub enum OpCode {
         result: ValueId,
         ptr: ValueId,
     },
-    AssertEq {
+    Assert {
+        value: ValueId,
+    },
+    AssertCmp {
+        kind: CmpKind,
         lhs: ValueId,
         rhs: ValueId,
     },
@@ -999,7 +1003,14 @@ impl Instruction for OpCode {
             OpCode::Load { result, ptr } => {
                 format!("v{}{} = *v{}", result.0, annotate_value(*result), ptr.0)
             }
-            OpCode::AssertEq { lhs, rhs } => format!("assert v{} == v{}", lhs.0, rhs.0),
+            OpCode::Assert { value } => format!("assert v{}", value.0),
+            OpCode::AssertCmp { kind, lhs, rhs } => {
+                let op_str = match kind {
+                    CmpKind::Lt => "<",
+                    CmpKind::Eq => "==",
+                };
+                format!("assert v{} {} v{}", lhs.0, op_str, rhs.0)
+            }
             OpCode::AssertR1C {
                 a: lhs,
                 b: rhs,
@@ -1507,7 +1518,11 @@ impl Instruction for OpCode {
                 result: _,
                 slice: b,
             } => vec![b].into_iter(),
-            Self::AssertEq { lhs: b, rhs: c }
+            Self::AssertCmp {
+                kind: _,
+                lhs: b,
+                rhs: c,
+            }
             | Self::Store { ptr: b, value: c }
             | Self::BumpD {
                 matrix: _,
@@ -1519,7 +1534,7 @@ impl Instruction for OpCode {
                 const_val: b,
                 var: c,
             } => vec![b, c].into_iter(),
-            Self::Load { result: _, ptr: c }
+            Self::Assert { value: c } | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
                 value: c,
@@ -1772,7 +1787,12 @@ impl Instruction for OpCode {
             }
             | Self::MemOp { kind: _, value: _ }
             | Self::Store { ptr: _, value: _ }
-            | Self::AssertEq { lhs: _, rhs: _ }
+            | Self::Assert { value: _ }
+            | Self::AssertCmp {
+                kind: _,
+                lhs: _,
+                rhs: _,
+            }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck {
                 value: _,
@@ -1895,14 +1915,18 @@ impl Instruction for OpCode {
                 result: _,
                 slice: b,
             } => vec![b].into_iter(),
-            Self::AssertEq { lhs: b, rhs: c }
+            Self::AssertCmp {
+                kind: _,
+                lhs: b,
+                rhs: c,
+            }
             | Self::Store { ptr: b, value: c }
             | Self::BumpD {
                 matrix: _,
                 variable: b,
                 sensitivity: c,
             } => vec![b, c].into_iter(),
-            Self::Load { result: _, ptr: c }
+            Self::Assert { value: c } | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
                 value: c,
@@ -2119,12 +2143,17 @@ impl Instruction for OpCode {
             Self::AssertR1C { a, b, c } | Self::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             Self::Store { ptr: a, value: b }
             | Self::Load { result: a, ptr: b }
-            | Self::AssertEq { lhs: a, rhs: b }
+            | Self::AssertCmp {
+                kind: _,
+                lhs: a,
+                rhs: b,
+            }
             | Self::BumpD {
                 matrix: _,
                 variable: a,
                 sensitivity: b,
             } => vec![a, b].into_iter(),
+            Self::Assert { value: a } => vec![a].into_iter(),
             Self::WriteWitness {
                 result: a,
                 value: b,

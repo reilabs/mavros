@@ -178,87 +178,15 @@ impl ExplicitWitness {
                             b.constrain(lr_diff, result_field, field_zero);
                         }
                         CmpKind::Lt => {
-                            let rhs_stripped =
-                                function_type_info.get_value_type(rhs).strip_witness().expr;
-                            let (s, is_signed) = match rhs_stripped {
-                                TypeExpr::U(s) => (s, false),
-                                TypeExpr::I(s) => (s, true),
-                                _ => panic!("ICE: rhs is not an integer type"),
-                            };
-                            let u1 = CastTarget::U(1);
-                            let res_hint = b.lt(lhs, rhs);
-                            let res_hint_field = b.cast_to_field(res_hint);
-                            let res_hint_plain = b.value_of(res_hint_field);
-                            let res_witness = b.write_witness(res_hint_plain);
-                            b.push(OpCode::Cast {
+                            self.lower_witness_lt(
+                                b,
+                                function_type_info,
+                                lhs,
+                                rhs,
                                 result,
-                                value: res_witness,
-                                target: u1,
-                            });
-
-                            let l_field = b.cast_to_field(lhs);
-                            let r_field = b.cast_to_field(rhs);
-                            let lr_diff = b.sub(l_field, r_field);
-
-                            let two = b.field_const(Field::from(2));
-                            let result_field = b.cast_to_field(result);
-                            let two_res = b.mul(result_field, two);
-                            let one = b.field_const(Field::ONE);
-                            let adjustment = b.sub(one, two_res);
-
-                            let adjusted_diff = b.mul(lr_diff, adjustment);
-                            let adjusted_diff_plain = b.value_of(adjusted_diff);
-                            let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
-                            b.constrain(lr_diff, adjustment, adjusted_diff_wit);
-
-                            if is_signed {
-                                // Signed Lt: decompose into sign bits + unsigned Lt.
-                                //
-                                // For same-sign values, unsigned Lt on two's complement
-                                // field representations gives the correct answer:
-                                //   both positive: field values = actual values, ult works
-                                //   both negative: field values preserve ordering, ult works
-                                //
-                                // For different-sign values, the negative operand is always
-                                // less than the positive one, so result = sign_a.
-                                //
-                                // Combined: result = ult + signs_differ * (sign_a - ult)
-                                //
-                                // The unsigned Lt range check is gated by signs_same so it's
-                                // only enforced when both operands have the same sign.
-                                // A separate constraint enforces result = sign_a when signs differ.
-
-                                let always_flag = b.field_const(Field::ONE);
-
-                                // Extract sign bits (always active, not gated)
-                                let sign_a =
-                                    self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
-                                let sign_b =
-                                    self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
-
-                                // signs_differ = sign_a XOR sign_b = sign_a + sign_b - 2*sign_a*sign_b
-                                let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
-                                let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
-                                let sa_sb_hint = b.mul(sa_pure, sb_pure);
-                                let sa_sb = b.write_witness(sa_sb_hint);
-                                b.constrain(sign_a, sign_b, sa_sb);
-
-                                let two_sa_sb = b.mul(sa_sb, two);
-                                let sa_plus_sb = b.add(sign_a, sign_b);
-                                let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
-                                let signs_same = b.sub(one, signs_differ);
-
-                                // Range check adjusted_diff only when signs are the same
-                                self.gen_witness_rangecheck(b, adjusted_diff_wit, s, signs_same);
-
-                                // When signs differ, result must equal sign_a
-                                let zero = b.field_const(Field::ZERO);
-                                let diff_r_sa = b.sub(result_field, sign_a);
-                                b.constrain(signs_differ, diff_r_sa, zero);
-                            } else {
-                                let rc_flag = b.field_const(Field::from(1));
-                                self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
-                            }
+                                l_taint,
+                                r_taint,
+                            );
                         }
                     }
                 } else {
@@ -495,7 +423,24 @@ impl ExplicitWitness {
                 assert!(!ptr_taint);
                 b.push(instruction);
             }
-            OpCode::AssertEq { lhs: l, rhs: r } => {
+            OpCode::Assert { value } => {
+                let v_type = function_type_info.get_value_type(value);
+                let v_taint = v_type.is_witness_of();
+                if !v_taint {
+                    b.push(instruction);
+                    return;
+                }
+                // assert(v) with witness → constrain(v_field, 1, 1)
+                // i.e. v * 1 = 1, meaning v = 1
+                let one_field = b.field_const(Field::ONE);
+                let v_field = if v_type.strip_witness().is_field() {
+                    value
+                } else {
+                    b.cast_to(CastTarget::Field, value)
+                };
+                b.constrain(v_field, one_field, one_field);
+            }
+            OpCode::AssertCmp { kind, lhs: l, rhs: r } => {
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
                 let l_taint = l_type.is_witness_of();
@@ -504,18 +449,58 @@ impl ExplicitWitness {
                     b.push(instruction);
                     return;
                 }
-                let one = b.field_const(Field::ONE);
-                let l = if l_type.strip_witness().is_field() {
-                    l
-                } else {
-                    b.cast_to(CastTarget::Field, l)
-                };
-                let r = if r_type.strip_witness().is_field() {
-                    r
-                } else {
-                    b.cast_to(CastTarget::Field, r)
-                };
-                b.constrain(l, one, r);
+                match kind {
+                    CmpKind::Eq => {
+                        let one = b.field_const(Field::ONE);
+                        let l = if l_type.strip_witness().is_field() {
+                            l
+                        } else {
+                            b.cast_to(CastTarget::Field, l)
+                        };
+                        let r = if r_type.strip_witness().is_field() {
+                            r
+                        } else {
+                            b.cast_to(CastTarget::Field, r)
+                        };
+                        b.constrain(l, one, r);
+                    }
+                    CmpKind::Lt => {
+                        let r_stripped = function_type_info.get_value_type(r).strip_witness().expr;
+                        let (s, is_signed) = match r_stripped {
+                            TypeExpr::U(s) => (s, false),
+                            TypeExpr::I(s) => (s, true),
+                            _ => panic!("ICE: AssertCmp Lt rhs is not an integer type"),
+                        };
+                        if is_signed {
+                            // Signed: fall back to lower_witness_lt + assert result == 1
+                            let result = b.fresh_value();
+                            self.lower_witness_lt(
+                                b,
+                                function_type_info,
+                                l,
+                                r,
+                                result,
+                                l_taint,
+                                r_taint,
+                            );
+                            let result_field = b.cast_to_field(result);
+                            let one = b.field_const(Field::ONE);
+                            b.constrain(result_field, one, one);
+                        } else {
+                            // Unsigned: assert lhs < rhs by proving rhs - lhs - 1 ∈ [0, 2^n).
+                            // Saves 2 R1C constraints vs computing the boolean result.
+                            let l_field = b.cast_to_field(l);
+                            let r_field = b.cast_to_field(r);
+                            let diff = b.sub(r_field, l_field);
+                            let one = b.field_const(Field::ONE);
+                            let diff_minus_one = b.sub(diff, one);
+                            let diff_plain = b.value_of(diff_minus_one);
+                            let diff_wit = b.write_witness(diff_plain);
+                            let flag = b.field_const(Field::ONE);
+                            self.gen_witness_rangecheck(b, diff_wit, s, flag);
+                        }
+                    }
+                }
             }
             OpCode::AssertR1C { a, b: r1c_b, c } => {
                 let a_taint = function_type_info.get_value_type(a).is_witness_of();
@@ -951,8 +936,29 @@ impl ExplicitWitness {
         inner: OpCode,
     ) {
         match inner {
-            OpCode::AssertEq { lhs: l, rhs: r } => {
-                // Guard(cond, AssertEq(l, r)) → constrain(cond_field, l_sub_r, zero)
+            OpCode::Assert { value: v } => {
+                // Guard(cond, Assert(v)) → constrain(cond_field, v_field, cond_field)
+                // i.e., cond * v == cond, meaning if cond then v == 1
+                let v_type = function_type_info.get_value_type(v);
+                let cond_type = function_type_info.get_value_type(condition);
+                let cond_field = if cond_type.strip_witness().is_field() {
+                    condition
+                } else {
+                    b.cast_to_field(condition)
+                };
+                let v_field = if v_type.strip_witness().is_field() {
+                    v
+                } else {
+                    b.cast_to(CastTarget::Field, v)
+                };
+                b.constrain(cond_field, v_field, cond_field);
+            }
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: l,
+                rhs: r,
+            } => {
+                // Guard(cond, AssertCmp(Eq, l, r)) → constrain(cond_field, l_sub_r, zero)
                 // This asserts cond * (l - r) = 0, i.e., if cond then l == r
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
@@ -1238,10 +1244,11 @@ impl ExplicitWitness {
 
         // Extract each byte, write as witness, range-check.
         // Simultaneously accumulate 4 x 64-bit limbs and the full 256-bit sum.
+        // Witness only 31 bytes; compute byte[31] = value - partial*256 (saves 1 witness + 1 constraint).
         let mut bytes = Vec::with_capacity(32);
         let mut limbs = [zero; 4]; // 64-bit limbs, big-endian
         let mut full_sum = zero;
-        for i in 0..32 {
+        for i in 0..31 {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_arr, idx);
             let byte_field = b.cast_to_field(byte);
@@ -1257,10 +1264,17 @@ impl ExplicitWitness {
             full_sum = b.add(shifted_full, byte_wit);
         }
 
-        // Step 2: Constrain reconstruction == input value (conditional)
-        // flag * (full_sum - value) = 0
-        let recon_diff = b.sub(full_sum, value);
-        b.constrain(flag, recon_diff, zero);
+        // Compute last byte as value - partial*256; rangecheck proves it's a byte,
+        // implicitly constraining reconstruction (no separate constraint needed).
+        let full_sum_shifted = b.mul(full_sum, two_to_8);
+        let lsb = b.sub(value, full_sum_shifted);
+        b.lookup_rngchk_8(lsb, flag);
+        bytes.push(lsb);
+
+        let shifted_limb = b.mul(limbs[3], two_to_8);
+        limbs[3] = b.add(shifted_limb, lsb);
+
+        // full_sum is no longer needed (reconstruction is implicit)
 
         // Step 3: Reconstruct hi (limbs[0..2]) and lo (limbs[2..4]) as 128-bit values
         let hi_upper = b.mul(limbs[0], two_to_64);
@@ -1354,7 +1368,6 @@ impl ExplicitWitness {
         let hi_pre = b.sub(byte_pure, lo_hint_field);
         let hi_hint = b.div(hi_pre, two_to_lo);
 
-        let lo_wit = b.write_witness(lo_hint_field);
         let hi_wit = b.write_witness(hi_hint);
 
         // Rangecheck hi: prove 2^hi_size - 1 - hi fits in 8 bits
@@ -1362,18 +1375,16 @@ impl ExplicitWitness {
         let hi_gap = b.sub(hi_bound, hi_wit);
         b.lookup_rngchk_8(hi_gap, flag);
 
+        // Compute lo = byte_wit - hi * 2^lo_size (saves 1 witness + 1 constraint)
+        let hi_shifted = b.mul(hi_wit, two_to_lo);
+        let lo = b.sub(byte_wit, hi_shifted);
+
         // Rangecheck lo: prove 2^lo_size - 1 - lo fits in 8 bits
         let lo_bound = b.field_const(Field::from((1u128 << lo_size) - 1));
-        let lo_gap = b.sub(lo_bound, lo_wit);
+        let lo_gap = b.sub(lo_bound, lo);
         b.lookup_rngchk_8(lo_gap, flag);
 
-        // Constrain split correctness: hi * 2^lo_size + lo = byte_wit
-        let hi_shifted = b.mul(hi_wit, two_to_lo);
-        let recon = b.add(hi_shifted, lo_wit);
-        let split_diff = b.sub(recon, byte_wit);
-        b.constrain(flag, split_diff, zero);
-
-        lo_wit
+        lo
     }
 
     fn gen_witness_rangecheck(
@@ -1406,22 +1417,95 @@ impl ExplicitWitness {
             endianness: Endianness::Big,
             count: chunks,
         });
-        let mut result = b.field_const(Field::ZERO);
         let two_to_8 = b.field_const(Field::from(256));
-        let one = b.field_const(Field::from(1));
-        for i in 0..chunks {
+        // Witness and rangecheck upper n-1 bytes, accumulate partial sum
+        let mut partial = b.field_const(Field::ZERO);
+        for i in 0..chunks - 1 {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_val, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
             b.lookup_rngchk_8(byte_wit, flag);
-            let shift_prev_res = b.mul(result, two_to_8);
-            result = b.add(shift_prev_res, byte_wit);
+            let shift_prev = b.mul(partial, two_to_8);
+            partial = b.add(shift_prev, byte_wit);
         }
-        // Conditional reconstruction constraint: flag * (result - value) = 0
-        let diff = b.sub(result, value);
-        let zero = b.field_const(Field::ZERO);
-        b.constrain(flag, diff, zero);
+        // Compute LSB as value - partial*256; rangecheck proves it's a byte,
+        // which implicitly constrains the reconstruction (no separate constraint needed)
+        let partial_shifted = b.mul(partial, two_to_8);
+        let lsb = b.sub(value, partial_shifted);
+        b.lookup_rngchk_8(lsb, flag);
+    }
+
+    /// Lower a witness-tainted Lt comparison, emitting the result into `result`.
+    /// Generates range-check constraints to prove the comparison.
+    fn lower_witness_lt(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        lhs: ValueId,
+        rhs: ValueId,
+        result: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+    ) {
+        let rhs_stripped = function_type_info.get_value_type(rhs).strip_witness().expr;
+        let (s, is_signed) = match rhs_stripped {
+            TypeExpr::U(s) => (s, false),
+            TypeExpr::I(s) => (s, true),
+            _ => panic!("ICE: rhs is not an integer type"),
+        };
+        let u1 = CastTarget::U(1);
+        let res_hint = b.lt(lhs, rhs);
+        let res_hint_field = b.cast_to_field(res_hint);
+        let res_hint_plain = b.value_of(res_hint_field);
+        let res_witness = b.write_witness(res_hint_plain);
+        b.push(OpCode::Cast {
+            result,
+            value: res_witness,
+            target: u1,
+        });
+
+        let l_field = b.cast_to_field(lhs);
+        let r_field = b.cast_to_field(rhs);
+        let lr_diff = b.sub(l_field, r_field);
+
+        let two = b.field_const(Field::from(2));
+        let result_field = b.cast_to_field(result);
+        let two_res = b.mul(result_field, two);
+        let one = b.field_const(Field::ONE);
+        let adjustment = b.sub(one, two_res);
+
+        let adjusted_diff = b.mul(lr_diff, adjustment);
+        let adjusted_diff_plain = b.value_of(adjusted_diff);
+        let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
+        b.constrain(lr_diff, adjustment, adjusted_diff_wit);
+
+        if is_signed {
+            let always_flag = b.field_const(Field::ONE);
+
+            let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
+            let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
+
+            let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
+            let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
+            let sa_sb_hint = b.mul(sa_pure, sb_pure);
+            let sa_sb = b.write_witness(sa_sb_hint);
+            b.constrain(sign_a, sign_b, sa_sb);
+
+            let two_sa_sb = b.mul(sa_sb, two);
+            let sa_plus_sb = b.add(sign_a, sign_b);
+            let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
+            let signs_same = b.sub(one, signs_differ);
+
+            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, signs_same);
+
+            let zero = b.field_const(Field::ZERO);
+            let diff_r_sa = b.sub(result_field, sign_a);
+            b.constrain(signs_differ, diff_r_sa, zero);
+        } else {
+            let rc_flag = b.field_const(Field::from(1));
+            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
+        }
     }
 
     /// Extract the sign bit (MSB) of an n-bit value.
@@ -1454,23 +1538,20 @@ impl ExplicitWitness {
         }
 
         let sign_wit = b.write_witness(sign_hint);
-        let low_wit = b.write_witness(low_hint);
 
         // sign ∈ {0, 1}
         self.gen_witness_rangecheck(b, sign_wit, 1, flag);
+
+        // Compute low = value - sign * 2^(n-1) (saves 1 witness + 1 constraint)
+        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
+        let low = b.sub(value, sign_shifted);
+
         // low ∈ [0, 2^n) — excludes field-wrapped values
-        self.gen_witness_rangecheck(b, low_wit, bits, flag);
+        self.gen_witness_rangecheck(b, low, bits, flag);
         // low < 2^(n-1)
         let bound = b.field_const(Field::from((1u128 << (bits - 1)) - 1));
-        let gap = b.sub(bound, low_wit);
+        let gap = b.sub(bound, low);
         self.gen_witness_rangecheck(b, gap, bits, flag);
-
-        // Constrain decomposition: sign * 2^(n-1) + low = value
-        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
-        let reconstructed = b.add(sign_shifted, low_wit);
-        let diff = b.sub(reconstructed, value);
-        let zero = b.field_const(Field::ZERO);
-        b.constrain(flag, diff, zero);
 
         sign_wit
     }
@@ -1863,40 +1944,54 @@ impl ExplicitWitness {
         let r_field = b.cast_to_field(r);
 
         // Step 1: Byte decomposition + spread for each operand.
-        let (a_pure_bytes, a_spread_word) = self.spread_decompose(b, l_pure, l_field, chunks, one);
-        let (b_pure_bytes, b_spread_word) = self.spread_decompose(b, r_pure, r_field, chunks, one);
+        let (a_pure_bytes, a_spread_word) =
+            self.spread_decompose(b, l_pure, l_field, chunks, one, l_taint);
+        let (b_pure_bytes, b_spread_word) =
+            self.spread_decompose(b, r_pure, r_field, chunks, one, r_taint);
 
         // Step 2: Per-byte witness generation, while reconstructing full-word values.
+        // For the last xor byte, compute its spread from the bitwise identity
+        // spread(a)+spread(b) = 2*spread(and)+spread(xor), saving 1 witness + 1 constraint.
         let mut and_word = zero;
         let mut xor_word = zero;
         let mut and_spread_word = zero;
         let mut xor_spread_word = zero;
         for i in 0..chunks {
-            // Compute pure integer hints for this byte.
             let a_byte_u8 = b.cast_to(CastTarget::U(8), a_pure_bytes[i]);
             let b_byte_u8 = b.cast_to(CastTarget::U(8), b_pure_bytes[i]);
             let and_hint = b.and(a_byte_u8, b_byte_u8);
             let xor_hint = b.xor(a_byte_u8, b_byte_u8);
-            let (and_byte_wit, and_spread_wit) = self.write_spread_byte_witness(b, and_hint, one);
-            let (xor_byte_wit, xor_spread_wit) = self.write_spread_byte_witness(b, xor_hint, one);
 
+            // And byte: always fully witnessed
+            let (and_byte_wit, and_spread_wit) = self.write_spread_byte_witness(b, and_hint, one);
             let shifted_and_word = b.mul(and_word, two_to_8);
             and_word = b.add(shifted_and_word, and_byte_wit);
-
-            let shifted_xor_word = b.mul(xor_word, two_to_8);
-            xor_word = b.add(shifted_xor_word, xor_byte_wit);
-
             let shifted_and_spread = b.mul(and_spread_word, two_to_16);
             and_spread_word = b.add(shifted_and_spread, and_spread_wit);
 
-            let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
-            xor_spread_word = b.add(shifted_xor_spread, xor_spread_wit);
-        }
+            if i < chunks - 1 {
+                // Xor byte: fully witnessed for non-last bytes
+                let (xor_byte_wit, xor_spread_wit) =
+                    self.write_spread_byte_witness(b, xor_hint, one);
+                let shifted_xor_word = b.mul(xor_word, two_to_8);
+                xor_word = b.add(shifted_xor_word, xor_byte_wit);
+                let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
+                xor_spread_word = b.add(shifted_xor_spread, xor_spread_wit);
+            } else {
+                // Last xor byte: witness byte only, derive spread from identity
+                let xor_byte_field = b.cast_to_field(xor_hint);
+                let xor_byte_wit = b.write_witness(xor_byte_field);
+                let shifted_xor_word = b.mul(xor_word, two_to_8);
+                xor_word = b.add(shifted_xor_word, xor_byte_wit);
 
-        let input_spread_sum = b.add(a_spread_word, b_spread_word);
-        let two_and_spread_word = b.mul(two, and_spread_word);
-        let bitwise_spread_sum = b.add(two_and_spread_word, xor_spread_word);
-        b.constrain(one, bitwise_spread_sum, input_spread_sum);
+                let input_spread_sum = b.add(a_spread_word, b_spread_word);
+                let two_and = b.mul(two, and_spread_word);
+                let remainder = b.sub(input_spread_sum, two_and);
+                let shifted_xor_spread = b.mul(xor_spread_word, two_to_16);
+                let xor_spread_last = b.sub(remainder, shifted_xor_spread);
+                b.lookup_spread(8, xor_byte_wit, xor_spread_last, one);
+            }
+        }
 
         let result_word = match kind {
             BinaryArithOpKind::And => and_word,
@@ -1915,6 +2010,9 @@ impl ExplicitWitness {
     /// Decompose an operand into bytes and their spreads.
     /// Returns (pure_bytes, reconstructed_spread) in big-endian order.
     /// pure_bytes: for use in hint computations (never witness-typed).
+    ///
+    /// When `is_witness` is false, the operand is pure (e.g. a constant in `a & 0xff`),
+    /// so we compute spreads purely without witnesses or lookups.
     fn spread_decompose(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1922,6 +2020,7 @@ impl ExplicitWitness {
         field_val: ValueId,
         chunks: usize,
         flag: ValueId,
+        is_witness: bool,
     ) -> (Vec<ValueId>, ValueId) {
         let zero = b.field_const(Field::ZERO);
         let two_to_8 = b.field_const(Field::from(256u128));
@@ -1933,29 +2032,60 @@ impl ExplicitWitness {
 
         let mut pure_bytes = Vec::with_capacity(chunks);
 
-        // Always use witness path: write bytes as witnesses and verify via spread lookups.
-        // Even for pure operands we need witnesses so the spread constraint works in R1CS
-        // (ToRadix is hint-only, not available in R1CS).
+        if !is_witness {
+            // Pure operand: no per-byte lookups needed.
+            // Compute per-byte spreads as hints and accumulate, then witness
+            // the accumulated spread. The identity constraint implicitly
+            // constrains it; in R1CS the hint chain gets DCE'd behind
+            // write_witness→FreshWitness.
+            let mut spread_acc = zero;
+            for i in 0..chunks {
+                let idx = b.u_const(32, i as u128);
+                let byte_i = b.array_get(bytes_arr, idx);
+                pure_bytes.push(byte_i);
+
+                let byte_spread = b.spread(byte_i, 8);
+                let byte_spread_field = b.cast_to_field(byte_spread);
+                let shifted_spread = b.mul(spread_acc, two_to_16);
+                spread_acc = b.add(shifted_spread, byte_spread_field);
+            }
+            let spread_wit = b.write_witness(spread_acc);
+            return (pure_bytes, spread_wit);
+        }
+
+        // Witness path: witness chunks-1 bytes with spread lookups, then compute
+        // last byte as field_val - partial*256 (saves 1 witness + 1 constraint).
         let mut recon_value = zero;
         let mut recon_spread = zero;
-        for i in 0..chunks {
+        for i in 0..chunks - 1 {
             let idx = b.u_const(32, i as u128);
             let byte_i = b.array_get(bytes_arr, idx);
             let (byte_wit, spread_wit) = self.write_spread_byte_witness(b, byte_i, flag);
 
-            // Accumulate reconstruction
             let shifted_value = b.mul(recon_value, two_to_8);
             recon_value = b.add(shifted_value, byte_wit);
 
             let shifted_spread = b.mul(recon_spread, two_to_16);
             recon_spread = b.add(shifted_spread, spread_wit);
 
-            pure_bytes.push(byte_i); // pure integer byte for hints
+            pure_bytes.push(byte_i);
         }
 
-        // Constrain reconstruction equals original: flag * (recon - field_val) = 0
-        let diff = b.sub(recon_value, field_val);
-        b.constrain(flag, diff, zero);
+        // Last byte: compute from reconstruction remainder, only witness spread
+        let last_idx = b.u_const(32, (chunks - 1) as u128);
+        let last_byte_pure = b.array_get(bytes_arr, last_idx);
+        let recon_shifted = b.mul(recon_value, two_to_8);
+        let last_byte = b.sub(field_val, recon_shifted);
+
+        let spread_hint = b.spread(last_byte_pure, 8);
+        let spread_hint_field = b.cast_to_field(spread_hint);
+        let last_spread_wit = b.write_witness(spread_hint_field);
+        b.lookup_spread(8, last_byte, last_spread_wit, flag);
+
+        let shifted_spread = b.mul(recon_spread, two_to_16);
+        recon_spread = b.add(shifted_spread, last_spread_wit);
+
+        pure_bytes.push(last_byte_pure);
 
         (pure_bytes, recon_spread)
     }

@@ -770,22 +770,75 @@ fn lower_instruction(
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
-        OpCode::AssertEq { lhs, rhs } => {
+        OpCode::Assert { value } => {
+            let ll_value = val_map[value];
+            // Assert that value is truthy (== 1 for u1 booleans)
+            let value_type = fn_type_info.get_value_type(*value);
+            let one = match &value_type.expr {
+                TypeExpr::U(bits) | TypeExpr::I(bits) => e.int_const(*bits as u32, 1),
+                _ => panic!(
+                    "Unsupported type for Assert in HLSSA->LLSSA lowering: {:?}",
+                    value_type
+                ),
+            };
+            let is_true = e.int_cmp(IntCmpOp::Eq, ll_value, one);
+
+            e.build_if_else(
+                is_true,
+                vec![],
+                |_| vec![],
+                |te| {
+                    te.trap();
+                    vec![]
+                },
+            );
+        }
+
+        OpCode::AssertCmp { kind, lhs, rhs } => {
             let ll_lhs = val_map[lhs];
             let ll_rhs = val_map[rhs];
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
-            let eq = match &lhs_type.expr {
-                TypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
-                TypeExpr::U(_) | TypeExpr::I(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
-                _ => panic!(
-                    "Unsupported type for AssertEq in HLSSA->LLSSA lowering: {:?}",
-                    lhs_type
-                ),
+            let cmp_result = match kind {
+                CmpKind::Eq => match &lhs_type.expr {
+                    TypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
+                    TypeExpr::U(_) | TypeExpr::I(_) => {
+                        e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
+                    }
+                    _ => panic!(
+                        "Unsupported type for AssertCmp in HLSSA->LLSSA lowering: {:?}",
+                        lhs_type
+                    ),
+                },
+                CmpKind::Lt => match &lhs_type.expr {
+                    TypeExpr::U(_) => e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs),
+                    TypeExpr::I(_) => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
+                    _ => panic!(
+                        "Unsupported type for AssertCmp Lt in HLSSA->LLSSA lowering: {:?}",
+                        lhs_type
+                    ),
+                },
             };
 
             e.build_if_else(
-                eq,
+                cmp_result,
+                vec![],
+                |_| vec![],
+                |te| {
+                    te.trap();
+                    vec![]
+                },
+            );
+        }
+
+        OpCode::AssertR1C { a, b, c } => {
+            let ll_a = val_map[a];
+            let ll_b = val_map[b];
+            let ll_c = val_map[c];
+            let product = e.field_arith(FieldArithOp::Mul, ll_a, ll_b);
+            let cmp_result = e.field_eq(product, ll_c);
+            e.build_if_else(
+                cmp_result,
                 vec![],
                 |_| vec![],
                 |te| {

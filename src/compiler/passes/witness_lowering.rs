@@ -389,7 +389,8 @@ impl WitnessLowering {
                         | OpCode::Truncate { .. }
                         | OpCode::SExt { .. }
                         | OpCode::Load { .. }
-                        | OpCode::AssertEq { .. }
+                        | OpCode::Assert { .. }
+                        | OpCode::AssertCmp { .. }
                         | OpCode::AssertR1C { .. }
                         | OpCode::Call { .. }
                         | OpCode::ArrayGet { .. }
