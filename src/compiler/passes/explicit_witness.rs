@@ -465,20 +465,40 @@ impl ExplicitWitness {
                         b.constrain(l, one, r);
                     }
                     CmpKind::Lt => {
-                        // Lower the comparison and assert result == 1
-                        let result = b.fresh_value();
-                        self.lower_witness_lt(
-                            b,
-                            function_type_info,
-                            l,
-                            r,
-                            result,
-                            l_taint,
-                            r_taint,
-                        );
-                        let result_field = b.cast_to_field(result);
-                        let one = b.field_const(Field::ONE);
-                        b.constrain(result_field, one, one);
+                        let r_stripped = function_type_info.get_value_type(r).strip_witness().expr;
+                        let (s, is_signed) = match r_stripped {
+                            TypeExpr::U(s) => (s, false),
+                            TypeExpr::I(s) => (s, true),
+                            _ => panic!("ICE: AssertCmp Lt rhs is not an integer type"),
+                        };
+                        if is_signed {
+                            // Signed: fall back to lower_witness_lt + assert result == 1
+                            let result = b.fresh_value();
+                            self.lower_witness_lt(
+                                b,
+                                function_type_info,
+                                l,
+                                r,
+                                result,
+                                l_taint,
+                                r_taint,
+                            );
+                            let result_field = b.cast_to_field(result);
+                            let one = b.field_const(Field::ONE);
+                            b.constrain(result_field, one, one);
+                        } else {
+                            // Unsigned: assert lhs < rhs by proving rhs - lhs - 1 ∈ [0, 2^n).
+                            // Saves 2 R1C constraints vs computing the boolean result.
+                            let l_field = b.cast_to_field(l);
+                            let r_field = b.cast_to_field(r);
+                            let diff = b.sub(r_field, l_field);
+                            let one = b.field_const(Field::ONE);
+                            let diff_minus_one = b.sub(diff, one);
+                            let diff_plain = b.value_of(diff_minus_one);
+                            let diff_wit = b.write_witness(diff_plain);
+                            let flag = b.field_const(Field::ONE);
+                            self.gen_witness_rangecheck(b, diff_wit, s, flag);
+                        }
                     }
                 }
             }
