@@ -453,10 +453,14 @@ impl Driver {
         )
         .unwrap();
 
-        let layout = r1cs_layout_info(r1cs);
-
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower_with_layout(ssa, &flow_analysis, &type_info, layout);
+        let llssa = hlssa_to_llssa::lower_with_layout(
+            ssa,
+            &flow_analysis,
+            &type_info,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+        );
 
         // Dump LLSSA after lowering
         fs::write(
@@ -529,8 +533,13 @@ impl Driver {
         .unwrap();
 
         // Lower HLSSA → LLSSA
-        let layout = r1cs_layout_info(r1cs);
-        let llssa = hlssa_to_llssa::lower_with_layout(&ssa, &flow_analysis, &type_info, layout);
+        let llssa = hlssa_to_llssa::lower_with_layout(
+            &ssa,
+            &flow_analysis,
+            &type_info,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+        );
 
         // Dump LLSSA after lowering
         fs::write(
@@ -611,19 +620,6 @@ impl Driver {
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
         Ok(())
-    }
-}
-
-/// Extract absolute offsets from the R1CS layout in the form the lookup
-/// lowering expects.
-fn r1cs_layout_info(r1cs: &R1CS) -> crate::compiler::hlssa_to_llssa::R1csLayoutInfo {
-    crate::compiler::hlssa_to_llssa::R1csLayoutInfo {
-        tables_cnst_start: r1cs.constraints_layout.tables_data_start(),
-        tables_wit_start: r1cs.witness_layout.tables_data_start(),
-        mults_wit_start: r1cs.witness_layout.multiplicities_start(),
-        logup_challenge_off: r1cs.witness_layout.challenges_start(),
-        lookups_cnst_start: r1cs.constraints_layout.lookups_data_start(),
-        lookups_wit_start: r1cs.witness_layout.lookups_data_start(),
     }
 }
 

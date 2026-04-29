@@ -22,38 +22,7 @@ use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
     ValueId,
 };
-
-// =============================================================================
-// R1CS layout info threaded into lowering
-// =============================================================================
-
-/// Absolute offsets the lookup lowering needs to bake into generated helpers.
-///
-/// All offsets are in field elements (not bytes). Witness-side offsets are
-/// absolute indices into the full witness buffer that helpers index directly.
-/// Constraint-side offsets are absolute indices into the a/b/c vectors.
-#[derive(Clone, Copy, Debug)]
-pub struct R1csLayoutInfo {
-    /// `constraints_layout.tables_data_start()` — first table's y-slot in the
-    /// constraint section (also the base for AD coefficient reads into the
-    /// tables region).
-    pub tables_cnst_start: usize,
-    /// `witness_layout.tables_data_start()` — first table's y-slot (absolute
-    /// witness index).
-    pub tables_wit_start: usize,
-    /// `witness_layout.multiplicities_start()` — first table's multiplicities
-    /// base (absolute witness index).
-    pub mults_wit_start: usize,
-    /// `witness_layout.challenges_start()` — absolute index of `alpha` in the
-    /// witness (alpha occupies this slot, beta — if present — the next).
-    pub logup_challenge_off: usize,
-    /// `constraints_layout.lookups_data_start()` — start of per-lookup entries
-    /// in the constraint section.
-    pub lookups_cnst_start: usize,
-    /// `witness_layout.lookups_data_start()` — start of per-lookup witness
-    /// slots (absolute witness index).
-    pub lookups_wit_start: usize,
-}
+use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
 
 // =============================================================================
 // Type helpers
@@ -291,16 +260,22 @@ pub fn lower_with_layout(
     hlssa: &HLSSA,
     flow_analysis: &FlowAnalysis,
     type_info: &TypeInfo,
-    layout: R1csLayoutInfo,
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
 ) -> LLSSA {
-    lower_inner(hlssa, flow_analysis, type_info, Some(layout))
+    lower_inner(
+        hlssa,
+        flow_analysis,
+        type_info,
+        Some((witness_layout, constraints_layout)),
+    )
 }
 
 fn lower_inner(
     hlssa: &HLSSA,
     flow_analysis: &FlowAnalysis,
     type_info: &TypeInfo,
-    layout: Option<R1csLayoutInfo>,
+    layout: Option<(WitnessLayout, ConstraintsLayout)>,
 ) -> LLSSA {
     let main_id = hlssa.get_main_id();
     let main_name = hlssa.get_main().get_name().to_string();
@@ -2073,25 +2048,26 @@ fn lower_terminator(
 fn generate_all_lookup_functions(
     llssa: &mut LLSSA,
     lookup_fns: &LookupFunctions,
-    layout: Option<R1csLayoutInfo>,
+    layout: Option<(WitnessLayout, ConstraintsLayout)>,
     ad_fns: &mut AdFunctions,
 ) {
     if let Some(id) = lookup_fns.rngchk_8 {
-        let layout = layout.expect("R1CS layout required to generate __rngchk_8");
-        let func = generate_rngchk_8_function(layout);
+        let func = generate_rngchk_8_function();
         let _old = llssa.take_function(id);
         llssa.put_function(id, func);
     }
 
     if let (Some(init_id), Some(call_id)) = (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call) {
-        let layout = layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
-        let init_fn = generate_drngchk_8_ad_init(layout);
+        let (witness_layout, constraints_layout) =
+            layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
+        let init_fn = generate_drngchk_8_ad_init(witness_layout, constraints_layout);
         let _old = llssa.take_function(init_id);
         llssa.put_function(init_id, init_fn);
 
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
-        let call_fn = generate_drngchk_8_ad_call(layout, bump_db_id, bump_dc_id);
+        let call_fn =
+            generate_drngchk_8_ad_call(witness_layout, constraints_layout, bump_db_id, bump_dc_id);
         let _old = llssa.take_function(call_id);
         llssa.put_function(call_id, call_fn);
     }
@@ -2156,7 +2132,7 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: VmField, value
 /// Phase 2 — which runs on the host after WASM returns — fixes the raw-u64
 /// multiplicity slots into Montgomery form and materializes the per-slot
 /// inverses + sum constraint.
-fn generate_rngchk_8_function(layout: R1csLayoutInfo) -> LLFunction {
+fn generate_rngchk_8_function() -> LLFunction {
     let mut func = LLFunction::empty("__rngchk_8".to_string());
     let entry = func.get_entry_id();
 
@@ -2187,7 +2163,6 @@ fn generate_rngchk_8_function(layout: R1csLayoutInfo) -> LLFunction {
         // `mults_wit_start` is baked into the host's VM-struct setup (via
         // test_runner), not into this helper — the compiler just asks for the
         // pointer the host prepared.
-        let _ = layout; // layout currently only needed for AD helpers below
         let mults_base_slot = e.vm_field_ptr(VmField::WitgenMultsBase);
         let mults_base = e.ll_load(mults_base_slot, LLType::Ptr);
         let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
@@ -2251,7 +2226,10 @@ fn ad_read_coeff_at_dyn(e: &mut LLBlockEmitter<'_>, offset_i32: ValueId) -> Valu
 /// `out_da`, `out_db`, `out_dc`.
 ///
 /// Matches the first-call branch of `drngchk_8_field` in `vm/src/bytecode.rs`.
-fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
+fn generate_drngchk_8_ad_init(
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+) -> LLFunction {
     let mut func = LLFunction::empty("__drngchk_8_ad_init".to_string());
     let entry = func.get_entry_id();
 
@@ -2260,12 +2238,12 @@ fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
 
         // inv_sum_coeff sits at the sum-constraint AD coefficient (one past
         // the per-element coefficients for this table).
-        let inv_sum_coeff = ad_read_coeff_at(&mut e, layout.tables_cnst_start + 256);
+        let inv_sum_coeff = ad_read_coeff_at(&mut e, constraints_layout.tables_data_start() + 256);
 
-        let tables_wit_start_i32 = e.int_const(32, layout.tables_wit_start as u64);
-        let mults_wit_start_i32 = e.int_const(32, layout.mults_wit_start as u64);
-        let logup_challenge_i32 = e.int_const(32, layout.logup_challenge_off as u64);
-        let tables_cnst_start_i32 = e.int_const(32, layout.tables_cnst_start as u64);
+        let tables_wit_start_i32 = e.int_const(32, witness_layout.tables_data_start() as u64);
+        let mults_wit_start_i32 = e.int_const(32, witness_layout.multiplicities_start() as u64);
+        let logup_challenge_i32 = e.int_const(32, witness_layout.challenges_start() as u64);
+        let tables_cnst_start_i32 = e.int_const(32, constraints_layout.tables_data_start() as u64);
 
         e.build_counted_loop(256, vec![], |e, i_i64, _| {
             let i_i32 = e.truncate(i_i64, 32);
@@ -2327,7 +2305,8 @@ fn generate_drngchk_8_ad_init(layout: R1csLayoutInfo) -> LLFunction {
 ///
 /// Matches the post-init tail of `drngchk_8_field` in `vm/src/bytecode.rs`.
 fn generate_drngchk_8_ad_call(
-    layout: R1csLayoutInfo,
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
     bump_db_fn: FunctionId,
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
@@ -2339,22 +2318,23 @@ fn generate_drngchk_8_ad_call(
         let val_ptr = e.add_parameter(LLType::Ptr);
         let flag_ptr = e.add_parameter(LLType::Ptr);
 
-        let inv_sum_coeff = ad_read_coeff_at(&mut e, layout.tables_cnst_start + 256);
+        let inv_sum_coeff = ad_read_coeff_at(&mut e, constraints_layout.tables_data_start() + 256);
         let inv_wit_off = ad_next_lookup_wit_off(&mut e);
 
         // inv_coeff = ad_coeffs[lookups_cnst_start + (inv_wit_off - lookups_wit_start)]
         //
         // Random-access; the main AdCoeffs cursor is for the algebraic
         // constraints, so it is *not* correct to advance it here.
-        let lookups_wit_start_i32 = e.int_const(32, layout.lookups_wit_start as u64);
-        let lookups_cnst_start_i32 = e.int_const(32, layout.lookups_cnst_start as u64);
+        let lookups_wit_start_i32 = e.int_const(32, witness_layout.lookups_data_start() as u64);
+        let lookups_cnst_start_i32 =
+            e.int_const(32, constraints_layout.lookups_data_start() as u64);
         let n = e.int_arith(IntArithOp::Sub, inv_wit_off, lookups_wit_start_i32);
         let cnst_idx = e.int_arith(IntArithOp::Add, lookups_cnst_start_i32, n);
         let inv_coeff = ad_read_coeff_at_dyn(&mut e, cnst_idx);
 
         e.ad_write_witness(DMatrix::C, inv_wit_off, inv_sum_coeff);
         e.ad_write_witness(DMatrix::A, inv_wit_off, inv_coeff);
-        let logup_ch_i32 = e.int_const(32, layout.logup_challenge_off as u64);
+        let logup_ch_i32 = e.int_const(32, witness_layout.challenges_start() as u64);
         e.ad_write_witness(DMatrix::B, logup_ch_i32, inv_coeff);
 
         // val.bump_db(-inv_coeff) — `0 - inv_coeff` via the Sub runtime
