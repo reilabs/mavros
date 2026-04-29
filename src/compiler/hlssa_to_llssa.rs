@@ -16,7 +16,6 @@ use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
-    VmField,
 };
 use crate::compiler::ssa::{
     BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
@@ -372,6 +371,7 @@ fn lower_function(
     let hl_entry_id = function.get_entry_id();
     let ll_entry_id = ll_func.get_entry_id();
     block_map.insert(hl_entry_id, ll_entry_id);
+    add_vm_parameter(&mut ll_func);
 
     // Create blocks for non-entry blocks
     for (block_id, _) in function.get_blocks() {
@@ -428,6 +428,17 @@ fn lower_function(
     }
 
     ll_func
+}
+
+fn new_ll_function(name: impl Into<String>) -> LLFunction {
+    let mut func = LLFunction::empty(name.into());
+    add_vm_parameter(&mut func);
+    func
+}
+
+fn add_vm_parameter(func: &mut LLFunction) -> ValueId {
+    let entry = func.get_entry_id();
+    func.add_parameter(entry, LLType::Ptr)
 }
 
 // =============================================================================
@@ -1623,7 +1634,7 @@ fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
         DMatrix::C => 6,
     };
 
-    let mut func = LLFunction::empty(name.to_string());
+    let mut func = new_ll_function(name.to_string());
     let entry = func.get_entry_id();
 
     {
@@ -1717,7 +1728,7 @@ fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
 ///   SUM: propagate da/db/dc to children, drop children, free
 ///   MUL_CONST: propagate da*coeff/db*coeff/dc*coeff to child, drop child, free
 fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFunction {
-    let mut func = LLFunction::empty("__ad_drop".to_string());
+    let mut func = new_ll_function("__ad_drop".to_string());
     let entry = func.get_entry_id();
 
     let field_type = LLType::Struct(LLStruct::field_elem());
@@ -1879,7 +1890,7 @@ fn generate_drop_function_for_array(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFu
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);
 
-    let mut func = LLFunction::empty(format!("drop_{}", ty));
+    let mut func = new_ll_function(format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
     {
@@ -1946,7 +1957,7 @@ fn generate_drop_function_for_tuple(
 ) -> LLFunction {
     let rc_struct = rc_tuple_struct(element_types);
 
-    let mut func = LLFunction::empty(format!("drop_{}", ty));
+    let mut func = new_ll_function(format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
     {
@@ -2090,8 +2101,8 @@ fn u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
 /// Emit: `bump_u64_at(cursor, delta)` — advance the cursor stored at
 /// `cursor_slot_ptr` by one Field, writing `(value, 0, 0, 0)` as raw limbs
 /// into the slot the old cursor pointed at.
-fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: VmField, value_u64: ValueId) {
-    let cursor_slot = e.vm_field_ptr(cursor_field);
+fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u64: ValueId) {
+    let cursor_slot = e.witgen_vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);
     // Store value into low limb via struct_field_ptr.
     let low_ptr = e.struct_field_ptr(cursor, LLStruct::field_elem(), 0);
@@ -2114,7 +2125,7 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: VmField, value
 /// multiplicity slots into Montgomery form and materializes the per-slot
 /// inverses + sum constraint.
 fn generate_rngchk_8_function() -> LLFunction {
-    let mut func = LLFunction::empty("__rngchk_8".to_string());
+    let mut func = new_ll_function("__rngchk_8".to_string());
     let entry = func.get_entry_id();
 
     {
@@ -2144,7 +2155,7 @@ fn generate_rngchk_8_function() -> LLFunction {
         // `mults_wit_start` is baked into the host's VM-struct setup (via
         // test_runner), not into this helper — the compiler just asks for the
         // pointer the host prepared.
-        let mults_base_slot = e.vm_field_ptr(VmField::WitgenMultsBase);
+        let mults_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_MULTS_BASE);
         let mults_base = e.ll_load(mults_base_slot, LLType::Ptr);
         let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
         let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
@@ -2156,9 +2167,9 @@ fn generate_rngchk_8_function() -> LLFunction {
         // Rangecheck-8 is always table 0 since it's the only supported
         // table in this PR.
         let table_id = e.int_const(64, 0);
-        write_tape_entry_u64(&mut e, VmField::WitgenLookupsA, table_id);
-        write_tape_entry_u64(&mut e, VmField::WitgenLookupsB, key);
-        write_tape_entry_u64(&mut e, VmField::WitgenLookupsC, flag_u64);
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, flag_u64);
 
         e.terminate_return(vec![]);
     }
@@ -2170,7 +2181,7 @@ fn generate_rngchk_8_function() -> LLFunction {
 /// AdCoeffs cursor). Used by AD helpers that need to peek at a coefficient at
 /// a layout-determined absolute index.
 fn ad_read_coeff_at(e: &mut LLBlockEmitter<'_>, offset: usize) -> ValueId {
-    let base_slot = e.vm_field_ptr(VmField::AdCoeffsBase);
+    let base_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS_BASE);
     let base = e.ll_load(base_slot, LLType::Ptr);
     let idx = e.int_const(32, offset as u64);
     let slot = e.array_elem_ptr(base, LLStruct::field_elem(), idx);
@@ -2179,7 +2190,7 @@ fn ad_read_coeff_at(e: &mut LLBlockEmitter<'_>, offset: usize) -> ValueId {
 
 /// Post-increment `AdCurrentLookupWitOff` by one, returning the old i32 value.
 fn ad_next_lookup_wit_off(e: &mut LLBlockEmitter<'_>) -> ValueId {
-    let slot = e.vm_field_ptr(VmField::AdCurrentLookupWitOff);
+    let slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_LOOKUP_WIT_OFF);
     let idx = e.ll_load(slot, LLType::i32());
     let one = e.int_const(32, 1);
     let next = e.int_add(idx, one);
@@ -2191,7 +2202,7 @@ fn ad_next_lookup_wit_off(e: &mut LLBlockEmitter<'_>) -> ValueId {
 /// AdCoeffsBase; no cursor advance). Used when we need a coefficient whose
 /// absolute index is determined by R1CS layout, not by the main AD cursor.
 fn ad_read_coeff_at_dyn(e: &mut LLBlockEmitter<'_>, offset_i32: ValueId) -> ValueId {
-    let base_slot = e.vm_field_ptr(VmField::AdCoeffsBase);
+    let base_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS_BASE);
     let base = e.ll_load(base_slot, LLType::Ptr);
     let slot = e.array_elem_ptr(base, LLStruct::field_elem(), offset_i32);
     e.ll_load(slot, LLType::Struct(LLStruct::field_elem()))
@@ -2211,7 +2222,7 @@ fn generate_drngchk_8_ad_init(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> LLFunction {
-    let mut func = LLFunction::empty("__drngchk_8_ad_init".to_string());
+    let mut func = new_ll_function("__drngchk_8_ad_init".to_string());
     let entry = func.get_entry_id();
 
     {
@@ -2291,7 +2302,7 @@ fn generate_drngchk_8_ad_call(
     bump_db_fn: FunctionId,
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
-    let mut func = LLFunction::empty("__drngchk_8_ad_call".to_string());
+    let mut func = new_ll_function("__drngchk_8_ad_call".to_string());
     let entry = func.get_entry_id();
 
     {

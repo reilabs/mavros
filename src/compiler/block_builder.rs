@@ -1,10 +1,10 @@
 use crate::compiler::{
     ir::r#type::{SSAType, Type},
-    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType, VmField},
+    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
-        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
-        Terminator, ValueId,
+        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType,
+        SliceOpDir, Terminator, ValueId,
     },
 };
 
@@ -577,6 +577,7 @@ pub trait HLEmitter {
 pub trait LLEmitter {
     fn fresh_value(&mut self) -> ValueId;
     fn emit_ll(&mut self, op: LLOp);
+    fn vm_ptr(&mut self) -> ValueId;
 
     // -- Constants --
 
@@ -832,11 +833,13 @@ pub trait LLEmitter {
     // -- VM / Constraint --
 
     fn constrain(&mut self, a: ValueId, b: ValueId, c: ValueId) {
-        self.emit_ll(LLOp::Constrain { a, b, c });
+        self.write_field_cursor(LLStruct::WITGEN_VM_A, a);
+        self.write_field_cursor(LLStruct::WITGEN_VM_B, b);
+        self.write_field_cursor(LLStruct::WITGEN_VM_C, c);
     }
 
     fn write_witness(&mut self, value: ValueId) {
-        self.emit_ll(LLOp::WriteWitness { value });
+        self.write_field_cursor(LLStruct::WITGEN_VM_WITNESS, value);
     }
 
     // -- Trap --
@@ -848,9 +851,13 @@ pub trait LLEmitter {
     // -- AD (Automatic Differentiation) --
 
     fn next_d_coeff(&mut self) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::NextDCoeff { result: r });
-        r
+        let coeffs_slot = self.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS);
+        let coeffs = self.ll_load(coeffs_slot, LLType::Ptr);
+        let value = self.ll_load(coeffs, LLType::Struct(LLStruct::field_elem()));
+        let one = self.int_const(32, 1);
+        let next_coeffs = self.array_elem_ptr(coeffs, LLStruct::field_elem(), one);
+        self.ll_store(coeffs_slot, next_coeffs);
+        value
     }
 
     fn ad_write_const(
@@ -859,11 +866,12 @@ pub trait LLEmitter {
         const_value: ValueId,
         sensitivity: ValueId,
     ) {
-        self.emit_ll(LLOp::ADWriteConst {
-            matrix,
-            const_value,
-            sensitivity,
-        });
+        let out_d_slot = self.ad_vm_field_ptr(ad_out_field(matrix));
+        let out_d = self.ll_load(out_d_slot, LLType::Ptr);
+        let product = self.field_arith(FieldArithOp::Mul, const_value, sensitivity);
+        let old = self.ll_load(out_d, LLType::Struct(LLStruct::field_elem()));
+        let new_value = self.field_arith(FieldArithOp::Add, old, product);
+        self.ll_store(out_d, new_value);
     }
 
     fn ad_write_witness(
@@ -872,28 +880,50 @@ pub trait LLEmitter {
         witness_index: ValueId,
         sensitivity: ValueId,
     ) {
-        self.emit_ll(LLOp::ADWriteWitness {
-            matrix,
-            witness_index,
-            sensitivity,
-        });
+        let out_d_slot = self.ad_vm_field_ptr(ad_out_field(matrix));
+        let out_d = self.ll_load(out_d_slot, LLType::Ptr);
+        let target = self.array_elem_ptr(out_d, LLStruct::field_elem(), witness_index);
+        let old = self.ll_load(target, LLType::Struct(LLStruct::field_elem()));
+        let new_value = self.field_arith(FieldArithOp::Add, old, sensitivity);
+        self.ll_store(target, new_value);
     }
 
     fn ad_fresh_witness(&mut self) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::ADFreshWitness { result: r });
-        r
+        let slot = self.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_WIT_OFF);
+        let index = self.ll_load(slot, LLType::i32());
+        let one = self.int_const(32, 1);
+        let next = self.int_add(index, one);
+        self.ll_store(slot, next);
+        index
     }
 
     // -- Transparent VM struct access --
 
-    /// Compute a pointer to a named VM-struct field (see `VmField`).
-    /// Returns an LLType::Ptr regardless of field kind — use ll_load/ll_store
-    /// with the appropriate type to read/write through it.
-    fn vm_field_ptr(&mut self, field: VmField) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::VmFieldPtr { result: r, field });
-        r
+    fn witgen_vm_field_ptr(&mut self, field: usize) -> ValueId {
+        let vm = self.vm_ptr();
+        self.struct_field_ptr(vm, LLStruct::witgen_vm(), field)
+    }
+
+    fn ad_vm_field_ptr(&mut self, field: usize) -> ValueId {
+        let vm = self.vm_ptr();
+        self.struct_field_ptr(vm, LLStruct::ad_vm(), field)
+    }
+
+    fn write_field_cursor(&mut self, cursor_field: usize, value: ValueId) {
+        let cursor_slot = self.witgen_vm_field_ptr(cursor_field);
+        let cursor = self.ll_load(cursor_slot, LLType::Ptr);
+        self.ll_store(cursor, value);
+        let one = self.int_const(32, 1);
+        let next = self.array_elem_ptr(cursor, LLStruct::field_elem(), one);
+        self.ll_store(cursor_slot, next);
+    }
+}
+
+fn ad_out_field(matrix: crate::compiler::ssa::DMatrix) -> usize {
+    match matrix {
+        crate::compiler::ssa::DMatrix::A => LLStruct::AD_VM_OUT_DA,
+        crate::compiler::ssa::DMatrix::B => LLStruct::AD_VM_OUT_DB,
+        crate::compiler::ssa::DMatrix::C => LLStruct::AD_VM_OUT_DC,
     }
 }
 
@@ -937,6 +967,15 @@ impl LLEmitter for LLInstrBuilder<'_> {
 
     fn emit_ll(&mut self, op: LLOp) {
         self.instructions.push(op);
+    }
+
+    fn vm_ptr(&mut self) -> ValueId {
+        self.function
+            .get_entry()
+            .get_parameters()
+            .next()
+            .expect("LLSSA functions must have a VM pointer entry parameter")
+            .0
     }
 }
 
@@ -1247,6 +1286,23 @@ impl LLEmitter for LLBlockEmitter<'_> {
 
     fn emit_ll(&mut self, op: LLOp) {
         self.block.push_instruction(op);
+    }
+
+    fn vm_ptr(&mut self) -> ValueId {
+        if self.block_id == self.function.get_entry_id() {
+            self.block
+                .get_parameters()
+                .next()
+                .expect("LLSSA functions must have a VM pointer entry parameter")
+                .0
+        } else {
+            self.function
+                .get_entry()
+                .get_parameters()
+                .next()
+                .expect("LLSSA functions must have a VM pointer entry parameter")
+                .0
+        }
     }
 }
 

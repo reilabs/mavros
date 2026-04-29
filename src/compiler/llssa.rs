@@ -1,6 +1,6 @@
 use crate::compiler::ir::r#type::SSAType;
 use crate::compiler::ssa::{
-    Block, BlockId, DMatrix, Function, FunctionId, Instruction, SSA, Terminator, ValueId,
+    Block, Function, FunctionId, Instruction, SSA, ValueId,
 };
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
@@ -148,6 +148,56 @@ impl LLStruct {
         ])
     }
 
+    /// VM struct used by the forward-pass/witgen entrypoint.
+    ///
+    /// Keep this in field-index order with `mavros-wasm-layout`.
+    pub fn witgen_vm() -> Self {
+        Self::new(vec![
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+        ])
+    }
+
+    pub const WITGEN_VM_WITNESS: usize = 0;
+    pub const WITGEN_VM_A: usize = 1;
+    pub const WITGEN_VM_B: usize = 2;
+    pub const WITGEN_VM_C: usize = 3;
+    pub const WITGEN_VM_MULTS_BASE: usize = 4;
+    pub const WITGEN_VM_LOOKUPS_A: usize = 5;
+    pub const WITGEN_VM_LOOKUPS_B: usize = 6;
+    pub const WITGEN_VM_LOOKUPS_C: usize = 7;
+    pub const WITGEN_VM_INPUTS: usize = 8;
+
+    /// VM struct used by the reverse AD entrypoint.
+    ///
+    /// Keep this in field-index order with `mavros-wasm-layout`.
+    pub fn ad_vm() -> Self {
+        Self::new(vec![
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Int(32),
+            LLFieldType::Ptr,
+            LLFieldType::Int(32),
+        ])
+    }
+
+    pub const AD_VM_OUT_DA: usize = 0;
+    pub const AD_VM_OUT_DB: usize = 1;
+    pub const AD_VM_OUT_DC: usize = 2;
+    pub const AD_VM_COEFFS: usize = 3;
+    pub const AD_VM_CURRENT_WIT_OFF: usize = 4;
+    pub const AD_VM_COEFFS_BASE: usize = 5;
+    pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
+
     /// AD tag constants.
     pub const AD_TAG_CONST: u64 = 0;
     pub const AD_TAG_WITNESS: u64 = 1;
@@ -282,58 +332,6 @@ impl Display for FieldArithOp {
             FieldArithOp::Sub => "field.sub",
             FieldArithOp::Mul => "field.mul",
             FieldArithOp::Div => "field.div",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-/// A named field of the (transparent) VM struct. The codegen maps each one to
-/// a known byte offset from `vm_ptr` and emits a GEP. This is what lets
-/// generated SSA helpers access VM-struct pointers (cursors, bases, counters)
-/// inline without calling an opaque runtime function — LLVM sees the whole
-/// thing and can CSE, hoist, inline, etc.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VmField {
-    // Witgen forward-pass cursors
-    WitgenWitness,
-    WitgenA,
-    WitgenB,
-    WitgenC,
-    // Witgen lookup support
-    WitgenMultsBase,
-    WitgenLookupsA,
-    WitgenLookupsB,
-    WitgenLookupsC,
-    // AD output matrix bases (pointers, not cursors)
-    AdOutDa,
-    AdOutDb,
-    AdOutDc,
-    // AD coefficient cursor (advances) + fixed base for random access
-    AdCoeffs,
-    AdCoeffsBase,
-    // AD counters (i32 slots)
-    AdCurrentWitOff,
-    AdCurrentLookupWitOff,
-}
-
-impl Display for VmField {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            VmField::WitgenWitness => "vm.witgen.witness",
-            VmField::WitgenA => "vm.witgen.a",
-            VmField::WitgenB => "vm.witgen.b",
-            VmField::WitgenC => "vm.witgen.c",
-            VmField::WitgenMultsBase => "vm.witgen.mults_base",
-            VmField::WitgenLookupsA => "vm.witgen.lookups_a",
-            VmField::WitgenLookupsB => "vm.witgen.lookups_b",
-            VmField::WitgenLookupsC => "vm.witgen.lookups_c",
-            VmField::AdOutDa => "vm.ad.out_da",
-            VmField::AdOutDb => "vm.ad.out_db",
-            VmField::AdOutDc => "vm.ad.out_dc",
-            VmField::AdCoeffs => "vm.ad.coeffs",
-            VmField::AdCoeffsBase => "vm.ad.coeffs_base",
-            VmField::AdCurrentWitOff => "vm.ad.current_wit_off",
-            VmField::AdCurrentLookupWitOff => "vm.ad.current_lookup_wit_off",
         };
         write!(f, "{}", s)
     }
@@ -482,59 +480,6 @@ pub enum LLOp {
         global_id: usize,
     },
 
-    // ── VM / Constraint ─────────────────────────────────────────────────
-    /// R1CS constraint: a * b = c
-    Constrain {
-        a: ValueId,
-        b: ValueId,
-        c: ValueId,
-    },
-    /// Write a field element to the witness tape
-    WriteWitness {
-        value: ValueId,
-    },
-
-    // ── AD (Automatic Differentiation) ─────────────────────────────────
-    /// Read the next sensitivity coefficient from the AD input tape.
-    /// Result: Struct(FieldElem).
-    NextDCoeff {
-        result: ValueId,
-    },
-    /// Accumulate sensitivity into AD output matrix for a constant node.
-    /// Computes: out_d[matrix][0] += sensitivity * const_value
-    ADWriteConst {
-        matrix: DMatrix,
-        const_value: ValueId,
-        sensitivity: ValueId,
-    },
-    /// Accumulate sensitivity into AD output matrix for a witness node.
-    /// Computes: out_d[matrix][witness_index] += sensitivity
-    ADWriteWitness {
-        matrix: DMatrix,
-        witness_index: ValueId,
-        sensitivity: ValueId,
-    },
-    /// Allocate a fresh AD witness node with the next witness index.
-    /// Result: Ptr to ADWitnessNode.
-    ADFreshWitness {
-        result: ValueId,
-    },
-
-    // ── Transparent VM struct access ────────────────────────────────────
-    /// Compute a pointer to a named field of the VM struct.
-    ///
-    /// The VM struct has a known layout (see `mavros-wasm-layout`), so this
-    /// lowers to a single GEP at codegen time — no runtime call. Once the
-    /// pointer is in hand, generated SSA code uses ordinary Load/Store/GEP
-    /// against it, and LLVM sees everything.
-    ///
-    /// Result type depends on the field: pointer slots yield Ptr, the i32
-    /// counter slots yield Ptr (to i32). Loaders/stores pick the right width.
-    VmFieldPtr {
-        result: ValueId,
-        field: VmField,
-    },
-
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -550,9 +495,6 @@ impl Instruction for LLOp {
             LLOp::IntConst { .. }
             | LLOp::NullPtr { .. }
             | LLOp::GlobalAddr { .. }
-            | LLOp::NextDCoeff { .. }
-            | LLOp::ADFreshWitness { .. }
-            | LLOp::VmFieldPtr { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -598,21 +540,6 @@ impl Instruction for LLOp {
             // Call
             LLOp::Call { args, .. } => args.iter().collect::<Vec<_>>().into_iter(),
 
-            // VM / Constraint
-            LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
-            LLOp::WriteWitness { value } => vec![value].into_iter(),
-
-            // AD
-            LLOp::ADWriteConst {
-                const_value,
-                sensitivity,
-                ..
-            } => vec![const_value, sensitivity].into_iter(),
-            LLOp::ADWriteWitness {
-                witness_index,
-                sensitivity,
-                ..
-            } => vec![witness_index, sensitivity].into_iter(),
         }
     }
 
@@ -638,10 +565,7 @@ impl Instruction for LLOp {
             | LLOp::StructFieldPtr { result, .. }
             | LLOp::ArrayElemPtr { result, .. }
             | LLOp::Select { result, .. }
-            | LLOp::GlobalAddr { result, .. }
-            | LLOp::NextDCoeff { result, .. }
-            | LLOp::ADFreshWitness { result, .. }
-            | LLOp::VmFieldPtr { result, .. } => vec![result].into_iter(),
+            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
@@ -650,10 +574,6 @@ impl Instruction for LLOp {
             LLOp::Free { .. }
             | LLOp::Store { .. }
             | LLOp::Memcpy { .. }
-            | LLOp::Constrain { .. }
-            | LLOp::WriteWitness { .. }
-            | LLOp::ADWriteConst { .. }
-            | LLOp::ADWriteWitness { .. }
             | LLOp::Trap => vec![].into_iter(),
         }
     }
@@ -664,9 +584,6 @@ impl Instruction for LLOp {
             LLOp::IntConst { .. }
             | LLOp::NullPtr { .. }
             | LLOp::GlobalAddr { .. }
-            | LLOp::NextDCoeff { .. }
-            | LLOp::ADFreshWitness { .. }
-            | LLOp::VmFieldPtr { .. }
             | LLOp::Trap => vec![].into_iter(),
 
             // Unary
@@ -714,21 +631,6 @@ impl Instruction for LLOp {
             // Call
             LLOp::Call { args, .. } => args.iter_mut().collect::<Vec<_>>().into_iter(),
 
-            // VM / Constraint
-            LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
-            LLOp::WriteWitness { value } => vec![value].into_iter(),
-
-            // AD
-            LLOp::ADWriteConst {
-                const_value,
-                sensitivity,
-                ..
-            } => vec![const_value, sensitivity].into_iter(),
-            LLOp::ADWriteWitness {
-                witness_index,
-                sensitivity,
-                ..
-            } => vec![witness_index, sensitivity].into_iter(),
         }
     }
 
@@ -736,10 +638,7 @@ impl Instruction for LLOp {
         match self {
             LLOp::IntConst { result, .. }
             | LLOp::NullPtr { result }
-            | LLOp::GlobalAddr { result, .. }
-            | LLOp::NextDCoeff { result }
-            | LLOp::ADFreshWitness { result }
-            | LLOp::VmFieldPtr { result, .. } => vec![result].into_iter(),
+            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
 
@@ -803,21 +702,6 @@ impl Instruction for LLOp {
                 v.into_iter()
             }
 
-            // VM / Constraint
-            LLOp::Constrain { a, b, c } => vec![a, b, c].into_iter(),
-            LLOp::WriteWitness { value } => vec![value].into_iter(),
-
-            // AD
-            LLOp::ADWriteConst {
-                const_value,
-                sensitivity,
-                ..
-            } => vec![const_value, sensitivity].into_iter(),
-            LLOp::ADWriteWitness {
-                witness_index,
-                sensitivity,
-                ..
-            } => vec![witness_index, sensitivity].into_iter(),
         }
     }
 
@@ -1009,58 +893,8 @@ impl Instruction for LLOp {
             LLOp::GlobalAddr { result, global_id } => {
                 format!("{} = global_addr g{}", v(*result), global_id)
             }
-            LLOp::Constrain { a, b, c } => {
-                format!("constrain {}, {}, {}", vr(*a), vr(*b), vr(*c))
-            }
-            LLOp::WriteWitness { value } => {
-                format!("write_witness {}", vr(*value))
-            }
             LLOp::Trap => "trap".to_string(),
 
-            // AD
-            LLOp::NextDCoeff { result } => {
-                format!("{} = next_d_coeff", v(*result))
-            }
-            LLOp::ADWriteConst {
-                matrix,
-                const_value,
-                sensitivity,
-            } => {
-                let m = match matrix {
-                    DMatrix::A => "A",
-                    DMatrix::B => "B",
-                    DMatrix::C => "C",
-                };
-                format!(
-                    "ad_write_const {} {}, {}",
-                    m,
-                    vr(*const_value),
-                    vr(*sensitivity)
-                )
-            }
-            LLOp::ADWriteWitness {
-                matrix,
-                witness_index,
-                sensitivity,
-            } => {
-                let m = match matrix {
-                    DMatrix::A => "A",
-                    DMatrix::B => "B",
-                    DMatrix::C => "C",
-                };
-                format!(
-                    "ad_write_witness {} {}, {}",
-                    m,
-                    vr(*witness_index),
-                    vr(*sensitivity)
-                )
-            }
-            LLOp::ADFreshWitness { result } => {
-                format!("{} = ad_fresh_witness", v(*result))
-            }
-            LLOp::VmFieldPtr { result, field } => {
-                format!("{} = vm_field_ptr {}", v(*result), field)
-            }
         }
     }
 }

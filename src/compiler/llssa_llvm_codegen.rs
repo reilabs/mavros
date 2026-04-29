@@ -21,38 +21,10 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
-    VmField,
 };
-use crate::compiler::ssa::{BlockId, DMatrix, FunctionId, Terminator, ValueId};
+use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
-use mavros_wasm_layout::{
-    AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
-    AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
-    WASM_PTR_SIZE, WITGEN_A_PTR_OFFSET as VM_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET as VM_B_PTR_OFFSET,
-    WITGEN_C_PTR_OFFSET as VM_C_PTR_OFFSET, WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET,
-    WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_BASE_PTR_OFFSET,
-    WITGEN_WITNESS_PTR_OFFSET as VM_WITNESS_PTR_OFFSET,
-};
-
-fn vm_field_byte_offset(field: VmField) -> u32 {
-    match field {
-        VmField::WitgenWitness => VM_WITNESS_PTR_OFFSET,
-        VmField::WitgenA => VM_A_PTR_OFFSET,
-        VmField::WitgenB => VM_B_PTR_OFFSET,
-        VmField::WitgenC => VM_C_PTR_OFFSET,
-        VmField::WitgenMultsBase => WITGEN_MULTS_BASE_PTR_OFFSET,
-        VmField::WitgenLookupsA => WITGEN_LOOKUPS_A_PTR_OFFSET,
-        VmField::WitgenLookupsB => WITGEN_LOOKUPS_B_PTR_OFFSET,
-        VmField::WitgenLookupsC => WITGEN_LOOKUPS_C_PTR_OFFSET,
-        VmField::AdOutDa => AD_OUT_DA_PTR_OFFSET,
-        VmField::AdOutDb => AD_OUT_DB_PTR_OFFSET,
-        VmField::AdOutDc => AD_OUT_DC_PTR_OFFSET,
-        VmField::AdCoeffs => AD_COEFFS_PTR_OFFSET,
-        VmField::AdCoeffsBase => AD_COEFFS_BASE_PTR_OFFSET,
-        VmField::AdCurrentWitOff => AD_CURRENT_WIT_OFF_OFFSET,
-        VmField::AdCurrentLookupWitOff => AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
-    }
-}
+use mavros_wasm_layout::WASM_PTR_SIZE;
 
 fn ll_type_size_bytes(ty: &LLType) -> u32 {
     match ty {
@@ -94,19 +66,6 @@ pub struct LLVMCodeGen<'ctx> {
     field_div_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
-    write_witness_fn: Option<FunctionValue<'ctx>>,
-    write_a_fn: Option<FunctionValue<'ctx>>,
-    write_b_fn: Option<FunctionValue<'ctx>>,
-    write_c_fn: Option<FunctionValue<'ctx>>,
-    // AD runtime functions
-    ad_next_d_coeff_fn: Option<FunctionValue<'ctx>>,
-    ad_fresh_witness_index_fn: Option<FunctionValue<'ctx>>,
-    ad_accum_da_fn: Option<FunctionValue<'ctx>>,
-    ad_accum_db_fn: Option<FunctionValue<'ctx>>,
-    ad_accum_dc_fn: Option<FunctionValue<'ctx>>,
-    ad_accum_at_da_fn: Option<FunctionValue<'ctx>>,
-    ad_accum_at_db_fn: Option<FunctionValue<'ctx>>,
-    ad_accum_at_dc_fn: Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
     // Globals
@@ -132,25 +91,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_div_fn: None,
             malloc_fn: None,
             free_fn: None,
-            write_witness_fn: None,
-            write_a_fn: None,
-            write_b_fn: None,
-            write_c_fn: None,
-            ad_next_d_coeff_fn: None,
-            ad_fresh_witness_index_fn: None,
-            ad_accum_da_fn: None,
-            ad_accum_db_fn: None,
-            ad_accum_dc_fn: None,
-            ad_accum_at_da_fn: None,
-            ad_accum_at_db_fn: None,
-            ad_accum_at_dc_fn: None,
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
             globals: Vec::new(),
         };
 
         codegen.declare_runtime_functions();
-        codegen.define_write_functions();
         codegen
     }
 
@@ -270,310 +216,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         ));
     }
 
-    fn define_write_functions(&mut self) {
-        self.write_witness_fn =
-            Some(self.define_write_fn("__write_witness", VM_WITNESS_PTR_OFFSET));
-        self.write_a_fn = Some(self.define_write_fn("__write_a", VM_A_PTR_OFFSET));
-        self.write_b_fn = Some(self.define_write_fn("__write_b", VM_B_PTR_OFFSET));
-        self.write_c_fn = Some(self.define_write_fn("__write_c", VM_C_PTR_OFFSET));
-        self.ad_next_d_coeff_fn = Some(self.define_ad_next_d_coeff_fn());
-        self.ad_fresh_witness_index_fn = Some(self.define_ad_fresh_witness_index_fn());
-        self.ad_accum_da_fn = Some(self.define_ad_accum_fn("__ad_accum_da", AD_OUT_DA_PTR_OFFSET));
-        self.ad_accum_db_fn = Some(self.define_ad_accum_fn("__ad_accum_db", AD_OUT_DB_PTR_OFFSET));
-        self.ad_accum_dc_fn = Some(self.define_ad_accum_fn("__ad_accum_dc", AD_OUT_DC_PTR_OFFSET));
-        self.ad_accum_at_da_fn =
-            Some(self.define_ad_accum_at_fn("__ad_accum_at_da", AD_OUT_DA_PTR_OFFSET));
-        self.ad_accum_at_db_fn =
-            Some(self.define_ad_accum_at_fn("__ad_accum_at_db", AD_OUT_DB_PTR_OFFSET));
-        self.ad_accum_at_dc_fn =
-            Some(self.define_ad_accum_at_fn("__ad_accum_at_dc", AD_OUT_DC_PTR_OFFSET));
-    }
-
-    fn define_write_fn(&self, name: &str, ptr_offset: u32) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let field_type = self.field_llvm_type();
-        let i32_type = self.context.i32_type();
-
-        let fn_type = void_type.fn_type(&[ptr_type.into(), field_type.into()], false);
-        let function = self
-            .module
-            .add_function(name, fn_type, Some(Linkage::Internal));
-
-        let entry = self.context.append_basic_block(function, "entry");
-        let builder = self.context.create_builder();
-        builder.position_at_end(entry);
-
-        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-        let value = function.get_nth_param(1).unwrap().into_struct_value();
-
-        let write_pos_ptr = unsafe {
-            builder
-                .build_gep(
-                    ptr_type,
-                    vm_ptr,
-                    &[i32_type.const_int((ptr_offset / 4) as u64, false)],
-                    "pos_ptr",
-                )
-                .unwrap()
-        };
-
-        let write_ptr = builder
-            .build_load(ptr_type, write_pos_ptr, "ptr")
-            .unwrap()
-            .into_pointer_value();
-
-        builder.build_store(write_ptr, value).unwrap();
-
-        let new_ptr = unsafe {
-            builder
-                .build_gep(
-                    field_type,
-                    write_ptr,
-                    &[i32_type.const_int(1, false)],
-                    "new_ptr",
-                )
-                .unwrap()
-        };
-
-        builder.build_store(write_pos_ptr, new_ptr).unwrap();
-        builder.build_return(None).unwrap();
-
-        function
-    }
-
-    /// Load the Field element that `ad_coeffs` currently points at, advance
-    /// `ad_coeffs` by one Field, return the loaded value.
-    fn define_ad_next_d_coeff_fn(&self) -> FunctionValue<'ctx> {
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i32_type = self.context.i32_type();
-        let field_type = self.field_llvm_type();
-
-        let fn_type = field_type.fn_type(&[ptr_type.into()], false);
-        let function =
-            self.module
-                .add_function("__ad_next_d_coeff", fn_type, Some(Linkage::Internal));
-
-        let entry = self.context.append_basic_block(function, "entry");
-        let builder = self.context.create_builder();
-        builder.position_at_end(entry);
-
-        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-
-        let coeffs_slot_ptr = unsafe {
-            builder
-                .build_gep(
-                    ptr_type,
-                    vm_ptr,
-                    &[i32_type.const_int((AD_COEFFS_PTR_OFFSET / WASM_PTR_SIZE) as u64, false)],
-                    "coeffs_slot",
-                )
-                .unwrap()
-        };
-
-        let coeffs_ptr = builder
-            .build_load(ptr_type, coeffs_slot_ptr, "coeffs_ptr")
-            .unwrap()
-            .into_pointer_value();
-
-        let value = builder
-            .build_load(field_type, coeffs_ptr, "d_coeff")
-            .unwrap();
-
-        let next_coeffs_ptr = unsafe {
-            builder
-                .build_gep(
-                    field_type,
-                    coeffs_ptr,
-                    &[i32_type.const_int(1, false)],
-                    "next_coeffs_ptr",
-                )
-                .unwrap()
-        };
-        builder
-            .build_store(coeffs_slot_ptr, next_coeffs_ptr)
-            .unwrap();
-
-        builder.build_return(Some(&value)).unwrap();
-
-        function
-    }
-
-    /// Return the current witness counter, post-increment it.
-    fn define_ad_fresh_witness_index_fn(&self) -> FunctionValue<'ctx> {
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i32_type = self.context.i32_type();
-
-        let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
-        let function =
-            self.module
-                .add_function("__ad_fresh_witness_index", fn_type, Some(Linkage::Internal));
-
-        let entry = self.context.append_basic_block(function, "entry");
-        let builder = self.context.create_builder();
-        builder.position_at_end(entry);
-
-        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-
-        let wit_off_ptr = unsafe {
-            builder
-                .build_gep(
-                    i32_type,
-                    vm_ptr,
-                    &[i32_type
-                        .const_int((AD_CURRENT_WIT_OFF_OFFSET / WASM_PTR_SIZE) as u64, false)],
-                    "wit_off_slot",
-                )
-                .unwrap()
-        };
-
-        let index = builder
-            .build_load(i32_type, wit_off_ptr, "wit_idx")
-            .unwrap()
-            .into_int_value();
-        let next_index = builder
-            .build_int_add(index, i32_type.const_int(1, false), "next_wit_idx")
-            .unwrap();
-        builder.build_store(wit_off_ptr, next_index).unwrap();
-
-        builder.build_return(Some(&index)).unwrap();
-
-        function
-    }
-
-    /// Load `out_d{matrix}` from the VM struct, read the field at position 0,
-    /// add `sensitivity * const_value`, write it back. Pointer is NOT advanced.
-    fn define_ad_accum_fn(&self, name: &str, out_d_offset: u32) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i32_type = self.context.i32_type();
-        let field_type = self.field_llvm_type();
-
-        let fn_type = void_type.fn_type(
-            &[ptr_type.into(), field_type.into(), field_type.into()],
-            false,
-        );
-        let function = self
-            .module
-            .add_function(name, fn_type, Some(Linkage::Internal));
-
-        let entry = self.context.append_basic_block(function, "entry");
-        let builder = self.context.create_builder();
-        builder.position_at_end(entry);
-
-        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-        let const_value = function.get_nth_param(1).unwrap();
-        let sensitivity = function.get_nth_param(2).unwrap();
-
-        let out_d_slot = unsafe {
-            builder
-                .build_gep(
-                    ptr_type,
-                    vm_ptr,
-                    &[i32_type.const_int((out_d_offset / WASM_PTR_SIZE) as u64, false)],
-                    "out_d_slot",
-                )
-                .unwrap()
-        };
-        let out_d_ptr = builder
-            .build_load(ptr_type, out_d_slot, "out_d_ptr")
-            .unwrap()
-            .into_pointer_value();
-
-        let product = {
-            let mul_fn = self.field_mul_fn.expect("__field_mul not declared");
-            let call = builder
-                .build_call(
-                    mul_fn,
-                    &[const_value.into(), sensitivity.into()],
-                    "accum_product",
-                )
-                .unwrap();
-            call.try_as_basic_value()
-                .left()
-                .expect("__field_mul should return a value")
-        };
-
-        let old = builder
-            .build_load(field_type, out_d_ptr, "accum_old")
-            .unwrap();
-        let new_val = {
-            let add_fn = self.field_add_fn.expect("__field_add not declared");
-            let call = builder
-                .build_call(add_fn, &[old.into(), product.into()], "accum_new")
-                .unwrap();
-            call.try_as_basic_value()
-                .left()
-                .expect("__field_add should return a value")
-        };
-        builder.build_store(out_d_ptr, new_val).unwrap();
-        builder.build_return(None).unwrap();
-
-        function
-    }
-
-    /// Load `out_d{matrix}` from the VM struct, read the field at position
-    /// `witness_index`, add `sensitivity`, write it back.
-    fn define_ad_accum_at_fn(&self, name: &str, out_d_offset: u32) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i32_type = self.context.i32_type();
-        let field_type = self.field_llvm_type();
-
-        let fn_type = void_type.fn_type(
-            &[ptr_type.into(), i32_type.into(), field_type.into()],
-            false,
-        );
-        let function = self
-            .module
-            .add_function(name, fn_type, Some(Linkage::Internal));
-
-        let entry = self.context.append_basic_block(function, "entry");
-        let builder = self.context.create_builder();
-        builder.position_at_end(entry);
-
-        let vm_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-        let index = function.get_nth_param(1).unwrap().into_int_value();
-        let sensitivity = function.get_nth_param(2).unwrap();
-
-        let out_d_slot = unsafe {
-            builder
-                .build_gep(
-                    ptr_type,
-                    vm_ptr,
-                    &[i32_type.const_int((out_d_offset / WASM_PTR_SIZE) as u64, false)],
-                    "out_d_slot",
-                )
-                .unwrap()
-        };
-        let out_d_ptr = builder
-            .build_load(ptr_type, out_d_slot, "out_d_ptr")
-            .unwrap()
-            .into_pointer_value();
-
-        let target_ptr = unsafe {
-            builder
-                .build_gep(field_type, out_d_ptr, &[index], "target_ptr")
-                .unwrap()
-        };
-        let old = builder
-            .build_load(field_type, target_ptr, "accum_old")
-            .unwrap();
-        let new_val = {
-            let add_fn = self.field_add_fn.expect("__field_add not declared");
-            let call = builder
-                .build_call(add_fn, &[old.into(), sensitivity.into()], "accum_new")
-                .unwrap();
-            call.try_as_basic_value()
-                .left()
-                .expect("__field_add should return a value")
-        };
-        builder.build_store(target_ptr, new_val).unwrap();
-        builder.build_return(None).unwrap();
-
-        function
-    }
-
     // ── Compilation entry point ─────────────────────────────────────────
 
     /// Compile LLSSA to LLVM IR.
@@ -612,7 +254,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
 
         if fn_id != main_id {
-            for (_, tp) in entry.get_parameters() {
+            for (_, tp) in entry.get_parameters().skip(1) {
                 param_types.push(self.convert_type(tp).into());
             }
         }
@@ -680,7 +322,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.load_main_params_from_memory(entry.get_parameters());
         } else {
             for (i, (param_id, _)) in entry.get_parameters().enumerate() {
-                let param_value = fn_value.get_nth_param((i + 1) as u32).unwrap();
+                let param_value = fn_value.get_nth_param(i as u32).unwrap();
                 self.value_map.insert(*param_id, param_value);
             }
         }
@@ -722,20 +364,22 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .vm_ptr
             .expect("main parameters are loaded relative to the VM pointer");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i32_type = self.context.i32_type();
         let i8_type = self.context.i8_type();
-        let input_slot =
-            unsafe {
-                self.builder
-                    .build_gep(
-                        ptr_type,
-                        vm_ptr,
-                        &[i32_type
-                            .const_int((WITGEN_INPUTS_PTR_OFFSET / WASM_PTR_SIZE) as u64, false)],
-                        "inputs_slot",
-                    )
-                    .unwrap()
-            };
+        let i32_type = self.context.i32_type();
+        let mut parameters = parameters;
+        if let Some((vm_param, _)) = parameters.next() {
+            self.value_map.insert(*vm_param, vm_ptr.into());
+        }
+        let vm_type = self.convert_struct_type(&LLStruct::witgen_vm()).into_struct_type();
+        let input_slot = self
+            .builder
+            .build_struct_gep(
+                vm_type,
+                vm_ptr,
+                LLStruct::WITGEN_VM_INPUTS as u32,
+                "inputs_slot",
+            )
+            .unwrap();
         let mut input_ptr = self
             .builder
             .build_load(ptr_type, input_slot, "inputs_ptr")
@@ -964,23 +608,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .build_select(c, t, f, &format!("v{}", result.0))
                     .unwrap();
                 self.value_map.insert(*result, val);
-            }
-
-            LLOp::Constrain { a, b, c } => {
-                let a_val = self.value_map[a];
-                let b_val = self.value_map[b];
-                let c_val = self.value_map[c];
-                let vm_ptr = self.vm_ptr.unwrap();
-
-                self.call_write_fn(self.write_a_fn.unwrap(), vm_ptr, a_val);
-                self.call_write_fn(self.write_b_fn.unwrap(), vm_ptr, b_val);
-                self.call_write_fn(self.write_c_fn.unwrap(), vm_ptr, c_val);
-            }
-
-            LLOp::WriteWitness { value } => {
-                let val = self.value_map[value];
-                let vm_ptr = self.vm_ptr.unwrap();
-                self.call_write_fn(self.write_witness_fn.unwrap(), vm_ptr, val);
             }
 
             LLOp::Truncate {
@@ -1240,117 +867,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 }
             }
 
-            // ── AD operations ──────────────────────────────────────────
-            LLOp::NextDCoeff { result } => {
-                let vm_ptr = self.vm_ptr.unwrap();
-                let ad_fn = self
-                    .ad_next_d_coeff_fn
-                    .expect("__ad_next_d_coeff not declared");
-                let call_result = self
-                    .builder
-                    .build_call(ad_fn, &[vm_ptr.into()], "d_coeff")
-                    .unwrap();
-                let val = call_result
-                    .try_as_basic_value()
-                    .left()
-                    .expect("__ad_next_d_coeff should return a value");
-                self.value_map.insert(*result, val);
-            }
-
-            LLOp::ADFreshWitness { result } => {
-                let vm_ptr = self.vm_ptr.unwrap();
-                let ad_fn = self
-                    .ad_fresh_witness_index_fn
-                    .expect("__ad_fresh_witness_index not declared");
-                let call_result = self
-                    .builder
-                    .build_call(ad_fn, &[vm_ptr.into()], "wit_idx")
-                    .unwrap();
-                let val = call_result
-                    .try_as_basic_value()
-                    .left()
-                    .expect("__ad_fresh_witness_index should return a value");
-                self.value_map.insert(*result, val);
-            }
-
-            LLOp::ADWriteConst {
-                matrix,
-                const_value,
-                sensitivity,
-            } => {
-                let vm_ptr = self.vm_ptr.unwrap();
-                let cv = self.value_map[const_value];
-                let s = self.value_map[sensitivity];
-                let accum_fn = match matrix {
-                    DMatrix::A => self.ad_accum_da_fn,
-                    DMatrix::B => self.ad_accum_db_fn,
-                    DMatrix::C => self.ad_accum_dc_fn,
-                }
-                .expect("AD accum function not declared");
-                self.builder
-                    .build_call(accum_fn, &[vm_ptr.into(), cv.into(), s.into()], "")
-                    .unwrap();
-            }
-
-            LLOp::ADWriteWitness {
-                matrix,
-                witness_index,
-                sensitivity,
-            } => {
-                let vm_ptr = self.vm_ptr.unwrap();
-                let idx = self.value_map[witness_index];
-                let s = self.value_map[sensitivity];
-                let accum_fn = match matrix {
-                    DMatrix::A => self.ad_accum_at_da_fn,
-                    DMatrix::B => self.ad_accum_at_db_fn,
-                    DMatrix::C => self.ad_accum_at_dc_fn,
-                }
-                .expect("AD accum_at function not declared");
-                self.builder
-                    .build_call(accum_fn, &[vm_ptr.into(), idx.into(), s.into()], "")
-                    .unwrap();
-            }
-
             LLOp::GlobalAddr { result, global_id } => {
                 let global = self.globals[*global_id];
                 let ptr = global.as_pointer_value();
                 self.value_map.insert(*result, ptr.into());
             }
 
-            LLOp::VmFieldPtr { result, field } => {
-                // Byte offset from vm_ptr to the named field. Layout is fixed
-                // and shared with the host via `mavros-wasm-layout`.
-                let offset = vm_field_byte_offset(*field);
-                let vm_ptr = self.vm_ptr.unwrap();
-                let i8_ty = self.context.i8_type();
-                let i32_ty = self.context.i32_type();
-                // GEP on i8 so the increment is exactly `offset` bytes.
-                let gep = unsafe {
-                    self.builder
-                        .build_gep(
-                            i8_ty,
-                            vm_ptr,
-                            &[i32_ty.const_int(offset as u64, false)],
-                            &format!("v{}", result.0),
-                        )
-                        .unwrap()
-                };
-                self.value_map.insert(*result, gep.into());
-            }
-
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),
         }
-    }
-
-    fn call_write_fn(
-        &self,
-        write_fn: FunctionValue<'ctx>,
-        vm_ptr: PointerValue<'ctx>,
-        value: BasicValueEnum<'ctx>,
-    ) {
-        self.builder
-            .build_call(write_fn, &[vm_ptr.into(), value.into()], "")
-            .unwrap();
     }
 
     // ── Terminator compilation ──────────────────────────────────────────
