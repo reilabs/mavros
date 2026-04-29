@@ -164,7 +164,10 @@ impl PrepareEntryPoint {
         let mut replacements = ValueReplacements::new();
         for (param_id, param_type) in &params {
             if param_type.is_witness_of() {
-                continue;
+                panic!(
+                    "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main parameter reconstruction: {:?}",
+                    param_id.0, param_type
+                );
             }
             let witness_val = main.fresh_value();
             write_witness_instructions.push(OpCode::WriteWitness {
