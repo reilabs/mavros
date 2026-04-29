@@ -388,8 +388,8 @@ pub fn run_phase2(
             let flag_u64 = phase1.out_c[cnst_off].0.0[0];
 
             if flag_u64 == 0 {
-                let key_raw = phase1.out_b[cnst_off].0.0[0];
-                let b_val = alpha - Field::from(key_raw);
+                let key = phase1.out_b[cnst_off];
+                let b_val = alpha - key;
                 phase1.out_a[cnst_off] = Field::ZERO;
                 phase1.out_b[cnst_off] = b_val;
                 phase1.out_c[cnst_off] = Field::ZERO;

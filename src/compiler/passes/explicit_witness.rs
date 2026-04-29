@@ -1412,22 +1412,23 @@ impl ExplicitWitness {
             endianness: Endianness::Big,
             count: chunks,
         });
-        let mut result = b.field_const(Field::ZERO);
         let two_to_8 = b.field_const(Field::from(256));
-        let one = b.field_const(Field::from(1));
-        for i in 0..chunks {
+        // Witness and rangecheck upper n-1 bytes, accumulate partial sum
+        let mut partial = b.field_const(Field::ZERO);
+        for i in 0..chunks - 1 {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_val, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
             b.lookup_rngchk_8(byte_wit, flag);
-            let shift_prev_res = b.mul(result, two_to_8);
-            result = b.add(shift_prev_res, byte_wit);
+            let shift_prev = b.mul(partial, two_to_8);
+            partial = b.add(shift_prev, byte_wit);
         }
-        // Conditional reconstruction constraint: flag * (result - value) = 0
-        let diff = b.sub(result, value);
-        let zero = b.field_const(Field::ZERO);
-        b.constrain(flag, diff, zero);
+        // Compute LSB as value - partial*256; rangecheck proves it's a byte,
+        // which implicitly constrains the reconstruction (no separate constraint needed)
+        let partial_shifted = b.mul(partial, two_to_8);
+        let lsb = b.sub(value, partial_shifted);
+        b.lookup_rngchk_8(lsb, flag);
     }
 
     /// Lower a witness-tainted Lt comparison, emitting the result into `result`.

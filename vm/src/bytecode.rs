@@ -1237,16 +1237,23 @@ mod def {
             }
         }
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
         unsafe {
-            let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
-            *(ptr as *mut u64) += flag_u64;
-            *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-            vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-            *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
-            vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            if flag_u64 != 0 {
+                let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
+                let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
+                *(ptr as *mut u64) += flag_u64;
+                *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+                *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
+                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            } else {
+                *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+                *(vm.data.as_forward.lookups_b as *mut Field) = val;
+                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            }
             *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
             vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
         }
