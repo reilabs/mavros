@@ -17,15 +17,15 @@ use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
-    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_RNGCHK_8_INV_CNST_OFF_OFFSET,
-    AD_RNGCHK_8_UNALLOCATED, AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET,
-    WITGEN_C_PTR_OFFSET, WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET,
-    WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET, WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET,
-    WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET,
-    WITGEN_NEXT_TABLE_IDX_OFFSET, WITGEN_RNGCHK_8_CNST_OFF_OFFSET,
-    WITGEN_RNGCHK_8_MULTS_BASE_PTR_OFFSET, WITGEN_RNGCHK_8_TABLE_IDX_OFFSET,
-    WITGEN_RNGCHK_8_UNALLOCATED, WITGEN_RNGCHK_8_WIT_OFF_OFFSET, WITGEN_VM_STRUCT_SIZE,
-    WITGEN_WITNESS_PTR_OFFSET,
+    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, MAX_TABLE_KINDS,
+    TABLE_INFO_INV_CNST_OFF_OFFSET, TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET,
+    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_NUM_INDICES_OFFSET,
+    TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_OCCUPANCY_OFFSET, TABLE_INFO_SLOT_SIZE,
+    TABLE_INFO_TABLE_IDX_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
+    WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
+    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_LEN_OFFSET,
+    WITGEN_TABLES_REGISTRY_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -408,12 +408,62 @@ struct WasmResult {
     live_bytes: usize,
 }
 
+/// Read a `TableInfo` record back from one slot of the witgen VM struct's
+/// table registry in WASM linear memory. Returns `None` if the slot is
+/// unclaimed (occupancy == 0). The host has no kind-specific knowledge —
+/// it walks all slots up to `tables_len` and reconstructs whatever was
+/// claimed at runtime.
+fn read_table_info_slot(
+    memory: &Memory,
+    store: impl wasmtime::AsContext,
+    vm_struct_ptr: u32,
+    witness_ptr: u32,
+    slot: u32,
+) -> Option<RuntimeTableInfo> {
+    let slot_base = vm_struct_ptr + WITGEN_TABLES_REGISTRY_OFFSET + slot * TABLE_INFO_SLOT_SIZE;
+    let occupancy = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_OCCUPANCY_OFFSET);
+    if occupancy == 0 {
+        return None;
+    }
+    let table_idx = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_TABLE_IDX_OFFSET);
+    let mults_base =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_MULTS_BASE_PTR_OFFSET);
+    let inv_cnst_off =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_CNST_OFF_OFFSET);
+    let inv_wit_off =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_WIT_OFF_OFFSET);
+    let num_indices =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_INDICES_OFFSET);
+    let num_values = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_VALUES_OFFSET);
+    let length = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_LENGTH_OFFSET);
+    let mults_off = mults_base
+        .checked_sub(witness_ptr)
+        .expect("table multiplicities pointer is before witness base")
+        / FIELD_SIZE as u32;
+    Some(RuntimeTableInfo {
+        table_idx: table_idx as usize,
+        multiplicities_wit_off: mults_off as usize,
+        elem_inverses_constraint_section_offset: inv_cnst_off as usize,
+        elem_inverses_witness_section_offset: inv_wit_off as usize,
+        num_indices: num_indices as usize,
+        num_values: num_values as usize,
+        length: length as usize,
+    })
+}
+
+/// Decoded contents of one occupied registry slot, in host-friendly types.
+/// Mirrors `vm::bytecode::TableInfo` but with `multiplicities_wit_off`
+/// (an index into `out_wit_pre_comm`) instead of a raw pointer, so it
+/// survives the wasmtime → host buffer copy unchanged.
 #[derive(Clone, Copy)]
-struct Rngchk8TableMeta {
+struct RuntimeTableInfo {
     table_idx: usize,
     multiplicities_wit_off: usize,
     elem_inverses_constraint_section_offset: usize,
     elem_inverses_witness_section_offset: usize,
+    num_indices: usize,
+    num_values: usize,
+    length: usize,
 }
 
 fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> u32 {
@@ -519,13 +569,16 @@ fn run_wasm(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
-    // Per-path offsets for lookup helpers to find their buffers.
+    // Cursors the host needs to seed. The per-slot table registry is left
+    // at its zero-initialized value (occupancy = 0 means "unclaimed");
+    // each lookup helper handles its own first-use claim at runtime, so
+    // the host has no per-kind knowledge. The two table-region cursors
+    // (cnst/wit) are seeded at the structural starts of those regions —
+    // first-use lookups snapshot them and bump by their footprint.
     //
-    // `mults_cursor` is the *cursor* a first-use lookup snapshots into its
-    // per-table slot (mirroring VM `multiplicities_witness`); seeding it at
-    // `multiplicities_start` makes the very first table's snapshot land
-    // there, matching the VM's behavior exactly. Subsequent tables claim
-    // their slabs by bumping the cursor.
+    // `current_wit_tables_off` is stored *relative to challenges_start*
+    // (matches how Phase 2 uses it: `out_wit_post_comm[wit_base + i]`,
+    // where `out_wit_post_comm` starts at challenges_start).
     let mults_cursor_ptr =
         witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
     let lookups_a_cursor =
@@ -537,13 +590,6 @@ fn run_wasm(
     let current_cnst_tables_off = r1cs.constraints_layout.tables_data_start() as u32;
     let current_wit_tables_off =
         (r1cs.witness_layout.tables_data_start() - r1cs.witness_layout.challenges_start()) as u32;
-    // Sentinel state for the rangecheck-8 table: not yet allocated. The
-    // metadata snapshots are null/`u32::MAX` — first Lookup of this kind
-    // allocates from the cursors.
-    let rngchk_8_mults_base_unalloc: u32 = 0;
-    let rngchk_8_cnst_off_unalloc = WITGEN_RNGCHK_8_UNALLOCATED;
-    let rngchk_8_wit_off_unalloc = WITGEN_RNGCHK_8_UNALLOCATED;
-    let rngchk_8_table_idx_unalloc = WITGEN_RNGCHK_8_UNALLOCATED;
 
     // Initialize VM struct with buffer pointers
     {
@@ -558,13 +604,8 @@ fn run_wasm(
         let lb = WITGEN_LOOKUPS_B_PTR_OFFSET as usize;
         let lc = WITGEN_LOOKUPS_C_PTR_OFFSET as usize;
         let inputs = WITGEN_INPUTS_PTR_OFFSET as usize;
-        let nt = WITGEN_NEXT_TABLE_IDX_OFFSET as usize;
         let cct = WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
         let cwt = WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
-        let r8c = WITGEN_RNGCHK_8_CNST_OFF_OFFSET as usize;
-        let r8w = WITGEN_RNGCHK_8_WIT_OFF_OFFSET as usize;
-        let r8m = WITGEN_RNGCHK_8_MULTS_BASE_PTR_OFFSET as usize;
-        let r8t = WITGEN_RNGCHK_8_TABLE_IDX_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
@@ -574,13 +615,8 @@ fn run_wasm(
         data[off + lb..off + lb + 4].copy_from_slice(&lookups_b_cursor.to_le_bytes());
         data[off + lc..off + lc + 4].copy_from_slice(&lookups_c_cursor.to_le_bytes());
         data[off + inputs..off + inputs + 4].copy_from_slice(&inputs_ptr.to_le_bytes());
-        data[off + nt..off + nt + 4].copy_from_slice(&0u32.to_le_bytes());
         data[off + cct..off + cct + 4].copy_from_slice(&current_cnst_tables_off.to_le_bytes());
         data[off + cwt..off + cwt + 4].copy_from_slice(&current_wit_tables_off.to_le_bytes());
-        data[off + r8c..off + r8c + 4].copy_from_slice(&rngchk_8_cnst_off_unalloc.to_le_bytes());
-        data[off + r8w..off + r8w + 4].copy_from_slice(&rngchk_8_wit_off_unalloc.to_le_bytes());
-        data[off + r8m..off + r8m + 4].copy_from_slice(&rngchk_8_mults_base_unalloc.to_le_bytes());
-        data[off + r8t..off + r8t + 4].copy_from_slice(&rngchk_8_table_idx_unalloc.to_le_bytes());
     }
 
     for (i, field) in input_fields.iter().enumerate() {
@@ -602,38 +638,30 @@ fn run_wasm(
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 
-    let rngchk_8_table_idx = read_u32_from_memory(
-        &memory,
-        &store,
-        vm_struct_ptr + WITGEN_RNGCHK_8_TABLE_IDX_OFFSET,
+    // Walk the registry: read every slot up to `MAX_TABLE_KINDS`, keep
+    // only the occupied ones. The host does not name any specific lookup
+    // kind; each runtime-claimed slot describes itself fully via its
+    // `TableInfoSlot` fields.
+    let tables_len =
+        read_u32_from_memory(&memory, &store, vm_struct_ptr + WITGEN_TABLES_LEN_OFFSET) as usize;
+    let mut runtime_tables: Vec<RuntimeTableInfo> = Vec::new();
+    for slot in 0..MAX_TABLE_KINDS {
+        if let Some(info) =
+            read_table_info_slot(&memory, &store, vm_struct_ptr, witness_ptr, slot)
+        {
+            runtime_tables.push(info);
+        }
+    }
+    assert_eq!(
+        runtime_tables.len(),
+        tables_len,
+        "WASM `tables_len` ({}) doesn't match the number of occupied registry slots ({})",
+        tables_len,
+        runtime_tables.len()
     );
-    let rngchk_8_meta = if rngchk_8_table_idx == WITGEN_RNGCHK_8_UNALLOCATED {
-        None
-    } else {
-        let mults_base = read_u32_from_memory(
-            &memory,
-            &store,
-            vm_struct_ptr + WITGEN_RNGCHK_8_MULTS_BASE_PTR_OFFSET,
-        );
-        let mults_off = mults_base
-            .checked_sub(witness_ptr)
-            .expect("rangecheck-8 multiplicities pointer is before witness base")
-            / FIELD_SIZE as u32;
-        Some(Rngchk8TableMeta {
-            table_idx: rngchk_8_table_idx as usize,
-            multiplicities_wit_off: mults_off as usize,
-            elem_inverses_constraint_section_offset: read_u32_from_memory(
-                &memory,
-                &store,
-                vm_struct_ptr + WITGEN_RNGCHK_8_CNST_OFF_OFFSET,
-            ) as usize,
-            elem_inverses_witness_section_offset: read_u32_from_memory(
-                &memory,
-                &store,
-                vm_struct_ptr + WITGEN_RNGCHK_8_WIT_OFF_OFFSET,
-            ) as usize,
-        })
-    };
+    // Phase 2 (witgen_phase2) wants `Vec<TableInfo>` indexed by table id;
+    // sort so each table lands at its assigned id.
+    runtime_tables.sort_by_key(|t| t.table_idx);
 
     // Read heap residual from the __live_bytes counter in wasm-runtime
     let live_bytes_fn = instance
@@ -688,7 +716,7 @@ fn run_wasm(
                 out_a,
                 out_b,
                 out_c,
-                rngchk_8_meta,
+                runtime_tables,
             );
             (
                 result.out_wit_pre_comm,
@@ -718,69 +746,53 @@ fn witgen_phase2(
     out_a: Vec<Field>,
     out_b: Vec<Field>,
     out_c: Vec<Field>,
-    rngchk_8_meta: Option<Rngchk8TableMeta>,
+    runtime_tables: Vec<RuntimeTableInfo>,
 ) -> interpreter::WitgenResult {
     use mavros::vm::bytecode::{AllocationInstrumenter, TableInfo};
 
     let witness_layout = &r1cs.witness_layout;
 
-    assert_eq!(
-        witness_layout.challenges_size, 1,
-        "WASM witgen phase 2 currently expects only the rangecheck-8 alpha challenge"
-    );
-
     // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
-    for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
-        out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
+    // Walk the runtime-claimed table list rather than scanning the entire
+    // multiplicities region: the host doesn't know each table's length
+    // statically, only that the runtime registry recorded `length` for
+    // every claimed slot.
+    for tbl in &runtime_tables {
+        let lo = tbl.multiplicities_wit_off;
+        let hi = lo + tbl.length;
+        for i in lo..hi {
+            out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
+        }
     }
 
     let witness_base = out_wit_pre_comm.as_mut_ptr();
     let tables = if r1cs.constraints_layout.lookups_data_size == 0 {
         vec![]
     } else {
-        let meta = rngchk_8_meta
-            .expect("WASM emitted lookup constraints but rangecheck-8 table was not allocated");
         assert!(
-            meta.multiplicities_wit_off + 256 <= witness_layout.multiplicities_end(),
-            "rangecheck-8 multiplicities allocation is outside the witness multiplicities section"
-        );
-        assert!(
-            meta.elem_inverses_witness_section_offset + 256
-                <= witness_layout.lookups_data_start() - witness_layout.challenges_start(),
-            "rangecheck-8 witness-table allocation is outside the post-commitment table section"
-        );
-        assert!(
-            meta.elem_inverses_constraint_section_offset + 257
-                <= r1cs.constraints_layout.lookups_data_start(),
-            "rangecheck-8 constraint-table allocation overlaps the lookup section"
+            !runtime_tables.is_empty(),
+            "WASM emitted lookup constraints but no tables were claimed at runtime"
         );
 
-        for i in 0..r1cs.constraints_layout.lookups_data_size {
-            let table_id = out_a[r1cs.constraints_layout.lookups_data_start() + i].0.0[0] as usize;
+        // The runtime claims tables in dynamic-execution order, assigning
+        // ids `0..tables_len`. After sorting by `table_idx` the indices
+        // are dense, so we can drop them straight into a Vec.
+        let mut tables = Vec::with_capacity(runtime_tables.len());
+        for (expected_idx, t) in runtime_tables.iter().enumerate() {
             assert_eq!(
-                table_id, meta.table_idx,
-                "WASM witgen phase 2 only has metadata for rangecheck-8 table {}, but lookup tape references table {}",
-                meta.table_idx, table_id
+                t.table_idx, expected_idx,
+                "table ids are not 0..tables_len (got {} at position {})",
+                t.table_idx, expected_idx
             );
+            tables.push(TableInfo {
+                multiplicities_wit: witness_base.wrapping_add(t.multiplicities_wit_off),
+                num_indices: t.num_indices,
+                num_values: t.num_values,
+                length: t.length,
+                elem_inverses_witness_section_offset: t.elem_inverses_witness_section_offset,
+                elem_inverses_constraint_section_offset: t.elem_inverses_constraint_section_offset,
+            });
         }
-
-        let placeholder = TableInfo {
-            multiplicities_wit: witness_base,
-            num_indices: 1,
-            num_values: 0,
-            length: 0,
-            elem_inverses_witness_section_offset: 0,
-            elem_inverses_constraint_section_offset: r1cs.constraints_layout.tables_data_start(),
-        };
-        let mut tables = vec![placeholder; meta.table_idx + 1];
-        tables[meta.table_idx] = TableInfo {
-            multiplicities_wit: witness_base.wrapping_add(meta.multiplicities_wit_off),
-            num_indices: 1,
-            num_values: 0,
-            length: 256,
-            elem_inverses_witness_section_offset: meta.elem_inverses_witness_section_offset,
-            elem_inverses_constraint_section_offset: meta.elem_inverses_constraint_section_offset,
-        };
         tables
     };
 
@@ -902,19 +914,18 @@ fn run_ad_wasm(
     }
 
     // AD lookups need an absolute base for random-access coefficient reads
-    // and a fresh-witness counter seeded at the lookups-section start.
+    // and a fresh-witness counter seeded at the lookups-section start. The
+    // three table-allocation cursors (`current_*_tables_off`,
+    // `current_wit_multiplicities_off`) are seeded at structural layout
+    // starts; first-use lookup helpers snapshot them and then bump by their
+    // own table footprint — mirrors `vm.data.as_ad.current_*_off`. The
+    // per-slot table registry (occupancy + inv_cnst_off arrays) is left at
+    // its zero-initialized value, since wasmtime zeros memory and zero
+    // means "unclaimed."
     let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
-    // Cursors for dynamically-allocated table regions. Each first-use lookup
-    // (e.g. the first rangecheck-8 DLookup) snapshots these into its table
-    // metadata and then advances them by its table's footprint — mirroring
-    // the VM's `current_*_tables_off` / `current_wit_multiplicities_off`. The
-    // AD-side rangecheck-8 helper also snapshots the offset into
-    // `rngchk_8_inv_cnst_off` (sentinel `u32::MAX` until first use) so
-    // subsequent calls reuse the same region.
     let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
     let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;
     let wit_mults_start = r1cs.witness_layout.multiplicities_start() as u32;
-    let rngchk_8_unalloc = AD_RNGCHK_8_UNALLOCATED;
 
     // Initialize AD VM struct
     {
@@ -930,7 +941,6 @@ fn run_ad_wasm(
         let cct = AD_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
         let cwt = AD_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
         let cwm = AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET as usize;
-        let r8 = AD_RNGCHK_8_INV_CNST_OFF_OFFSET as usize;
         data[off + da..off + da + 4].copy_from_slice(&da_ptr.to_le_bytes());
         data[off + db..off + db + 4].copy_from_slice(&db_ptr.to_le_bytes());
         data[off + dc..off + dc + 4].copy_from_slice(&dc_ptr.to_le_bytes());
@@ -941,7 +951,6 @@ fn run_ad_wasm(
         data[off + cct..off + cct + 4].copy_from_slice(&cnst_tables_start.to_le_bytes());
         data[off + cwt..off + cwt + 4].copy_from_slice(&wit_tables_start.to_le_bytes());
         data[off + cwm..off + cwm + 4].copy_from_slice(&wit_mults_start.to_le_bytes());
-        data[off + r8..off + r8 + 4].copy_from_slice(&rngchk_8_unalloc.to_le_bytes());
     }
 
     let func: wasmtime::Func = instance

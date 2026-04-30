@@ -3,6 +3,11 @@ use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueI
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 
+/// `usize` mirror of `mavros_wasm_layout::MAX_TABLE_KINDS`, kept here so the
+/// `LLStruct::*_vm()` definitions can use it as an `InlineArray` length
+/// without taking a runtime dep on the no_std layout crate's u32 type.
+const MAX_TABLE_KINDS: usize = mavros_wasm_layout::MAX_TABLE_KINDS as usize;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -133,6 +138,41 @@ impl LLStruct {
         ])
     }
 
+    /// Per-slot table-info record. Mirrors the byte layout of
+    /// `TABLE_INFO_*_OFFSET` in `mavros-wasm-layout`. One of these lives in
+    /// each registry slot of both the witgen and AD VM structs.
+    ///
+    /// Field index → name (use `TABLE_INFO_*` constants below):
+    ///   0: occupancy   (i32; 0 = unclaimed)
+    ///   1: table_idx   (i32)
+    ///   2: mults_base  (ptr; forward-only)
+    ///   3: inv_cnst_off (i32)
+    ///   4: inv_wit_off (i32)
+    ///   5: num_indices (i32)
+    ///   6: num_values  (i32)
+    ///   7: length      (i32)
+    pub fn table_info_slot() -> Self {
+        Self::new(vec![
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Ptr,
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+        ])
+    }
+
+    pub const TABLE_INFO_OCCUPANCY: usize = 0;
+    pub const TABLE_INFO_TABLE_IDX: usize = 1;
+    pub const TABLE_INFO_MULTS_BASE: usize = 2;
+    pub const TABLE_INFO_INV_CNST_OFF: usize = 3;
+    pub const TABLE_INFO_INV_WIT_OFF: usize = 4;
+    pub const TABLE_INFO_NUM_INDICES: usize = 5;
+    pub const TABLE_INFO_NUM_VALUES: usize = 6;
+    pub const TABLE_INFO_LENGTH: usize = 7;
+
     /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
     pub fn ad_mul_const_node() -> Self {
         Self::new(vec![
@@ -148,25 +188,25 @@ impl LLStruct {
 
     /// VM struct used by the forward-pass/witgen entrypoint.
     ///
-    /// Keep this in field-index order with `mavros-wasm-layout`.
+    /// Keep this in field-index order with `mavros-wasm-layout`. The
+    /// trailing inline array is the table registry (length
+    /// `MAX_TABLE_KINDS`); each lookup kind is assigned a compile-time
+    /// slot index into it.
     pub fn witgen_vm() -> Self {
         Self::new(vec![
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Ptr,
-            LLFieldType::Int(32),
+            LLFieldType::Ptr,                                                       // 0  witness
+            LLFieldType::Ptr,                                                       // 1  a
+            LLFieldType::Ptr,                                                       // 2  b
+            LLFieldType::Ptr,                                                       // 3  c
+            LLFieldType::Ptr,                                                       // 4  mults_cursor
+            LLFieldType::Ptr,                                                       // 5  lookups_a
+            LLFieldType::Ptr,                                                       // 6  lookups_b
+            LLFieldType::Ptr,                                                       // 7  lookups_c
+            LLFieldType::Ptr,                                                       // 8  inputs
+            LLFieldType::Int(32),                                                   // 9  tables_len
+            LLFieldType::Int(32),                                                   // 10 current_cnst_tables_off
+            LLFieldType::Int(32),                                                   // 11 current_wit_tables_off
+            LLFieldType::InlineArray(Self::table_info_slot(), MAX_TABLE_KINDS),     // 12 tables registry
         ])
     }
 
@@ -176,51 +216,45 @@ impl LLStruct {
     pub const WITGEN_VM_C: usize = 3;
     /// Cursor into the witness multiplicities section. Mirrors VM
     /// `multiplicities_witness`: each first-use lookup snapshots this into
-    /// its own per-table slot, then bumps it by the table's length.
+    /// its slot, then bumps it by the table's length.
     pub const WITGEN_VM_MULTS_CURSOR: usize = 4;
     pub const WITGEN_VM_LOOKUPS_A: usize = 5;
     pub const WITGEN_VM_LOOKUPS_B: usize = 6;
     pub const WITGEN_VM_LOOKUPS_C: usize = 7;
     pub const WITGEN_VM_INPUTS: usize = 8;
-    /// Cursor producing the next free table index. Mirrors `vm.tables.len()`
-    /// — first-use lookups snapshot it into their per-table slot, then bump
-    /// it by 1.
-    pub const WITGEN_VM_NEXT_TABLE_IDX: usize = 9;
-    /// Cursor for the constraints tables section. Mirrors VM
-    /// `elem_inverses_constraint_section_offset`.
+    /// Cursor counting allocated tables. Each first-use claim assigns the
+    /// current `tables_len` as the new table id, then bumps it.
+    /// Mirrors `vm.tables.len()`.
+    pub const WITGEN_VM_TABLES_LEN: usize = 9;
+    /// Cursor into the constraints-region tables section (advances on
+    /// first-use claims by each table's footprint). Forward-side, written-
+    /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
     pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 10;
-    /// Cursor for the post-commitment witness tables section, relative to
-    /// `challenges_start`. Mirrors VM `elem_inverses_witness_section_offset`.
+    /// Cursor into the post-commitment witness tables section (relative to
+    /// the witness base, *not* relative to challenges_start).
     pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 11;
-    /// Snapshot slot for the rangecheck-8 table's constraint-table offset.
-    pub const WITGEN_VM_RNGCHK_8_CNST_OFF: usize = 12;
-    /// Snapshot slot for the rangecheck-8 table's post-commitment witness
-    /// table offset.
-    pub const WITGEN_VM_RNGCHK_8_WIT_OFF: usize = 13;
-    /// Snapshot slot for the rangecheck-8 table's `multiplicities_wit` base.
-    /// Sentinel `null` until first rangecheck-8 Lookup; then carries the
-    /// snapshotted `mults_cursor`. Mirrors `TableInfo.multiplicities_wit`.
-    pub const WITGEN_VM_RNGCHK_8_MULTS_BASE: usize = 14;
-    /// Snapshot slot for the rangecheck-8 table's index. Sentinel `u32::MAX`
-    /// until first rangecheck-8 Lookup; mirrors `vm.rgchk_8: Option<usize>`.
-    pub const WITGEN_VM_RNGCHK_8_TABLE_IDX: usize = 15;
+    /// Inline `[TableInfoSlot; MAX_TABLE_KINDS]`. Slot `k` is "occupied"
+    /// iff its `TABLE_INFO_OCCUPANCY` field is non-zero.
+    pub const WITGEN_VM_TABLES_REGISTRY: usize = 12;
 
     /// VM struct used by the reverse AD entrypoint.
     ///
-    /// Keep this in field-index order with `mavros-wasm-layout`.
+    /// Keep this in field-index order with `mavros-wasm-layout`. The
+    /// trailing inline array is the table registry, same shape as the
+    /// witgen one.
     pub fn ad_vm() -> Self {
         Self::new(vec![
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Int(32),
-            LLFieldType::Ptr,
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
+            LLFieldType::Ptr,                                                   // 0  out_da
+            LLFieldType::Ptr,                                                   // 1  out_db
+            LLFieldType::Ptr,                                                   // 2  out_dc
+            LLFieldType::Ptr,                                                   // 3  coeffs (cursor)
+            LLFieldType::Int(32),                                               // 4  current_wit_off
+            LLFieldType::Ptr,                                                   // 5  coeffs_base
+            LLFieldType::Int(32),                                               // 6  current_lookup_wit_off
+            LLFieldType::Int(32),                                               // 7  current_cnst_tables_off
+            LLFieldType::Int(32),                                               // 8  current_wit_tables_off
+            LLFieldType::Int(32),                                               // 9  current_wit_multiplicities_off
+            LLFieldType::InlineArray(Self::table_info_slot(), MAX_TABLE_KINDS), // 10 tables registry
         ])
     }
 
@@ -232,16 +266,14 @@ impl LLStruct {
     pub const AD_VM_COEFFS_BASE: usize = 5;
     pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
     /// Cursor for the constraints tables section. Mirrors VM
-    /// `current_cnst_tables_off`: each first-use lookup snapshots this and
-    /// then bumps it by the table's constraint footprint.
+    /// `current_cnst_tables_off`.
     pub const AD_VM_CURRENT_CNST_TABLES_OFF: usize = 7;
     /// Cursor for the witness tables section.
     pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
     /// Cursor for the witness multiplicities section.
     pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
-    /// Snapshot slot for the rangecheck-8 table's `inv_cnst_off`. Sentinel
-    /// `u32::MAX` until the first rangecheck-8 DLookup allocates the table.
-    pub const AD_VM_RNGCHK_8_INV_CNST_OFF: usize = 10;
+    /// Inline `[TableInfoSlot; MAX_TABLE_KINDS]`.
+    pub const AD_VM_TABLES_REGISTRY: usize = 10;
 
     /// AD tag constants.
     pub const AD_TAG_CONST: u64 = 0;

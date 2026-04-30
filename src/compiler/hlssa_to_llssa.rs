@@ -22,7 +22,6 @@ use crate::compiler::ssa::{
     ValueId,
 };
 use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
-use mavros_wasm_layout::{AD_RNGCHK_8_UNALLOCATED, WITGEN_RNGCHK_8_UNALLOCATED};
 
 // =============================================================================
 // Type helpers
@@ -208,15 +207,31 @@ impl AdFunctions {
 // Lookup generated function tracking
 // =============================================================================
 
-/// IDs of the lookup helper functions generated on demand.
+/// Tracking for generated lookup helpers + per-kind slot assignments in the
+/// VM struct's table registry.
+///
+/// Each lookup *kind* (rangecheck-8, future array, spread, ...) gets a
+/// unique slot index in `[0, MAX_TABLE_KINDS)` assigned the first time the
+/// kind is encountered during lowering. Both the forward and AD helpers for
+/// that kind share the same slot index — they live in different VM structs
+/// (one per pass) but at runtime each first-use claim writes the same slot
+/// in *its own* registry. The slot index is baked into the helper body as a
+/// compile-time constant.
 struct LookupFunctions {
-    /// Forward-pass rangecheck-8 helper: `__rngchk_8(val, flag)`.
+    /// Forward-pass rangecheck-8 helper id, set on first registration.
     rngchk_8: Option<FunctionId>,
-    /// AD-path rangecheck-8 helper. Branches internally on the runtime
-    /// `rngchk_8_inv_cnst_off` sentinel: first call allocates the table region
-    /// from the AD VM cursors and runs the init body; subsequent calls reuse
-    /// the snapshot. Mirrors the VM's `drngchk_8_field` opcode.
+    /// AD-path rangecheck-8 helper id. Branches internally on the runtime
+    /// table-registry occupancy at the kind's slot index — first call
+    /// claims the slot and runs the init body; subsequent calls reuse the
+    /// snapshot. Mirrors `drngchk_8_field` in `vm/src/bytecode.rs`.
     drngchk_8_call: Option<FunctionId>,
+    /// Slot index assigned to rangecheck-8 in the VM's table registry.
+    /// `None` until first-use; allocated by `next_slot`. Both forward and
+    /// AD helpers read the same slot.
+    rngchk_8_slot: Option<u32>,
+    /// Cursor handing out the next free slot index. Bumped by 1 each time a
+    /// new lookup kind is encountered.
+    next_slot: u32,
 }
 
 impl LookupFunctions {
@@ -224,13 +239,31 @@ impl LookupFunctions {
         Self {
             rngchk_8: None,
             drngchk_8_call: None,
+            rngchk_8_slot: None,
+            next_slot: 0,
         }
+    }
+
+    /// Allocate (or return) the registry slot for rangecheck-8.
+    fn rngchk_8_slot(&mut self) -> u32 {
+        if let Some(s) = self.rngchk_8_slot {
+            return s;
+        }
+        let s = self.next_slot;
+        assert!(
+            s < mavros_wasm_layout::MAX_TABLE_KINDS,
+            "Out of lookup-kind slots; bump MAX_TABLE_KINDS in mavros-wasm-layout"
+        );
+        self.next_slot += 1;
+        self.rngchk_8_slot = Some(s);
+        s
     }
 
     fn get_rngchk_8_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
         if let Some(id) = self.rngchk_8 {
             return id;
         }
+        let _ = self.rngchk_8_slot();
         let id = llssa.add_function("__rngchk_8".to_string());
         self.rngchk_8 = Some(id);
         id
@@ -243,6 +276,7 @@ impl LookupFunctions {
         if let Some(id) = self.drngchk_8_call {
             return id;
         }
+        let _ = self.rngchk_8_slot();
         let id = llssa.add_function("__drngchk_8_ad_call".to_string());
         self.drngchk_8_call = Some(id);
         id
@@ -2051,18 +2085,29 @@ fn generate_all_lookup_functions(
     ad_fns: &mut AdFunctions,
 ) {
     if let Some(id) = lookup_fns.rngchk_8 {
-        let func = generate_rngchk_8_function();
+        let slot = lookup_fns
+            .rngchk_8_slot
+            .expect("rangecheck-8 helper id registered without a slot assignment");
+        let func = generate_rngchk_8_function(slot);
         let _old = llssa.take_function(id);
         llssa.put_function(id, func);
     }
 
     if let Some(call_id) = lookup_fns.drngchk_8_call {
+        let rngchk_8_slot = lookup_fns
+            .rngchk_8_slot
+            .expect("rangecheck-8 AD helper id registered without a slot assignment");
         let (witness_layout, constraints_layout) =
             layout.expect("R1CS layout required to generate AD rangecheck-8 helper");
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
-        let call_fn =
-            generate_drngchk_8_ad_call(witness_layout, constraints_layout, bump_db_id, bump_dc_id);
+        let call_fn = generate_drngchk_8_ad_call(
+            rngchk_8_slot,
+            witness_layout,
+            constraints_layout,
+            bump_db_id,
+            bump_dc_id,
+        );
         let _old = llssa.take_function(call_id);
         llssa.put_function(call_id, call_fn);
     }
@@ -2113,16 +2158,45 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
     e.ll_store(cursor_slot, next);
 }
 
+/// Pointer to the start of the witgen VM struct's table registry slot at
+/// the given compile-time `slot` index. Subsequent field reads go through
+/// `struct_field_ptr(slot_ptr, table_info_slot(), TABLE_INFO_*)`.
+fn witgen_table_slot_ptr(e: &mut LLBlockEmitter<'_>, slot: u32) -> ValueId {
+    let arr_base = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_TABLES_REGISTRY);
+    let idx = e.int_const(32, slot as u64);
+    e.array_elem_ptr(arr_base, LLStruct::table_info_slot(), idx)
+}
+
+fn ad_table_slot_ptr(e: &mut LLBlockEmitter<'_>, slot: u32) -> ValueId {
+    let arr_base = e.ad_vm_field_ptr(LLStruct::AD_VM_TABLES_REGISTRY);
+    let idx = e.int_const(32, slot as u64);
+    e.array_elem_ptr(arr_base, LLStruct::table_info_slot(), idx)
+}
+
+/// GEP a field within a `TableInfoSlot` (already-pointed-to). Wraps the
+/// `struct_field_ptr` boilerplate so call sites read as
+/// `table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_OCCUPANCY)`.
+fn table_info_field_ptr(
+    e: &mut LLBlockEmitter<'_>,
+    slot_ptr: ValueId,
+    field: usize,
+) -> ValueId {
+    e.struct_field_ptr(slot_ptr, LLStruct::table_info_slot(), field)
+}
+
 /// Generate __rngchk_8(val: FieldElem, flag: FieldElem):
 ///
 /// Emits one entry into the LogUp lookup argument for the 8-bit rangecheck
 /// table. Extracts the raw low u64 limb of both `val` and `flag`, asserts
-/// upper limbs are zero and `val < 256`, then on the *first* call snapshots
-/// the rangecheck-8 table region by claiming the next 256 multiplicities
-/// slots and the next free table id; on every call (first and subsequent)
-/// bumps the multiplicity slot for the indexed key by `flag_u64`, and writes
-/// three raw u64 tape entries (table_id, key, flag) into the forward lookup
-/// tape.
+/// upper limbs are zero and `val < 256`, then checks the witgen VM's table
+/// registry at this kind's `slot`: if `tables_occupancy[slot] == 0`, claims
+/// the next free table id by snapshotting `mults_cursor` into
+/// `tables_mults_base[slot]` and writing `tables_len + 1` into
+/// `tables_occupancy[slot]` (so a real id of 0 stays distinguishable from
+/// "unclaimed"), then bumps `mults_cursor` and `tables_len`. On every call
+/// — first and subsequent — bumps the multiplicity slot at the snapshot's
+/// `mults_base[key]` by `flag_u64` and writes three raw u64 tape entries
+/// `(table_id, key, flag)` into the forward lookup tape.
 ///
 /// Mirrors `rngchk_8_field` in `vm/src/bytecode.rs`: the table id and
 /// multiplicities-base pointer come from runtime cursors, not compile-time
@@ -2133,7 +2207,7 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
 /// Phase 2 — which runs on the host after WASM returns — fixes the raw-u64
 /// multiplicity slots into Montgomery form and materializes the per-slot
 /// inverses + sum constraint.
-fn generate_rngchk_8_function() -> LLFunction {
+fn generate_rngchk_8_function(slot: u32) -> LLFunction {
     let mut func = new_ll_function("__rngchk_8".to_string());
     let entry = func.get_entry_id();
 
@@ -2157,63 +2231,82 @@ fn generate_rngchk_8_function() -> LLFunction {
             assert(&mut e, ok);
         }
 
-        // First-use check: sentinel `u32::MAX` in `rngchk_8_table_idx` means
-        // "table not yet allocated", just like `vm.rgchk_8.is_none()` in the
-        // VM. Both branches return (mults_base, table_idx_i32), so the merge
-        // block carries the per-table snapshot used for the per-call work.
-        let snap_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_TABLE_IDX);
-        let snap_idx = e.ll_load(snap_idx_slot, LLType::i32());
-        let unalloc = e.int_const(32, WITGEN_RNGCHK_8_UNALLOCATED as u64);
-        let is_unalloc = e.int_eq(snap_idx, unalloc);
+        // First-use check: registry slot is "occupied" iff
+        // `slot.occupancy != 0`. On first use we claim the slot, populating
+        // the full TableInfoSlot from runtime cursors and bumping each
+        // cursor by this kind's footprint. Mirrors the
+        // `vm.rgchk_8.is_none()` branch in `rngchk_8_field`. Both branches
+        // return (mults_base, table_idx_i32) for the per-call work below.
+        //
+        // Static metadata for rangecheck-8: length=256, num_indices=1,
+        // num_values=0 (width-1 table; Phase 2 dispatches on num_values).
+        // Constraints footprint = 256 + 1 = 257 (sum constraint).
+        let slot_ptr = witgen_table_slot_ptr(&mut e, slot);
+        let occ_ptr = table_info_field_ptr(&mut e, slot_ptr, LLStruct::TABLE_INFO_OCCUPANCY);
+        let occ = e.ll_load(occ_ptr, LLType::i32());
+        let zero_i32 = e.int_const(32, 0);
+        let is_unalloc = e.int_eq(occ, zero_i32);
         let merge = e.build_if_else(
             is_unalloc,
             vec![LLType::Ptr, LLType::Int(32)],
             |e| {
-                // First use: snapshot the current dynamic table state, then
-                // bump each cursor by rangecheck-8's footprint. This mirrors
-                // the interpreter's `rngchk_8_field` first-call branch.
                 let mults_cursor_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_MULTS_CURSOR);
                 let mults_base = e.ll_load(mults_cursor_slot, LLType::Ptr);
-                let next_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_NEXT_TABLE_IDX);
-                let table_idx = e.ll_load(next_idx_slot, LLType::i32());
-
-                // Snapshot.
-                let snap_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_MULTS_BASE);
-                e.ll_store(snap_base_slot, mults_base);
-                let cnst_tables_slot =
+                let len_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_TABLES_LEN);
+                let table_idx = e.ll_load(len_slot, LLType::i32());
+                let cnst_cursor_slot =
                     e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_CURRENT_CNST_TABLES_OFF);
-                let cnst_tables_off = e.ll_load(cnst_tables_slot, LLType::i32());
-                let snap_cnst_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_CNST_OFF);
-                e.ll_store(snap_cnst_slot, cnst_tables_off);
-                let wit_tables_slot =
+                let inv_cnst_off = e.ll_load(cnst_cursor_slot, LLType::i32());
+                let wit_cursor_slot =
                     e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_CURRENT_WIT_TABLES_OFF);
-                let wit_tables_off = e.ll_load(wit_tables_slot, LLType::i32());
-                let snap_wit_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_WIT_OFF);
-                e.ll_store(snap_wit_slot, wit_tables_off);
-                let snap_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_TABLE_IDX);
-                e.ll_store(snap_idx_slot, table_idx);
+                let inv_wit_off = e.ll_load(wit_cursor_slot, LLType::i32());
 
-                // Bump cursors.
+                // Populate the registry slot.
+                let slot_ptr = witgen_table_slot_ptr(e, slot);
+                let one_i32 = e.int_const(32, 1);
                 let bump_256 = e.int_const(32, 256);
+                let bump_257 = e.int_const(32, 257);
+                let zero_i32 = e.int_const(32, 0);
+                let table_info_writes = [
+                    (LLStruct::TABLE_INFO_TABLE_IDX, table_idx),
+                    (LLStruct::TABLE_INFO_INV_CNST_OFF, inv_cnst_off),
+                    (LLStruct::TABLE_INFO_INV_WIT_OFF, inv_wit_off),
+                    (LLStruct::TABLE_INFO_NUM_INDICES, one_i32),
+                    (LLStruct::TABLE_INFO_NUM_VALUES, zero_i32),
+                    (LLStruct::TABLE_INFO_LENGTH, bump_256),
+                ];
+                for (field, value) in table_info_writes {
+                    let p = table_info_field_ptr(e, slot_ptr, field);
+                    e.ll_store(p, value);
+                }
+                let mults_p = table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_MULTS_BASE);
+                e.ll_store(mults_p, mults_base);
+                // Mark occupied last so a partial write can never be read
+                // as ready by a (hypothetical) reentrant call.
+                let occ_p = table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_OCCUPANCY);
+                e.ll_store(occ_p, one_i32);
+
+                // Bump cursors by this kind's footprint.
                 let next_mults = e.array_elem_ptr(mults_base, LLStruct::field_elem(), bump_256);
                 e.ll_store(mults_cursor_slot, next_mults);
-                let one_i32 = e.int_const(32, 1);
-                let next_idx = e.int_arith(IntArithOp::Add, table_idx, one_i32);
-                e.ll_store(next_idx_slot, next_idx);
-                let bump_257 = e.int_const(32, 257);
-                let next_cnst_tables = e.int_arith(IntArithOp::Add, cnst_tables_off, bump_257);
-                e.ll_store(cnst_tables_slot, next_cnst_tables);
-                let next_wit_tables = e.int_arith(IntArithOp::Add, wit_tables_off, bump_256);
-                e.ll_store(wit_tables_slot, next_wit_tables);
+                let next_len = e.int_arith(IntArithOp::Add, table_idx, one_i32);
+                e.ll_store(len_slot, next_len);
+                let next_cnst = e.int_arith(IntArithOp::Add, inv_cnst_off, bump_257);
+                e.ll_store(cnst_cursor_slot, next_cnst);
+                let next_wit = e.int_arith(IntArithOp::Add, inv_wit_off, bump_256);
+                e.ll_store(wit_cursor_slot, next_wit);
 
                 vec![mults_base, table_idx]
             },
             |e| {
-                // Already allocated — reload the snapshot.
-                let snap_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_MULTS_BASE);
-                let mults_base = e.ll_load(snap_base_slot, LLType::Ptr);
-                let snap_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_TABLE_IDX);
-                let table_idx = e.ll_load(snap_idx_slot, LLType::i32());
+                // Already claimed — reload the per-call fields.
+                let slot_ptr = witgen_table_slot_ptr(e, slot);
+                let mults_p =
+                    table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_MULTS_BASE);
+                let mults_base = e.ll_load(mults_p, LLType::Ptr);
+                let idx_p =
+                    table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_TABLE_IDX);
+                let table_idx = e.ll_load(idx_p, LLType::i32());
                 vec![mults_base, table_idx]
             },
         );
@@ -2275,22 +2368,24 @@ fn ad_read_coeff_at_dyn(e: &mut LLBlockEmitter<'_>, offset_i32: ValueId) -> Valu
     e.ll_load(slot, LLType::Struct(LLStruct::field_elem()))
 }
 
-/// Emit the per-element AD bumps that allocate the rangecheck-8 table region.
+/// Emit the per-element AD bumps that allocate the rangecheck-8 table region
+/// at the kind's compile-time-assigned `slot`.
 ///
 /// Mirrors the first-call branch of `drngchk_8_field` in `vm/src/bytecode.rs`:
 /// snapshots the three table-region cursors out of the AD VM struct, advances
 /// them by the rangecheck-8 footprint (256 / 256 / 257), and runs the loop
 /// that bumps `out_da`, `out_db`, `out_dc` for each of the 256 entries plus
-/// the post-loop `out_db[0] += inv_sum_coeff`. Stores the snapshot of
-/// `inv_cnst_off` into `AD_VM_RNGCHK_8_INV_CNST_OFF` so subsequent calls find
-/// the same region; returns `inv_cnst_off` so the caller can immediately read
-/// `inv_sum_coeff` from it without reloading.
+/// the post-loop `out_db[0] += inv_sum_coeff`. Writes
+/// `tables_inv_cnst_off[slot] = inv_cnst_off` and `tables_occupancy[slot] = 1`
+/// so subsequent calls find the same region. Returns `inv_cnst_off` so the
+/// caller can immediately read `inv_sum_coeff` from it without reloading.
 ///
 /// Reads `logup_challenge_off` from `witness_layout` because it's a structural
 /// constant of the layout (always at `challenges_start`), not a
 /// dynamically-allocated region.
 fn emit_rngchk_8_ad_init_body(
     e: &mut LLBlockEmitter<'_>,
+    slot: u32,
     witness_layout: WitnessLayout,
 ) -> ValueId {
     // Snapshot the three table-region cursors. These are the AD analogue of
@@ -2317,9 +2412,30 @@ fn emit_rngchk_8_ad_init_body(
     let next_mults = e.int_arith(IntArithOp::Add, mults_wit_off, bump_256);
     e.ll_store(wit_mults_slot, next_mults);
 
-    // Mark the rangecheck-8 table as allocated by stashing its inv_cnst_off.
-    let snap_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_RNGCHK_8_INV_CNST_OFF);
-    e.ll_store(snap_slot, inv_cnst_off);
+    // Populate the registry slot. The AD per-call body only needs
+    // `inv_cnst_off`, but populating the rest mirrors the VM's full
+    // `TableInfo` so the slot's contents are interpretable from the host
+    // (or from a future helper) without per-kind knowledge.
+    let slot_ptr = ad_table_slot_ptr(e, slot);
+    let one_i32 = e.int_const(32, 1);
+    let zero_i32 = e.int_const(32, 0);
+    let len_const = e.int_const(32, 256);
+    let table_idx_unused = zero_i32; // AD has no separate table-id concept
+    let table_info_writes = [
+        (LLStruct::TABLE_INFO_TABLE_IDX, table_idx_unused),
+        (LLStruct::TABLE_INFO_INV_CNST_OFF, inv_cnst_off),
+        (LLStruct::TABLE_INFO_INV_WIT_OFF, inv_wit_off),
+        (LLStruct::TABLE_INFO_NUM_INDICES, one_i32),
+        (LLStruct::TABLE_INFO_NUM_VALUES, zero_i32),
+        (LLStruct::TABLE_INFO_LENGTH, len_const),
+    ];
+    for (field, value) in table_info_writes {
+        let p = table_info_field_ptr(e, slot_ptr, field);
+        e.ll_store(p, value);
+    }
+    // Mark occupied last.
+    let occ_p = table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_OCCUPANCY);
+    e.ll_store(occ_p, one_i32);
 
     // inv_sum_coeff sits at the sum-constraint AD coefficient (one past the
     // 256 per-element coefficients for this table).
@@ -2372,24 +2488,24 @@ fn emit_rngchk_8_ad_init_body(
 
 /// Generate __drngchk_8_ad_call(val: AdNode*, flag: AdNode*):
 ///
-/// On first call (sentinel `u32::MAX` in `AD_VM_RNGCHK_8_INV_CNST_OFF`)
-/// allocates the rangecheck-8 table region from the AD VM cursors and runs
-/// the per-element init bumps. On every call (first and subsequent) does the
-/// per-lookup AD work: reads `inv_sum_coeff` and `inv_coeff`, allocates the
-/// next lookup-witness offset via `AdCurrentLookupWitOff`, and bumps:
+/// First call (registry slot's occupancy still 0) allocates the rangecheck-8
+/// table region from the AD VM cursors and runs the per-element init bumps.
+/// On every call (first and subsequent) does the per-lookup AD work: reads
+/// `inv_sum_coeff` and `inv_coeff`, allocates the next lookup-witness
+/// offset via `AdCurrentLookupWitOff`, and bumps:
 ///   out_dc[inv_wit_off] += inv_sum_coeff
 ///   out_da[inv_wit_off] += inv_coeff
 ///   out_db[logup_challenge_off] += inv_coeff
 ///   val.bump_db(-inv_coeff)
 ///   flag.bump_dc(inv_coeff)
 ///
-/// Matches `drngchk_8_field` in `vm/src/bytecode.rs` end-to-end (both the
-/// first-call init branch and the always-run tail). The init branch reads
-/// the table region's start from runtime cursors rather than baking
-/// `tables_data_start` etc. as constants, so adding other lookup kinds (which
-/// will land their tables before or after this one) doesn't break the
-/// rangecheck-8 path.
+/// Matches `drngchk_8_field` in `vm/src/bytecode.rs` end-to-end. The init
+/// branch reads the table region's start from runtime cursors and the per-
+/// kind state from a registry slot rather than baking `tables_data_start`
+/// or per-kind sentinel field names, so adding other lookup kinds is a
+/// matter of giving them a different slot index.
 fn generate_drngchk_8_ad_call(
+    slot: u32,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     bump_db_fn: FunctionId,
@@ -2403,26 +2519,27 @@ fn generate_drngchk_8_ad_call(
         let val_ptr = e.add_parameter(LLType::Ptr);
         let flag_ptr = e.add_parameter(LLType::Ptr);
 
-        // First-use check: sentinel `u32::MAX` means "table not yet
-        // allocated", just like `vm.rgchk_8.is_none()` in the VM. After the
-        // if/else both arms have stored a real `inv_cnst_off` into
-        // `AD_VM_RNGCHK_8_INV_CNST_OFF`, so subsequent calls take the cheap
-        // else branch.
-        let snap_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_RNGCHK_8_INV_CNST_OFF);
-        let snap = e.ll_load(snap_slot, LLType::i32());
-        let unalloc = e.int_const(32, AD_RNGCHK_8_UNALLOCATED as u64);
-        let is_unalloc = e.int_eq(snap, unalloc);
+        // First-use check: registry slot occupancy `0` means
+        // "not yet allocated", just like `vm.rgchk_8.is_none()` in the VM.
+        // The init branch claims the slot and stores `inv_cnst_off`; both
+        // branches reach the merge with a valid `inv_cnst_off`.
+        let slot_ptr = ad_table_slot_ptr(&mut e, slot);
+        let occ_ptr = table_info_field_ptr(&mut e, slot_ptr, LLStruct::TABLE_INFO_OCCUPANCY);
+        let occ = e.ll_load(occ_ptr, LLType::i32());
+        let zero_i32 = e.int_const(32, 0);
+        let is_unalloc = e.int_eq(occ, zero_i32);
         let merge = e.build_if_else(
             is_unalloc,
             vec![LLType::Int(32)],
             |e| {
-                let inv_cnst_off = emit_rngchk_8_ad_init_body(e, witness_layout);
+                let inv_cnst_off = emit_rngchk_8_ad_init_body(e, slot, witness_layout);
                 vec![inv_cnst_off]
             },
             |e| {
-                // Table already allocated — just reload the snapshot.
-                let snap_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_RNGCHK_8_INV_CNST_OFF);
-                let inv_cnst_off = e.ll_load(snap_slot, LLType::i32());
+                // Slot already claimed — just reload the snapshot.
+                let slot_ptr = ad_table_slot_ptr(e, slot);
+                let p = table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_INV_CNST_OFF);
+                let inv_cnst_off = e.ll_load(p, LLType::i32());
                 vec![inv_cnst_off]
             },
         );
