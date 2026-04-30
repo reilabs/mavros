@@ -10,8 +10,11 @@ use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
 use mavros::{
-    Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
-    vm::interpreter,
+    Project, abi_helpers,
+    compiler::Field,
+    compiler::r1cs_gen::R1CS,
+    driver::Driver,
+    vm::{bytecode::TableInfo, interpreter},
 };
 use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
@@ -415,9 +418,10 @@ fn read_table_info_slot(
     memory: &Memory,
     store: impl wasmtime::AsContext,
     tables_ptr: u32,
-    witness_ptr: u32,
+    wasm_witness_ptr: u32,
+    host_witness_base: *mut Field,
     table_idx: u32,
-) -> RuntimeTableInfo {
+) -> (usize, TableInfo) {
     let slot_base = tables_ptr + table_idx * TABLE_INFO_SLOT_SIZE;
     let mults_base =
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_MULTS_BASE_PTR_OFFSET);
@@ -430,33 +434,20 @@ fn read_table_info_slot(
     let num_values = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_VALUES_OFFSET);
     let length = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_LENGTH_OFFSET);
     let mults_off = mults_base
-        .checked_sub(witness_ptr)
+        .checked_sub(wasm_witness_ptr)
         .expect("table multiplicities pointer is before witness base")
         / FIELD_SIZE as u32;
-    RuntimeTableInfo {
-        table_idx: table_idx as usize,
-        multiplicities_wit_off: mults_off as usize,
-        elem_inverses_constraint_section_offset: inv_cnst_off as usize,
-        elem_inverses_witness_section_offset: inv_wit_off as usize,
-        num_indices: num_indices as usize,
-        num_values: num_values as usize,
-        length: length as usize,
-    }
-}
-
-/// Decoded contents of one occupied registry slot, in host-friendly types.
-/// Mirrors `vm::bytecode::TableInfo` but with `multiplicities_wit_off`
-/// (an index into `out_wit_pre_comm`) instead of a raw pointer, so it
-/// survives the wasmtime → host buffer copy unchanged.
-#[derive(Clone, Copy)]
-struct RuntimeTableInfo {
-    table_idx: usize,
-    multiplicities_wit_off: usize,
-    elem_inverses_constraint_section_offset: usize,
-    elem_inverses_witness_section_offset: usize,
-    num_indices: usize,
-    num_values: usize,
-    length: usize,
+    (
+        mults_off as usize,
+        TableInfo {
+            multiplicities_wit: host_witness_base.wrapping_add(mults_off as usize),
+            num_indices: num_indices as usize,
+            num_values: num_values as usize,
+            length: length as usize,
+            elem_inverses_witness_section_offset: inv_wit_off as usize,
+            elem_inverses_constraint_section_offset: inv_cnst_off as usize,
+        },
+    )
 }
 
 fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> u32 {
@@ -636,28 +627,6 @@ fn run_wasm(
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 
-    // Walk the registry in table-id order. The host does not name any
-    // specific lookup kind; each runtime-claimed slot describes itself fully
-    // via its `TableInfoSlot` fields.
-    let tables_len =
-        read_u32_from_memory(&memory, &store, vm_struct_ptr + WITGEN_TABLES_LEN_OFFSET) as usize;
-    assert!(
-        tables_len <= tables_cap as usize,
-        "WASM `tables_len` ({}) exceeds registry capacity ({})",
-        tables_len,
-        tables_cap
-    );
-    let mut runtime_tables: Vec<RuntimeTableInfo> = Vec::with_capacity(tables_len);
-    for table_idx in 0..tables_len as u32 {
-        runtime_tables.push(read_table_info_slot(
-            &memory,
-            &store,
-            tables_ptr,
-            witness_ptr,
-            table_idx,
-        ));
-    }
-
     // Read heap residual from the __live_bytes counter in wasm-runtime
     let live_bytes_fn = instance
         .get_func(&mut store, "__live_bytes")
@@ -699,8 +668,33 @@ fn run_wasm(
 
     // Split witness into pre-commit and post-commit sections
     let pre_comm_count = r1cs.witness_layout.pre_commitment_size();
-    let out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
+    let mut out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
     let out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
+
+    // Walk the registry in table-id order. The host does not name any
+    // specific lookup kind; each runtime-claimed slot describes itself fully
+    // via its `TableInfoSlot` fields. `TableInfo` stores a host pointer, so
+    // build it only after `out_wit_pre_comm` exists.
+    let tables_len =
+        read_u32_from_memory(&memory, &store, vm_struct_ptr + WITGEN_TABLES_LEN_OFFSET) as usize;
+    assert!(
+        tables_len <= tables_cap as usize,
+        "WASM `tables_len` ({}) exceeds registry capacity ({})",
+        tables_len,
+        tables_cap
+    );
+    let host_witness_base = out_wit_pre_comm.as_mut_ptr();
+    let mut runtime_tables: Vec<(usize, TableInfo)> = Vec::with_capacity(tables_len);
+    for table_idx in 0..tables_len as u32 {
+        runtime_tables.push(read_table_info_slot(
+            &memory,
+            &store,
+            tables_ptr,
+            witness_ptr,
+            host_witness_base,
+            table_idx,
+        ));
+    }
 
     let (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c) =
         if r1cs.witness_layout.challenges_size > 0 {
@@ -741,26 +735,23 @@ fn witgen_phase2(
     out_a: Vec<Field>,
     out_b: Vec<Field>,
     out_c: Vec<Field>,
-    runtime_tables: Vec<RuntimeTableInfo>,
+    runtime_tables: Vec<(usize, TableInfo)>,
 ) -> interpreter::WitgenResult {
-    use mavros::vm::bytecode::{AllocationInstrumenter, TableInfo};
-
-    let witness_layout = &r1cs.witness_layout;
+    use mavros::vm::bytecode::AllocationInstrumenter;
 
     // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
     // Walk the runtime-claimed table list rather than scanning the entire
     // multiplicities region: the host doesn't know each table's length
     // statically, only that the runtime registry recorded `length` for
     // every claimed slot.
-    for tbl in &runtime_tables {
-        let lo = tbl.multiplicities_wit_off;
+    for (multiplicities_wit_off, tbl) in &runtime_tables {
+        let lo = *multiplicities_wit_off;
         let hi = lo + tbl.length;
         for i in lo..hi {
             out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
         }
     }
 
-    let witness_base = out_wit_pre_comm.as_mut_ptr();
     let tables = if r1cs.constraints_layout.lookups_data_size == 0 {
         vec![]
     } else {
@@ -769,26 +760,7 @@ fn witgen_phase2(
             "WASM emitted lookup constraints but no tables were claimed at runtime"
         );
 
-        // The runtime claims tables in dynamic-execution order, assigning
-        // ids `0..tables_len`. After sorting by `table_idx` the indices
-        // are dense, so we can drop them straight into a Vec.
-        let mut tables = Vec::with_capacity(runtime_tables.len());
-        for (expected_idx, t) in runtime_tables.iter().enumerate() {
-            assert_eq!(
-                t.table_idx, expected_idx,
-                "table ids are not 0..tables_len (got {} at position {})",
-                t.table_idx, expected_idx
-            );
-            tables.push(TableInfo {
-                multiplicities_wit: witness_base.wrapping_add(t.multiplicities_wit_off),
-                num_indices: t.num_indices,
-                num_values: t.num_values,
-                length: t.length,
-                elem_inverses_witness_section_offset: t.elem_inverses_witness_section_offset,
-                elem_inverses_constraint_section_offset: t.elem_inverses_constraint_section_offset,
-            });
-        }
-        tables
+        runtime_tables.into_iter().map(|(_, table)| table).collect()
     };
 
     let phase1 = interpreter::Phase1Result {
