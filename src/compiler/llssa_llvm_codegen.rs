@@ -383,7 +383,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         if let Some((vm_param, _)) = parameters.next() {
             self.value_map.insert(*vm_param, vm_ptr.into());
         }
-        let vm_type = self.convert_struct_type(&LLStruct::witgen_vm()).into_struct_type();
+        let vm_type = self
+            .convert_struct_type(&LLStruct::witgen_vm())
+            .into_struct_type();
         let input_slot = self
             .builder
             .build_struct_gep(

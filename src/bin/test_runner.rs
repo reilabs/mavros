@@ -14,11 +14,17 @@ use mavros::{
     vm::interpreter,
 };
 use mavros_wasm_layout::{
-    AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_LOOKUP_WIT_OFF_OFFSET,
-    AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET,
-    AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
-    WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
-    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_BASE_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
+    AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
+    AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
+    AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
+    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_RNGCHK_8_INV_CNST_OFF_OFFSET,
+    AD_RNGCHK_8_UNALLOCATED, AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET,
+    WITGEN_C_PTR_OFFSET, WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET,
+    WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET, WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET,
+    WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET,
+    WITGEN_NEXT_TABLE_IDX_OFFSET, WITGEN_RNGCHK_8_CNST_OFF_OFFSET,
+    WITGEN_RNGCHK_8_MULTS_BASE_PTR_OFFSET, WITGEN_RNGCHK_8_TABLE_IDX_OFFSET,
+    WITGEN_RNGCHK_8_UNALLOCATED, WITGEN_RNGCHK_8_WIT_OFF_OFFSET, WITGEN_VM_STRUCT_SIZE,
     WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
@@ -402,6 +408,20 @@ struct WasmResult {
     live_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+struct Rngchk8TableMeta {
+    table_idx: usize,
+    multiplicities_wit_off: usize,
+    elem_inverses_constraint_section_offset: usize,
+    elem_inverses_witness_section_offset: usize,
+}
+
+fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> u32 {
+    let data = memory.data(&store);
+    let offset = ptr as usize;
+    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
 /// Read a field element from WASM memory
 fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> Field {
     use ark_ff::BigInt;
@@ -500,7 +520,13 @@ fn run_wasm(
     }
 
     // Per-path offsets for lookup helpers to find their buffers.
-    let mults_base_ptr =
+    //
+    // `mults_cursor` is the *cursor* a first-use lookup snapshots into its
+    // per-table slot (mirroring VM `multiplicities_witness`); seeding it at
+    // `multiplicities_start` makes the very first table's snapshot land
+    // there, matching the VM's behavior exactly. Subsequent tables claim
+    // their slabs by bumping the cursor.
+    let mults_cursor_ptr =
         witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
     let lookups_a_cursor =
         a_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
@@ -508,6 +534,16 @@ fn run_wasm(
         b_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
     let lookups_c_cursor =
         c_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let current_cnst_tables_off = r1cs.constraints_layout.tables_data_start() as u32;
+    let current_wit_tables_off =
+        (r1cs.witness_layout.tables_data_start() - r1cs.witness_layout.challenges_start()) as u32;
+    // Sentinel state for the rangecheck-8 table: not yet allocated. The
+    // metadata snapshots are null/`u32::MAX` — first Lookup of this kind
+    // allocates from the cursors.
+    let rngchk_8_mults_base_unalloc: u32 = 0;
+    let rngchk_8_cnst_off_unalloc = WITGEN_RNGCHK_8_UNALLOCATED;
+    let rngchk_8_wit_off_unalloc = WITGEN_RNGCHK_8_UNALLOCATED;
+    let rngchk_8_table_idx_unalloc = WITGEN_RNGCHK_8_UNALLOCATED;
 
     // Initialize VM struct with buffer pointers
     {
@@ -517,20 +553,34 @@ fn run_wasm(
         let a = WITGEN_A_PTR_OFFSET as usize;
         let b = WITGEN_B_PTR_OFFSET as usize;
         let c = WITGEN_C_PTR_OFFSET as usize;
-        let mb = WITGEN_MULTS_BASE_PTR_OFFSET as usize;
+        let mc = WITGEN_MULTS_CURSOR_PTR_OFFSET as usize;
         let la = WITGEN_LOOKUPS_A_PTR_OFFSET as usize;
         let lb = WITGEN_LOOKUPS_B_PTR_OFFSET as usize;
         let lc = WITGEN_LOOKUPS_C_PTR_OFFSET as usize;
         let inputs = WITGEN_INPUTS_PTR_OFFSET as usize;
+        let nt = WITGEN_NEXT_TABLE_IDX_OFFSET as usize;
+        let cct = WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
+        let cwt = WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
+        let r8c = WITGEN_RNGCHK_8_CNST_OFF_OFFSET as usize;
+        let r8w = WITGEN_RNGCHK_8_WIT_OFF_OFFSET as usize;
+        let r8m = WITGEN_RNGCHK_8_MULTS_BASE_PTR_OFFSET as usize;
+        let r8t = WITGEN_RNGCHK_8_TABLE_IDX_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + c..off + c + 4].copy_from_slice(&c_ptr.to_le_bytes());
-        data[off + mb..off + mb + 4].copy_from_slice(&mults_base_ptr.to_le_bytes());
+        data[off + mc..off + mc + 4].copy_from_slice(&mults_cursor_ptr.to_le_bytes());
         data[off + la..off + la + 4].copy_from_slice(&lookups_a_cursor.to_le_bytes());
         data[off + lb..off + lb + 4].copy_from_slice(&lookups_b_cursor.to_le_bytes());
         data[off + lc..off + lc + 4].copy_from_slice(&lookups_c_cursor.to_le_bytes());
         data[off + inputs..off + inputs + 4].copy_from_slice(&inputs_ptr.to_le_bytes());
+        data[off + nt..off + nt + 4].copy_from_slice(&0u32.to_le_bytes());
+        data[off + cct..off + cct + 4].copy_from_slice(&current_cnst_tables_off.to_le_bytes());
+        data[off + cwt..off + cwt + 4].copy_from_slice(&current_wit_tables_off.to_le_bytes());
+        data[off + r8c..off + r8c + 4].copy_from_slice(&rngchk_8_cnst_off_unalloc.to_le_bytes());
+        data[off + r8w..off + r8w + 4].copy_from_slice(&rngchk_8_wit_off_unalloc.to_le_bytes());
+        data[off + r8m..off + r8m + 4].copy_from_slice(&rngchk_8_mults_base_unalloc.to_le_bytes());
+        data[off + r8t..off + r8t + 4].copy_from_slice(&rngchk_8_table_idx_unalloc.to_le_bytes());
     }
 
     for (i, field) in input_fields.iter().enumerate() {
@@ -551,6 +601,39 @@ fn run_wasm(
     // Call the function
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
+
+    let rngchk_8_table_idx = read_u32_from_memory(
+        &memory,
+        &store,
+        vm_struct_ptr + WITGEN_RNGCHK_8_TABLE_IDX_OFFSET,
+    );
+    let rngchk_8_meta = if rngchk_8_table_idx == WITGEN_RNGCHK_8_UNALLOCATED {
+        None
+    } else {
+        let mults_base = read_u32_from_memory(
+            &memory,
+            &store,
+            vm_struct_ptr + WITGEN_RNGCHK_8_MULTS_BASE_PTR_OFFSET,
+        );
+        let mults_off = mults_base
+            .checked_sub(witness_ptr)
+            .expect("rangecheck-8 multiplicities pointer is before witness base")
+            / FIELD_SIZE as u32;
+        Some(Rngchk8TableMeta {
+            table_idx: rngchk_8_table_idx as usize,
+            multiplicities_wit_off: mults_off as usize,
+            elem_inverses_constraint_section_offset: read_u32_from_memory(
+                &memory,
+                &store,
+                vm_struct_ptr + WITGEN_RNGCHK_8_CNST_OFF_OFFSET,
+            ) as usize,
+            elem_inverses_witness_section_offset: read_u32_from_memory(
+                &memory,
+                &store,
+                vm_struct_ptr + WITGEN_RNGCHK_8_WIT_OFF_OFFSET,
+            ) as usize,
+        })
+    };
 
     // Read heap residual from the __live_bytes counter in wasm-runtime
     let live_bytes_fn = instance
@@ -605,6 +688,7 @@ fn run_wasm(
                 out_a,
                 out_b,
                 out_c,
+                rngchk_8_meta,
             );
             (
                 result.out_wit_pre_comm,
@@ -634,6 +718,7 @@ fn witgen_phase2(
     out_a: Vec<Field>,
     out_b: Vec<Field>,
     out_c: Vec<Field>,
+    rngchk_8_meta: Option<Rngchk8TableMeta>,
 ) -> interpreter::WitgenResult {
     use mavros::vm::bytecode::{AllocationInstrumenter, TableInfo};
 
@@ -643,42 +728,69 @@ fn witgen_phase2(
         witness_layout.challenges_size, 1,
         "WASM witgen phase 2 currently expects only the rangecheck-8 alpha challenge"
     );
-    assert_eq!(
-        witness_layout.multiplicities_size, 256,
-        "WASM witgen phase 2 currently reconstructs only the rangecheck-8 table metadata"
-    );
-    assert_eq!(
-        witness_layout.tables_data_size, 256,
-        "WASM witgen phase 2 currently expects 256 rangecheck-8 table witness slots"
-    );
-    assert_eq!(
-        r1cs.constraints_layout.tables_data_size, 257,
-        "WASM witgen phase 2 currently expects 256 rangecheck-8 table constraints plus one sum"
-    );
 
     // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
     }
 
-    let multiplicities_ptr = out_wit_pre_comm
-        .as_mut_ptr()
-        .wrapping_add(witness_layout.multiplicities_start());
+    let witness_base = out_wit_pre_comm.as_mut_ptr();
+    let tables = if r1cs.constraints_layout.lookups_data_size == 0 {
+        vec![]
+    } else {
+        let meta = rngchk_8_meta
+            .expect("WASM emitted lookup constraints but rangecheck-8 table was not allocated");
+        assert!(
+            meta.multiplicities_wit_off + 256 <= witness_layout.multiplicities_end(),
+            "rangecheck-8 multiplicities allocation is outside the witness multiplicities section"
+        );
+        assert!(
+            meta.elem_inverses_witness_section_offset + 256
+                <= witness_layout.lookups_data_start() - witness_layout.challenges_start(),
+            "rangecheck-8 witness-table allocation is outside the post-commitment table section"
+        );
+        assert!(
+            meta.elem_inverses_constraint_section_offset + 257
+                <= r1cs.constraints_layout.lookups_data_start(),
+            "rangecheck-8 constraint-table allocation overlaps the lookup section"
+        );
+
+        for i in 0..r1cs.constraints_layout.lookups_data_size {
+            let table_id = out_a[r1cs.constraints_layout.lookups_data_start() + i].0.0[0] as usize;
+            assert_eq!(
+                table_id, meta.table_idx,
+                "WASM witgen phase 2 only has metadata for rangecheck-8 table {}, but lookup tape references table {}",
+                meta.table_idx, table_id
+            );
+        }
+
+        let placeholder = TableInfo {
+            multiplicities_wit: witness_base,
+            num_indices: 1,
+            num_values: 0,
+            length: 0,
+            elem_inverses_witness_section_offset: 0,
+            elem_inverses_constraint_section_offset: r1cs.constraints_layout.tables_data_start(),
+        };
+        let mut tables = vec![placeholder; meta.table_idx + 1];
+        tables[meta.table_idx] = TableInfo {
+            multiplicities_wit: witness_base.wrapping_add(meta.multiplicities_wit_off),
+            num_indices: 1,
+            num_values: 0,
+            length: 256,
+            elem_inverses_witness_section_offset: meta.elem_inverses_witness_section_offset,
+            elem_inverses_constraint_section_offset: meta.elem_inverses_constraint_section_offset,
+        };
+        tables
+    };
+
     let phase1 = interpreter::Phase1Result {
         out_wit_pre_comm,
         out_wit_post_comm,
         out_a,
         out_b,
         out_c,
-        tables: vec![TableInfo {
-            multiplicities_wit: multiplicities_ptr,
-            num_indices: 1,
-            num_values: 0,
-            length: 256,
-            elem_inverses_witness_section_offset: witness_layout.tables_data_start()
-                - witness_layout.challenges_start(),
-            elem_inverses_constraint_section_offset: r1cs.constraints_layout.tables_data_start(),
-        }],
+        tables,
         instrumenter: AllocationInstrumenter::new(),
     };
 
@@ -792,6 +904,17 @@ fn run_ad_wasm(
     // AD lookups need an absolute base for random-access coefficient reads
     // and a fresh-witness counter seeded at the lookups-section start.
     let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
+    // Cursors for dynamically-allocated table regions. Each first-use lookup
+    // (e.g. the first rangecheck-8 DLookup) snapshots these into its table
+    // metadata and then advances them by its table's footprint — mirroring
+    // the VM's `current_*_tables_off` / `current_wit_multiplicities_off`. The
+    // AD-side rangecheck-8 helper also snapshots the offset into
+    // `rngchk_8_inv_cnst_off` (sentinel `u32::MAX` until first use) so
+    // subsequent calls reuse the same region.
+    let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
+    let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;
+    let wit_mults_start = r1cs.witness_layout.multiplicities_start() as u32;
+    let rngchk_8_unalloc = AD_RNGCHK_8_UNALLOCATED;
 
     // Initialize AD VM struct
     {
@@ -804,6 +927,10 @@ fn run_ad_wasm(
         let wit = AD_CURRENT_WIT_OFF_OFFSET as usize;
         let cbase = AD_COEFFS_BASE_PTR_OFFSET as usize;
         let lwit = AD_CURRENT_LOOKUP_WIT_OFF_OFFSET as usize;
+        let cct = AD_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
+        let cwt = AD_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
+        let cwm = AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET as usize;
+        let r8 = AD_RNGCHK_8_INV_CNST_OFF_OFFSET as usize;
         data[off + da..off + da + 4].copy_from_slice(&da_ptr.to_le_bytes());
         data[off + db..off + db + 4].copy_from_slice(&db_ptr.to_le_bytes());
         data[off + dc..off + dc + 4].copy_from_slice(&dc_ptr.to_le_bytes());
@@ -811,6 +938,10 @@ fn run_ad_wasm(
         data[off + wit..off + wit + 4].copy_from_slice(&0u32.to_le_bytes());
         data[off + cbase..off + cbase + 4].copy_from_slice(&coeffs_ptr.to_le_bytes());
         data[off + lwit..off + lwit + 4].copy_from_slice(&lookups_wit_start.to_le_bytes());
+        data[off + cct..off + cct + 4].copy_from_slice(&cnst_tables_start.to_le_bytes());
+        data[off + cwt..off + cwt + 4].copy_from_slice(&wit_tables_start.to_le_bytes());
+        data[off + cwm..off + cwm + 4].copy_from_slice(&wit_mults_start.to_le_bytes());
+        data[off + r8..off + r8 + 4].copy_from_slice(&rngchk_8_unalloc.to_le_bytes());
     }
 
     let func: wasmtime::Func = instance

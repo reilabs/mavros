@@ -3,8 +3,8 @@ use crate::compiler::{
     llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LLType},
     ssa::{
         BinaryArithOpKind, Block, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, Endianness,
-        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType,
-        SliceOpDir, Terminator, ValueId,
+        Function, FunctionId, Instruction, LookupTarget, MemOp, OpCode, Radix, SeqType, SliceOpDir,
+        Terminator, ValueId,
     },
 };
 

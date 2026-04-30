@@ -22,6 +22,7 @@ use crate::compiler::ssa::{
     ValueId,
 };
 use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
+use mavros_wasm_layout::{AD_RNGCHK_8_UNALLOCATED, WITGEN_RNGCHK_8_UNALLOCATED};
 
 // =============================================================================
 // Type helpers
@@ -211,8 +212,10 @@ impl AdFunctions {
 struct LookupFunctions {
     /// Forward-pass rangecheck-8 helper: `__rngchk_8(val, flag)`.
     rngchk_8: Option<FunctionId>,
-    /// AD-path rangecheck-8 helpers.
-    drngchk_8_init: Option<FunctionId>,
+    /// AD-path rangecheck-8 helper. Branches internally on the runtime
+    /// `rngchk_8_inv_cnst_off` sentinel: first call allocates the table region
+    /// from the AD VM cursors and runs the init body; subsequent calls reuse
+    /// the snapshot. Mirrors the VM's `drngchk_8_field` opcode.
     drngchk_8_call: Option<FunctionId>,
 }
 
@@ -220,7 +223,6 @@ impl LookupFunctions {
     fn new() -> Self {
         Self {
             rngchk_8: None,
-            drngchk_8_init: None,
             drngchk_8_call: None,
         }
     }
@@ -234,17 +236,16 @@ impl LookupFunctions {
         id
     }
 
-    /// Lazily register the pair of AD rangecheck-8 helpers (init runs once,
-    /// hoisted to main prologue; call runs per DLookup).
+    /// Lazily register the AD rangecheck-8 helper. Allocation of the table
+    /// region happens lazily inside the helper on first call, so there's no
+    /// separate init step or main-prologue hoist.
     fn get_drngchk_8_call_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
         if let Some(id) = self.drngchk_8_call {
             return id;
         }
-        let init = llssa.add_function("__drngchk_8_ad_init".to_string());
-        let call = llssa.add_function("__drngchk_8_ad_call".to_string());
-        self.drngchk_8_init = Some(init);
-        self.drngchk_8_call = Some(call);
-        call
+        let id = llssa.add_function("__drngchk_8_ad_call".to_string());
+        self.drngchk_8_call = Some(id);
+        id
     }
 }
 
@@ -338,12 +339,6 @@ fn lower_inner(
 
     // Fifth pass: generate lookup helper function bodies (needs layout).
     generate_all_lookup_functions(&mut llssa, &lookup_fns, layout, &mut ad_fns);
-
-    // Sixth pass: hoist AD init call into main prologue if needed.
-    if let Some(init_fn) = lookup_fns.drngchk_8_init {
-        let main_ll_id = llssa.get_main_id();
-        hoist_init_call_to_main_prologue(&mut llssa, main_ll_id, init_fn);
-    }
 
     llssa
 }
@@ -2061,13 +2056,9 @@ fn generate_all_lookup_functions(
         llssa.put_function(id, func);
     }
 
-    if let (Some(init_id), Some(call_id)) = (lookup_fns.drngchk_8_init, lookup_fns.drngchk_8_call) {
+    if let Some(call_id) = lookup_fns.drngchk_8_call {
         let (witness_layout, constraints_layout) =
-            layout.expect("R1CS layout required to generate AD rangecheck-8 helpers");
-        let init_fn = generate_drngchk_8_ad_init(witness_layout, constraints_layout);
-        let _old = llssa.take_function(init_id);
-        llssa.put_function(init_id, init_fn);
-
+            layout.expect("R1CS layout required to generate AD rangecheck-8 helper");
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
         let call_fn =
@@ -2126,9 +2117,18 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
 ///
 /// Emits one entry into the LogUp lookup argument for the 8-bit rangecheck
 /// table. Extracts the raw low u64 limb of both `val` and `flag`, asserts
-/// upper limbs are zero and `val < 256`, bumps the multiplicity slot for the
-/// indexed key by `flag_u64`, and writes three raw u64 tape entries
-/// (table_id=0, key, flag) into the forward lookup tape.
+/// upper limbs are zero and `val < 256`, then on the *first* call snapshots
+/// the rangecheck-8 table region by claiming the next 256 multiplicities
+/// slots and the next free table id; on every call (first and subsequent)
+/// bumps the multiplicity slot for the indexed key by `flag_u64`, and writes
+/// three raw u64 tape entries (table_id, key, flag) into the forward lookup
+/// tape.
+///
+/// Mirrors `rngchk_8_field` in `vm/src/bytecode.rs`: the table id and
+/// multiplicities-base pointer come from runtime cursors, not compile-time
+/// constants, so adding other lookup kinds (which will allocate their own
+/// table regions before or after this one) doesn't break the rangecheck-8
+/// path.
 ///
 /// Phase 2 — which runs on the host after WASM returns — fixes the raw-u64
 /// multiplicity slots into Montgomery form and materializes the per-slot
@@ -2157,25 +2157,83 @@ fn generate_rngchk_8_function() -> LLFunction {
             assert(&mut e, ok);
         }
 
-        // Bump: multiplicities[key].low_u64 += flag_u64
-        //
-        // Layout: WitgenMultsBase points at the absolute slot
-        // `mults_wit_start`, so we offset by `key` field-elements from it.
-        // `mults_wit_start` is baked into the host's VM-struct setup (via
-        // test_runner), not into this helper — the compiler just asks for the
-        // pointer the host prepared.
-        let mults_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_MULTS_BASE);
-        let mults_base = e.ll_load(mults_base_slot, LLType::Ptr);
+        // First-use check: sentinel `u32::MAX` in `rngchk_8_table_idx` means
+        // "table not yet allocated", just like `vm.rgchk_8.is_none()` in the
+        // VM. Both branches return (mults_base, table_idx_i32), so the merge
+        // block carries the per-table snapshot used for the per-call work.
+        let snap_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_TABLE_IDX);
+        let snap_idx = e.ll_load(snap_idx_slot, LLType::i32());
+        let unalloc = e.int_const(32, WITGEN_RNGCHK_8_UNALLOCATED as u64);
+        let is_unalloc = e.int_eq(snap_idx, unalloc);
+        let merge = e.build_if_else(
+            is_unalloc,
+            vec![LLType::Ptr, LLType::Int(32)],
+            |e| {
+                // First use: snapshot the current dynamic table state, then
+                // bump each cursor by rangecheck-8's footprint. This mirrors
+                // the interpreter's `rngchk_8_field` first-call branch.
+                let mults_cursor_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_MULTS_CURSOR);
+                let mults_base = e.ll_load(mults_cursor_slot, LLType::Ptr);
+                let next_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_NEXT_TABLE_IDX);
+                let table_idx = e.ll_load(next_idx_slot, LLType::i32());
+
+                // Snapshot.
+                let snap_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_MULTS_BASE);
+                e.ll_store(snap_base_slot, mults_base);
+                let cnst_tables_slot =
+                    e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_CURRENT_CNST_TABLES_OFF);
+                let cnst_tables_off = e.ll_load(cnst_tables_slot, LLType::i32());
+                let snap_cnst_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_CNST_OFF);
+                e.ll_store(snap_cnst_slot, cnst_tables_off);
+                let wit_tables_slot =
+                    e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_CURRENT_WIT_TABLES_OFF);
+                let wit_tables_off = e.ll_load(wit_tables_slot, LLType::i32());
+                let snap_wit_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_WIT_OFF);
+                e.ll_store(snap_wit_slot, wit_tables_off);
+                let snap_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_TABLE_IDX);
+                e.ll_store(snap_idx_slot, table_idx);
+
+                // Bump cursors.
+                let bump_256 = e.int_const(32, 256);
+                let next_mults = e.array_elem_ptr(mults_base, LLStruct::field_elem(), bump_256);
+                e.ll_store(mults_cursor_slot, next_mults);
+                let one_i32 = e.int_const(32, 1);
+                let next_idx = e.int_arith(IntArithOp::Add, table_idx, one_i32);
+                e.ll_store(next_idx_slot, next_idx);
+                let bump_257 = e.int_const(32, 257);
+                let next_cnst_tables = e.int_arith(IntArithOp::Add, cnst_tables_off, bump_257);
+                e.ll_store(cnst_tables_slot, next_cnst_tables);
+                let next_wit_tables = e.int_arith(IntArithOp::Add, wit_tables_off, bump_256);
+                e.ll_store(wit_tables_slot, next_wit_tables);
+
+                vec![mults_base, table_idx]
+            },
+            |e| {
+                // Already allocated — reload the snapshot.
+                let snap_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_MULTS_BASE);
+                let mults_base = e.ll_load(snap_base_slot, LLType::Ptr);
+                let snap_idx_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_RNGCHK_8_TABLE_IDX);
+                let table_idx = e.ll_load(snap_idx_slot, LLType::i32());
+                vec![mults_base, table_idx]
+            },
+        );
+        let mults_base = merge[0];
+        let table_idx_i32 = merge[1];
+
+        // Bump: multiplicities[key].low_u64 += flag_u64. `mults_base` is the
+        // snapshotted base for *this* table's slab, so we offset by `key`
+        // Field-elements from it.
         let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
         let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
         let old_low = e.ll_load(low_ptr, LLType::i64());
         let new_low = e.int_add(old_low, flag_u64);
         e.ll_store(low_ptr, new_low);
 
-        // Append one tape entry: (table_id=0, key, flag_u64) into (a, b, c).
-        // Rangecheck-8 is always table 0 since it's the only supported
-        // table in this PR.
-        let table_id = e.int_const(64, 0);
+        // Append one tape entry: (table_id, key, flag_u64) into (a, b, c).
+        // The table id is the snapshotted `vm.rgchk_8` analog — once a real
+        // value, since the merge-block parameters always carry an allocated
+        // snapshot. The tape stores u64s, so widen the i32 snapshot.
+        let table_id = e.zext(table_idx_i32, 64);
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, flag_u64);
@@ -2217,94 +2275,120 @@ fn ad_read_coeff_at_dyn(e: &mut LLBlockEmitter<'_>, offset_i32: ValueId) -> Valu
     e.ll_load(slot, LLType::Struct(LLStruct::field_elem()))
 }
 
-/// Generate __drngchk_8_ad_init():
+/// Emit the per-element AD bumps that allocate the rangecheck-8 table region.
 ///
-/// Runs once at the start of main (hoisted via `hoist_init_call_to_main_prologue`).
-/// For each i in 0..256 reads the corresponding AD coefficient (at
-/// `tables_cnst_start + i`, random-accessed via `AdCoeffsBase` so we don't
-/// clobber the main AdCoeffs cursor that `NextDCoeff` advances) and performs
-/// the fixed bumps that the LogUp rangecheck-8 constraints demand on
-/// `out_da`, `out_db`, `out_dc`.
+/// Mirrors the first-call branch of `drngchk_8_field` in `vm/src/bytecode.rs`:
+/// snapshots the three table-region cursors out of the AD VM struct, advances
+/// them by the rangecheck-8 footprint (256 / 256 / 257), and runs the loop
+/// that bumps `out_da`, `out_db`, `out_dc` for each of the 256 entries plus
+/// the post-loop `out_db[0] += inv_sum_coeff`. Stores the snapshot of
+/// `inv_cnst_off` into `AD_VM_RNGCHK_8_INV_CNST_OFF` so subsequent calls find
+/// the same region; returns `inv_cnst_off` so the caller can immediately read
+/// `inv_sum_coeff` from it without reloading.
 ///
-/// Matches the first-call branch of `drngchk_8_field` in `vm/src/bytecode.rs`.
-fn generate_drngchk_8_ad_init(
+/// Reads `logup_challenge_off` from `witness_layout` because it's a structural
+/// constant of the layout (always at `challenges_start`), not a
+/// dynamically-allocated region.
+fn emit_rngchk_8_ad_init_body(
+    e: &mut LLBlockEmitter<'_>,
     witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
-) -> LLFunction {
-    let mut func = new_ll_function("__drngchk_8_ad_init".to_string());
-    let entry = func.get_entry_id();
+) -> ValueId {
+    // Snapshot the three table-region cursors. These are the AD analogue of
+    // VM `current_cnst_tables_off` / `current_wit_tables_off` /
+    // `current_wit_multiplicities_off`. The host seeds them at
+    // {constraints,witness}_layout starts; first-use lookups bump them.
+    let cnst_tables_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_CNST_TABLES_OFF);
+    let inv_cnst_off = e.ll_load(cnst_tables_slot, LLType::i32());
+    let wit_tables_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_WIT_TABLES_OFF);
+    let inv_wit_off = e.ll_load(wit_tables_slot, LLType::i32());
+    let wit_mults_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF);
+    let mults_wit_off = e.ll_load(wit_mults_slot, LLType::i32());
 
-    {
-        let mut e = LLBlockEmitter::new(&mut func, entry);
+    // Bump each cursor by the rangecheck-8 table's footprint:
+    //   constraints: 256 (per-elem) + 1 (sum) = 257
+    //   witness tables: 256 (per-elem inverses)
+    //   witness multiplicities: 256
+    let bump_257 = e.int_const(32, 257);
+    let next_cnst = e.int_arith(IntArithOp::Add, inv_cnst_off, bump_257);
+    e.ll_store(cnst_tables_slot, next_cnst);
+    let bump_256 = e.int_const(32, 256);
+    let next_wit = e.int_arith(IntArithOp::Add, inv_wit_off, bump_256);
+    e.ll_store(wit_tables_slot, next_wit);
+    let next_mults = e.int_arith(IntArithOp::Add, mults_wit_off, bump_256);
+    e.ll_store(wit_mults_slot, next_mults);
 
-        // inv_sum_coeff sits at the sum-constraint AD coefficient (one past
-        // the per-element coefficients for this table).
-        let inv_sum_coeff = ad_read_coeff_at(&mut e, constraints_layout.tables_data_start() + 256);
+    // Mark the rangecheck-8 table as allocated by stashing its inv_cnst_off.
+    let snap_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_RNGCHK_8_INV_CNST_OFF);
+    e.ll_store(snap_slot, inv_cnst_off);
 
-        let tables_wit_start_i32 = e.int_const(32, witness_layout.tables_data_start() as u64);
-        let mults_wit_start_i32 = e.int_const(32, witness_layout.multiplicities_start() as u64);
-        let logup_challenge_i32 = e.int_const(32, witness_layout.challenges_start() as u64);
-        let tables_cnst_start_i32 = e.int_const(32, constraints_layout.tables_data_start() as u64);
+    // inv_sum_coeff sits at the sum-constraint AD coefficient (one past the
+    // 256 per-element coefficients for this table).
+    let two_fifty_six_i32 = e.int_const(32, 256);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, two_fifty_six_i32);
+    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
 
-        e.build_counted_loop(256, vec![], |e, i_i64, _| {
-            let i_i32 = e.truncate(i_i64, 32);
-            // coeff = ad_coeffs[tables_cnst_start + i] — random access, does
-            // NOT advance the main AdCoeffs cursor (that one is reserved for
-            // the algebraic-constraint AD code in the rest of main).
-            let coeff_idx = e.int_arith(IntArithOp::Add, tables_cnst_start_i32, i_i32);
-            let coeff = ad_read_coeff_at_dyn(e, coeff_idx);
+    let logup_challenge_i32 = e.int_const(32, witness_layout.challenges_start() as u64);
 
-            // out_da[tables_wit_start + i] += coeff
-            let da_idx = e.int_arith(IntArithOp::Add, tables_wit_start_i32, i_i32);
-            e.ad_write_witness(DMatrix::A, da_idx, coeff);
+    e.build_counted_loop(256, vec![], |e, i_i64, _| {
+        let i_i32 = e.truncate(i_i64, 32);
+        // coeff = ad_coeffs[inv_cnst_off + i] — random access, does NOT
+        // advance the main AdCoeffs cursor (reserved for algebraic
+        // constraints).
+        let coeff_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, i_i32);
+        let coeff = ad_read_coeff_at_dyn(e, coeff_idx);
 
-            // out_db[logup_challenge_off] += coeff
-            e.ad_write_witness(DMatrix::B, logup_challenge_i32, coeff);
+        // out_da[inv_wit_off + i] += coeff
+        let da_idx = e.int_arith(IntArithOp::Add, inv_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::A, da_idx, coeff);
 
-            // out_db[0] += (-i_field) * coeff  (i.e. out_db[0] -= coeff * i)
-            //
-            // `field_neg` isn't wired up in LLVM codegen (no runtime helper
-            // for unary negation) — express as `0 - i` so the pipeline goes
-            // through `__field_sub`.
-            let i_field = u64_as_field(e, i_i64);
-            let zero_i64_f = e.int_const(64, 0);
-            let zero_field = u64_as_field(e, zero_i64_f);
-            let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
-            e.ad_write_const(DMatrix::B, neg_i_field, coeff);
+        // out_db[logup_challenge_off] += coeff
+        e.ad_write_witness(DMatrix::B, logup_challenge_i32, coeff);
 
-            // out_dc[mults_wit_start + i] += coeff
-            let dc_idx = e.int_arith(IntArithOp::Add, mults_wit_start_i32, i_i32);
-            e.ad_write_witness(DMatrix::C, dc_idx, coeff);
+        // out_db[0] += (-i_field) * coeff. `field_neg` isn't wired up in LLVM
+        // codegen — express as `0 - i` so it goes through `__field_sub`.
+        let i_field = u64_as_field(e, i_i64);
+        let zero_i64_f = e.int_const(64, 0);
+        let zero_field = u64_as_field(e, zero_i64_f);
+        let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+        e.ad_write_const(DMatrix::B, neg_i_field, coeff);
 
-            // Second pass: out_da[tables_wit_start + i] += inv_sum_coeff
-            e.ad_write_witness(DMatrix::A, da_idx, inv_sum_coeff);
+        // out_dc[mults_wit_off + i] += coeff
+        let dc_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::C, dc_idx, coeff);
 
-            vec![]
-        });
+        // Second pass: out_da[inv_wit_off + i] += inv_sum_coeff
+        e.ad_write_witness(DMatrix::A, da_idx, inv_sum_coeff);
 
-        // After the loop: out_db[0] += inv_sum_coeff
-        let one_i64 = e.int_const(64, 1);
-        let one_field = u64_as_field(&mut e, one_i64);
-        e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
+        vec![]
+    });
 
-        e.terminate_return(vec![]);
-    }
+    // After the loop: out_db[0] += inv_sum_coeff
+    let one_i64 = e.int_const(64, 1);
+    let one_field = u64_as_field(e, one_i64);
+    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
 
-    func
+    inv_cnst_off
 }
 
 /// Generate __drngchk_8_ad_call(val: AdNode*, flag: AdNode*):
 ///
-/// Per-lookup AD work. Reads a fresh `inv_coeff` off AdCoeffs, reads
-/// `inv_sum_coeff` via random access, allocates the next lookup-witness
-/// offset via AdCurrentLookupWitOff, and bumps:
+/// On first call (sentinel `u32::MAX` in `AD_VM_RNGCHK_8_INV_CNST_OFF`)
+/// allocates the rangecheck-8 table region from the AD VM cursors and runs
+/// the per-element init bumps. On every call (first and subsequent) does the
+/// per-lookup AD work: reads `inv_sum_coeff` and `inv_coeff`, allocates the
+/// next lookup-witness offset via `AdCurrentLookupWitOff`, and bumps:
 ///   out_dc[inv_wit_off] += inv_sum_coeff
 ///   out_da[inv_wit_off] += inv_coeff
 ///   out_db[logup_challenge_off] += inv_coeff
 ///   val.bump_db(-inv_coeff)
 ///   flag.bump_dc(inv_coeff)
 ///
-/// Matches the post-init tail of `drngchk_8_field` in `vm/src/bytecode.rs`.
+/// Matches `drngchk_8_field` in `vm/src/bytecode.rs` end-to-end (both the
+/// first-call init branch and the always-run tail). The init branch reads
+/// the table region's start from runtime cursors rather than baking
+/// `tables_data_start` etc. as constants, so adding other lookup kinds (which
+/// will land their tables before or after this one) doesn't break the
+/// rangecheck-8 path.
 fn generate_drngchk_8_ad_call(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
@@ -2319,13 +2403,45 @@ fn generate_drngchk_8_ad_call(
         let val_ptr = e.add_parameter(LLType::Ptr);
         let flag_ptr = e.add_parameter(LLType::Ptr);
 
-        let inv_sum_coeff = ad_read_coeff_at(&mut e, constraints_layout.tables_data_start() + 256);
+        // First-use check: sentinel `u32::MAX` means "table not yet
+        // allocated", just like `vm.rgchk_8.is_none()` in the VM. After the
+        // if/else both arms have stored a real `inv_cnst_off` into
+        // `AD_VM_RNGCHK_8_INV_CNST_OFF`, so subsequent calls take the cheap
+        // else branch.
+        let snap_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_RNGCHK_8_INV_CNST_OFF);
+        let snap = e.ll_load(snap_slot, LLType::i32());
+        let unalloc = e.int_const(32, AD_RNGCHK_8_UNALLOCATED as u64);
+        let is_unalloc = e.int_eq(snap, unalloc);
+        let merge = e.build_if_else(
+            is_unalloc,
+            vec![LLType::Int(32)],
+            |e| {
+                let inv_cnst_off = emit_rngchk_8_ad_init_body(e, witness_layout);
+                vec![inv_cnst_off]
+            },
+            |e| {
+                // Table already allocated — just reload the snapshot.
+                let snap_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_RNGCHK_8_INV_CNST_OFF);
+                let inv_cnst_off = e.ll_load(snap_slot, LLType::i32());
+                vec![inv_cnst_off]
+            },
+        );
+        let inv_cnst_off = merge[0];
+
+        // inv_sum_coeff = ad_coeffs[inv_cnst_off + 256]
+        let two_fifty_six_i32 = e.int_const(32, 256);
+        let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, two_fifty_six_i32);
+        let inv_sum_coeff = ad_read_coeff_at_dyn(&mut e, sum_idx);
+
         let inv_wit_off = ad_next_lookup_wit_off(&mut e);
 
         // inv_coeff = ad_coeffs[lookups_cnst_start + (inv_wit_off - lookups_wit_start)]
         //
         // Random-access; the main AdCoeffs cursor is for the algebraic
-        // constraints, so it is *not* correct to advance it here.
+        // constraints, so it is *not* correct to advance it here. The
+        // lookups-section start offsets are layout-structural (a Lookup
+        // section is one contiguous slab whose start is fixed by the layout),
+        // not table-allocation dynamic, so they can stay as constants.
         let lookups_wit_start_i32 = e.int_const(32, witness_layout.lookups_data_start() as u64);
         let lookups_cnst_start_i32 =
             e.int_const(32, constraints_layout.lookups_data_start() as u64);
@@ -2352,31 +2468,4 @@ fn generate_drngchk_8_ad_call(
     }
 
     func
-}
-
-/// Insert a call to `init_fn` at the very start of main's entry block. Used
-/// to hoist one-time AD lookup init before any other AD work.
-fn hoist_init_call_to_main_prologue(
-    llssa: &mut LLSSA,
-    main_fn_id: FunctionId,
-    init_fn: FunctionId,
-) {
-    let mut main_fn = llssa.take_function(main_fn_id);
-    let entry_id = main_fn.get_entry_id();
-
-    // Emit the call (appended to the end of the entry block's instruction
-    // list), then rotate so it becomes the first instruction.
-    {
-        let mut e = LLBlockEmitter::new(&mut main_fn, entry_id);
-        let _ = e.call(init_fn, vec![], 0);
-    }
-
-    let entry_block = main_fn.get_block_mut(entry_id);
-    let mut insns = entry_block.take_instructions();
-    if let Some(init_call) = insns.pop() {
-        insns.insert(0, init_call);
-    }
-    entry_block.put_instructions(insns);
-
-    llssa.put_function(main_fn_id, main_fn);
 }

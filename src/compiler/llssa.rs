@@ -1,7 +1,5 @@
 use crate::compiler::ir::r#type::SSAType;
-use crate::compiler::ssa::{
-    Block, Function, FunctionId, Instruction, SSA, ValueId,
-};
+use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 
@@ -162,6 +160,13 @@ impl LLStruct {
             LLFieldType::Ptr,
             LLFieldType::Ptr,
             LLFieldType::Ptr,
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Ptr,
+            LLFieldType::Int(32),
         ])
     }
 
@@ -169,11 +174,36 @@ impl LLStruct {
     pub const WITGEN_VM_A: usize = 1;
     pub const WITGEN_VM_B: usize = 2;
     pub const WITGEN_VM_C: usize = 3;
-    pub const WITGEN_VM_MULTS_BASE: usize = 4;
+    /// Cursor into the witness multiplicities section. Mirrors VM
+    /// `multiplicities_witness`: each first-use lookup snapshots this into
+    /// its own per-table slot, then bumps it by the table's length.
+    pub const WITGEN_VM_MULTS_CURSOR: usize = 4;
     pub const WITGEN_VM_LOOKUPS_A: usize = 5;
     pub const WITGEN_VM_LOOKUPS_B: usize = 6;
     pub const WITGEN_VM_LOOKUPS_C: usize = 7;
     pub const WITGEN_VM_INPUTS: usize = 8;
+    /// Cursor producing the next free table index. Mirrors `vm.tables.len()`
+    /// — first-use lookups snapshot it into their per-table slot, then bump
+    /// it by 1.
+    pub const WITGEN_VM_NEXT_TABLE_IDX: usize = 9;
+    /// Cursor for the constraints tables section. Mirrors VM
+    /// `elem_inverses_constraint_section_offset`.
+    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 10;
+    /// Cursor for the post-commitment witness tables section, relative to
+    /// `challenges_start`. Mirrors VM `elem_inverses_witness_section_offset`.
+    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 11;
+    /// Snapshot slot for the rangecheck-8 table's constraint-table offset.
+    pub const WITGEN_VM_RNGCHK_8_CNST_OFF: usize = 12;
+    /// Snapshot slot for the rangecheck-8 table's post-commitment witness
+    /// table offset.
+    pub const WITGEN_VM_RNGCHK_8_WIT_OFF: usize = 13;
+    /// Snapshot slot for the rangecheck-8 table's `multiplicities_wit` base.
+    /// Sentinel `null` until first rangecheck-8 Lookup; then carries the
+    /// snapshotted `mults_cursor`. Mirrors `TableInfo.multiplicities_wit`.
+    pub const WITGEN_VM_RNGCHK_8_MULTS_BASE: usize = 14;
+    /// Snapshot slot for the rangecheck-8 table's index. Sentinel `u32::MAX`
+    /// until first rangecheck-8 Lookup; mirrors `vm.rgchk_8: Option<usize>`.
+    pub const WITGEN_VM_RNGCHK_8_TABLE_IDX: usize = 15;
 
     /// VM struct used by the reverse AD entrypoint.
     ///
@@ -187,6 +217,10 @@ impl LLStruct {
             LLFieldType::Int(32),
             LLFieldType::Ptr,
             LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
         ])
     }
 
@@ -197,6 +231,17 @@ impl LLStruct {
     pub const AD_VM_CURRENT_WIT_OFF: usize = 4;
     pub const AD_VM_COEFFS_BASE: usize = 5;
     pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
+    /// Cursor for the constraints tables section. Mirrors VM
+    /// `current_cnst_tables_off`: each first-use lookup snapshots this and
+    /// then bumps it by the table's constraint footprint.
+    pub const AD_VM_CURRENT_CNST_TABLES_OFF: usize = 7;
+    /// Cursor for the witness tables section.
+    pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
+    /// Cursor for the witness multiplicities section.
+    pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
+    /// Snapshot slot for the rangecheck-8 table's `inv_cnst_off`. Sentinel
+    /// `u32::MAX` until the first rangecheck-8 DLookup allocates the table.
+    pub const AD_VM_RNGCHK_8_INV_CNST_OFF: usize = 10;
 
     /// AD tag constants.
     pub const AD_TAG_CONST: u64 = 0;
@@ -494,10 +539,9 @@ impl Instruction for LLOp {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             // No inputs (constants / traps / etc.)
-            LLOp::IntConst { .. }
-            | LLOp::NullPtr { .. }
-            | LLOp::GlobalAddr { .. }
-            | LLOp::Trap => vec![].into_iter(),
+            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
 
             // Unary
             LLOp::Not { value, .. }
@@ -541,7 +585,6 @@ impl Instruction for LLOp {
 
             // Call
             LLOp::Call { args, .. } => args.iter().collect::<Vec<_>>().into_iter(),
-
         }
     }
 
@@ -573,20 +616,18 @@ impl Instruction for LLOp {
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
 
             // No result
-            LLOp::Free { .. }
-            | LLOp::Store { .. }
-            | LLOp::Memcpy { .. }
-            | LLOp::Trap => vec![].into_iter(),
+            LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
         }
     }
 
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             // No inputs
-            LLOp::IntConst { .. }
-            | LLOp::NullPtr { .. }
-            | LLOp::GlobalAddr { .. }
-            | LLOp::Trap => vec![].into_iter(),
+            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
 
             // Unary
             LLOp::Not { value, .. }
@@ -632,7 +673,6 @@ impl Instruction for LLOp {
 
             // Call
             LLOp::Call { args, .. } => args.iter_mut().collect::<Vec<_>>().into_iter(),
-
         }
     }
 
@@ -703,7 +743,6 @@ impl Instruction for LLOp {
                 v.extend(args.iter_mut());
                 v.into_iter()
             }
-
         }
     }
 
@@ -896,7 +935,6 @@ impl Instruction for LLOp {
                 format!("{} = global_addr g{}", v(*result), global_id)
             }
             LLOp::Trap => "trap".to_string(),
-
         }
     }
 }
