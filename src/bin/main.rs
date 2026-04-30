@@ -171,7 +171,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
-            Some((wasm_path, &r1cs))
+            Some(wasm_path)
         } else {
             None
         };
@@ -181,7 +181,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
 
         driver
-            .compile_llvm_targets(args.emit_llvm, wasm_config)
+            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config)
             .unwrap();
     }
 
