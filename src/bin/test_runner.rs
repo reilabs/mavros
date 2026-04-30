@@ -17,15 +17,15 @@ use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
-    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, MAX_TABLE_KINDS,
-    TABLE_INFO_INV_CNST_OFF_OFFSET, TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET,
-    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_NUM_INDICES_OFFSET,
-    TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_OCCUPANCY_OFFSET, TABLE_INFO_SLOT_SIZE,
-    TABLE_INFO_TABLE_IDX_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
+    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET, TABLE_INFO_MULTS_BASE_PTR_OFFSET,
+    TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_SLOT_SIZE,
+    WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
     WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
     WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
-    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_LEN_OFFSET,
-    WITGEN_TABLES_REGISTRY_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
+    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_CAP_OFFSET,
+    WITGEN_TABLES_LEN_OFFSET, WITGEN_TABLES_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
+    WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -409,23 +409,16 @@ struct WasmResult {
 }
 
 /// Read a `TableInfo` record back from one slot of the witgen VM struct's
-/// table registry in WASM linear memory. Returns `None` if the slot is
-/// unclaimed (occupancy == 0). The host has no kind-specific knowledge —
-/// it walks all slots up to `tables_len` and reconstructs whatever was
-/// claimed at runtime.
+/// table registry in WASM linear memory. Slot `i` is runtime table id `i`,
+/// matching the VM's `Vec<TableInfo>` order.
 fn read_table_info_slot(
     memory: &Memory,
     store: impl wasmtime::AsContext,
-    vm_struct_ptr: u32,
+    tables_ptr: u32,
     witness_ptr: u32,
-    slot: u32,
-) -> Option<RuntimeTableInfo> {
-    let slot_base = vm_struct_ptr + WITGEN_TABLES_REGISTRY_OFFSET + slot * TABLE_INFO_SLOT_SIZE;
-    let occupancy = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_OCCUPANCY_OFFSET);
-    if occupancy == 0 {
-        return None;
-    }
-    let table_idx = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_TABLE_IDX_OFFSET);
+    table_idx: u32,
+) -> RuntimeTableInfo {
+    let slot_base = tables_ptr + table_idx * TABLE_INFO_SLOT_SIZE;
     let mults_base =
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_MULTS_BASE_PTR_OFFSET);
     let inv_cnst_off =
@@ -440,7 +433,7 @@ fn read_table_info_slot(
         .checked_sub(witness_ptr)
         .expect("table multiplicities pointer is before witness base")
         / FIELD_SIZE as u32;
-    Some(RuntimeTableInfo {
+    RuntimeTableInfo {
         table_idx: table_idx as usize,
         multiplicities_wit_off: mults_off as usize,
         elem_inverses_constraint_section_offset: inv_cnst_off as usize,
@@ -448,7 +441,7 @@ fn read_table_info_slot(
         num_indices: num_indices as usize,
         num_values: num_values as usize,
         length: length as usize,
-    })
+    }
 }
 
 /// Decoded contents of one occupied registry slot, in host-friendly types.
@@ -520,7 +513,10 @@ fn run_wasm(
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
-    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes;
+    let tables_cap = r1cs.constraints_layout.tables_data_size as u32;
+    let table_info_bytes = tables_cap * TABLE_INFO_SLOT_SIZE;
+    let our_data_size =
+        vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes + table_info_bytes;
 
     // Create wasmtime engine and store
     let engine = Engine::default();
@@ -560,7 +556,8 @@ fn run_wasm(
     let b_ptr = a_ptr + constraint_bytes;
     let c_ptr = b_ptr + constraint_bytes;
     let inputs_ptr = c_ptr + constraint_bytes;
-    let total_bytes = inputs_ptr + input_bytes;
+    let tables_ptr = inputs_ptr + input_bytes;
+    let total_bytes = tables_ptr + table_info_bytes;
 
     // Grow memory if needed
     let needed_pages = ((total_bytes as usize + 65535) / 65536) as u32;
@@ -569,12 +566,9 @@ fn run_wasm(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
-    // Cursors the host needs to seed. The per-slot table registry is left
-    // at its zero-initialized value (occupancy = 0 means "unclaimed");
-    // each lookup helper handles its own first-use claim at runtime, so
-    // the host has no per-kind knowledge. The two table-region cursors
-    // (cnst/wit) are seeded at the structural starts of those regions —
-    // first-use lookups snapshot them and bump by their footprint.
+    // Cursors the host needs to seed. The table registry is written by
+    // first-use lookup helpers. The two table-region cursors (cnst/wit) are
+    // seeded at the structural starts of those regions.
     //
     // `current_wit_tables_off` is stored *relative to challenges_start*
     // (matches how Phase 2 uses it: `out_wit_post_comm[wit_base + i]`,
@@ -604,6 +598,8 @@ fn run_wasm(
         let lb = WITGEN_LOOKUPS_B_PTR_OFFSET as usize;
         let lc = WITGEN_LOOKUPS_C_PTR_OFFSET as usize;
         let inputs = WITGEN_INPUTS_PTR_OFFSET as usize;
+        let tcap = WITGEN_TABLES_CAP_OFFSET as usize;
+        let tptr = WITGEN_TABLES_PTR_OFFSET as usize;
         let cct = WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
         let cwt = WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
@@ -615,6 +611,8 @@ fn run_wasm(
         data[off + lb..off + lb + 4].copy_from_slice(&lookups_b_cursor.to_le_bytes());
         data[off + lc..off + lc + 4].copy_from_slice(&lookups_c_cursor.to_le_bytes());
         data[off + inputs..off + inputs + 4].copy_from_slice(&inputs_ptr.to_le_bytes());
+        data[off + tcap..off + tcap + 4].copy_from_slice(&tables_cap.to_le_bytes());
+        data[off + tptr..off + tptr + 4].copy_from_slice(&tables_ptr.to_le_bytes());
         data[off + cct..off + cct + 4].copy_from_slice(&current_cnst_tables_off.to_le_bytes());
         data[off + cwt..off + cwt + 4].copy_from_slice(&current_wit_tables_off.to_le_bytes());
     }
@@ -638,30 +636,27 @@ fn run_wasm(
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 
-    // Walk the registry: read every slot up to `MAX_TABLE_KINDS`, keep
-    // only the occupied ones. The host does not name any specific lookup
-    // kind; each runtime-claimed slot describes itself fully via its
-    // `TableInfoSlot` fields.
+    // Walk the registry in table-id order. The host does not name any
+    // specific lookup kind; each runtime-claimed slot describes itself fully
+    // via its `TableInfoSlot` fields.
     let tables_len =
         read_u32_from_memory(&memory, &store, vm_struct_ptr + WITGEN_TABLES_LEN_OFFSET) as usize;
-    let mut runtime_tables: Vec<RuntimeTableInfo> = Vec::new();
-    for slot in 0..MAX_TABLE_KINDS {
-        if let Some(info) =
-            read_table_info_slot(&memory, &store, vm_struct_ptr, witness_ptr, slot)
-        {
-            runtime_tables.push(info);
-        }
-    }
-    assert_eq!(
-        runtime_tables.len(),
+    assert!(
+        tables_len <= tables_cap as usize,
+        "WASM `tables_len` ({}) exceeds registry capacity ({})",
         tables_len,
-        "WASM `tables_len` ({}) doesn't match the number of occupied registry slots ({})",
-        tables_len,
-        runtime_tables.len()
+        tables_cap
     );
-    // Phase 2 (witgen_phase2) wants `Vec<TableInfo>` indexed by table id;
-    // sort so each table lands at its assigned id.
-    runtime_tables.sort_by_key(|t| t.table_idx);
+    let mut runtime_tables: Vec<RuntimeTableInfo> = Vec::with_capacity(tables_len);
+    for table_idx in 0..tables_len as u32 {
+        runtime_tables.push(read_table_info_slot(
+            &memory,
+            &store,
+            tables_ptr,
+            witness_ptr,
+            table_idx,
+        ));
+    }
 
     // Read heap residual from the __live_bytes counter in wasm-runtime
     let live_bytes_fn = instance
@@ -918,15 +913,11 @@ fn run_ad_wasm(
     // three table-allocation cursors (`current_*_tables_off`,
     // `current_wit_multiplicities_off`) are seeded at structural layout
     // starts; first-use lookup helpers snapshot them and then bump by their
-    // own table footprint — mirrors `vm.data.as_ad.current_*_off`. The
-    // per-slot table registry (occupancy + inv_cnst_off arrays) is left at
-    // its zero-initialized value, since wasmtime zeros memory and zero
-    // means "unclaimed."
+    // own table footprint.
     let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
     let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
     let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;
     let wit_mults_start = r1cs.witness_layout.multiplicities_start() as u32;
-
     // Initialize AD VM struct
     {
         let data = memory.data_mut(&mut store);

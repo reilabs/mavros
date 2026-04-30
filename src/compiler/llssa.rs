@@ -3,11 +3,6 @@ use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueI
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 
-/// `usize` mirror of `mavros_wasm_layout::MAX_TABLE_KINDS`, kept here so the
-/// `LLStruct::*_vm()` definitions can use it as an `InlineArray` length
-/// without taking a runtime dep on the no_std layout crate's u32 type.
-const MAX_TABLE_KINDS: usize = mavros_wasm_layout::MAX_TABLE_KINDS as usize;
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -140,21 +135,17 @@ impl LLStruct {
 
     /// Per-slot table-info record. Mirrors the byte layout of
     /// `TABLE_INFO_*_OFFSET` in `mavros-wasm-layout`. One of these lives in
-    /// each registry slot of both the witgen and AD VM structs.
+    /// each host-visible runtime table slot of the witgen VM struct.
     ///
     /// Field index → name (use `TABLE_INFO_*` constants below):
-    ///   0: occupancy   (i32; 0 = unclaimed)
-    ///   1: table_idx   (i32)
-    ///   2: mults_base  (ptr; forward-only)
-    ///   3: inv_cnst_off (i32)
-    ///   4: inv_wit_off (i32)
-    ///   5: num_indices (i32)
-    ///   6: num_values  (i32)
-    ///   7: length      (i32)
+    ///   0: mults_base   (ptr)
+    ///   1: inv_cnst_off (i32)
+    ///   2: inv_wit_off  (i32)
+    ///   3: num_indices  (i32)
+    ///   4: num_values   (i32)
+    ///   5: length       (i32)
     pub fn table_info_slot() -> Self {
         Self::new(vec![
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
             LLFieldType::Ptr,
             LLFieldType::Int(32),
             LLFieldType::Int(32),
@@ -164,14 +155,12 @@ impl LLStruct {
         ])
     }
 
-    pub const TABLE_INFO_OCCUPANCY: usize = 0;
-    pub const TABLE_INFO_TABLE_IDX: usize = 1;
-    pub const TABLE_INFO_MULTS_BASE: usize = 2;
-    pub const TABLE_INFO_INV_CNST_OFF: usize = 3;
-    pub const TABLE_INFO_INV_WIT_OFF: usize = 4;
-    pub const TABLE_INFO_NUM_INDICES: usize = 5;
-    pub const TABLE_INFO_NUM_VALUES: usize = 6;
-    pub const TABLE_INFO_LENGTH: usize = 7;
+    pub const TABLE_INFO_MULTS_BASE: usize = 0;
+    pub const TABLE_INFO_INV_CNST_OFF: usize = 1;
+    pub const TABLE_INFO_INV_WIT_OFF: usize = 2;
+    pub const TABLE_INFO_NUM_INDICES: usize = 3;
+    pub const TABLE_INFO_NUM_VALUES: usize = 4;
+    pub const TABLE_INFO_LENGTH: usize = 5;
 
     /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
     pub fn ad_mul_const_node() -> Self {
@@ -188,25 +177,23 @@ impl LLStruct {
 
     /// VM struct used by the forward-pass/witgen entrypoint.
     ///
-    /// Keep this in field-index order with `mavros-wasm-layout`. The
-    /// trailing inline array is the table registry (length
-    /// `MAX_TABLE_KINDS`); each lookup kind is assigned a compile-time
-    /// slot index into it.
+    /// Keep this in field-index order with `mavros-wasm-layout`.
     pub fn witgen_vm() -> Self {
         Self::new(vec![
-            LLFieldType::Ptr,                                                       // 0  witness
-            LLFieldType::Ptr,                                                       // 1  a
-            LLFieldType::Ptr,                                                       // 2  b
-            LLFieldType::Ptr,                                                       // 3  c
-            LLFieldType::Ptr,                                                       // 4  mults_cursor
-            LLFieldType::Ptr,                                                       // 5  lookups_a
-            LLFieldType::Ptr,                                                       // 6  lookups_b
-            LLFieldType::Ptr,                                                       // 7  lookups_c
-            LLFieldType::Ptr,                                                       // 8  inputs
-            LLFieldType::Int(32),                                                   // 9  tables_len
-            LLFieldType::Int(32),                                                   // 10 current_cnst_tables_off
-            LLFieldType::Int(32),                                                   // 11 current_wit_tables_off
-            LLFieldType::InlineArray(Self::table_info_slot(), MAX_TABLE_KINDS),     // 12 tables registry
+            LLFieldType::Ptr,     // 0  witness
+            LLFieldType::Ptr,     // 1  a
+            LLFieldType::Ptr,     // 2  b
+            LLFieldType::Ptr,     // 3  c
+            LLFieldType::Ptr,     // 4  mults_cursor
+            LLFieldType::Ptr,     // 5  lookups_a
+            LLFieldType::Ptr,     // 6  lookups_b
+            LLFieldType::Ptr,     // 7  lookups_c
+            LLFieldType::Ptr,     // 8  inputs
+            LLFieldType::Int(32), // 9  tables_len
+            LLFieldType::Int(32), // 10 tables_cap
+            LLFieldType::Ptr,     // 11 tables_ptr
+            LLFieldType::Int(32), // 12 current_cnst_tables_off
+            LLFieldType::Int(32), // 13 current_wit_tables_off
         ])
     }
 
@@ -226,35 +213,33 @@ impl LLStruct {
     /// current `tables_len` as the new table id, then bumps it.
     /// Mirrors `vm.tables.len()`.
     pub const WITGEN_VM_TABLES_LEN: usize = 9;
+    /// Capacity of the host-allocated table-info buffer.
+    pub const WITGEN_VM_TABLES_CAP: usize = 10;
+    /// Base pointer to the host-allocated table-info buffer.
+    pub const WITGEN_VM_TABLES_PTR: usize = 11;
     /// Cursor into the constraints-region tables section (advances on
     /// first-use claims by each table's footprint). Forward-side, written-
     /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
-    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 10;
+    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 12;
     /// Cursor into the post-commitment witness tables section (relative to
-    /// the witness base, *not* relative to challenges_start).
-    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 11;
-    /// Inline `[TableInfoSlot; MAX_TABLE_KINDS]`. Slot `k` is "occupied"
-    /// iff its `TABLE_INFO_OCCUPANCY` field is non-zero.
-    pub const WITGEN_VM_TABLES_REGISTRY: usize = 12;
+    /// `challenges_start`).
+    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 13;
 
     /// VM struct used by the reverse AD entrypoint.
     ///
-    /// Keep this in field-index order with `mavros-wasm-layout`. The
-    /// trailing inline array is the table registry, same shape as the
-    /// witgen one.
+    /// Keep this in field-index order with `mavros-wasm-layout`.
     pub fn ad_vm() -> Self {
         Self::new(vec![
-            LLFieldType::Ptr,                                                   // 0  out_da
-            LLFieldType::Ptr,                                                   // 1  out_db
-            LLFieldType::Ptr,                                                   // 2  out_dc
-            LLFieldType::Ptr,                                                   // 3  coeffs (cursor)
-            LLFieldType::Int(32),                                               // 4  current_wit_off
-            LLFieldType::Ptr,                                                   // 5  coeffs_base
-            LLFieldType::Int(32),                                               // 6  current_lookup_wit_off
-            LLFieldType::Int(32),                                               // 7  current_cnst_tables_off
-            LLFieldType::Int(32),                                               // 8  current_wit_tables_off
-            LLFieldType::Int(32),                                               // 9  current_wit_multiplicities_off
-            LLFieldType::InlineArray(Self::table_info_slot(), MAX_TABLE_KINDS), // 10 tables registry
+            LLFieldType::Ptr,     // 0  out_da
+            LLFieldType::Ptr,     // 1  out_db
+            LLFieldType::Ptr,     // 2  out_dc
+            LLFieldType::Ptr,     // 3  coeffs (cursor)
+            LLFieldType::Int(32), // 4  current_wit_off
+            LLFieldType::Ptr,     // 5  coeffs_base
+            LLFieldType::Int(32), // 6  current_lookup_wit_off
+            LLFieldType::Int(32), // 7  current_cnst_tables_off
+            LLFieldType::Int(32), // 8  current_wit_tables_off
+            LLFieldType::Int(32), // 9  current_wit_multiplicities_off
         ])
     }
 
@@ -272,8 +257,6 @@ impl LLStruct {
     pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
     /// Cursor for the witness multiplicities section.
     pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
-    /// Inline `[TableInfoSlot; MAX_TABLE_KINDS]`.
-    pub const AD_VM_TABLES_REGISTRY: usize = 10;
 
     /// AD tag constants.
     pub const AD_TAG_CONST: u64 = 0;
