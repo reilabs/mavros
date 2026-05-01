@@ -1020,6 +1020,17 @@ impl CodeGen {
                         }
                     }
                 }
+                ssa::OpCode::Assert { value } => {
+                    let one = layouter.alloc_scratch(1);
+                    emitter.push_op(bytecode::OpCode::MovConst {
+                        res: one,
+                        val: 1,
+                    });
+                    emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                        a: layouter.get_value(*value),
+                        b: one,
+                    });
+                }
                 ssa::OpCode::AssertR1C { a, b, c } => {
                     let tmp = layouter.alloc_scratch(4);
                     emitter.push_op(bytecode::OpCode::MulField {

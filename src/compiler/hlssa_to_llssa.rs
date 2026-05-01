@@ -892,6 +892,11 @@ fn lower_instruction(
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
+        OpCode::Assert { value } => {
+            let ll_value = val_map[value];
+            assert(e, ll_value);
+        }
+
         OpCode::AssertCmp { kind, lhs, rhs } => {
             let ll_lhs = val_map[lhs];
             let ll_rhs = val_map[rhs];
