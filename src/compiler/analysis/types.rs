@@ -228,7 +228,12 @@ impl Types {
                 Ok(())
             }
             OpCode::MemOp { kind: _, value: _ } => Ok(()),
-            OpCode::AssertEq { lhs: _, rhs: _ } => Ok(()),
+            OpCode::Assert { value: _ } => Ok(()),
+            OpCode::AssertCmp {
+                kind: _,
+                lhs: _,
+                rhs: _,
+            } => Ok(()),
             OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
             OpCode::Call {
                 results: result,

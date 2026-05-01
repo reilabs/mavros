@@ -83,7 +83,7 @@ impl DCE {
                 ..
             } => false,
             OpCode::Call { .. } | OpCode::Store { .. } => true,
-            OpCode::AssertEq { lhs, rhs } => lhs != rhs,
+            OpCode::Assert { .. } | OpCode::AssertCmp { .. } => true,
             OpCode::AssertR1C { .. }
             | OpCode::Constrain { .. }
             | OpCode::Lookup { .. }

@@ -286,14 +286,12 @@ fn unspread_bits(v: u64) -> (u32, u32) {
 /// Emit a forward key-value lookup: bump multiplicity and write 2 lookup tape entries.
 unsafe fn forward_kv_lookup_emit(
     table_idx: usize,
-    key_u64: u64,
+    key: Field,
     result: Field,
     flag_u64: u64,
     vm: &mut VM,
 ) {
     let table_info = &vm.tables[table_idx];
-    let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
-    *(ptr as *mut u64) += flag_u64;
 
     // Entry 1 (x-constraint): table_id, result_value, 0
     *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
@@ -305,7 +303,14 @@ unsafe fn forward_kv_lookup_emit(
 
     // Entry 2 (y-constraint): table_id, key, flag
     *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-    *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
+    if flag_u64 != 0 {
+        let key_u64 = ark_ff::PrimeField::into_bigint(key).0[0];
+        let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
+        *(ptr as *mut u64) += flag_u64;
+        *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
+    } else {
+        *(vm.data.as_forward.lookups_b as *mut Field) = key;
+    }
     *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
     vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
     vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
@@ -1100,8 +1105,7 @@ mod def {
 
         let table_idx = vm.spread_tables[bits].unwrap();
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        let key_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
-        unsafe { forward_kv_lookup_emit(table_idx, key_u64, result, flag_u64, vm) };
+        unsafe { forward_kv_lookup_emit(table_idx, val, result, flag_u64, vm) };
     }
 
     #[opcode]
@@ -1242,16 +1246,23 @@ mod def {
             }
         }
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
         let table_idx = *vm.rgchk_8.as_ref().unwrap();
         let table_info = &vm.tables[table_idx];
         unsafe {
-            let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
-            *(ptr as *mut u64) += flag_u64;
-            *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-            vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-            *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
-            vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            if flag_u64 != 0 {
+                let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
+                let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
+                *(ptr as *mut u64) += flag_u64;
+                *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+                *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
+                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            } else {
+                *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+                *(vm.data.as_forward.lookups_b as *mut Field) = val;
+                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            }
             *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
             vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
         }
@@ -1321,8 +1332,7 @@ mod def {
         };
 
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        let index_u64 = ark_ff::PrimeField::into_bigint(index).0[0];
-        unsafe { forward_kv_lookup_emit(table_idx, index_u64, result, flag_u64, vm) };
+        unsafe { forward_kv_lookup_emit(table_idx, index, result, flag_u64, vm) };
     }
 
     #[opcode]

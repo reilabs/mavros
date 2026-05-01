@@ -951,21 +951,36 @@ fn lower_instruction(
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
-        OpCode::AssertEq { lhs, rhs } => {
+        OpCode::Assert { value } => {
+            let ll_value = val_map[value];
+            assert(e, ll_value);
+        }
+
+        OpCode::AssertCmp { kind, lhs, rhs } => {
             let ll_lhs = val_map[lhs];
             let ll_rhs = val_map[rhs];
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
-            let eq = match &lhs_type.expr {
-                TypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
-                TypeExpr::U(_) | TypeExpr::I(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
-                _ => panic!(
-                    "Unsupported type for AssertEq in HLSSA->LLSSA lowering: {:?}",
-                    lhs_type
-                ),
+            let cmp_result = match kind {
+                CmpKind::Eq => match &lhs_type.expr {
+                    TypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
+                    TypeExpr::U(_) | TypeExpr::I(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
+                    _ => panic!(
+                        "Unsupported type for AssertCmp Eq in HLSSA->LLSSA lowering: {:?}",
+                        lhs_type
+                    ),
+                },
+                CmpKind::Lt => match &lhs_type.expr {
+                    TypeExpr::U(_) => e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs),
+                    TypeExpr::I(_) => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
+                    _ => panic!(
+                        "Unsupported type for AssertCmp Lt in HLSSA->LLSSA lowering: {:?}",
+                        lhs_type
+                    ),
+                },
             };
 
-            assert(e, eq);
+            assert(e, cmp_result);
         }
 
         OpCode::AssertR1C { a, b, c } => {
@@ -2458,10 +2473,15 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
     e.ll_store(cursor_slot, next);
 }
 
-fn write_tape_entry_field(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value: ValueId) {
+fn write_tape_entry_field(
+    e: &mut LLBlockEmitter<'_>,
+    cursor_field: usize,
+    field_val: ValueId,
+) {
+    // Same structure as `write_field_cursor` used by Constrain.
     let cursor_slot = e.witgen_vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);
-    e.ll_store(cursor, value);
+    e.ll_store(cursor, field_val);
     let one = e.int_const(32, 1);
     let next = e.array_elem_ptr(cursor, LLStruct::field_elem(), one);
     e.ll_store(cursor_slot, next);
@@ -2653,17 +2673,15 @@ fn generate_rngchk_8_function(table_idx_global: usize) -> LLFunction {
         let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
         let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
+        // BigInt limbs (Montgomery → BigInt) for index/u64 uses.
         let (val_l0, val_l1, val_l2, val_l3) = field_limbs(&mut e, val);
         let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag);
         let flag_u64 = flag_l0;
         let key = val_l0;
 
-        // Invariants: val < 256, all high limbs zero (for both val and flag).
+        // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
         let zero_i64 = e.int_const(64, 0);
-        let table_len_i64 = e.int_const(64, 256);
-        let in_range = e.int_ult(val_l0, table_len_i64);
-        assert(&mut e, in_range);
-        for high in [val_l1, val_l2, val_l3, flag_l1, flag_l2, flag_l3] {
+        for high in [flag_l1, flag_l2, flag_l3] {
             let ok = e.int_eq(high, zero_i64);
             assert(&mut e, ok);
         }
@@ -2744,23 +2762,41 @@ fn generate_rngchk_8_function(table_idx_global: usize) -> LLFunction {
         );
         let mults_base = merge[0];
         let table_idx_i32 = merge[1];
-
-        // Bump: multiplicities[key].low_u64 += flag_u64. `mults_base` is the
-        // snapshotted base for *this* table's slab, so we offset by `key`
-        // Field-elements from it.
-        let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
-        let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
-        let old_low = e.ll_load(low_ptr, LLType::i64());
-        let new_low = e.int_add(old_low, flag_u64);
-        e.ll_store(low_ptr, new_low);
-
-        // Append one tape entry: (table_id, key, flag_u64) into (a, b, c).
-        // The table id is the snapshotted `vm.rgchk_8` analog — once a real
-        // value, since the merge-block parameters always carry an allocated
-        // snapshot. The tape stores u64s, so widen the i32 snapshot.
         let table_id = e.zext(table_idx_i32, 64);
+
+        // Always write tape entries (table_id, ?, flag_u64).
+        // For lookups_b: flag=0 writes full Field (Montgomery limbs);
+        // flag!=0 writes u64 key. This matches the VM's `rngchk_8_field` so
+        // Phase 2 reads consistently for both backends.
+        // Multiplicities only get bumped (and val<256 validated) for flag!=0.
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
-        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
+        let flag_zero = e.int_eq(flag_u64, zero_i64);
+        e.build_if_else(
+            flag_zero,
+            vec![],
+            |e| {
+                write_tape_entry_field(e, LLStruct::WITGEN_VM_LOOKUPS_B, val);
+                vec![]
+            },
+            |e| {
+                // Validate val < 256, all val high limbs zero.
+                let table_len_i64 = e.int_const(64, 256);
+                let in_range = e.int_ult(val_l0, table_len_i64);
+                assert(e, in_range);
+                for high in [val_l1, val_l2, val_l3] {
+                    let ok = e.int_eq(high, zero_i64);
+                    assert(e, ok);
+                }
+                // Bump: multiplicities[key].low_u64 += flag_u64.
+                let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
+                let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
+                let old_low = e.ll_load(low_ptr, LLType::i64());
+                let new_low = e.int_add(old_low, flag_u64);
+                e.ll_store(low_ptr, new_low);
+                write_tape_entry_u64(e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
+                vec![]
+            },
+        );
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, flag_u64);
 
         e.terminate_return(vec![]);

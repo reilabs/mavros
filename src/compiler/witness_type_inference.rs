@@ -546,7 +546,8 @@ impl WitnessTypeInference {
                         let result_wt = Self::construct_pure_witness_for_type(tp);
                         value_wt.insert(*r, result_wt);
                     }
-                    OpCode::AssertEq { .. }
+                    OpCode::Assert { .. }
+                    | OpCode::AssertCmp { .. }
                     | OpCode::AssertR1C { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }

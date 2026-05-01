@@ -420,8 +420,20 @@ pub trait HLEmitter {
         self.emit(OpCode::Store { ptr, value });
     }
 
+    fn assert_bool(&mut self, value: ValueId) {
+        self.emit(OpCode::Assert { value });
+    }
+
+    fn assert_cmp(&mut self, kind: CmpKind, lhs: ValueId, rhs: ValueId) {
+        self.emit(OpCode::AssertCmp { kind, lhs, rhs });
+    }
+
     fn assert_eq(&mut self, lhs: ValueId, rhs: ValueId) {
-        self.emit(OpCode::AssertEq { lhs, rhs });
+        self.emit(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs,
+            rhs,
+        });
     }
 
     fn rangecheck(&mut self, value: ValueId, max_bits: usize) {
