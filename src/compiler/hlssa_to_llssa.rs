@@ -2228,7 +2228,7 @@ fn generate_rngchk_8_function(table_idx_global: usize) -> LLFunction {
         let flag_u64 = flag_l0;
         let key = val_l0;
 
-        // flag must always fit in low limb (it's 0 or 1, possibly other small u64s).
+        // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
         let zero_i64 = e.int_const(64, 0);
         for high in [flag_l1, flag_l2, flag_l3] {
             let ok = e.int_eq(high, zero_i64);
