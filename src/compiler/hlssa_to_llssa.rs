@@ -1167,11 +1167,11 @@ fn lower_instruction(
     }
 }
 
-fn integer_width(ty: &Type, op_name: &str) -> u32 {
+fn integer_width(ty: &Type) -> u32 {
     let scalar_ty = ty.strip_witness();
     match scalar_ty.expr {
         TypeExpr::U(bits) | TypeExpr::I(bits) => bits as u32,
-        _ => panic!("{} expects an integer type, got {}", op_name, ty),
+        _ => panic!("Expected integer type, got {}", ty),
     }
 }
 
@@ -1182,7 +1182,7 @@ fn lower_wrapping_shift(
     rhs: ValueId,
     result_type: &Type,
 ) -> ValueId {
-    let bits = integer_width(result_type, "shift");
+    let bits = integer_width(result_type);
     let bits_value = e.int_const(bits, bits as u64);
     let wrapped_rhs = e.int_arith(IntArithOp::URem, rhs, bits_value);
     e.int_arith(op, lhs, wrapped_rhs)
@@ -1233,8 +1233,8 @@ fn lower_spread(
     result_type: &Type,
     bits: u8,
 ) -> ValueId {
-    let input_bits = integer_width(value_type, "Spread");
-    let result_bits = integer_width(result_type, "Spread");
+    let input_bits = integer_width(value_type);
+    let result_bits = integer_width(result_type);
     assert!(
         input_bits <= 64,
         "Spread only supports integer widths up to 64 bits, got {}",
@@ -1282,9 +1282,9 @@ fn lower_unspread(
     even_type: &Type,
     bits: u8,
 ) -> (ValueId, ValueId) {
-    let input_bits = integer_width(value_type, "Unspread");
-    let odd_bits = integer_width(odd_type, "Unspread");
-    let even_bits = integer_width(even_type, "Unspread");
+    let input_bits = integer_width(value_type);
+    let odd_bits = integer_width(odd_type);
+    let even_bits = integer_width(even_type);
     assert!(
         input_bits <= 128 && input_bits % 2 == 0,
         "Unspread expects an even integer width up to 128 bits, got {}",
@@ -2473,11 +2473,7 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
     e.ll_store(cursor_slot, next);
 }
 
-fn write_tape_entry_field(
-    e: &mut LLBlockEmitter<'_>,
-    cursor_field: usize,
-    field_val: ValueId,
-) {
+fn write_tape_entry_field(e: &mut LLBlockEmitter<'_>, cursor_field: usize, field_val: ValueId) {
     // Same structure as `write_field_cursor` used by Constrain.
     let cursor_slot = e.witgen_vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);
