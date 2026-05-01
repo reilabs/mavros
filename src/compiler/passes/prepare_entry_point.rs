@@ -6,13 +6,23 @@ use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, CastTarget, CmpKind, ConstValue, FunctionId,
-        HLFunction, HLSSA, OpCode, SeqType, ValueId,
+        BlockId, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
+        SeqType, ValueId,
     },
 };
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
+}
+
+struct PrepareFnEntry {
+    hlssa_type: Type,
+    fn_id: FunctionId,
+}
+
+struct ReconstructFnEntry {
+    hlssa_type: Type,
+    fn_id: FunctionId,
 }
 
 impl Pass for PrepareEntryPoint {
@@ -127,10 +137,10 @@ impl PrepareEntryPoint {
         let entry_id = main.get_entry_id();
 
         // Collect entry params
-        let params: Vec<ValueId> = main
+        let params: Vec<(ValueId, Type)> = main
             .get_entry()
             .get_parameters()
-            .map(|(id, _)| *id)
+            .map(|(id, typ)| (*id, typ.clone()))
             .collect();
 
         // witness[0] must be constant one, emitted by the program.
@@ -152,7 +162,13 @@ impl PrepareEntryPoint {
         // These must be pinned so they survive DCE even when their results become unused
         // (e.g. when inter-procedural DCE prunes call args to original_main).
         let mut replacements = ValueReplacements::new();
-        for param_id in &params {
+        for (param_id, param_type) in &params {
+            if param_type.is_witness_of() {
+                panic!(
+                    "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main parameter reconstruction: {:?}",
+                    param_id.0, param_type
+                );
+            }
             let witness_val = main.fresh_value();
             write_witness_instructions.push(OpCode::WriteWitness {
                 result: Some(witness_val),
@@ -194,6 +210,13 @@ impl PrepareEntryPoint {
                             .or_insert_with(|| ssa.get_function(*callee_id).get_returns().to_vec());
                     }
                 }
+            }
+        }
+
+        let mut prepare_fns = Vec::new();
+        for return_types in callee_return_types.values() {
+            for return_type in return_types {
+                Self::get_or_create_prepare_fn(return_type, ssa, &mut prepare_fns);
             }
         }
 
@@ -240,9 +263,14 @@ impl PrepareEntryPoint {
                     new_instructions.push(instr);
 
                     for (result_vid, return_type) in call_results {
-                        let (reconstructed, extras) =
-                            Self::flatten_witness_reconstruct(&result_vid, &return_type, function);
-                        new_instructions.extend(extras);
+                        let reconstructed = function.fresh_value();
+                        let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
+                        new_instructions.push(OpCode::Call {
+                            results: vec![reconstructed],
+                            function: CallTarget::Static(prepare_fn),
+                            args: vec![result_vid],
+                            unconstrained: false,
+                        });
                         replacements.insert(result_vid, reconstructed);
                     }
                 }
@@ -254,168 +282,156 @@ impl PrepareEntryPoint {
         }
     }
 
-    /// Flatten a call result to field-level, WriteWitness each field, rangecheck + reconstruct.
-    /// Returns (reconstructed_value_id, instructions_to_insert).
-    fn flatten_witness_reconstruct(
-        value_id: &ValueId,
-        typ: &Type,
-        function: &mut HLFunction,
-    ) -> (ValueId, Vec<OpCode>) {
-        let mut instructions = Vec::new();
+    fn find_prepare_fn(typ: &Type, prepare_fns: &[PrepareFnEntry]) -> FunctionId {
+        prepare_fns
+            .iter()
+            .find(|entry| entry.hlssa_type == *typ)
+            .map(|entry| entry.fn_id)
+            .expect("prepare function should have been pre-created")
+    }
 
+    fn unique_prepare_fn_name(prepare_fns: &[PrepareFnEntry]) -> String {
+        format!("prepare_{}", prepare_fns.len())
+    }
+
+    fn unique_reconstruct_fn_name(reconstruct_fns: &[ReconstructFnEntry]) -> String {
+        format!("reconstruct_{}", reconstruct_fns.len())
+    }
+
+    fn flattened_field_count(typ: &Type) -> usize {
         match &typ.expr {
-            TypeExpr::Field => {
-                // WriteWitness the field value directly
-                let ww_result = function.fresh_value();
-                instructions.push(OpCode::WriteWitness {
-                    result: Some(ww_result),
-                    value: *value_id,
-                    pinned: false,
-                });
-                (ww_result, instructions)
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
+            TypeExpr::Array(inner, size) => Self::flattened_field_count(inner) * size,
+            TypeExpr::Tuple(element_types) => {
+                element_types.iter().map(Self::flattened_field_count).sum()
             }
+            TypeExpr::WitnessOf(inner) => Self::flattened_field_count(inner),
+            _ => todo!("Not implemented yet"),
+        }
+    }
+
+    fn get_or_create_prepare_fn(
+        typ: &Type,
+        ssa: &mut HLSSA,
+        prepare_fns: &mut Vec<PrepareFnEntry>,
+    ) -> FunctionId {
+        if let Some(entry) = prepare_fns.iter().find(|entry| entry.hlssa_type == *typ) {
+            return entry.fn_id;
+        }
+
+        let fn_id = ssa.add_function(Self::unique_prepare_fn_name(prepare_fns));
+        prepare_fns.push(PrepareFnEntry {
+            hlssa_type: typ.clone(),
+            fn_id,
+        });
+
+        let child_fns = match &typ.expr {
+            TypeExpr::Array(inner, _) => {
+                vec![Self::get_or_create_prepare_fn(inner, ssa, prepare_fns)]
+            }
+            TypeExpr::Tuple(element_types) => element_types
+                .iter()
+                .map(|elem_type| Self::get_or_create_prepare_fn(elem_type, ssa, prepare_fns))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        {
+            let function = ssa.get_function_mut(fn_id);
+            function.add_return_type(typ.clone());
+            let entry_block = function.get_entry_id();
+            let mut b = HLFunctionBuilder::new(function);
+            let mut e = b.block(entry_block);
+            let param = e.add_parameter(typ.clone());
+            let result = Self::emit_prepare_body(&mut e, param, typ, &child_fns);
+            e.terminate_return(vec![result]);
+        }
+
+        fn_id
+    }
+
+    fn emit_prepare_body(
+        e: &mut HLBlockEmitter<'_>,
+        value_id: ValueId,
+        typ: &Type,
+        child_fns: &[FunctionId],
+    ) -> ValueId {
+        match &typ.expr {
+            TypeExpr::Field => e.write_witness(value_id),
             TypeExpr::U(size) | TypeExpr::I(size) => {
                 let cast_back = match &typ.expr {
                     TypeExpr::U(s) => CastTarget::U(*s),
                     TypeExpr::I(s) => CastTarget::I(*s),
                     _ => unreachable!(),
                 };
-                // Cast to Field, WriteWitness, rangecheck, cast back
-                let as_field = function.fresh_value();
-                instructions.push(OpCode::Cast {
-                    result: as_field,
-                    value: *value_id,
-                    target: CastTarget::Field,
-                });
-                let ww_result = function.fresh_value();
-                instructions.push(OpCode::WriteWitness {
-                    result: Some(ww_result),
-                    value: as_field,
-                    pinned: false,
-                });
+                let as_field = e.cast_to_field(value_id);
+                let witness = e.write_witness(as_field);
 
                 if *size == 1 {
-                    // Boolean constraint: x * (x - 1) = 0
-                    let zero = function.fresh_value();
-                    instructions.push(OpCode::Const {
-                        result: zero,
-                        value: ConstValue::Field(ark_bn254::Fr::from(0)),
-                    });
-                    let one = function.fresh_value();
-                    instructions.push(OpCode::Const {
-                        result: one,
-                        value: ConstValue::Field(ark_bn254::Fr::from(1)),
-                    });
-                    let x_sub_1 = function.fresh_value();
-                    let x_times_x_sub_1 = function.fresh_value();
-                    instructions.push(OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Sub,
-                        result: x_sub_1,
-                        lhs: ww_result,
-                        rhs: one,
-                    });
-                    instructions.push(OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Mul,
-                        result: x_times_x_sub_1,
-                        lhs: ww_result,
-                        rhs: x_sub_1,
-                    });
-                    instructions.push(OpCode::AssertCmp {
-                        kind: CmpKind::Eq,
-                        lhs: x_times_x_sub_1,
-                        rhs: zero,
-                    });
+                    let zero = e.field_const(ark_bn254::Fr::from(0));
+                    let one = e.field_const(ark_bn254::Fr::from(1));
+                    let x_sub_1 = e.sub(witness, one);
+                    let x_times_x_sub_1 = e.mul(witness, x_sub_1);
+                    e.assert_eq(x_times_x_sub_1, zero);
                 } else {
-                    instructions.push(OpCode::Rangecheck {
-                        value: ww_result,
-                        max_bits: *size,
-                    });
+                    e.rangecheck(witness, *size);
                 }
 
-                let casted = function.fresh_value();
-                instructions.push(OpCode::Cast {
-                    result: casted,
-                    value: ww_result,
-                    target: cast_back,
-                });
-                (casted, instructions)
+                e.cast_to(cast_back, witness)
             }
             TypeExpr::Array(inner, size) => {
-                let mut elems = Vec::new();
-                for i in 0..*size {
-                    let index = function.fresh_value();
-                    instructions.push(OpCode::Const {
-                        result: index,
-                        value: ConstValue::U(32, i as u128),
-                    });
-                    let elem = function.fresh_value();
-                    instructions.push(OpCode::ArrayGet {
-                        result: elem,
-                        array: *value_id,
-                        index,
-                    });
-                    let (reconstructed_elem, child_instructions) =
-                        Self::flatten_witness_reconstruct(&elem, inner, function);
-                    instructions.extend(child_instructions);
-                    elems.push(reconstructed_elem);
-                }
-                let reconstructed = function.fresh_value();
-                instructions.push(OpCode::MkSeq {
-                    result: reconstructed,
-                    elems,
-                    seq_type: SeqType::Array(*size),
-                    elem_type: *inner.clone(),
-                });
-                (reconstructed, instructions)
+                let child_fn = child_fns
+                    .first()
+                    .copied()
+                    .expect("array prepare function should have child function");
+                let initial_array = Self::emit_default_array(e, inner, *size);
+                let prepared_array = e.build_counted_loop(
+                    *size,
+                    vec![(initial_array, typ.clone())],
+                    |e, index, accumulators| {
+                        let current_array = accumulators[0];
+                        let elem = e.array_get(value_id, index);
+                        let prepared = e.call(child_fn, vec![elem], 1);
+                        let updated_array = e.array_set(current_array, index, prepared[0]);
+                        vec![updated_array]
+                    },
+                );
+                prepared_array[0]
             }
             TypeExpr::Tuple(element_types) => {
-                let mut elems = Vec::new();
-                let mut elem_types = Vec::new();
-                for (i, elem_type) in element_types.iter().enumerate() {
-                    let proj = function.fresh_value();
-                    instructions.push(OpCode::TupleProj {
-                        result: proj,
-                        tuple: *value_id,
-                        idx: i,
-                    });
-                    let (reconstructed_elem, child_instructions) =
-                        Self::flatten_witness_reconstruct(&proj, elem_type, function);
-                    instructions.extend(child_instructions);
-                    elems.push(reconstructed_elem);
-                    elem_types.push(elem_type.clone());
+                let mut elems = Vec::with_capacity(element_types.len());
+                for (i, child_fn) in child_fns.iter().enumerate() {
+                    let elem = e.tuple_proj(value_id, i);
+                    let prepared = e.call(*child_fn, vec![elem], 1);
+                    elems.push(prepared[0]);
                 }
-                let reconstructed = function.fresh_value();
-                instructions.push(OpCode::MkTuple {
-                    result: reconstructed,
-                    elems,
-                    element_types: elem_types,
-                });
-                (reconstructed, instructions)
+                e.mk_tuple(elems, element_types.clone())
             }
-            _ => {
-                // For other types, just WriteWitness directly
-                let ww_result = function.fresh_value();
-                instructions.push(OpCode::WriteWitness {
-                    result: Some(ww_result),
-                    value: *value_id,
-                    pinned: false,
-                });
-                (ww_result, instructions)
-            }
+            TypeExpr::WitnessOf(_) => value_id,
+            _ => e.write_witness(value_id),
         }
     }
 
     fn rebuild_main_params(&self, ssa: &mut HLSSA) {
-        let function = ssa.get_main_mut();
+        let params: Vec<_> = ssa
+            .get_main()
+            .get_entry()
+            .get_parameters()
+            .cloned()
+            .collect();
+        let mut reconstruct_fns = Vec::new();
+        for (_, typ) in &params {
+            Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
+        }
 
-        let params: Vec<_> = function.get_entry().get_parameters().cloned().collect();
+        let function = ssa.get_main_mut();
 
         let mut new_instructions = Vec::new();
         let mut new_parameters = Vec::new();
 
         for (value_id, typ) in params.iter() {
             let (_, child_parameters, child_instructions) =
-                Self::reconstruct_param(Some(value_id), typ, function);
+                Self::reconstruct_param(Some(*value_id), typ, function, &reconstruct_fns);
             new_parameters.extend(child_parameters);
             new_instructions.extend(child_instructions);
         }
@@ -428,111 +444,256 @@ impl PrepareEntryPoint {
         entry_block.put_instructions(new_instructions);
     }
 
-    fn reconstruct_param(
-        value_id: Option<&ValueId>,
-        typ: &Type,
-        function: &mut HLFunction,
-    ) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
-        let mut new_instructions = Vec::new();
-        let mut new_parameters = Vec::new();
+    fn find_reconstruct_fn(typ: &Type, reconstruct_fns: &[ReconstructFnEntry]) -> FunctionId {
+        reconstruct_fns
+            .iter()
+            .find(|entry| entry.hlssa_type == *typ)
+            .map(|entry| entry.fn_id)
+            .expect("reconstruct function should have been pre-created")
+    }
 
-        let value_id = if let Some(id) = value_id {
-            id
-        } else {
-            &(function.fresh_value())
-        };
+    fn get_or_create_reconstruct_fn(
+        typ: &Type,
+        ssa: &mut HLSSA,
+        reconstruct_fns: &mut Vec<ReconstructFnEntry>,
+    ) -> FunctionId {
+        if let Some(entry) = reconstruct_fns
+            .iter()
+            .find(|entry| entry.hlssa_type == *typ)
+        {
+            return entry.fn_id;
+        }
 
         match &typ.expr {
-            TypeExpr::Field => new_parameters.push((*value_id, typ.clone())),
+            TypeExpr::Array(inner, _) => {
+                Self::get_or_create_reconstruct_fn(inner, ssa, reconstruct_fns);
+            }
+            TypeExpr::WitnessOf(inner) => {
+                Self::get_or_create_reconstruct_fn(inner, ssa, reconstruct_fns);
+            }
+            TypeExpr::Tuple(element_types) => {
+                for elem_type in element_types {
+                    Self::get_or_create_reconstruct_fn(elem_type, ssa, reconstruct_fns);
+                }
+            }
+            _ => {}
+        }
+
+        let fn_id = ssa.add_function(Self::unique_reconstruct_fn_name(reconstruct_fns));
+        reconstruct_fns.push(ReconstructFnEntry {
+            hlssa_type: typ.clone(),
+            fn_id,
+        });
+
+        {
+            let function = ssa.get_function_mut(fn_id);
+            function.add_return_type(typ.clone());
+            let entry_block = function.get_entry_id();
+            let mut b = HLFunctionBuilder::new(function);
+            let mut e = b.block(entry_block);
+
+            let input_len = Self::flattened_field_count(typ);
+            let input_array = e.add_parameter(Type::field().array_of(input_len));
+            let result = Self::emit_reconstruct_body(&mut e, typ, input_array, reconstruct_fns);
+            e.terminate_return(vec![result]);
+        }
+
+        fn_id
+    }
+
+    fn emit_reconstruct_body(
+        e: &mut HLBlockEmitter<'_>,
+        typ: &Type,
+        input_array: ValueId,
+        reconstruct_fns: &[ReconstructFnEntry],
+    ) -> ValueId {
+        match &typ.expr {
+            TypeExpr::Field => {
+                let zero = e.u_const(32, 0);
+                e.array_get(input_array, zero)
+            }
             TypeExpr::U(size) | TypeExpr::I(size) => {
+                let zero = e.u_const(32, 0);
+                let field_param = e.array_get(input_array, zero);
+                if *size == 1 {
+                    let zero = e.field_const(ark_bn254::Fr::from(0));
+                    let one = e.field_const(ark_bn254::Fr::from(1));
+                    let x_sub_1 = e.sub(field_param, one);
+                    let x_times_x_sub_1 = e.mul(field_param, x_sub_1);
+                    e.assert_eq(x_times_x_sub_1, zero);
+                } else {
+                    e.rangecheck(field_param, *size);
+                }
+
                 let cast_back = match &typ.expr {
                     TypeExpr::U(s) => CastTarget::U(*s),
                     TypeExpr::I(s) => CastTarget::I(*s),
                     _ => unreachable!(),
                 };
-                let new_field_id = function.fresh_value();
-                new_parameters.push((new_field_id, Type::field()));
-
-                if *size == 1 {
-                    // Boolean constraint: x * (x - 1) = 0
-                    let zero = function.fresh_value();
-                    new_instructions.push(OpCode::Const {
-                        result: zero,
-                        value: ConstValue::Field(ark_bn254::Fr::from(0)),
-                    });
-                    let one = function.fresh_value();
-                    new_instructions.push(OpCode::Const {
-                        result: one,
-                        value: ConstValue::Field(ark_bn254::Fr::from(1)),
-                    });
-                    let x_sub_1 = function.fresh_value();
-                    let x_times_x_sub_1 = function.fresh_value();
-                    new_instructions.push(OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Sub,
-                        result: x_sub_1,
-                        lhs: new_field_id,
-                        rhs: one,
-                    });
-                    new_instructions.push(OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Mul,
-                        result: x_times_x_sub_1,
-                        lhs: new_field_id,
-                        rhs: x_sub_1,
-                    });
-                    new_instructions.push(OpCode::AssertCmp {
-                        kind: CmpKind::Eq,
-                        lhs: x_times_x_sub_1,
-                        rhs: zero,
-                    });
-                } else {
-                    new_instructions.push(OpCode::Rangecheck {
-                        value: new_field_id,
-                        max_bits: *size,
-                    });
-                }
-
-                new_instructions.push(OpCode::Cast {
-                    result: *value_id,
-                    value: new_field_id,
-                    target: cast_back,
-                });
+                e.cast_to(cast_back, field_param)
             }
             TypeExpr::Array(inner, size) => {
-                let mut elems = Vec::new();
-                for _ in 0..*size {
-                    let (child_id, child_parameters, child_instructions) =
-                        Self::reconstruct_param(None, inner, function);
-                    elems.push(child_id);
-                    new_parameters.extend(child_parameters);
-                    new_instructions.extend(child_instructions);
-                }
-                new_instructions.push(OpCode::MkSeq {
-                    result: *value_id,
-                    elems,
-                    seq_type: SeqType::Array(*size),
-                    elem_type: *inner.clone(),
-                });
+                let child_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
+                let child_width = Self::flattened_field_count(inner);
+                let initial_array = Self::emit_default_array(e, inner, *size);
+                let reconstructed_array = e.build_counted_loop(
+                    *size,
+                    vec![(initial_array, typ.clone())],
+                    |e, index, accumulators| {
+                        let current_array = accumulators[0];
+                        let child_input = Self::emit_reconstruct_child_input_array_at_index(
+                            e,
+                            input_array,
+                            index,
+                            child_width,
+                        );
+                        let reconstructed = e.call(child_fn, vec![child_input], 1);
+                        let updated_array = e.array_set(current_array, index, reconstructed[0]);
+                        vec![updated_array]
+                    },
+                );
+                reconstructed_array[0]
             }
             TypeExpr::Tuple(element_types) => {
-                let mut elems = Vec::new();
-                let mut elem_types = Vec::new();
+                let mut elems = Vec::with_capacity(element_types.len());
+                let mut field_offset = 0;
                 for elem_type in element_types {
-                    let (child_id, child_parameters, child_instructions) =
-                        Self::reconstruct_param(None, elem_type, function);
-                    elems.push(child_id);
-                    elem_types.push(elem_type.clone());
-                    new_parameters.extend(child_parameters);
-                    new_instructions.extend(child_instructions);
+                    let child_fn = Self::find_reconstruct_fn(elem_type, reconstruct_fns);
+                    let child_width = Self::flattened_field_count(elem_type);
+                    let child_input = Self::emit_reconstruct_child_input_array(
+                        e,
+                        input_array,
+                        field_offset,
+                        child_width,
+                    );
+                    let reconstructed = e.call(child_fn, vec![child_input], 1);
+                    elems.push(reconstructed[0]);
+                    field_offset += child_width;
                 }
-                new_instructions.push(OpCode::MkTuple {
-                    result: *value_id,
-                    elems,
-                    element_types: elem_types,
+                e.mk_tuple(elems, element_types.clone())
+            }
+            TypeExpr::WitnessOf(inner) => {
+                let inner_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
+                let reconstructed = e.call(inner_fn, vec![input_array], 1);
+                e.cast_to_witness_of(reconstructed[0])
+            }
+            _ => todo!("Not implemented yet"),
+        }
+    }
+
+    fn emit_default_value(e: &mut HLBlockEmitter<'_>, typ: &Type) -> ValueId {
+        match &typ.expr {
+            TypeExpr::Field => e.field_const(ark_bn254::Fr::from(0)),
+            TypeExpr::U(size) => e.u_const(*size, 0),
+            TypeExpr::I(size) => e.i_const(*size, 0),
+            TypeExpr::Array(inner, size) => Self::emit_default_array(e, inner, *size),
+            TypeExpr::WitnessOf(_) => {
+                let field = e.field_const(ark_bn254::Fr::from(0));
+                e.cast_to_witness_of(field)
+            }
+            TypeExpr::Tuple(element_types) => {
+                let elems = element_types
+                    .iter()
+                    .map(|elem_type| Self::emit_default_value(e, elem_type))
+                    .collect();
+                e.mk_tuple(elems, element_types.clone())
+            }
+            _ => todo!("Not implemented yet"),
+        }
+    }
+
+    fn emit_default_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
+        let elems = if size == 0 {
+            Vec::new()
+        } else {
+            let default_elem = Self::emit_default_value(e, inner);
+            vec![default_elem; size]
+        };
+        e.mk_seq(elems, SeqType::Array(size), inner.clone())
+    }
+
+    fn emit_reconstruct_child_input_array(
+        e: &mut HLBlockEmitter<'_>,
+        input_array: ValueId,
+        start: usize,
+        len: usize,
+    ) -> ValueId {
+        let fields = (0..len)
+            .map(|i| {
+                let index = e.u_const(32, (start + i) as u128);
+                e.array_get(input_array, index)
+            })
+            .collect();
+        e.mk_seq(fields, SeqType::Array(len), Type::field())
+    }
+
+    fn emit_reconstruct_child_input_array_at_index(
+        e: &mut HLBlockEmitter<'_>,
+        input_array: ValueId,
+        index: ValueId,
+        width: usize,
+    ) -> ValueId {
+        let start = if width == 1 {
+            index
+        } else {
+            let width_value = e.u_const(32, width as u128);
+            e.mul(index, width_value)
+        };
+
+        let fields = (0..width)
+            .map(|i| {
+                let field_index = if i == 0 {
+                    start
+                } else {
+                    let offset = e.u_const(32, i as u128);
+                    e.add(start, offset)
+                };
+                e.array_get(input_array, field_index)
+            })
+            .collect();
+        e.mk_seq(fields, SeqType::Array(width), Type::field())
+    }
+
+    fn reconstruct_param(
+        value_id: Option<ValueId>,
+        typ: &Type,
+        function: &mut HLFunction,
+        reconstruct_fns: &[ReconstructFnEntry],
+    ) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
+        let mut new_instructions = Vec::new();
+        let mut new_parameters = Vec::new();
+
+        let value_id = value_id.unwrap_or_else(|| function.fresh_value());
+
+        match &typ.expr {
+            TypeExpr::Field => new_parameters.push((value_id, typ.clone())),
+            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
+                let input_len = Self::flattened_field_count(typ);
+                let mut fields = Vec::with_capacity(input_len);
+                for _ in 0..input_len {
+                    let field_id = function.fresh_value();
+                    new_parameters.push((field_id, Type::field()));
+                    fields.push(field_id);
+                }
+
+                let input_array = function.fresh_value();
+                new_instructions.push(OpCode::MkSeq {
+                    result: input_array,
+                    elems: fields,
+                    seq_type: SeqType::Array(input_len),
+                    elem_type: Type::field(),
+                });
+                let fn_id = Self::find_reconstruct_fn(typ, reconstruct_fns);
+                new_instructions.push(OpCode::Call {
+                    results: vec![value_id],
+                    function: CallTarget::Static(fn_id),
+                    args: vec![input_array],
+                    unconstrained: false,
                 });
             }
             _ => todo!("Not implemented yet"),
         }
 
-        return (*value_id, new_parameters, new_instructions);
+        (value_id, new_parameters, new_instructions)
     }
 }

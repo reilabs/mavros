@@ -371,10 +371,17 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                     }
                     OpCode::Store { ptr, value } => {
-                        // In forward order: bump value if still live (aliased into cell), then store
-                        // In reverse: push store first, then bump
+                        // In forward order: bump value if still live (aliased into cell),
+                        // store, then drop ptr if it dies here.
+                        // In reverse: push the drop first, then store, then bump.
                         let ptr = *ptr;
                         let value = *value;
+                        if !currently_live.contains(&ptr) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Drop,
+                                value: ptr,
+                            });
+                        }
                         new_instructions.push(instruction);
                         if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
                             new_instructions.push(OpCode::MemOp {

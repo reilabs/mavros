@@ -432,7 +432,8 @@ impl Driver {
     pub fn compile_llvm_targets(
         &mut self,
         emit_llvm: bool,
-        wasm_config: Option<(std::path::PathBuf, &R1CS)>,
+        r1cs: &R1CS,
+        wasm_config: Option<std::path::PathBuf>,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::hlssa_to_llssa;
         use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
@@ -454,7 +455,13 @@ impl Driver {
         .unwrap();
 
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower(ssa, &flow_analysis, &type_info);
+        let llssa = hlssa_to_llssa::lower_with_layout(
+            ssa,
+            &flow_analysis,
+            &type_info,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+        );
 
         // Dump LLSSA after lowering
         fs::write(
@@ -478,7 +485,7 @@ impl Driver {
             None
         };
 
-        if let Some((wasm_path, r1cs)) = wasm_config {
+        if let Some(wasm_path) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
             codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
             info!(message = %"WASM object generated", path = %wasm_path.display());
@@ -527,7 +534,13 @@ impl Driver {
         .unwrap();
 
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower(&ssa, &flow_analysis, &type_info);
+        let llssa = hlssa_to_llssa::lower_with_layout(
+            &ssa,
+            &flow_analysis,
+            &type_info,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+        );
 
         // Dump LLSSA after lowering
         fs::write(

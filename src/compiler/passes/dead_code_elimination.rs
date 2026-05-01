@@ -354,20 +354,17 @@ impl DCE {
 
                     let function = ssa.get_function(function_id);
                     let instruction = function.get_block(block_id).get_instruction(i);
-                    for input in instruction.get_inputs() {
-                        worklist.push(WorkItem::LiveValue(function_id, *input));
-                    }
 
-                    // When a Call becomes live, propagate already-live callee entry
-                    // params to the corresponding args. This is the reverse direction
-                    // of the callee-param-to-caller-arg propagation above, needed for
-                    // calls that weren't initially live (e.g. unconstrained calls).
                     if let OpCode::Call {
                         function: CallTarget::Static(callee),
                         args,
                         ..
                     } = instruction
                     {
+                        // When a Call becomes live, propagate already-live callee entry
+                        // params back to the corresponding callsite args. Other callee
+                        // params may become live later; ValueDefinition::Param handles
+                        // those by revisiting already-live callsites.
                         if let Some(live_params) = live_entry_params.get(callee) {
                             for param_idx in live_params.iter() {
                                 if *param_idx < args.len() {
@@ -375,6 +372,10 @@ impl DCE {
                                         .push(WorkItem::LiveValue(function_id, args[*param_idx]));
                                 }
                             }
+                        }
+                    } else {
+                        for input in instruction.get_inputs() {
+                            worklist.push(WorkItem::LiveValue(function_id, *input));
                         }
                     }
                 }

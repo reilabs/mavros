@@ -47,12 +47,40 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
                 })
                 .collect::<Vec<_>>(),
         ),
+        (InputValue::String(string), AbiType::String { length }) => {
+            let bytes = string.as_bytes();
+            assert_eq!(
+                bytes.len(),
+                *length as usize,
+                "String value length does not match ABI string length"
+            );
+            InputValueOrdered::Vec(
+                bytes
+                    .iter()
+                    .map(|byte| InputValueOrdered::Field(ark_bn254::Fr::from(*byte as u64)))
+                    .collect(),
+            )
+        }
         (InputValue::String(_string), _) => {
-            panic!("Strings are not supported in ordered params");
+            panic!("String input did not match ABI string type");
         }
 
-        (InputValue::Vec(_vec_elements), AbiType::Tuple { fields: _fields }) => {
-            panic!("Tuples are not supported in ordered params");
+        (InputValue::Vec(vec_elements), AbiType::Tuple { fields }) => {
+            assert_eq!(
+                vec_elements.len(),
+                fields.len(),
+                "Tuple value length does not match ABI tuple field count"
+            );
+            InputValueOrdered::Struct(
+                fields
+                    .iter()
+                    .zip(vec_elements.iter())
+                    .enumerate()
+                    .map(|(idx, (field_type, field_value))| {
+                        (idx.to_string(), ordered_param(field_type, field_value))
+                    })
+                    .collect(),
+            )
         }
         _ => unreachable!("value should have already been checked to match abi type"),
     }

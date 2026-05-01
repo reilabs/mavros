@@ -10,13 +10,25 @@ use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
 use mavros::{
-    Project, abi_helpers, compiler::Field, compiler::r1cs_gen::R1CS, driver::Driver,
-    vm::interpreter,
+    Project, abi_helpers,
+    compiler::Field,
+    compiler::r1cs_gen::R1CS,
+    driver::Driver,
+    vm::{bytecode::TableInfo, interpreter},
 };
 use mavros_wasm_layout::{
-    AD_COEFFS_PTR_OFFSET, AD_CURRENT_WIT_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET, AD_OUT_DB_PTR_OFFSET,
-    AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET,
-    WITGEN_C_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE, WITGEN_WITNESS_PTR_OFFSET,
+    AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
+    AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
+    AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
+    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
+    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET, TABLE_INFO_MULTS_BASE_PTR_OFFSET,
+    TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_SLOT_SIZE,
+    WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
+    WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
+    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_CAP_OFFSET,
+    WITGEN_TABLES_LEN_OFFSET, WITGEN_TABLES_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
+    WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
@@ -238,7 +250,7 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.into_path().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, Some((wasm_path.clone(), r1cs))) {
+        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -269,7 +281,8 @@ fn run_single(root: PathBuf) {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("WASM run error: {:?}", e);
                 emit("END:WITGEN_WASM_RUN:fail");
                 None
             }
@@ -398,6 +411,51 @@ struct WasmResult {
     live_bytes: usize,
 }
 
+/// Read a `TableInfo` record back from one slot of the witgen VM struct's
+/// table registry in WASM linear memory. Slot `i` is runtime table id `i`,
+/// matching the VM's `Vec<TableInfo>` order.
+fn read_table_info_slot(
+    memory: &Memory,
+    store: impl wasmtime::AsContext,
+    tables_ptr: u32,
+    wasm_witness_ptr: u32,
+    host_witness_base: *mut Field,
+    table_idx: u32,
+) -> (usize, TableInfo) {
+    let slot_base = tables_ptr + table_idx * TABLE_INFO_SLOT_SIZE;
+    let mults_base =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_MULTS_BASE_PTR_OFFSET);
+    let inv_cnst_off =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_CNST_OFF_OFFSET);
+    let inv_wit_off =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_WIT_OFF_OFFSET);
+    let num_indices =
+        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_INDICES_OFFSET);
+    let num_values = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_VALUES_OFFSET);
+    let length = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_LENGTH_OFFSET);
+    let mults_off = mults_base
+        .checked_sub(wasm_witness_ptr)
+        .expect("table multiplicities pointer is before witness base")
+        / FIELD_SIZE as u32;
+    (
+        mults_off as usize,
+        TableInfo {
+            multiplicities_wit: host_witness_base.wrapping_add(mults_off as usize),
+            num_indices: num_indices as usize,
+            num_values: num_values as usize,
+            length: length as usize,
+            elem_inverses_witness_section_offset: inv_wit_off as usize,
+            elem_inverses_constraint_section_offset: inv_cnst_off as usize,
+        },
+    )
+}
+
+fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> u32 {
+    let data = memory.data(&store);
+    let offset = ptr as usize;
+    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
 /// Read a field element from WASM memory
 fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> Field {
     use ark_ff::BigInt;
@@ -440,11 +498,16 @@ fn run_wasm(
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
+    let input_fields: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
-    let our_data_size = vm_struct_size + witness_bytes + 3 * constraint_bytes;
+    let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
+    let tables_cap = r1cs.constraints_layout.tables_data_size as u32;
+    let table_info_bytes = tables_cap * TABLE_INFO_SLOT_SIZE;
+    let our_data_size =
+        vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes + table_info_bytes;
 
     // Create wasmtime engine and store
     let engine = Engine::default();
@@ -483,7 +546,9 @@ fn run_wasm(
     let a_ptr = witness_ptr + witness_bytes;
     let b_ptr = a_ptr + constraint_bytes;
     let c_ptr = b_ptr + constraint_bytes;
-    let total_bytes = c_ptr + constraint_bytes;
+    let inputs_ptr = c_ptr + constraint_bytes;
+    let tables_ptr = inputs_ptr + input_bytes;
+    let total_bytes = tables_ptr + table_info_bytes;
 
     // Grow memory if needed
     let needed_pages = ((total_bytes as usize + 65535) / 65536) as u32;
@@ -491,6 +556,25 @@ fn run_wasm(
     if needed_pages > current_pages {
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
+
+    // Cursors the host needs to seed. The table registry is written by
+    // first-use lookup helpers. The two table-region cursors (cnst/wit) are
+    // seeded at the structural starts of those regions.
+    //
+    // `current_wit_tables_off` is stored *relative to challenges_start*
+    // (matches how Phase 2 uses it: `out_wit_post_comm[wit_base + i]`,
+    // where `out_wit_post_comm` starts at challenges_start).
+    let mults_cursor_ptr =
+        witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
+    let lookups_a_cursor =
+        a_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let lookups_b_cursor =
+        b_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let lookups_c_cursor =
+        c_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+    let current_cnst_tables_off = r1cs.constraints_layout.tables_data_start() as u32;
+    let current_wit_tables_off =
+        (r1cs.witness_layout.tables_data_start() - r1cs.witness_layout.challenges_start()) as u32;
 
     // Initialize VM struct with buffer pointers
     {
@@ -500,29 +584,44 @@ fn run_wasm(
         let a = WITGEN_A_PTR_OFFSET as usize;
         let b = WITGEN_B_PTR_OFFSET as usize;
         let c = WITGEN_C_PTR_OFFSET as usize;
+        let mc = WITGEN_MULTS_CURSOR_PTR_OFFSET as usize;
+        let la = WITGEN_LOOKUPS_A_PTR_OFFSET as usize;
+        let lb = WITGEN_LOOKUPS_B_PTR_OFFSET as usize;
+        let lc = WITGEN_LOOKUPS_C_PTR_OFFSET as usize;
+        let inputs = WITGEN_INPUTS_PTR_OFFSET as usize;
+        let tcap = WITGEN_TABLES_CAP_OFFSET as usize;
+        let tptr = WITGEN_TABLES_PTR_OFFSET as usize;
+        let cct = WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
+        let cwt = WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + c..off + c + 4].copy_from_slice(&c_ptr.to_le_bytes());
+        data[off + mc..off + mc + 4].copy_from_slice(&mults_cursor_ptr.to_le_bytes());
+        data[off + la..off + la + 4].copy_from_slice(&lookups_a_cursor.to_le_bytes());
+        data[off + lb..off + lb + 4].copy_from_slice(&lookups_b_cursor.to_le_bytes());
+        data[off + lc..off + lc + 4].copy_from_slice(&lookups_c_cursor.to_le_bytes());
+        data[off + inputs..off + inputs + 4].copy_from_slice(&inputs_ptr.to_le_bytes());
+        data[off + tcap..off + tcap + 4].copy_from_slice(&tables_cap.to_le_bytes());
+        data[off + tptr..off + tptr + 4].copy_from_slice(&tables_ptr.to_le_bytes());
+        data[off + cct..off + cct + 4].copy_from_slice(&current_cnst_tables_off.to_le_bytes());
+        data[off + cwt..off + cwt + 4].copy_from_slice(&current_wit_tables_off.to_le_bytes());
+    }
+
+    for (i, field) in input_fields.iter().enumerate() {
+        write_field_to_memory(
+            &memory,
+            &mut store,
+            inputs_ptr + (i * FIELD_SIZE) as u32,
+            field,
+        );
     }
 
     let func = instance
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
 
-    // Prepare arguments: vmPtr followed by all input field element limbs
-    let mut args: Vec<wasmtime::Val> = Vec::new();
-    args.push(wasmtime::Val::I32(vm_struct_ptr as i32)); // vmPtr
-
-    for param in params {
-        for field in flatten_input_value(param) {
-            let limbs = field.0.0;
-            args.push(wasmtime::Val::I64(limbs[0] as i64));
-            args.push(wasmtime::Val::I64(limbs[1] as i64));
-            args.push(wasmtime::Val::I64(limbs[2] as i64));
-            args.push(wasmtime::Val::I64(limbs[3] as i64));
-        }
-    }
+    let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
 
     // Call the function
     let mut results = vec![];
@@ -569,8 +668,55 @@ fn run_wasm(
 
     // Split witness into pre-commit and post-commit sections
     let pre_comm_count = r1cs.witness_layout.pre_commitment_size();
-    let out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
+    let mut out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
     let out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
+
+    // Walk the registry in table-id order. The host does not name any
+    // specific lookup kind; each runtime-claimed slot describes itself fully
+    // via its `TableInfoSlot` fields. `TableInfo` stores a host pointer, so
+    // build it only after `out_wit_pre_comm` exists.
+    let tables_len =
+        read_u32_from_memory(&memory, &store, vm_struct_ptr + WITGEN_TABLES_LEN_OFFSET) as usize;
+    assert!(
+        tables_len <= tables_cap as usize,
+        "WASM `tables_len` ({}) exceeds registry capacity ({})",
+        tables_len,
+        tables_cap
+    );
+    let host_witness_base = out_wit_pre_comm.as_mut_ptr();
+    let mut runtime_tables: Vec<(usize, TableInfo)> = Vec::with_capacity(tables_len);
+    for table_idx in 0..tables_len as u32 {
+        runtime_tables.push(read_table_info_slot(
+            &memory,
+            &store,
+            tables_ptr,
+            witness_ptr,
+            host_witness_base,
+            table_idx,
+        ));
+    }
+
+    let (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c) =
+        if r1cs.witness_layout.challenges_size > 0 {
+            let result = witgen_phase2(
+                r1cs,
+                out_wit_pre_comm,
+                out_wit_post_comm,
+                out_a,
+                out_b,
+                out_c,
+                runtime_tables,
+            );
+            (
+                result.out_wit_pre_comm,
+                result.out_wit_post_comm,
+                result.out_a,
+                result.out_b,
+                result.out_c,
+            )
+        } else {
+            (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c)
+        };
 
     Ok(WasmResult {
         out_wit_pre_comm,
@@ -580,6 +726,58 @@ fn run_wasm(
         out_c,
         live_bytes,
     })
+}
+
+fn witgen_phase2(
+    r1cs: &R1CS,
+    mut out_wit_pre_comm: Vec<Field>,
+    out_wit_post_comm: Vec<Field>,
+    out_a: Vec<Field>,
+    out_b: Vec<Field>,
+    out_c: Vec<Field>,
+    runtime_tables: Vec<(usize, TableInfo)>,
+) -> interpreter::WitgenResult {
+    use mavros::vm::bytecode::AllocationInstrumenter;
+
+    // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
+    // Walk the runtime-claimed table list rather than scanning the entire
+    // multiplicities region: the host doesn't know each table's length
+    // statically, only that the runtime registry recorded `length` for
+    // every claimed slot.
+    for (multiplicities_wit_off, tbl) in &runtime_tables {
+        let lo = *multiplicities_wit_off;
+        let hi = lo + tbl.length;
+        for i in lo..hi {
+            out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
+        }
+    }
+
+    let tables = if r1cs.constraints_layout.lookups_data_size == 0 {
+        vec![]
+    } else {
+        assert!(
+            !runtime_tables.is_empty(),
+            "WASM emitted lookup constraints but no tables were claimed at runtime"
+        );
+
+        runtime_tables.into_iter().map(|(_, table)| table).collect()
+    };
+
+    let phase1 = interpreter::Phase1Result {
+        out_wit_pre_comm,
+        out_wit_post_comm,
+        out_a,
+        out_b,
+        out_c,
+        tables,
+        instrumenter: AllocationInstrumenter::new(),
+    };
+
+    interpreter::run_phase2_with_fake_challenges(
+        phase1,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+    )
 }
 
 // ── AD WASM Runner ───────────────────────────────────────────────────
@@ -682,6 +880,16 @@ fn run_ad_wasm(
         );
     }
 
+    // AD lookups need an absolute base for random-access coefficient reads
+    // and a fresh-witness counter seeded at the lookups-section start. The
+    // three table-allocation cursors (`current_*_tables_off`,
+    // `current_wit_multiplicities_off`) are seeded at structural layout
+    // starts; first-use lookup helpers snapshot them and then bump by their
+    // own table footprint.
+    let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
+    let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
+    let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;
+    let wit_mults_start = r1cs.witness_layout.multiplicities_start() as u32;
     // Initialize AD VM struct
     {
         let data = memory.data_mut(&mut store);
@@ -691,11 +899,21 @@ fn run_ad_wasm(
         let dc = AD_OUT_DC_PTR_OFFSET as usize;
         let coeffs = AD_COEFFS_PTR_OFFSET as usize;
         let wit = AD_CURRENT_WIT_OFF_OFFSET as usize;
+        let cbase = AD_COEFFS_BASE_PTR_OFFSET as usize;
+        let lwit = AD_CURRENT_LOOKUP_WIT_OFF_OFFSET as usize;
+        let cct = AD_CURRENT_CNST_TABLES_OFF_OFFSET as usize;
+        let cwt = AD_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
+        let cwm = AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET as usize;
         data[off + da..off + da + 4].copy_from_slice(&da_ptr.to_le_bytes());
         data[off + db..off + db + 4].copy_from_slice(&db_ptr.to_le_bytes());
         data[off + dc..off + dc + 4].copy_from_slice(&dc_ptr.to_le_bytes());
         data[off + coeffs..off + coeffs + 4].copy_from_slice(&coeffs_ptr.to_le_bytes());
         data[off + wit..off + wit + 4].copy_from_slice(&0u32.to_le_bytes());
+        data[off + cbase..off + cbase + 4].copy_from_slice(&coeffs_ptr.to_le_bytes());
+        data[off + lwit..off + lwit + 4].copy_from_slice(&lookups_wit_start.to_le_bytes());
+        data[off + cct..off + cct + 4].copy_from_slice(&cnst_tables_start.to_le_bytes());
+        data[off + cwt..off + cwt + 4].copy_from_slice(&wit_tables_start.to_le_bytes());
+        data[off + cwm..off + cwm + 4].copy_from_slice(&wit_mults_start.to_le_bytes());
     }
 
     let func: wasmtime::Func = instance
