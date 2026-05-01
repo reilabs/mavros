@@ -545,38 +545,38 @@ fn lower_instruction(
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::U(_) => {
-                    let op = match kind {
-                        BinaryArithOpKind::Add => IntArithOp::Add,
-                        BinaryArithOpKind::Sub => IntArithOp::Sub,
-                        BinaryArithOpKind::Mul => IntArithOp::Mul,
-                        BinaryArithOpKind::And => IntArithOp::And,
-                        BinaryArithOpKind::Or => IntArithOp::Or,
-                        BinaryArithOpKind::Xor => IntArithOp::Xor,
-                        BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        BinaryArithOpKind::Shr => IntArithOp::UShr,
-                        BinaryArithOpKind::Div => IntArithOp::UDiv,
-                        BinaryArithOpKind::Mod => IntArithOp::URem,
-                        _ => panic!("Unsupported int arith op: {:?}", kind),
-                    };
-                    e.int_arith(op, ll_lhs, ll_rhs)
-                }
-                TypeExpr::I(_) => {
-                    let op = match kind {
-                        BinaryArithOpKind::Add => IntArithOp::Add,
-                        BinaryArithOpKind::Sub => IntArithOp::Sub,
-                        BinaryArithOpKind::Mul => IntArithOp::Mul,
-                        BinaryArithOpKind::And => IntArithOp::And,
-                        BinaryArithOpKind::Or => IntArithOp::Or,
-                        BinaryArithOpKind::Xor => IntArithOp::Xor,
-                        BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        BinaryArithOpKind::Shr => IntArithOp::UShr,
-                        BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
-                        BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
-                        _ => panic!("Unsupported signed int arith op: {:?}", kind),
-                    };
-                    e.int_arith(op, ll_lhs, ll_rhs)
-                }
+                TypeExpr::U(_) => match kind {
+                    BinaryArithOpKind::Add => e.int_arith(IntArithOp::Add, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Sub => e.int_arith(IntArithOp::Sub, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Mul => e.int_arith(IntArithOp::Mul, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shl => {
+                        lower_wrapping_shift(e, IntArithOp::Shl, ll_lhs, ll_rhs, &result_type)
+                    }
+                    BinaryArithOpKind::Shr => {
+                        lower_wrapping_shift(e, IntArithOp::UShr, ll_lhs, ll_rhs, &result_type)
+                    }
+                    BinaryArithOpKind::Div => e.int_arith(IntArithOp::UDiv, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Mod => e.int_arith(IntArithOp::URem, ll_lhs, ll_rhs),
+                },
+                TypeExpr::I(_) => match kind {
+                    BinaryArithOpKind::Add => e.int_arith(IntArithOp::Add, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Sub => e.int_arith(IntArithOp::Sub, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Mul => e.int_arith(IntArithOp::Mul, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shl => {
+                        lower_wrapping_shift(e, IntArithOp::Shl, ll_lhs, ll_rhs, &result_type)
+                    }
+                    BinaryArithOpKind::Shr => {
+                        lower_wrapping_shift(e, IntArithOp::UShr, ll_lhs, ll_rhs, &result_type)
+                    }
+                    BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
+                    BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
+                },
                 TypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind {
@@ -1158,6 +1158,19 @@ fn integer_width(ty: &Type, op_name: &str) -> u32 {
         TypeExpr::U(bits) | TypeExpr::I(bits) => bits as u32,
         _ => panic!("{} expects an integer type, got {}", op_name, ty),
     }
+}
+
+fn lower_wrapping_shift(
+    e: &mut LLBlockEmitter<'_>,
+    op: IntArithOp,
+    lhs: ValueId,
+    rhs: ValueId,
+    result_type: &Type,
+) -> ValueId {
+    let bits = integer_width(result_type, "shift");
+    let bits_value = e.int_const(bits, bits as u64);
+    let wrapped_rhs = e.int_arith(IntArithOp::URem, rhs, bits_value);
+    e.int_arith(op, lhs, wrapped_rhs)
 }
 
 fn zext_to_width(
