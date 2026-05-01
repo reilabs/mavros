@@ -356,11 +356,6 @@ fn lower_inner(
     let hlssa_global_types: Vec<Type> = hlssa.get_global_types().to_vec();
     let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(|ty| lower_type(ty)).collect();
     llssa.set_global_types(ll_global_types);
-    let forward_a_base_global = if hlssa_has_forward_spread_lookup(hlssa) {
-        Some(add_ll_global(&mut llssa, LLType::Ptr))
-    } else {
-        None
-    };
 
     // First pass: create all functions (so we can map FunctionIds)
     fn_map.insert(main_id, llssa.get_main_id());
@@ -389,11 +384,6 @@ fn lower_inner(
             &mut ad_fns,
             &mut lookup_fns,
             &hlssa_global_types,
-            if *fn_id == main_id {
-                forward_a_base_global
-            } else {
-                None
-            },
         );
 
         let _old = llssa.take_function(ll_fn_id);
@@ -416,34 +406,9 @@ fn lower_inner(
     generate_all_ad_functions(&mut llssa, &ad_fns);
 
     // Fifth pass: generate lookup helper function bodies (needs layout).
-    generate_all_lookup_functions(
-        &mut llssa,
-        &lookup_fns,
-        layout,
-        &mut ad_fns,
-        forward_a_base_global,
-    );
+    generate_all_lookup_functions(&mut llssa, &lookup_fns, layout, &mut ad_fns);
 
     llssa
-}
-
-fn hlssa_has_forward_spread_lookup(hlssa: &HLSSA) -> bool {
-    for (_, function) in hlssa.iter_functions() {
-        for (_, block) in function.get_blocks() {
-            for instruction in block.get_instructions() {
-                if matches!(
-                    instruction,
-                    crate::compiler::ssa::OpCode::Lookup {
-                        target: crate::compiler::ssa::LookupTarget::Spread(_),
-                        ..
-                    }
-                ) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 // =============================================================================
@@ -461,7 +426,6 @@ fn lower_function(
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[Type],
-    forward_a_base_global: Option<usize>,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -501,13 +465,7 @@ fn lower_function(
         let block = function.get_block(block_id);
         let ll_block_id = block_map[&block_id];
 
-        // Create a BlockEmitter for this block
         let mut emitter = LLBlockEmitter::new(&mut ll_func, ll_block_id);
-        if block_id == hl_entry_id {
-            if let Some(global) = forward_a_base_global {
-                capture_witgen_a_base(&mut emitter, global);
-            }
-        }
 
         // Lower instructions
         for instruction in block.get_instructions() {
@@ -543,13 +501,6 @@ fn new_ll_function(name: impl Into<String>) -> LLFunction {
 fn add_vm_parameter(func: &mut LLFunction) -> ValueId {
     let entry = func.get_entry_id();
     func.add_parameter(entry, LLType::Ptr)
-}
-
-fn capture_witgen_a_base(e: &mut LLBlockEmitter<'_>, global: usize) {
-    let a_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A);
-    let a_base = e.ll_load(a_slot, LLType::Ptr);
-    let global_slot = e.global_addr(global);
-    e.ll_store(global_slot, a_base);
 }
 
 // =============================================================================
@@ -2407,7 +2358,6 @@ fn generate_all_lookup_functions(
     lookup_fns: &LookupFunctions,
     layout: Option<(WitnessLayout, ConstraintsLayout)>,
     ad_fns: &mut AdFunctions,
-    forward_a_base_global: Option<usize>,
 ) {
     if let Some(id) = lookup_fns.rngchk_8 {
         let table_idx_global = lookup_fns
@@ -2424,9 +2374,7 @@ fn generate_all_lookup_functions(
             .get(bits)
             .copied()
             .expect("spread helper registered without internal table-id global");
-        let a_base_global =
-            forward_a_base_global.expect("spread helper registered without forward A base global");
-        let func = generate_spread_lookup_function(*bits, table_idx_global, a_base_global);
+        let func = generate_spread_lookup_function(*bits, table_idx_global);
         let _old = llssa.take_function(*id);
         llssa.put_function(*id, func);
     }
@@ -2551,11 +2499,7 @@ fn table_info_field_ptr(e: &mut LLBlockEmitter<'_>, slot_ptr: ValueId, field: us
     e.struct_field_ptr(slot_ptr, LLStruct::table_info_slot(), field)
 }
 
-fn generate_spread_lookup_function(
-    bits: u8,
-    table_idx_global: usize,
-    a_base_global: usize,
-) -> LLFunction {
+fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunction {
     assert!(
         bits <= 16,
         "Spread lookup helper currently supports bit-widths up to 16, got {}",
@@ -2626,7 +2570,7 @@ fn generate_spread_lookup_function(
                     e.ll_store(p, value);
                 }
 
-                let a_base_slot = e.global_addr(a_base_global);
+                let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
                 let a_base = e.ll_load(a_base_slot, LLType::Ptr);
                 let input_ty = Type::u(bits as usize);
                 let result_ty = Type::u(bits as usize * 2);
