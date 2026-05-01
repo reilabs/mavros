@@ -1394,7 +1394,29 @@ impl ExplicitWitness {
         max_bits: usize,
         flag: ValueId,
     ) {
-        if max_bits == 1 {
+        self.gen_witness_rangecheck_bits(b, value, max_bits, flag);
+    }
+
+    /// Rangecheck `value ∈ [0, 2^bits)` for any `bits ≥ 1`.
+    ///
+    /// Cost:
+    ///   bits == 1                     → 0 lookups (boolean check, 2 algebraic constraints)
+    ///   bits == 8q (byte-aligned)     → q lookups
+    ///   bits == 8q + r, r ∈ (0, 8)    → q + 2 lookups
+    ///
+    /// The non-byte-aligned case extends the byte-decomposition trick: rangecheck all
+    /// q+1 byte chunks normally, then add a single byte rangecheck of
+    /// `(2^r - 1) - top_chunk` to prove `top_chunk < 2^r`.
+    fn gen_witness_rangecheck_bits(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        bits: usize,
+        flag: ValueId,
+    ) {
+        assert!(bits >= 1, "rangecheck width must be at least 1 bit");
+
+        if bits == 1 {
             // Boolean check: flag * (value² - value) = 0
             // Split into: t = value * value (constrained), then flag * (t - value) = 0
             let v_plain = b.value_of(value);
@@ -1406,8 +1428,12 @@ impl ExplicitWitness {
             b.constrain(flag, diff, zero);
             return;
         }
-        assert!(max_bits % 8 == 0); // TODO
-        let chunks = max_bits / 8;
+
+        let full_bytes = bits / 8;
+        let leftover_bits = bits % 8;
+        let total_chunks = full_bytes + if leftover_bits > 0 { 1 } else { 0 };
+        // total_chunks ≥ 1 since bits ≥ 2 here.
+
         let pure_value = b.value_of(value);
         let bytes_val = b.fresh_value();
         b.push(OpCode::ToRadix {
@@ -1415,25 +1441,43 @@ impl ExplicitWitness {
             value: pure_value,
             radix: Radix::Bytes,
             endianness: Endianness::Big,
-            count: chunks,
+            count: total_chunks,
         });
         let two_to_8 = b.field_const(Field::from(256));
-        // Witness and rangecheck upper n-1 bytes, accumulate partial sum
+
+        // Witness and rangecheck upper total_chunks-1 chunks, accumulate partial sum.
+        // The top chunk is the first iteration when leftover_bits > 0 (big-endian).
         let mut partial = b.field_const(Field::ZERO);
-        for i in 0..chunks - 1 {
+        let mut top_chunk: Option<ValueId> = None;
+        for i in 0..total_chunks - 1 {
             let idx = b.u_const(32, i as u128);
             let byte = b.array_get(bytes_val, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
             b.lookup_rngchk_8(byte_wit, flag);
+            if i == 0 {
+                top_chunk = Some(byte_wit);
+            }
             let shift_prev = b.mul(partial, two_to_8);
             partial = b.add(shift_prev, byte_wit);
         }
-        // Compute LSB as value - partial*256; rangecheck proves it's a byte,
-        // which implicitly constrains the reconstruction (no separate constraint needed)
+        // Compute the LSB chunk as value - partial*256; rangecheck proves it's a byte,
+        // which implicitly constrains the reconstruction (no separate constraint needed).
         let partial_shifted = b.mul(partial, two_to_8);
         let lsb = b.sub(value, partial_shifted);
         b.lookup_rngchk_8(lsb, flag);
+        if total_chunks == 1 {
+            top_chunk = Some(lsb);
+        }
+
+        // For non-byte-aligned widths, constrain the top chunk to leftover_bits bits
+        // by rangechecking (2^r - 1) - top_chunk to 8 bits.
+        if leftover_bits > 0 {
+            let top = top_chunk.expect("top_chunk set when total_chunks ≥ 1");
+            let bound = b.field_const(Field::from((1u128 << leftover_bits) - 1));
+            let gap = b.sub(bound, top);
+            b.lookup_rngchk_8(gap, flag);
+        }
     }
 
     /// Lower a witness-tainted Lt comparison, emitting the result into `result`.
@@ -1512,11 +1556,10 @@ impl ExplicitWitness {
     /// Requires: `value` is already rangechecked to n bits.
     /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
     ///
-    /// For witness inputs: writes sign and low as independent witnesses, then constrains
-    ///   sign * 2^(n-1) + low = value
-    /// with sign ∈ {0,1}, low ∈ [0, 2^n), and (2^(n-1) - 1 - low) ∈ [0, 2^n).
-    /// The two rangechecks on low together prove low < 2^(n-1) (can't rangecheck
-    /// n-1 bits directly because it isn't byte-aligned).
+    /// For witness inputs: writes sign as a witness with a boolean check, then
+    /// computes low = value - sign * 2^(n-1) and rangechecks low ∈ [0, 2^(n-1))
+    /// directly via `gen_witness_rangecheck_bits`. For byte-aligned `bits` this
+    /// costs `bits/8 + 1` lookups (e.g. n=64 → 9, n=32 → 5, n=16 → 3).
     ///
     /// For pure inputs: computes sign as a pure hint (no witnesses or constraints).
     fn extract_sign_bit(
@@ -1540,18 +1583,16 @@ impl ExplicitWitness {
         let sign_wit = b.write_witness(sign_hint);
 
         // sign ∈ {0, 1}
-        self.gen_witness_rangecheck(b, sign_wit, 1, flag);
+        self.gen_witness_rangecheck_bits(b, sign_wit, 1, flag);
 
         // Compute low = value - sign * 2^(n-1) (saves 1 witness + 1 constraint)
         let sign_shifted = b.mul(sign_wit, two_n_minus_1);
         let low = b.sub(value, sign_shifted);
 
-        // low ∈ [0, 2^n) — excludes field-wrapped values
-        self.gen_witness_rangecheck(b, low, bits, flag);
-        // low < 2^(n-1)
-        let bound = b.field_const(Field::from((1u128 << (bits - 1)) - 1));
-        let gap = b.sub(bound, low);
-        self.gen_witness_rangecheck(b, gap, bits, flag);
+        // low ∈ [0, 2^(n-1)) — proves the sign bit is correctly extracted.
+        // For byte-aligned `bits`, this is bits/8 lookups for low's bytes plus
+        // 1 lookup of (127 - top_byte) to constrain the top byte to 7 bits.
+        self.gen_witness_rangecheck_bits(b, low, bits - 1, flag);
 
         sign_wit
     }
