@@ -88,7 +88,7 @@ impl ExplicitWitness {
                             _ => unreachable!(),
                         };
                         let one = b.field_const(Field::ONE);
-                        self.gen_witness_rangecheck(b, arith_result, bits, one);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, one);
                         b.push(OpCode::Cast {
                             result,
                             value: arith_result,
@@ -223,7 +223,7 @@ impl ExplicitWitness {
                             b.mul(l_field, r_field)
                         };
                         let one = b.field_const(Field::ONE);
-                        self.gen_witness_rangecheck(b, arith_result, bits, one);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, one);
                         b.push(OpCode::Cast {
                             result: res,
                             value: arith_result,
@@ -497,7 +497,7 @@ impl ExplicitWitness {
                             let diff_plain = b.value_of(diff_minus_one);
                             let diff_wit = b.write_witness(diff_plain);
                             let flag = b.field_const(Field::ONE);
-                            self.gen_witness_rangecheck(b, diff_wit, s, flag);
+                            self.gen_witness_rangecheck_bits(b, diff_wit, s, flag);
                         }
                     }
                 }
@@ -820,7 +820,7 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let one = b.field_const(Field::from(1));
-                    self.gen_witness_rangecheck(b, value, max_bits, one);
+                    self.gen_witness_rangecheck_bits(b, value, max_bits, one);
                 }
             }
             OpCode::ReadGlobal {
@@ -1041,7 +1041,7 @@ impl ExplicitWitness {
                             BinaryArithOpKind::Sub => b.sub(l_field, r_field),
                             _ => unreachable!(),
                         };
-                        self.gen_witness_rangecheck(b, arith_result, bits, cond_field);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, cond_field);
                         b.push(OpCode::Cast {
                             result,
                             value: arith_result,
@@ -1086,7 +1086,7 @@ impl ExplicitWitness {
                         } else {
                             b.mul(l_field, r_field)
                         };
-                        self.gen_witness_rangecheck(b, arith_result, bits, cond_field);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, cond_field);
                         b.push(OpCode::Cast {
                             result: res,
                             value: arith_result,
@@ -1189,7 +1189,7 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(condition)
                 };
-                self.gen_witness_rangecheck(b, value, max_bits, cond_field);
+                self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
             }
             inner => {
                 panic!("unrecognized op inside Guard: {:?}", inner);
@@ -1315,8 +1315,8 @@ impl ExplicitWitness {
 
         // Step 8: Range-check resultHi and resultLo to 128 bits
         // This proves the decomposition is canonical (value < field modulus)
-        self.gen_witness_rangecheck(b, result_hi, 128, flag);
-        self.gen_witness_rangecheck(b, result_lo, 128, flag);
+        self.gen_witness_rangecheck_bits(b, result_hi, 128, flag);
+        self.gen_witness_rangecheck_bits(b, result_lo, 128, flag);
 
         // Step 9: Recover truncated value from low bytes of the decomposition
         // In big-endian, the low bytes are bytes[start..32], where the first may be partial.
@@ -1385,16 +1385,6 @@ impl ExplicitWitness {
         b.lookup_rngchk_8(lo_gap, flag);
 
         lo
-    }
-
-    fn gen_witness_rangecheck(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        max_bits: usize,
-        flag: ValueId,
-    ) {
-        self.gen_witness_rangecheck_bits(b, value, max_bits, flag);
     }
 
     /// Rangecheck `value ∈ [0, 2^bits)` for any `bits ≥ 1`.
@@ -1541,14 +1531,14 @@ impl ExplicitWitness {
             let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
             let signs_same = b.sub(one, signs_differ);
 
-            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, signs_same);
+            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, signs_same);
 
             let zero = b.field_const(Field::ZERO);
             let diff_r_sa = b.sub(result_field, sign_a);
             b.constrain(signs_differ, diff_r_sa, zero);
         } else {
             let rc_flag = b.field_const(Field::from(1));
-            self.gen_witness_rangecheck(b, adjusted_diff_wit, s, rc_flag);
+            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, rc_flag);
         }
     }
 
@@ -1663,8 +1653,8 @@ impl ExplicitWitness {
                 let result_wit = b.write_witness(hint_result);
                 let carry_wit = b.write_witness(hint_carry);
 
-                self.gen_witness_rangecheck(b, result_wit, bits, flag);
-                self.gen_witness_rangecheck(b, carry_wit, 1, flag);
+                self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+                self.gen_witness_rangecheck_bits(b, carry_wit, 1, flag);
 
                 // Constrain: l + r = result + carry * 2^n
                 let carry_shifted = b.mul(carry_wit, two_n);
@@ -1701,8 +1691,8 @@ impl ExplicitWitness {
                 let result_wit = b.write_witness(hint_result);
                 let borrow_wit = b.write_witness(hint_borrow);
 
-                self.gen_witness_rangecheck(b, result_wit, bits, flag);
-                self.gen_witness_rangecheck(b, borrow_wit, 1, flag);
+                self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+                self.gen_witness_rangecheck_bits(b, borrow_wit, 1, flag);
 
                 // Constrain: l - r + 2^n = result + borrow * 2^n
                 let borrow_shifted = b.mul(borrow_wit, two_n);
@@ -1779,8 +1769,8 @@ impl ExplicitWitness {
             let result_wit = b.write_witness(hint_result);
             let q_wit = b.write_witness(hint_q);
 
-            self.gen_witness_rangecheck(b, result_wit, bits, flag);
-            self.gen_witness_rangecheck(b, q_wit, bits, flag);
+            self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+            self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
 
             // Constrain: l * r = result + q * 2^n
             let q_shifted = b.mul(q_wit, two_n);
@@ -1798,8 +1788,8 @@ impl ExplicitWitness {
             let result_wit = b.write_witness(hint_result);
             let q_wit = b.write_witness(hint_q);
 
-            self.gen_witness_rangecheck(b, result_wit, bits, flag);
-            self.gen_witness_rangecheck(b, q_wit, bits, flag);
+            self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+            self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
 
             // Constrain: l * r = result + q * 2^n
             let q_shifted = b.mul(q_wit, two_n);
@@ -1885,14 +1875,14 @@ impl ExplicitWitness {
         b.constrain(q_wit, b_field, a_minus_r);
 
         // Rangecheck q and r
-        self.gen_witness_rangecheck(b, q_wit, bits, flag);
-        self.gen_witness_rangecheck(b, r_wit, bits, flag);
+        self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
+        self.gen_witness_rangecheck_bits(b, r_wit, bits, flag);
 
         // Assert r < b via rangecheck(b - r - 1, bits)
         let one = b.field_const(Field::ONE);
         let b_minus_r = b.sub(b_field, r_wit);
         let b_minus_r_minus_1 = b.sub(b_minus_r, one);
-        self.gen_witness_rangecheck(b, b_minus_r_minus_1, bits, flag);
+        self.gen_witness_rangecheck_bits(b, b_minus_r_minus_1, bits, flag);
 
         // Cast result
         let wit_val = match kind {
