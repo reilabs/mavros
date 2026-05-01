@@ -495,11 +495,23 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
-                    IntArithOp::Shl => self.builder.build_left_shift(lhs, rhs, name).unwrap(),
-                    IntArithOp::UShr => self
-                        .builder
-                        .build_right_shift(lhs, rhs, false, name)
-                        .unwrap(),
+                    IntArithOp::Shl => {
+                        // Mask shift count modulo bit width — LLVM treats shifts
+                        // by >= bit_width as poison, but the VM's Rust `<<` on
+                        // x86 masks to bit_width-1. Match the VM.
+                        let bw = lhs.get_type().get_bit_width();
+                        let mask = lhs.get_type().const_int((bw - 1) as u64, false);
+                        let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
+                        self.builder.build_left_shift(lhs, masked_rhs, name).unwrap()
+                    }
+                    IntArithOp::UShr => {
+                        let bw = lhs.get_type().get_bit_width();
+                        let mask = lhs.get_type().const_int((bw - 1) as u64, false);
+                        let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
+                        self.builder
+                            .build_right_shift(lhs, masked_rhs, false, name)
+                            .unwrap()
+                    }
                     _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val.into());
