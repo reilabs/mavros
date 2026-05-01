@@ -24,7 +24,8 @@ where
         out_type: &Type,
         ctx: &mut Context,
     ) -> Self;
-    fn assert_eq(&self, other: &Self, ctx: &mut Context);
+    fn assert_bool(&self, ctx: &mut Context);
+    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, ctx: &mut Context);
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
@@ -441,10 +442,15 @@ impl SymbolicExecutor {
                         let c = scope[c.0 as usize].as_ref().unwrap();
                         V::constrain(a, b, c, ctx);
                     }
-                    crate::compiler::ssa::OpCode::AssertEq { lhs: a, rhs: b } => {
+                    crate::compiler::ssa::OpCode::Assert { value } => {
+                        let v = scope[value.0 as usize].as_ref().unwrap();
+                        V::assert_bool(v, ctx);
+                    }
+                    crate::compiler::ssa::OpCode::AssertCmp { kind, lhs: a, rhs: b } => {
+                        let lhs_type = fn_type_info.get_value_type(*a);
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         let b = scope[b.0 as usize].as_ref().unwrap();
-                        V::assert_eq(a, b, ctx);
+                        V::assert_cmp(*kind, a, b, lhs_type, ctx);
                     }
                     crate::compiler::ssa::OpCode::MemOp { kind, value } => {
                         let value = scope[value.0 as usize].as_ref().unwrap();

@@ -115,7 +115,8 @@ impl StripWitnessOf {
             | OpCode::Not { .. }
             | OpCode::Store { .. }
             | OpCode::Load { .. }
-            | OpCode::AssertEq { .. }
+            | OpCode::Assert { .. }
+            | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Call { .. }
             | OpCode::ArrayGet { .. }

@@ -4,7 +4,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, HLFunction, HLSSA, Instruction, OpCode, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLFunction, HLSSA, Instruction, OpCode,
+        ValueId,
     },
 };
 
@@ -27,7 +28,7 @@ use crate::compiler::{
 /// - **Lower with div-zero check** (pure inputs only, can fail):
 ///   Div/Mod — if divisor==0 assert !cond and produce 0; else compute.
 /// - **Keep as Guard** (side-effectful or generates constraints):
-///   Store, Call, WriteWitness, AssertEq, AssertR1C, Constrain, Rangecheck,
+///   Store, Call, WriteWitness, Assert, AssertCmp, AssertR1C, Constrain, Rangecheck,
 ///   and failable ops with witness inputs (SExt, integer arith).
 pub struct LowerPureGuards {}
 
@@ -132,7 +133,8 @@ impl LowerPureGuards {
             OpCode::Store { .. }
             | OpCode::Call { .. }
             | OpCode::WriteWitness { .. }
-            | OpCode::AssertEq { .. }
+            | OpCode::Assert { .. }
+            | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Constrain { .. }
             | OpCode::Rangecheck { .. }
@@ -413,7 +415,8 @@ impl LowerPureGuards {
             // Divisor is zero: assert condition is false, produce default
             |e| {
                 let zero_u1 = e.u_const(1, 0);
-                e.emit(OpCode::AssertEq {
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
                     lhs: condition,
                     rhs: zero_u1,
                 });
@@ -463,7 +466,8 @@ impl LowerPureGuards {
             // OOB: assert condition is false, pass through original array
             |e| {
                 let zero = e.u_const(1, 0);
-                e.emit(OpCode::AssertEq {
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
                     lhs: condition,
                     rhs: zero,
                 });
@@ -500,7 +504,8 @@ impl LowerPureGuards {
             // OOB: assert condition is false, produce default value
             |e| {
                 let zero = e.u_const(1, 0);
-                e.emit(OpCode::AssertEq {
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
                     lhs: condition,
                     rhs: zero,
                 });
@@ -574,7 +579,8 @@ impl LowerPureGuards {
             // Failure: assert condition is false, produce default value
             |e| {
                 let zero = e.u_const(1, 0);
-                e.emit(OpCode::AssertEq {
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
                     lhs: condition,
                     rhs: zero,
                 });
