@@ -291,29 +291,6 @@ fn run_single(root: PathBuf) {
 
     // 13. Check WASM correctness  (depends on WITGEN_WASM_RUN)
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
-        if let (Some(vm), Ok(_)) = (&witgen_result, std::env::var("DUMP_DIFF")) {
-            eprintln!(
-                "=== Layout: lookups_data_start={} lookups_data_size={} total={}",
-                r1cs.constraints_layout.lookups_data_start(),
-                r1cs.constraints_layout.lookups_data_size,
-                r1cs.constraints_layout.size()
-            );
-            for i in 0..result.out_a.len().min(50) {
-                let in_lookup = i >= r1cs.constraints_layout.lookups_data_start()
-                    && i < r1cs.constraints_layout.lookups_data_start()
-                        + r1cs.constraints_layout.lookups_data_size;
-                if vm.out_a[i] != result.out_a[i]
-                    || vm.out_b[i] != result.out_b[i]
-                    || vm.out_c[i] != result.out_c[i]
-                {
-                    eprintln!(
-                        "DIFF i={} (lookup={}): vm a/b/c={}/{}/{}, wasm a/b/c={}/{}/{}",
-                        i, in_lookup, vm.out_a[i], vm.out_b[i], vm.out_c[i],
-                        result.out_a[i], result.out_b[i], result.out_c[i]
-                    );
-                }
-            }
-        }
         emit("START:WITGEN_WASM_CORRECT");
 
         let correct = r1cs.check_witgen_output(
