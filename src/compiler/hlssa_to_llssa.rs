@@ -486,7 +486,14 @@ fn lower_function(
 
         // Lower terminator (into current block, which may have changed due to block splits)
         if let Some(terminator) = block.get_terminator() {
-            lower_terminator(terminator, &mut emitter, &val_map, &block_map);
+            lower_terminator(
+                terminator,
+                &mut emitter,
+                &val_map,
+                &block_map,
+                fn_type_info,
+                function.get_returns(),
+            );
         }
     }
 
@@ -1214,31 +1221,25 @@ fn zext_to_width(
     }
 }
 
-fn truncate_to_width(
+fn resize_to_width(
     e: &mut LLBlockEmitter<'_>,
     value: ValueId,
     from_bits: u32,
     to_bits: u32,
 ) -> ValueId {
-    assert!(
-        to_bits <= from_bits,
-        "Cannot truncate i{} to wider i{}",
-        from_bits,
-        to_bits
-    );
-    if from_bits == to_bits {
-        value
-    } else {
+    if from_bits < to_bits {
+        e.zext(value, to_bits)
+    } else if from_bits > to_bits {
         e.truncate(value, to_bits)
+    } else {
+        value
     }
 }
 
 /// Lower a Spread bit-interleave inline as SSA bit ops. Used both for
-/// `OpCode::Spread` (where any input width up to 64 is valid) and inside
-/// the `__spread_N_lookup` / `emit_spread_ad_init_body` helpers (where the
-/// caller separately enforces `bits <= 16` as required by the LogUp table).
-/// The 64-bit ceiling here is just the largest input that doubles within a
-/// representable integer type; it is not the lookup-helper limit.
+/// `OpCode::Spread` and inside the spread lookup helpers. `bits` is the
+/// active low-bit width from `spread::<N>`, while the SSA value type may be a
+/// wider container such as `u32`.
 fn lower_spread(
     e: &mut LLBlockEmitter<'_>,
     value: ValueId,
@@ -1248,26 +1249,30 @@ fn lower_spread(
 ) -> ValueId {
     let input_bits = integer_width(value_type);
     let result_bits = integer_width(result_type);
+    let active_bits = bits as u32;
     assert!(
-        input_bits <= 64,
-        "Spread only supports integer widths up to 64 bits, got {}",
+        (1..=64).contains(&active_bits),
+        "Spread active bit-width must be in 1..=64, got {}",
+        bits
+    );
+    assert!(
+        active_bits <= input_bits,
+        "Spread active bit-width {} exceeds input type width {}",
+        bits,
         value_type
     );
-    assert_eq!(
-        result_bits,
-        input_bits * 2,
-        "Spread result width must be twice the input width"
-    );
-    assert_eq!(
-        bits as u32, input_bits,
-        "Spread opcode bit-width does not match input type width"
+    assert!(
+        result_bits >= active_bits * 2,
+        "Spread result type {} is too narrow for {} active bits",
+        result_type,
+        bits
     );
 
-    let value = zext_to_width(e, value, input_bits, result_bits);
+    let value = resize_to_width(e, value, input_bits, result_bits);
     let mut acc = e.int_const(result_bits, 0);
     let one = e.int_const(result_bits, 1);
 
-    for i in 0..input_bits {
+    for i in 0..active_bits {
         let src_shift = e.int_const(result_bits, i as u64);
         let shifted_down = if i == 0 {
             value
@@ -1298,38 +1303,51 @@ fn lower_unspread(
     let input_bits = integer_width(value_type);
     let odd_bits = integer_width(odd_type);
     let even_bits = integer_width(even_type);
+    let active_bits = bits as u32;
     assert!(
         input_bits <= 128 && input_bits % 2 == 0,
         "Unspread expects an even integer width up to 128 bits, got {}",
         value_type
     );
-    let half_bits = input_bits / 2;
-    assert_eq!(
-        odd_bits, half_bits,
-        "Unspread odd result width must be half the input width"
+    assert!(
+        active_bits >= 1,
+        "Unspread active bit-width must be at least 1, got {}",
+        bits
     );
-    assert_eq!(
-        even_bits, half_bits,
-        "Unspread even result width must be half the input width"
+    assert!(
+        active_bits * 2 <= input_bits,
+        "Unspread active bit-width {} exceeds input type width {}",
+        bits,
+        value_type
     );
-    assert_eq!(
-        bits as u32, half_bits,
-        "Unspread opcode bit-width does not match result type width"
+    assert!(
+        odd_bits >= active_bits,
+        "Unspread odd result type {} is too narrow for {} active bits",
+        odd_type,
+        bits
+    );
+    assert!(
+        even_bits >= active_bits,
+        "Unspread even result type {} is too narrow for {} active bits",
+        even_type,
+        bits
     );
 
-    let mut odd_acc = e.int_const(input_bits, 0);
-    let mut even_acc = e.int_const(input_bits, 0);
-    let one = e.int_const(input_bits, 1);
+    let acc_bits = input_bits.max(odd_bits).max(even_bits);
+    let value = zext_to_width(e, value, input_bits, acc_bits);
+    let mut odd_acc = e.int_const(acc_bits, 0);
+    let mut even_acc = e.int_const(acc_bits, 0);
+    let one = e.int_const(acc_bits, 1);
 
-    for i in 0..half_bits {
-        let even_src_shift = e.int_const(input_bits, (i * 2) as u64);
+    for i in 0..active_bits {
+        let even_src_shift = e.int_const(acc_bits, (i * 2) as u64);
         let even_shifted_down = if i == 0 {
             value
         } else {
             e.int_arith(IntArithOp::UShr, value, even_src_shift)
         };
         let even_bit = e.int_arith(IntArithOp::And, even_shifted_down, one);
-        let dst_shift = e.int_const(input_bits, i as u64);
+        let dst_shift = e.int_const(acc_bits, i as u64);
         let even_compact_bit = if i == 0 {
             even_bit
         } else {
@@ -1337,7 +1355,7 @@ fn lower_unspread(
         };
         even_acc = e.int_arith(IntArithOp::Or, even_acc, even_compact_bit);
 
-        let odd_src_shift = e.int_const(input_bits, (i * 2 + 1) as u64);
+        let odd_src_shift = e.int_const(acc_bits, (i * 2 + 1) as u64);
         let odd_shifted_down = e.int_arith(IntArithOp::UShr, value, odd_src_shift);
         let odd_bit = e.int_arith(IntArithOp::And, odd_shifted_down, one);
         let odd_compact_bit = if i == 0 {
@@ -1349,8 +1367,8 @@ fn lower_unspread(
     }
 
     (
-        truncate_to_width(e, odd_acc, input_bits, odd_bits),
-        truncate_to_width(e, even_acc, input_bits, even_bits),
+        resize_to_width(e, odd_acc, acc_bits, odd_bits),
+        resize_to_width(e, even_acc, acc_bits, even_bits),
     )
 }
 
@@ -2339,6 +2357,8 @@ fn lower_terminator(
     e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     block_map: &HashMap<BlockId, BlockId>,
+    fn_type_info: &FunctionTypeInfo,
+    return_types: &[Type],
 ) {
     match terminator {
         Terminator::Jmp(target, args) => {
@@ -2353,7 +2373,20 @@ fn lower_terminator(
             e.terminate_jmp_if(ll_cond, ll_then, ll_else);
         }
         Terminator::Return(values) => {
-            let ll_values: Vec<ValueId> = values.iter().map(|v| val_map[v]).collect();
+            let ll_values: Vec<ValueId> = values
+                .iter()
+                .zip(return_types.iter())
+                .map(|(v, expected_type)| {
+                    let actual_type = fn_type_info.get_value_type(*v);
+                    let ll_value = val_map[v];
+                    match (lower_type(actual_type), lower_type(expected_type)) {
+                        (LLType::Int(from_bits), LLType::Int(to_bits)) => {
+                            resize_to_width(e, ll_value, from_bits, to_bits)
+                        }
+                        _ => ll_value,
+                    }
+                })
+                .collect();
             e.terminate_return(ll_values);
         }
     }
