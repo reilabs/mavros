@@ -496,20 +496,26 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
                     IntArithOp::Shl => {
-                        // Mask shift count modulo bit width — LLVM treats shifts
-                        // by >= bit_width as poison, but the VM's Rust `<<` on
-                        // x86 masks to bit_width-1. Match the VM.
+                        // LLVM treats shifts by >= bit_width as poison. Wrap by
+                        // the actual bit width so custom widths like i6 behave
+                        // correctly too.
                         let bw = lhs.get_type().get_bit_width();
-                        let mask = lhs.get_type().const_int((bw - 1) as u64, false);
-                        let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
-                        self.builder.build_left_shift(lhs, masked_rhs, name).unwrap()
+                        let width = lhs.get_type().const_int(bw as u64, false);
+                        let wrapped_rhs = self
+                            .builder
+                            .build_int_unsigned_rem(rhs, width, "shamt")
+                            .unwrap();
+                        self.builder.build_left_shift(lhs, wrapped_rhs, name).unwrap()
                     }
                     IntArithOp::UShr => {
                         let bw = lhs.get_type().get_bit_width();
-                        let mask = lhs.get_type().const_int((bw - 1) as u64, false);
-                        let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
+                        let width = lhs.get_type().const_int(bw as u64, false);
+                        let wrapped_rhs = self
+                            .builder
+                            .build_int_unsigned_rem(rhs, width, "shamt")
+                            .unwrap();
                         self.builder
-                            .build_right_shift(lhs, masked_rhs, false, name)
+                            .build_right_shift(lhs, wrapped_rhs, false, name)
                             .unwrap()
                     }
                     _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
