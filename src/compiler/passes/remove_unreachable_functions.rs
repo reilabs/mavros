@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass},
     ssa::HLSSA,
 };
 

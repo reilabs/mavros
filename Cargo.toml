@@ -58,4 +58,4 @@ path = "src/bin/test_runner.rs"
 [profile.release]
 debug = true
 opt-level = "z"
-lto = true
+lto = "thin"

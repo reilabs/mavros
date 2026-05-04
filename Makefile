@@ -16,7 +16,7 @@ help:
 
 .PHONY: build
 build: ## Build Mavros for testing
-	$(SHELL_WRAPPER) cargo build --all-features
+	$(SHELL_WRAPPER) cargo build --all-targets --all-features
 
 .PHONY: build-test-runner
 build-test-runner: ## Builds the test runner in release mode
@@ -24,7 +24,7 @@ build-test-runner: ## Builds the test runner in release mode
 
 .PHONY: release
 release: ## Build Mavros in release mode
-	$(SHELL_WRAPPER) cargo build --release --all-features
+	$(SHELL_WRAPPER) cargo build --release --all-targets --all-features
 
 # -- Testing --------------------------------------------------------------------------------------
 

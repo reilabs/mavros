@@ -11,7 +11,7 @@ use crate::{
     vm::interpreter,
 };
 use mavros_artifacts::InputValueOrdered;
-use noirc_abi::input_parser::{Format, InputValue};
+use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
 

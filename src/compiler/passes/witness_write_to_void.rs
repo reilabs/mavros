@@ -1,6 +1,6 @@
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::{Analysis as _, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{HLSSA, OpCode},
 };

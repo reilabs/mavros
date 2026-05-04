@@ -1,12 +1,11 @@
 #![allow(unused_variables)]
 
-use crate::interpreter::dispatch;
 use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use opcode_gen::interpreter;
 
 use crate::array::{BoxedLayout, BoxedValue};
-use crate::interpreter::{Frame, Handler};
+use crate::interpreter::{DispatchAction, Frame, Handler};
 
 use crate::array::DataType;
 use std::fmt::Display;
@@ -23,30 +22,34 @@ pub const ELEM_WITNESS: usize = 2;
 /// Read an array element as a Field and bump out_db accordingly.
 #[inline(always)]
 unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm: &mut VM) {
-    match elem_kind {
-        ELEM_WORD => {
-            let v = Field::from(*(ptr as *const u64));
-            *vm.data.as_ad.out_db += coeff * v;
+    unsafe {
+        match elem_kind {
+            ELEM_WORD => {
+                let v = Field::from(*(ptr as *const u64));
+                *vm.data.as_ad.out_db += coeff * v;
+            }
+            ELEM_FIELD => {
+                let v = *(ptr as *const Field);
+                *vm.data.as_ad.out_db += coeff * v;
+            }
+            ELEM_WITNESS => {
+                let elem = BoxedValue(*(ptr as *const *mut u64));
+                elem.bump_db(coeff, vm);
+            }
+            _ => unreachable!(),
         }
-        ELEM_FIELD => {
-            let v = *(ptr as *const Field);
-            *vm.data.as_ad.out_db += coeff * v;
-        }
-        ELEM_WITNESS => {
-            let elem = BoxedValue(*(ptr as *const *mut u64));
-            elem.bump_db(coeff, vm);
-        }
-        _ => unreachable!(),
     }
 }
 
 /// Read a pure (non-WitnessOf) array element as a Field value.
 #[inline(always)]
 unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
-    match elem_kind {
-        ELEM_WORD => Field::from(*(ptr as *const u64)),
-        ELEM_FIELD => *(ptr as *const Field),
-        _ => unreachable!(),
+    unsafe {
+        match elem_kind {
+            ELEM_WORD => Field::from(*(ptr as *const u64)),
+            ELEM_FIELD => *(ptr as *const Field),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -295,30 +298,32 @@ unsafe fn forward_kv_lookup_emit(
     flag_u64: u64,
     vm: &mut VM,
 ) {
-    let table_info = &vm.tables[table_idx];
+    unsafe {
+        let table_info = &vm.tables[table_idx];
 
-    // Entry 1 (x-constraint): table_id, result_value, 0
-    *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-    *vm.data.as_forward.lookups_b = result;
-    *(vm.data.as_forward.lookups_c as *mut u64) = 0;
-    vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-    vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-    vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+        // Entry 1 (x-constraint): table_id, result_value, 0
+        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+        *vm.data.as_forward.lookups_b = result;
+        *(vm.data.as_forward.lookups_c as *mut u64) = 0;
+        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
 
-    // Entry 2 (y-constraint): table_id, key, flag
-    *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-    if flag_u64 != 0 {
-        let key_u64 = ark_ff::PrimeField::into_bigint(key).0[0];
-        let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
-        *(ptr as *mut u64) += flag_u64;
-        *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
-    } else {
-        *(vm.data.as_forward.lookups_b as *mut Field) = key;
+        // Entry 2 (y-constraint): table_id, key, flag
+        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+        if flag_u64 != 0 {
+            let key_u64 = ark_ff::PrimeField::into_bigint(key).0[0];
+            let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
+            *(ptr as *mut u64) += flag_u64;
+            *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
+        } else {
+            *(vm.data.as_forward.lookups_b as *mut Field) = key;
+        }
+        *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
+        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
     }
-    *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
-    vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-    vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-    vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
 }
 
 /// Emit AD bumps for a key-value lookup (x-constraint + y-constraint + sum).
@@ -329,64 +334,66 @@ unsafe fn ad_kv_lookup_emit(
     flag: BoxedValue,
     vm: &mut VM,
 ) {
-    let table_info = &vm.tables[table_idx];
-    let cnst_off = table_info.elem_inverses_constraint_section_offset;
-    let length = table_info.length;
+    unsafe {
+        let table_info = &vm.tables[table_idx];
+        let cnst_off = table_info.elem_inverses_constraint_section_offset;
+        let length = table_info.length;
 
-    let x_coeff = {
-        let r = *vm
+        let x_coeff = {
+            let r = *vm
+                .data
+                .as_ad
+                .ad_coeffs
+                .offset(vm.data.as_ad.current_cnst_lookups_off as isize);
+            vm.data.as_ad.current_cnst_lookups_off += 1;
+            r
+        };
+        let x_wit_off = {
+            let r = vm.data.as_ad.current_wit_lookups_off;
+            vm.data.as_ad.current_wit_lookups_off += 1;
+            r
+        };
+        let y_coeff = {
+            let r = *vm
+                .data
+                .as_ad
+                .ad_coeffs
+                .offset(vm.data.as_ad.current_cnst_lookups_off as isize);
+            vm.data.as_ad.current_cnst_lookups_off += 1;
+            r
+        };
+        let y_wit_off = {
+            let r = vm.data.as_ad.current_wit_lookups_off;
+            vm.data.as_ad.current_wit_lookups_off += 1;
+            r
+        };
+        let inv_sum_coeff = *vm
             .data
             .as_ad
             .ad_coeffs
-            .offset(vm.data.as_ad.current_cnst_lookups_off as isize);
-        vm.data.as_ad.current_cnst_lookups_off += 1;
-        r
-    };
-    let x_wit_off = {
-        let r = vm.data.as_ad.current_wit_lookups_off;
-        vm.data.as_ad.current_wit_lookups_off += 1;
-        r
-    };
-    let y_coeff = {
-        let r = *vm
-            .data
+            .offset(cnst_off as isize + 2 * length as isize);
+
+        // x-constraint: beta * result - x_lookup = 0
+        *vm.data
             .as_ad
-            .ad_coeffs
-            .offset(vm.data.as_ad.current_cnst_lookups_off as isize);
-        vm.data.as_ad.current_cnst_lookups_off += 1;
-        r
-    };
-    let y_wit_off = {
-        let r = vm.data.as_ad.current_wit_lookups_off;
-        vm.data.as_ad.current_wit_lookups_off += 1;
-        r
-    };
-    let inv_sum_coeff = *vm
-        .data
-        .as_ad
-        .ad_coeffs
-        .offset(cnst_off as isize + 2 * length as isize);
+            .out_da
+            .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
+        result.bump_db(x_coeff, vm);
+        *vm.data.as_ad.out_dc.offset(x_wit_off as isize) -= x_coeff;
 
-    // x-constraint: beta * result - x_lookup = 0
-    *vm.data
-        .as_ad
-        .out_da
-        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
-    result.bump_db(x_coeff, vm);
-    *vm.data.as_ad.out_dc.offset(x_wit_off as isize) -= x_coeff;
+        // y-constraint: y * (alpha - x_lookup - key) = flag
+        *vm.data.as_ad.out_da.offset(y_wit_off as isize) += y_coeff;
+        *vm.data
+            .as_ad
+            .out_db
+            .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += y_coeff;
+        *vm.data.as_ad.out_db.offset(x_wit_off as isize) -= y_coeff;
+        key.bump_db(-y_coeff, vm);
+        flag.bump_dc(y_coeff, vm);
 
-    // y-constraint: y * (alpha - x_lookup - key) = flag
-    *vm.data.as_ad.out_da.offset(y_wit_off as isize) += y_coeff;
-    *vm.data
-        .as_ad
-        .out_db
-        .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += y_coeff;
-    *vm.data.as_ad.out_db.offset(x_wit_off as isize) -= y_coeff;
-    key.bump_db(-y_coeff, vm);
-    flag.bump_dc(y_coeff, vm);
-
-    // Sum constraint
-    *vm.data.as_ad.out_dc.offset(y_wit_off as isize) += inv_sum_coeff;
+        // Sum constraint
+        *vm.data.as_ad.out_dc.offset(y_wit_off as isize) += inv_sum_coeff;
+    }
 }
 
 #[interpreter]
@@ -395,7 +402,7 @@ mod def {
     fn jmp(pc: *const u64, frame: Frame, vm: &mut VM, target: JumpTarget) {
         let pc = unsafe { pc.offset(target.0) };
         // println!("jmp: target={:?}", pc);
-        dispatch(pc, frame, vm);
+        return DispatchAction::Continue(pc, frame);
     }
 
     #[raw_opcode]
@@ -410,7 +417,7 @@ mod def {
         let target = if cond != 0 { if_t } else { if_f };
         let pc = unsafe { pc.offset(target.0) };
         // println!("jmp_if: cond={} target={:?}", cond, pc);
-        dispatch(pc, frame, vm);
+        return DispatchAction::Continue(pc, frame);
     }
 
     #[raw_opcode]
@@ -440,7 +447,7 @@ mod def {
             current_child = unsafe { current_child.offset(*arg_size as isize) };
         }
 
-        dispatch(func_pc, new_frame, vm);
+        return DispatchAction::Continue(func_pc, new_frame);
     }
 
     #[raw_opcode]
@@ -448,9 +455,9 @@ mod def {
         let ret_address = unsafe { *frame.data.offset(1) } as *mut u64;
         let new_frame = frame.pop(vm);
         if new_frame.data.is_null() {
-            return;
+            return DispatchAction::Halt;
         }
-        dispatch(ret_address, new_frame, vm);
+        return DispatchAction::Continue(ret_address, new_frame);
     }
 
     #[raw_opcode]
@@ -474,7 +481,7 @@ mod def {
             vm.data.as_forward.out_c = vm.data.as_forward.out_c.offset(1);
         };
         let pc = unsafe { pc.offset(4) };
-        dispatch(pc, frame, vm);
+        return DispatchAction::Continue(pc, frame);
     }
 
     #[raw_opcode]
@@ -484,7 +491,7 @@ mod def {
             vm.data.as_forward.algebraic_witness = vm.data.as_forward.algebraic_witness.offset(1);
         };
         let pc = unsafe { pc.offset(2) };
-        dispatch(pc, frame, vm);
+        return DispatchAction::Continue(pc, frame);
     }
 
     #[opcode]

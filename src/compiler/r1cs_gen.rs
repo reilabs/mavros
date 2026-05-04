@@ -25,19 +25,19 @@ pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 // }
 
 #[derive(Clone, Debug)]
-struct ArrayData {
+pub(crate) struct ArrayData {
     table_id: Option<usize>,
     data:     Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
-struct TupleData {
-    table_id: Option<usize>,
-    data:     Vec<Value>,
+pub(crate) struct TupleData {
+    _table_id: Option<usize>,
+    data:      Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
-pub enum Value {
+pub(crate) enum Value {
     Const(ark_bn254::Fr),
     LC(LC),
     Array(Rc<RefCell<ArrayData>>),
@@ -82,7 +82,7 @@ impl Value {
         Self::wrap_unsigned(v as u128, bits)
     }
 
-    pub fn add(&self, other: &Value) -> Value {
+    pub(crate) fn add(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs + rhs),
             (..) => {
@@ -128,11 +128,11 @@ impl Value {
         }
     }
 
-    pub fn sub(&self, other: &Value) -> Value {
+    pub(crate) fn sub(&self, other: &Value) -> Value {
         self.add(&other.neg())
     }
 
-    pub fn div(&self, other: &Value) -> Value {
+    pub(crate) fn div(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs / rhs),
             (_, Value::Const(rhs)) => {
@@ -143,14 +143,15 @@ impl Value {
         }
     }
 
-    pub fn expect_constant(&self) -> ark_bn254::Fr {
+    pub(crate) fn expect_constant(&self) -> ark_bn254::Fr {
         match self {
             Value::Const(c) => *c,
             _ => panic!("expected constant"),
         }
     }
 
-    pub fn expect_u1(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn expect_u1(&self) -> bool {
         match self {
             Value::Const(c) => {
                 let v: u128 = c.into_bigint().to_string().parse().unwrap_or_else(|e| {
@@ -163,7 +164,8 @@ impl Value {
         }
     }
 
-    pub fn expect_u8(&self) -> u8 {
+    #[allow(dead_code)]
+    pub(crate) fn expect_u8(&self) -> u8 {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
@@ -174,7 +176,7 @@ impl Value {
         }
     }
 
-    pub fn expect_u32(&self) -> u32 {
+    pub(crate) fn expect_u32(&self) -> u32 {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
@@ -185,7 +187,8 @@ impl Value {
         }
     }
 
-    pub fn expect_u64(&self) -> u64 {
+    #[allow(dead_code)]
+    pub(crate) fn expect_u64(&self) -> u64 {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
@@ -196,7 +199,7 @@ impl Value {
         }
     }
 
-    pub fn expect_u128(&self) -> u128 {
+    pub(crate) fn expect_u128(&self) -> u128 {
         match self {
             Value::Const(c) => {
                 let s = c.into_bigint().to_string();
@@ -207,7 +210,7 @@ impl Value {
         }
     }
 
-    pub fn mul(&self, other: &Value) -> Value {
+    pub(crate) fn mul(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs * rhs),
             (Value::Const(c), Value::LC(lc)) | (Value::LC(lc), Value::Const(c)) => {
@@ -224,14 +227,14 @@ impl Value {
         }
     }
 
-    pub fn expect_ptr(&self) -> Rc<RefCell<Value>> {
+    pub(crate) fn expect_ptr(&self) -> Rc<RefCell<Value>> {
         match self {
             Value::Ptr(ptr) => ptr.clone(),
             _ => panic!("expected ptr"),
         }
     }
 
-    pub fn lt(&self, other: &Value) -> Value {
+    pub(crate) fn lt(&self, other: &Value) -> Value {
         let self_const = self.expect_constant();
         let other_const = other.expect_constant();
         if self_const < other_const {
@@ -241,21 +244,21 @@ impl Value {
         }
     }
 
-    pub fn expect_array(&self) -> Rc<RefCell<ArrayData>> {
+    pub(crate) fn expect_array(&self) -> Rc<RefCell<ArrayData>> {
         match self {
             Value::Array(array) => array.clone(),
             _ => panic!("expected array"),
         }
     }
 
-    pub fn expect_tuple(&self) -> Rc<RefCell<TupleData>> {
+    pub(crate) fn expect_tuple(&self) -> Rc<RefCell<TupleData>> {
         match self {
             Value::Tuple(fields) => fields.clone(),
             _ => panic!("expected tuple"),
         }
     }
 
-    pub fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
+    pub(crate) fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
         match self {
             Value::Const(c) => vec![(0, *c)],
             Value::LC(lc) => lc.clone(),
@@ -263,7 +266,7 @@ impl Value {
         }
     }
 
-    pub fn eq(&self, other: &Value) -> Value {
+    pub(crate) fn eq(&self, other: &Value) -> Value {
         let self_const = self.expect_constant();
         let other_const = other.expect_constant();
         if self_const == other_const {
@@ -273,17 +276,17 @@ impl Value {
         }
     }
 
-    pub fn mk_array(data: Vec<Value>) -> Value {
+    pub(crate) fn mk_array(data: Vec<Value>) -> Value {
         Value::Array(Rc::new(RefCell::new(ArrayData {
             table_id: None,
             data,
         })))
     }
 
-    pub fn mk_tuple(fields: Vec<Value>) -> Value {
+    pub(crate) fn mk_tuple(fields: Vec<Value>) -> Value {
         Value::Tuple(Rc::new(RefCell::new(TupleData {
-            table_id: None,
-            data:     fields,
+            _table_id: None,
+            data:      fields,
         })))
     }
 }

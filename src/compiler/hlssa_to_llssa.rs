@@ -517,7 +517,6 @@ fn lower_instruction(
                         BinaryArithOpKind::Shr => IntArithOp::UShr,
                         BinaryArithOpKind::Div => IntArithOp::UDiv,
                         BinaryArithOpKind::Mod => IntArithOp::URem,
-                        _ => panic!("Unsupported int arith op: {:?}", kind),
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
                 }
@@ -533,7 +532,6 @@ fn lower_instruction(
                         BinaryArithOpKind::Shr => IntArithOp::UShr,
                         BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
                         BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
-                        _ => panic!("Unsupported signed int arith op: {:?}", kind),
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
                 }
@@ -873,10 +871,14 @@ fn lower_instruction(
             val_map.insert(*result, ll_result);
         }
 
-        OpCode::Spread { result, value, .. }
+        OpCode::Spread {
+            result: _result,
+            value: _value,
+            ..
+        }
         | OpCode::Unspread {
-            result_odd: result,
-            value,
+            result_odd: _result,
+            value: _value,
             ..
         } => {
             todo!(
@@ -1524,7 +1526,7 @@ fn lower_ad_fresh_witness(
 /// Allocate an ADSumNode for two AD values.
 fn lower_ad_sum(e: &mut LLBlockEmitter<'_>, ll_a: ValueId, ll_b: ValueId) -> ValueId {
     let node_struct = LLStruct::ad_sum_node();
-    let field_elem = LLStruct::field_elem();
+    let _field_elem = LLStruct::field_elem();
     let node = e.heap_alloc(node_struct.clone(), None);
 
     // RC = 1
@@ -2353,17 +2355,6 @@ fn generate_rngchk_8_function(table_idx_global: usize) -> LLFunction {
     }
 
     func
-}
-
-/// Read `ad_coeffs_base[offset]` via random access (does not advance the
-/// AdCoeffs cursor). Used by AD helpers that need to peek at a coefficient at
-/// a layout-determined absolute index.
-fn ad_read_coeff_at(e: &mut LLBlockEmitter<'_>, offset: usize) -> ValueId {
-    let base_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS_BASE);
-    let base = e.ll_load(base_slot, LLType::Ptr);
-    let idx = e.int_const(32, offset as u64);
-    let slot = e.array_elem_ptr(base, LLStruct::field_elem(), idx);
-    e.ll_load(slot, LLType::Struct(LLStruct::field_elem()))
 }
 
 /// Post-increment `AdCurrentLookupWitOff` by one, returning the old i32 value.

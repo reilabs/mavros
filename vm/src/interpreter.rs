@@ -6,22 +6,39 @@ use std::{
 };
 
 use ark_ff::{AdditiveGroup, BigInt, Field as _, Fp, PrimeField as _};
-use tracing::{field, instrument};
+use tracing::instrument;
 
 pub use crate::InputValueOrdered;
 
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
-    array::{BoxedLayout, BoxedValue},
+    array::BoxedValue,
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
 
-pub type Handler = fn(*const u64, Frame, &mut VM);
+/// Result returned by each opcode handler to drive the dispatch loop.
+pub enum DispatchAction {
+    /// Continue execution at the given (pc, frame).
+    Continue(*const u64, Frame),
+    /// Halt execution (returned by `ret` when the frame stack is exhausted).
+    Halt,
+}
 
+pub type Handler = fn(*const u64, Frame, &mut VM) -> DispatchAction;
+
+/// Iterative dispatch loop. Runs opcode handlers until one returns `Halt`.
 #[inline(always)]
-pub fn dispatch(pc: *const u64, frame: Frame, vm: &mut VM) {
-    let opcode: Handler = unsafe { mem::transmute(*pc) };
-    opcode(pc, frame, vm);
+pub fn dispatch(mut pc: *const u64, mut frame: Frame, vm: &mut VM) {
+    loop {
+        let opcode: Handler = unsafe { mem::transmute(*pc) };
+        match opcode(pc, frame, vm) {
+            DispatchAction::Continue(next_pc, next_frame) => {
+                pc = next_pc;
+                frame = next_frame;
+            }
+            DispatchAction::Halt => return,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -206,7 +223,7 @@ pub fn run_phase1(
     let flat_inputs = flatten_param_vec(ordered_inputs);
     // The program itself writes inputs to the witness tape via pinned WriteWitness
     // instructions.
-    let mut out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
+    let out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
         out_a.as_mut_ptr(),

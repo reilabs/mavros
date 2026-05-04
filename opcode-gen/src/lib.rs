@@ -420,6 +420,10 @@ pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         #[inline(always)]
                     });
                 }
+                // Raw opcodes return DispatchAction; set the return type
+                if is_raw {
+                    func.sig.output = syn::parse_quote! { -> DispatchAction };
+                }
                 result.extend(func.into_token_stream());
             }
             _ => {
@@ -701,17 +705,18 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
     );
     let op_name = format_ident!("{}", &def.name);
 
-    let call_op = quote! {
-        #op_name(#(#call_params),*);
-    };
-
-    let finish = if def.is_raw {
-        quote! {}
+    let (call_op, finish) = if def.is_raw {
+        // Raw opcodes return DispatchAction directly
+        (quote! { return #op_name(#(#call_params),*); }, quote! {})
     } else {
-        quote! {
-            let pc = unsafe { pc.offset(current_field_offset) };
-            dispatch(pc, frame, vm)
-        }
+        // Regular opcodes return () and we generate the dispatch continuation
+        (
+            quote! { #op_name(#(#call_params),*); },
+            quote! {
+                let pc = unsafe { pc.offset(current_field_offset) };
+                return DispatchAction::Continue(pc, frame);
+            },
+        )
     };
 
     let handler_name = format_ident!("{}_handler", def.name);
@@ -720,10 +725,7 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
             pc: *const u64,
             frame: Frame,
             vm: &mut VM,
-        ) {
-            // unsafe {
-            //     println!("opcode: {:?}", *(pc as *mut (*mut usize)));
-            // }
+        ) -> DispatchAction {
             let mut current_field_offset = 1isize;
             #getters
             #call_op

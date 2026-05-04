@@ -1356,7 +1356,7 @@ impl ExplicitWitness {
         let two_to_64 = b.field_const(Field::from(2u128).pow([64u64]));
         let two_to_128 = b.field_const(Field::from(2u128).pow([128u64]));
         let zero = b.field_const(Field::ZERO);
-        let one = b.field_const(Field::ONE);
+        let _one = b.field_const(Field::ONE);
 
         // Step 1: Decompose value into 32 bytes (big-endian)
         let pure_value = b.value_of(value);
@@ -1489,7 +1489,7 @@ impl ExplicitWitness {
     ) -> ValueId {
         let hi_size = 8 - lo_size;
         let two_to_lo = b.field_const(Field::from(1u128 << lo_size));
-        let zero = b.field_const(Field::ZERO);
+        let _zero = b.field_const(Field::ZERO);
 
         // Compute lo and hi hints from the byte value
         let byte_pure = b.value_of(byte_wit);
