@@ -1644,26 +1644,26 @@ impl ExplicitWitness {
 
         match kind {
             BinaryArithOpKind::Add => {
+                // raw_sum = l + r is always linear (Field add). Define
+                //   result = raw_sum - carry * 2^n
+                // as an LC: this folds the reconstruction equality into the
+                // definition, saving 1 witness write + 1 R1C constraint.
                 let raw_sum = b.add(l_field, r_field);
                 let raw_pure = b.value_of(raw_sum);
                 let hint_result = b.truncate(raw_pure, bits, 254);
                 let hint_diff = b.sub(raw_pure, hint_result);
                 let hint_carry = b.div(hint_diff, two_n);
 
-                let result_wit = b.write_witness(hint_result);
                 let carry_wit = b.write_witness(hint_carry);
 
-                self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+                let carry_shifted = b.mul(carry_wit, two_n);
+                let result_lc = b.sub(raw_sum, carry_shifted);
+
+                self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
                 self.gen_witness_rangecheck_bits(b, carry_wit, 1, flag);
 
-                // Constrain: l + r = result + carry * 2^n
-                let carry_shifted = b.mul(carry_wit, two_n);
-                let rhs = b.add(result_wit, carry_shifted);
-                let diff = b.sub(raw_sum, rhs);
-                b.constrain(flag, diff, zero);
-
                 // Extract sign bit of result for overflow check
-                let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
+                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true);
 
                 // Signed overflow iff carry_into_MSB != carry_out_of_MSB.
                 // The MSB full-adder gives: s_a + s_b + carry_in = s_r + 2*carry_out.
@@ -1676,11 +1676,14 @@ impl ExplicitWitness {
 
                 b.push(OpCode::Cast {
                     result,
-                    value: result_wit,
+                    value: result_lc,
                     target: CastTarget::I(bits),
                 });
             }
             BinaryArithOpKind::Sub => {
+                // raw_diff = l - r is linear, so raw_diff + 2^n is too. Define
+                //   result = (raw_diff + 2^n) - borrow * 2^n
+                // as an LC, folding the reconstruction equality into the definition.
                 let raw_diff = b.sub(l_field, r_field);
                 let raw_pure = b.value_of(raw_diff);
                 let shifted = b.add(raw_pure, two_n);
@@ -1688,21 +1691,17 @@ impl ExplicitWitness {
                 let hint_rem = b.sub(shifted, hint_result);
                 let hint_borrow = b.div(hint_rem, two_n);
 
-                let result_wit = b.write_witness(hint_result);
                 let borrow_wit = b.write_witness(hint_borrow);
 
-                self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+                let lhs_full = b.add(raw_diff, two_n);
+                let borrow_shifted = b.mul(borrow_wit, two_n);
+                let result_lc = b.sub(lhs_full, borrow_shifted);
+
+                self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
                 self.gen_witness_rangecheck_bits(b, borrow_wit, 1, flag);
 
-                // Constrain: l - r + 2^n = result + borrow * 2^n
-                let borrow_shifted = b.mul(borrow_wit, two_n);
-                let rhs = b.add(result_wit, borrow_shifted);
-                let lhs = b.add(raw_diff, two_n);
-                let diff = b.sub(lhs, rhs);
-                b.constrain(flag, diff, zero);
-
                 // Extract sign bit of result for overflow check
-                let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
+                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true);
 
                 // Subtraction a - b is computed as a + ~b + 1 (two's complement).
                 // At the MSB column the full-adder sees:
@@ -1722,7 +1721,7 @@ impl ExplicitWitness {
 
                 b.push(OpCode::Cast {
                     result,
-                    value: result_wit,
+                    value: result_lc,
                     target: CastTarget::I(bits),
                 });
             }
@@ -1778,25 +1777,25 @@ impl ExplicitWitness {
             b.constrain(l_field, r_field, rhs);
             result_wit
         } else {
-            // Linear: one operand is pure
+            // Linear: one operand is pure → raw_product is an LC.
+            // Define result = raw_product - q * 2^n as an LC, folding the
+            // reconstruction equality into the definition. Saves 1 witness
+            // + 1 R1C constraint vs the witness form.
             let raw_product = b.mul(l_field, r_field);
             let raw_pure = b.value_of(raw_product);
             let hint_result = b.truncate(raw_pure, bits, 254);
             let hint_rem = b.sub(raw_pure, hint_result);
             let hint_q = b.div(hint_rem, two_n);
 
-            let result_wit = b.write_witness(hint_result);
             let q_wit = b.write_witness(hint_q);
 
-            self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
+            let q_shifted = b.mul(q_wit, two_n);
+            let result_lc = b.sub(raw_product, q_shifted);
+
+            self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
             self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
 
-            // Constrain: l * r = result + q * 2^n
-            let q_shifted = b.mul(q_wit, two_n);
-            let rhs = b.add(result_wit, q_shifted);
-            let diff = b.sub(raw_product, rhs);
-            b.constrain(flag, diff, zero);
-            result_wit
+            result_lc
         };
 
         let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
