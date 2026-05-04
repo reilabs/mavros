@@ -4,7 +4,10 @@ use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::types::TypeInfo,
+    analysis::{
+        types::{FunctionTypeInfo, TypeInfo},
+        value_range::{FunctionValueRanges, IntInterval, ValueRanges},
+    },
     block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
@@ -23,11 +26,15 @@ impl Pass for ExplicitWitness {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
+        vec![TypeInfo::id(), ValueRanges::id()]
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
+        self.do_run(
+            ssa,
+            store.get::<TypeInfo>(),
+            store.get::<ValueRanges>(),
+        );
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -40,15 +47,21 @@ impl ExplicitWitness {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo, value_ranges: &ValueRanges) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
+            let function_value_ranges = value_ranges.get_function(*function_id);
             let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
             for (bid, mut block) in function.take_blocks().into_iter() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {
                     let b = &mut HLInstrBuilder::new(function, &mut new_instructions);
-                    self.process_instruction(b, function_type_info, instruction);
+                    self.process_instruction(
+                        b,
+                        function_type_info,
+                        function_value_ranges,
+                        instruction,
+                    );
                 }
                 block.put_instructions(new_instructions);
                 new_blocks.insert(bid, block);
@@ -60,7 +73,8 @@ impl ExplicitWitness {
     fn process_instruction(
         &self,
         b: &mut HLInstrBuilder<'_>,
-        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        function_type_info: &FunctionTypeInfo,
+        function_value_ranges: &FunctionValueRanges,
         instruction: OpCode,
     ) {
         match instruction {
@@ -99,8 +113,11 @@ impl ExplicitWitness {
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let one = b.field_const(Field::ONE);
+                        let l_range = function_value_ranges.get(l);
+                        let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_addsub(
                             b, l_field, r_field, bits, kind, one, result, l_taint, r_taint,
+                            &l_range, &r_range,
                         );
                     }
                     _ => {
@@ -178,6 +195,8 @@ impl ExplicitWitness {
                             b.constrain(lr_diff, result_field, field_zero);
                         }
                         CmpKind::Lt => {
+                            let l_range = function_value_ranges.get(lhs);
+                            let r_range = function_value_ranges.get(rhs);
                             self.lower_witness_lt(
                                 b,
                                 function_type_info,
@@ -186,6 +205,8 @@ impl ExplicitWitness {
                                 result,
                                 l_taint,
                                 r_taint,
+                                &l_range,
+                                &r_range,
                             );
                         }
                     }
@@ -234,8 +255,11 @@ impl ExplicitWitness {
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let one = b.field_const(Field::ONE);
+                        let l_range = function_value_ranges.get(l);
+                        let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_mul(
                             b, l_field, r_field, bits, one, res, l_taint, r_taint,
+                            &l_range, &r_range,
                         );
                     }
                     _ => {
@@ -474,6 +498,8 @@ impl ExplicitWitness {
                         if is_signed {
                             // Signed: fall back to lower_witness_lt + assert result == 1
                             let result = b.fresh_value();
+                            let l_range = function_value_ranges.get(l);
+                            let r_range = function_value_ranges.get(r);
                             self.lower_witness_lt(
                                 b,
                                 function_type_info,
@@ -482,6 +508,8 @@ impl ExplicitWitness {
                                 result,
                                 l_taint,
                                 r_taint,
+                                &l_range,
+                                &r_range,
                             );
                             let result_field = b.cast_to_field(result);
                             let one = b.field_const(Field::ONE);
@@ -722,7 +750,10 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(value)
                 };
-                self.gen_sext(b, value_field, from_bits, to_bits, one, i_taint, result);
+                let value_range = function_value_ranges.get(value);
+                self.gen_sext(
+                    b, value_field, from_bits, to_bits, one, i_taint, result, &value_range,
+                );
             }
             OpCode::Not { result, value } => {
                 let value_type = function_type_info.get_value_type(value);
@@ -923,7 +954,7 @@ impl ExplicitWitness {
                 }
             }
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(b, function_type_info, condition, *inner);
+                self.lower_guard(b, function_type_info, function_value_ranges, condition, *inner);
             }
         }
     }
@@ -931,7 +962,8 @@ impl ExplicitWitness {
     fn lower_guard(
         &self,
         b: &mut HLInstrBuilder<'_>,
-        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        function_type_info: &FunctionTypeInfo,
+        function_value_ranges: &FunctionValueRanges,
         condition: ValueId,
         inner: OpCode,
     ) {
@@ -1020,7 +1052,10 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(value)
                 };
-                self.gen_sext(b, value_field, from_bits, to_bits, cond_field, true, result);
+                let value_range = function_value_ranges.get(value);
+                self.gen_sext(
+                    b, value_field, from_bits, to_bits, cond_field, true, result, &value_range,
+                );
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
@@ -1052,8 +1087,11 @@ impl ExplicitWitness {
                         let cond_field = self.ensure_field(b, function_type_info, condition);
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
+                        let l_range = function_value_ranges.get(l);
+                        let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_addsub(
                             b, l_field, r_field, bits, kind, cond_field, result, l_taint, r_taint,
+                            &l_range, &r_range,
                         );
                     }
                     _ => {
@@ -1097,8 +1135,11 @@ impl ExplicitWitness {
                         let cond_field = self.ensure_field(b, function_type_info, condition);
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
+                        let l_range = function_value_ranges.get(l);
+                        let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_mul(
                             b, l_field, r_field, bits, cond_field, res, l_taint, r_taint,
+                            &l_range, &r_range,
                         );
                     }
                     _ if l_taint && r_taint => {
@@ -1475,12 +1516,14 @@ impl ExplicitWitness {
     fn lower_witness_lt(
         &self,
         b: &mut HLInstrBuilder<'_>,
-        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        function_type_info: &FunctionTypeInfo,
         lhs: ValueId,
         rhs: ValueId,
         result: ValueId,
         l_taint: bool,
         r_taint: bool,
+        l_range: &IntInterval,
+        r_range: &IntInterval,
     ) {
         let rhs_stripped = function_type_info.get_value_type(rhs).strip_witness().expr;
         let (s, is_signed) = match rhs_stripped {
@@ -1517,8 +1560,8 @@ impl ExplicitWitness {
         if is_signed {
             let always_flag = b.field_const(Field::ONE);
 
-            let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint);
-            let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint);
+            let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint, &l_range);
+            let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint, &r_range);
 
             let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
             let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
@@ -1546,6 +1589,10 @@ impl ExplicitWitness {
     /// Requires: `value` is already rangechecked to n bits.
     /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
     ///
+    /// `value_range` is the analyzer's bound on the underlying integer; if it
+    /// proves the sign bit is 0 (i.e. value ∈ [0, 2^(n-1))), this short-circuits
+    /// to the field constant 0 and emits no witness, rangecheck, or constraint.
+    ///
     /// For witness inputs: writes sign as a witness with a boolean check, then
     /// computes low = value - sign * 2^(n-1) and rangechecks low ∈ [0, 2^(n-1))
     /// directly via `gen_witness_rangecheck_bits`. For byte-aligned `bits` this
@@ -1559,7 +1606,12 @@ impl ExplicitWitness {
         bits: usize,
         flag: ValueId,
         is_witness: bool,
+        value_range: &IntInterval,
     ) -> ValueId {
+        if value_range.is_non_negative_in_signed(bits) {
+            return b.field_const(Field::ZERO);
+        }
+
         let two_n_minus_1 = b.field_const(Field::from(1u128 << (bits - 1)));
         let pure_val = if is_witness { b.value_of(value) } else { value };
         let low_hint = b.truncate(pure_val, bits - 1, 254);
@@ -1599,8 +1651,9 @@ impl ExplicitWitness {
         flag: ValueId,
         is_witness: bool,
         result: ValueId,
+        value_range: &IntInterval,
     ) {
-        let sign_bit = self.extract_sign_bit(b, value, from_bits, flag, is_witness);
+        let sign_bit = self.extract_sign_bit(b, value, from_bits, flag, is_witness, value_range);
         let extension =
             b.field_const(Field::from(1u128 << to_bits) - Field::from(1u128 << from_bits));
         let offset = b.mul(sign_bit, extension);
@@ -1634,13 +1687,26 @@ impl ExplicitWitness {
         result: ValueId,
         l_taint: bool,
         r_taint: bool,
+        l_range: &IntInterval,
+        r_range: &IntInterval,
     ) {
         let two_n = b.field_const(Field::from(1u128 << bits));
         let zero = b.field_const(Field::ZERO);
 
-        // Extract sign bits of inputs
-        let sign_a = self.extract_sign_bit(b, l_field, bits, flag, l_taint);
-        let sign_b = self.extract_sign_bit(b, r_field, bits, flag, r_taint);
+        // Extract sign bits of inputs (short-circuited to const 0 when range
+        // proves the sign bit is 0).
+        let sign_a = self.extract_sign_bit(b, l_field, bits, flag, l_taint, l_range);
+        let sign_b = self.extract_sign_bit(b, r_field, bits, flag, r_taint, r_range);
+
+        // Bound on the result. For Add of non-negatives the integer bound is
+        // l + r; for Sub of non-negatives it's l - r (which can be negative).
+        // The gadget consumer (`extract_sign_bit` for `sign_r`) checks
+        // `is_non_negative_in_signed(bits)` to decide whether to elide.
+        let result_range = match kind {
+            BinaryArithOpKind::Add => l_range.add(r_range),
+            BinaryArithOpKind::Sub => l_range.sub(r_range),
+            _ => IntInterval::top(),
+        };
 
         match kind {
             BinaryArithOpKind::Add => {
@@ -1662,8 +1728,10 @@ impl ExplicitWitness {
                 self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
                 self.gen_witness_rangecheck_bits(b, carry_wit, 1, flag);
 
-                // Extract sign bit of result for overflow check
-                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true);
+                // Extract sign bit of result for overflow check (skipped when
+                // range proves result is non-negative).
+                let sign_r =
+                    self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
 
                 // Signed overflow iff carry_into_MSB != carry_out_of_MSB.
                 // The MSB full-adder gives: s_a + s_b + carry_in = s_r + 2*carry_out.
@@ -1700,8 +1768,10 @@ impl ExplicitWitness {
                 self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
                 self.gen_witness_rangecheck_bits(b, borrow_wit, 1, flag);
 
-                // Extract sign bit of result for overflow check
-                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true);
+                // Extract sign bit of result for overflow check (skipped when
+                // range proves result is non-negative).
+                let sign_r =
+                    self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
 
                 // Subtraction a - b is computed as a + ~b + 1 (two's complement).
                 // At the MSB column the full-adder sees:
@@ -1748,13 +1818,19 @@ impl ExplicitWitness {
         result: ValueId,
         l_taint: bool,
         r_taint: bool,
+        l_range: &IntInterval,
+        r_range: &IntInterval,
     ) {
         let two_n = b.field_const(Field::from(1u128 << bits));
         let zero = b.field_const(Field::ZERO);
 
-        // Extract sign bits of inputs
-        let sign_a = self.extract_sign_bit(b, l_field, bits, flag, l_taint);
-        let sign_b = self.extract_sign_bit(b, r_field, bits, flag, r_taint);
+        // Extract sign bits of inputs (short-circuited when range proves non-negative).
+        let sign_a = self.extract_sign_bit(b, l_field, bits, flag, l_taint, l_range);
+        let sign_b = self.extract_sign_bit(b, r_field, bits, flag, r_taint, r_range);
+
+        // The product's integer bound: interval arithmetic gives the right
+        // result whether the operands are non-negative or possibly mixed-sign.
+        let result_range = l_range.mul(r_range);
 
         let result_wit = if l_taint && r_taint {
             // Non-linear: compute hint from pure values
@@ -1798,7 +1874,7 @@ impl ExplicitWitness {
             result_lc
         };
 
-        let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true);
+        let sign_r = self.extract_sign_bit(b, result_wit, bits, flag, true, &result_range);
 
         // sa_sb = sign_a * sign_b (R1CS multiplication)
         let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
@@ -2142,7 +2218,7 @@ impl ExplicitWitness {
     fn gen_witness_array_get(
         &self,
         b: &mut HLInstrBuilder<'_>,
-        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        function_type_info: &FunctionTypeInfo,
         arr: ValueId,
         idx: ValueId,
         result: ValueId,
@@ -2198,7 +2274,7 @@ impl ExplicitWitness {
     fn ensure_field(
         &self,
         b: &mut HLInstrBuilder<'_>,
-        function_type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        function_type_info: &FunctionTypeInfo,
         value: ValueId,
     ) -> ValueId {
         if function_type_info
