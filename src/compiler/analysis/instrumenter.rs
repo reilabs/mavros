@@ -464,7 +464,7 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Unknown(_) => {}
-            Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
+            Value::U(..) | Value::I(..) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in vals {
                     val.blind();
@@ -533,7 +533,13 @@ impl Value {
         }
     }
 
-    fn assert_cmp(_kind: CmpKind, a: &Self, b: &Self, _lhs_type: &Type, instrumenter: &mut dyn OpInstrumenter) {
+    fn assert_cmp(
+        _kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        _lhs_type: &Type,
+        instrumenter: &mut dyn OpInstrumenter,
+    ) {
         if a.is_witness() || b.is_witness() {
             instrumenter.record_constraints(1);
         }
@@ -971,10 +977,10 @@ impl Value {
     ) -> Value {
         match self {
             Value::U(_, 0) => if_false.clone(),
-            Value::U(_, _) => if_true.clone(),
+            Value::U(..) => if_true.clone(),
             Value::WitnessOf(inner) => match inner.as_ref() {
                 Value::U(_, 0) => if_false.clone(),
-                Value::U(_, _) => if_true.clone(),
+                Value::U(..) => if_true.clone(),
                 _ => {
                     if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
                         instrumenter.record_constraints(1);
@@ -997,7 +1003,7 @@ impl Value {
 #[derive(Debug, Clone)]
 pub struct SpecSplitValue {
     unspecialized: Value,
-    specialized: Value,
+    specialized:   Value,
 }
 
 impl SpecSplitValue {
@@ -1089,7 +1095,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             unspecialized: self
                 .unspecialized
                 .cast_op(cast_target, instrumenter.get_unspecialized()),
-            specialized: self
+            specialized:   self
                 .specialized
                 .cast_op(cast_target, instrumenter.get_specialized()),
         }
@@ -1108,7 +1114,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 to,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self
+            specialized:   self
                 .specialized
                 .truncate_op(from, to, instrumenter.get_specialized()),
         }
@@ -1125,7 +1131,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             unspecialized: self
                 .unspecialized
                 .sext_op(from, to, instrumenter.get_unspecialized()),
-            specialized: self
+            specialized:   self
                 .specialized
                 .sext_op(from, to, instrumenter.get_specialized()),
         }
@@ -1134,7 +1140,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn not(&self, _tp: &Type, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
             unspecialized: self.unspecialized.not_op(instrumenter.get_unspecialized()),
-            specialized: self.specialized.not_op(instrumenter.get_specialized()),
+            specialized:   self.specialized.not_op(instrumenter.get_specialized()),
         }
     }
 
@@ -1148,7 +1154,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn ptr_read(&self, tp: &Type, ctx: &mut CostAnalysis) -> SpecSplitValue {
         let mut res = SpecSplitValue {
             unspecialized: self.unspecialized.ptr_read(tp, ctx.get_unspecialized()),
-            specialized: self.specialized.ptr_read(tp, ctx.get_specialized()),
+            specialized:   self.specialized.ptr_read(tp, ctx.get_specialized()),
         };
         res.blind_unspecialized();
         res
@@ -1166,7 +1172,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             .unzip();
         SpecSplitValue {
             unspecialized: Value::Array(uns),
-            specialized: Value::Array(spec),
+            specialized:   Value::Array(spec),
         }
     }
 
@@ -1181,7 +1187,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             .unzip();
         SpecSplitValue {
             unspecialized: Value::Tuple(uns),
-            specialized: Value::Tuple(spec),
+            specialized:   Value::Tuple(spec),
         }
     }
 
@@ -1217,7 +1223,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 tp,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.array_get(
+            specialized:   self.specialized.array_get(
                 &i.specialized,
                 tp,
                 instrumenter.get_specialized(),
@@ -1237,7 +1243,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 tp,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self
+            specialized:   self
                 .specialized
                 .tuple_get(index, tp, instrumenter.get_specialized()),
         }
@@ -1256,7 +1262,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 &v.unspecialized,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.array_set(
+            specialized:   self.specialized.array_set(
                 &i.specialized,
                 &v.specialized,
                 instrumenter.get_specialized(),
@@ -1278,7 +1284,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 tp,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.select(
+            specialized:   self.specialized.select(
                 &if_t.specialized,
                 &if_f.specialized,
                 tp,
@@ -1308,13 +1314,18 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn assert_bool(&self, instrumenter: &mut CostAnalysis) {
-        self.specialized
-            .assert_bool(instrumenter.get_specialized());
+        self.specialized.assert_bool(instrumenter.get_specialized());
         self.unspecialized
             .assert_bool(instrumenter.get_unspecialized());
     }
 
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, instrumenter: &mut CostAnalysis) {
+    fn assert_cmp(
+        kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        lhs_type: &Type,
+        instrumenter: &mut CostAnalysis,
+    ) {
         Value::assert_cmp(
             kind,
             &a.specialized,
@@ -1351,7 +1362,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 size,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.to_bits(
+            specialized:   self.specialized.to_bits(
                 &endianness,
                 size,
                 instrumenter.get_specialized(),
@@ -1382,7 +1393,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 size,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self.specialized.to_radix(
+            specialized:   self.specialized.to_radix(
                 &spec_radix,
                 &endianness,
                 size,
@@ -1413,35 +1424,35 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn of_u(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::U(s, v),
-            specialized: Value::U(s, v),
+            specialized:   Value::U(s, v),
         }
     }
 
     fn of_i(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::I(s, v),
-            specialized: Value::I(s, v),
+            specialized:   Value::I(s, v),
         }
     }
 
     fn of_field(f: Field, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::Field(f),
-            specialized: Value::Field(f),
+            specialized:   Value::Field(f),
         }
     }
 
     fn alloc(_elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
-            specialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
+            specialized:   Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
         }
     }
 
     fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::WitnessOf(Box::new(self.unspecialized.clone())),
-            specialized: Value::WitnessOf(Box::new(self.specialized.clone())),
+            specialized:   Value::WitnessOf(Box::new(self.specialized.clone())),
         }
     }
 
@@ -1449,14 +1460,14 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         let kind = ScalarKind::from_type(result_type);
         Self {
             unspecialized: Value::WitnessOf(Box::new(Value::Unknown(kind))),
-            specialized: Value::WitnessOf(Box::new(Value::Unknown(kind))),
+            specialized:   Value::WitnessOf(Box::new(Value::Unknown(kind))),
         }
     }
 
     fn value_of(&self, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: self.unspecialized.unwrap_witness().clone(),
-            specialized: self.specialized.unwrap_witness().clone(),
+            specialized:   self.specialized.unwrap_witness().clone(),
         }
     }
 
@@ -1467,7 +1478,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             unspecialized: self
                 .unspecialized
                 .spread_op(instrumenter.get_unspecialized()),
-            specialized: self.specialized.spread_op(instrumenter.get_specialized()),
+            specialized:   self.specialized.spread_op(instrumenter.get_specialized()),
         }
     }
 
@@ -1479,11 +1490,11 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         (
             Self {
                 unspecialized: unspec_odd,
-                specialized: spec_odd,
+                specialized:   spec_odd,
             },
             Self {
                 unspecialized: unspec_even,
-                specialized: spec_even,
+                specialized:   spec_even,
             },
         )
     }
@@ -1491,7 +1502,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSignature {
-    id: FunctionId,
+    id:     FunctionId,
     params: Vec<ValueSignature>,
 }
 
@@ -1534,7 +1545,7 @@ trait FunctionInstrumenter {
 struct Instrumenter {
     constraints: usize,
     rangechecks: HashMap<u8, usize>,
-    lookups: HashMap<(usize, usize), usize>,
+    lookups:     HashMap<(usize, usize), usize>,
 }
 
 impl Instrumenter {
@@ -1542,7 +1553,7 @@ impl Instrumenter {
         Self {
             constraints: 0,
             rangechecks: HashMap::new(),
-            lookups: HashMap::new(),
+            lookups:     HashMap::new(),
         }
     }
 }
@@ -1563,8 +1574,8 @@ impl OpInstrumenter for Instrumenter {
 
 #[derive(Debug, Clone)]
 pub struct FunctionCost {
-    calls: HashMap<FunctionSignature, usize>,
-    raw: Instrumenter,
+    calls:       HashMap<FunctionSignature, usize>,
+    raw:         Instrumenter,
     specialized: Instrumenter,
 }
 
@@ -1606,15 +1617,17 @@ impl FunctionInstrumenter for DummyInstrumenter {
 
 impl OpInstrumenter for DummyInstrumenter {
     fn record_constraints(&mut self, _: usize) {}
+
     fn record_rangechecks(&mut self, _: u8, _: usize) {}
+
     fn record_lookups(&mut self, _: usize, _: usize, _: usize) {}
 }
 
 pub struct CostAnalysis {
     entry_point: Option<FunctionSignature>,
-    functions: HashMap<FunctionSignature, FunctionCost>,
-    cache: HashMap<FunctionSignature, Vec<ValueSignature>>,
-    stack: Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
+    functions:   HashMap<FunctionSignature, FunctionCost>,
+    cache:       HashMap<FunctionSignature, Vec<ValueSignature>>,
+    stack:       Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
 }
 
 impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
@@ -1652,7 +1665,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                         let v = unknown_value(ty);
                         SpecSplitValue {
                             unspecialized: v.clone(),
-                            specialized: v,
+                            specialized:   v,
                         }
                     })
                     .collect(),
@@ -1671,7 +1684,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
             .collect();
 
         let sig = FunctionSignature {
-            id: func,
+            id:     func,
             params: inputs_sig,
         };
 
@@ -1687,7 +1700,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                         .iter()
                         .map(|v| SpecSplitValue {
                             unspecialized: v.to_value(),
-                            specialized: v.to_value(),
+                            specialized:   v.to_value(),
                         })
                         .collect(),
                 );
@@ -1754,7 +1767,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         };
         SpecSplitValue {
             unspecialized: new_unspec,
-            specialized: new_spec,
+            specialized:   new_spec,
         }
     }
 
@@ -1769,7 +1782,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         };
         SpecSplitValue {
             unspecialized: unspec,
-            specialized: spec,
+            specialized:   spec,
         }
     }
 
@@ -1814,7 +1827,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 let v = unknown_value(ty);
                 SpecSplitValue {
                     unspecialized: v.clone(),
-                    specialized: v,
+                    specialized:   v,
                 }
             })
             .collect()
@@ -1829,9 +1842,9 @@ pub struct SpecializationSummary {
 }
 
 pub struct Summary {
-    total_constraints: usize,
+    total_constraints:     usize,
     total_savings_to_make: usize,
-    pub functions: HashMap<FunctionSignature, SpecializationSummary>,
+    pub functions:         HashMap<FunctionSignature, SpecializationSummary>,
 }
 
 impl Summary {
@@ -1886,8 +1899,8 @@ impl CostAnalysis {
             self.stack.push((sig, Box::new(DummyInstrumenter {})));
         } else {
             let instrumenter = FunctionCost {
-                calls: HashMap::new(),
-                raw: Instrumenter::new(),
+                calls:       HashMap::new(),
+                raw:         Instrumenter::new(),
                 specialized: Instrumenter::new(),
             };
             self.stack.push((sig, Box::new(instrumenter)));
@@ -1939,8 +1952,8 @@ impl CostAnalysis {
 
     pub fn summarize(&self) -> Summary {
         let mut r = Summary {
-            functions: HashMap::new(),
-            total_constraints: 0,
+            functions:             HashMap::new(),
+            total_constraints:     0,
             total_savings_to_make: 0,
         };
         for (sig, cost) in self.functions.iter() {
@@ -1986,10 +1999,10 @@ impl CostEstimator {
     pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
-            functions: HashMap::new(),
-            stack: vec![],
+            functions:   HashMap::new(),
+            stack:       vec![],
             entry_point: Some(main_sig.clone()),
-            cache: HashMap::new(),
+            cache:       HashMap::new(),
         };
 
         self.run_fn_from_signature(ssa, type_info, main_sig, &mut costs);
@@ -2010,7 +2023,7 @@ impl CostEstimator {
             .map(|param| SpecSplitValue {
                 // We need to call `to_value` twice, to avoid pointer aliasing.
                 unspecialized: param.to_value(),
-                specialized: param.to_value(),
+                specialized:   param.to_value(),
             })
             .collect();
         SymbolicExecutor::new().run(ssa, type_info, sig.id, inputs, costs);

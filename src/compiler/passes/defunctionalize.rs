@@ -124,7 +124,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                 {
                     *instruction = OpCode::Const {
                         result: *result,
-                        value: ConstValue::U(32, fn_id.0 as u128),
+                        value:  ConstValue::U(32, fn_id.0 as u128),
                     };
                 }
             }
@@ -244,8 +244,9 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         }
     }
 
-    // Pre-compute which values are Refs containing Functions (need bidirectional propagation)
-    // These come from: Alloc results, block parameters with Ref<...Function...> type
+    // Pre-compute which values are Refs containing Functions (need bidirectional
+    // propagation) These come from: Alloc results, block parameters with
+    // Ref<...Function...> type
     let mut is_ref_with_fn: HashSet<(FunctionId, ValueId)> = HashSet::new();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
@@ -325,7 +326,8 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     let mut global_slots: HashMap<usize, HashSet<FunctionId>> = HashMap::new();
 
     // Fixpoint: propagate reaching sets through edges
-    // Backward propagation only happens when source is_ref_with_fn (pointer aliasing)
+    // Backward propagation only happens when source is_ref_with_fn (pointer
+    // aliasing)
     let mut changed = true;
     while changed {
         changed = false;

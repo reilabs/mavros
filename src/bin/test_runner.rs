@@ -403,12 +403,12 @@ const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
 
 /// Output from running WASM witgen
 struct WasmResult {
-    out_wit_pre_comm: Vec<Field>,
+    out_wit_pre_comm:  Vec<Field>,
     out_wit_post_comm: Vec<Field>,
-    out_a: Vec<Field>,
-    out_b: Vec<Field>,
-    out_c: Vec<Field>,
-    live_bytes: usize,
+    out_a:             Vec<Field>,
+    out_b:             Vec<Field>,
+    out_c:             Vec<Field>,
+    live_bytes:        usize,
 }
 
 /// Read a `TableInfo` record back from one slot of the witgen VM struct's
@@ -517,7 +517,8 @@ fn run_wasm(
     let wasm_bytes = fs::read(wasm_path)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
-    // Estimate initial memory: stack (64KB) + module data + our buffers + heap headroom
+    // Estimate initial memory: stack (64KB) + module data + our buffers + heap
+    // headroom
     let initial_estimate = 65536 + 4096 + our_data_size;
     let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
     let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
@@ -528,9 +529,10 @@ fn run_wasm(
     linker.define(&store, "env", "memory", memory)?;
     let instance = linker.instantiate(&mut store, &module)?;
 
-    // Read __data_end from the WASM module to find where the module's static data ends.
-    // Our VM struct and buffers must be placed AFTER this to avoid colliding with the
-    // module's data segment (which contains allocator metadata, etc.).
+    // Read __data_end from the WASM module to find where the module's static data
+    // ends. Our VM struct and buffers must be placed AFTER this to avoid
+    // colliding with the module's data segment (which contains allocator
+    // metadata, etc.).
     let data_end_global = instance
         .get_global(&mut store, "__data_end")
         .ok_or("__data_end global not found in WASM module")?;
@@ -784,9 +786,9 @@ fn witgen_phase2(
 
 /// Output from running AD WASM
 struct AdWasmResult {
-    out_da: Vec<Field>,
-    out_db: Vec<Field>,
-    out_dc: Vec<Field>,
+    out_da:     Vec<Field>,
+    out_db:     Vec<Field>,
+    out_dc:     Vec<Field>,
     live_bytes: usize,
 }
 
@@ -991,12 +993,12 @@ const STEP_KEYS: &[&str] = &[
 ];
 
 struct TestResult {
-    name: String,
-    steps: HashMap<String, Status>,
-    rows: Option<usize>,
-    cols: Option<usize>,
+    name:         String,
+    steps:        HashMap<String, Status>,
+    rows:         Option<usize>,
+    cols:         Option<usize>,
     witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    ad_bytes:     Option<usize>,
 }
 
 /// Determined purely from child output:
@@ -1047,7 +1049,7 @@ fn find_noir_execution_success_dir() -> Option<PathBuf> {
 
 /// A test entry with its absolute path and display name.
 struct TestEntry {
-    path: PathBuf,
+    path:         PathBuf,
     display_name: String,
 }
 
@@ -1062,7 +1064,7 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
         .map(|p| {
             let test_name = p.file_name().unwrap().to_string_lossy().into_owned();
             TestEntry {
-                path: p,
+                path:         p,
                 display_name: format!("{prefix}{test_name}"),
             }
         })
@@ -1189,12 +1191,12 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
 // ── Regression & growth checks ───────────────────────────────────────
 
 struct ParsedRow {
-    name: String,
-    cells: Vec<String>,
-    rows: Option<usize>,
-    cols: Option<usize>,
+    name:         String,
+    cells:        Vec<String>,
+    rows:         Option<usize>,
+    cols:         Option<usize>,
     witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    ad_bytes:     Option<usize>,
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
@@ -1511,7 +1513,12 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
+    md.push_str(
+        "| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen \
+         Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No \
+         Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak \
+         | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n",
+    );
     md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n");
 
     for r in results {
@@ -1521,7 +1528,8 @@ fn render_markdown(results: &[TestResult]) -> String {
         let witgen_sz = r.witgen_bytes.map_or("-".to_string(), |v| v.to_string());
         let ad_sz = r.ad_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} \
+             | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),

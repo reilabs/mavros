@@ -57,9 +57,11 @@ impl FramePosition {
     pub fn offset(&self, offset: isize) -> FramePosition {
         FramePosition(self.0.checked_add_signed(offset).unwrap())
     }
+
     pub fn return_data_ptr() -> FramePosition {
         FramePosition(0)
     }
+
     pub fn return_address_ptr() -> FramePosition {
         FramePosition(1)
     }
@@ -166,16 +168,16 @@ pub struct AdArrays {
 
 pub union Arrays {
     pub as_forward: FwdArrays,
-    pub as_ad: AdArrays,
+    pub as_ad:      AdArrays,
 }
 
 pub struct VM {
-    pub data: Arrays,
+    pub data:                    Arrays,
     pub allocation_instrumenter: AllocationInstrumenter,
-    pub tables: Vec<TableInfo>,
-    pub rgchk_8: Option<usize>,
-    pub spread_tables: [Option<usize>; 17],
-    pub globals: *mut u64,
+    pub tables:                  Vec<TableInfo>,
+    pub rgchk_8:                 Option<usize>,
+    pub spread_tables:           [Option<usize>; 17],
+    pub globals:                 *mut u64,
 }
 
 impl VM {
@@ -257,9 +259,9 @@ impl VM {
 /// Compute spread of a u32: interleave zero bits between each bit.
 fn spread_bits(v: u32) -> u64 {
     let mut x = v as u64;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x << 16)) & 0x0000_ffff_0000_ffff;
+    x = (x | (x << 8)) & 0x00ff_00ff_00ff_00ff;
+    x = (x | (x << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
     x = (x | (x << 2)) & 0x3333_3333_3333_3333;
     x = (x | (x << 1)) & 0x5555_5555_5555_5555;
     x
@@ -269,21 +271,23 @@ fn spread_bits(v: u32) -> u64 {
 fn compact_bits(mut x: u64) -> u32 {
     x &= 0x5555_5555_5555_5555;
     x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
-    x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
-    x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF;
-    x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF;
-    x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF;
+    x = (x | (x >> 2)) & 0x0f0f_0f0f_0f0f_0f0f;
+    x = (x | (x >> 4)) & 0x00ff_00ff_00ff_00ff;
+    x = (x | (x >> 8)) & 0x0000_ffff_0000_ffff;
+    x = (x | (x >> 16)) & 0x0000_0000_ffff_ffff;
     x as u32
 }
 
-/// Extract even bits and odd bits from a spread sum. Returns (odd_bits, even_bits).
+/// Extract even bits and odd bits from a spread sum. Returns (odd_bits,
+/// even_bits).
 fn unspread_bits(v: u64) -> (u32, u32) {
     let even = compact_bits(v);
     let odd = compact_bits(v >> 1);
     (odd, even)
 }
 
-/// Emit a forward key-value lookup: bump multiplicity and write 2 lookup tape entries.
+/// Emit a forward key-value lookup: bump multiplicity and write 2 lookup tape
+/// entries.
 unsafe fn forward_kv_lookup_emit(
     table_idx: usize,
     key: Field,
@@ -1025,7 +1029,7 @@ mod def {
                 let limb_idx = byte_idx / 8;
                 let byte_in_limb = byte_idx % 8;
                 let byte_val = if limb_idx < val.0.len() {
-                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xFF
+                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xff
                 } else {
                     0
                 };
@@ -1299,7 +1303,8 @@ mod def {
             let new_table_idx = vm.tables.len();
             vm.tables.push(table_info);
 
-            // Dump array element values into the x-slots (even offsets) of the table section
+            // Dump array element values into the x-slots (even offsets) of the table
+            // section
             unsafe {
                 let cnst_off = vm.data.as_forward.elem_inverses_constraint_section_offset;
                 for i in 0..length {
@@ -1365,7 +1370,8 @@ mod def {
             };
 
             for i in 0..256 {
-                // For each element in the table, we have constraint `elem_inv_witness * (alpha - i) - multiplicity_witness = 0`
+                // For each element in the table, we have constraint `elem_inv_witness * (alpha
+                // - i) - multiplicity_witness = 0`
                 let coeff = unsafe {
                     *vm.data
                         .as_ad
@@ -1378,8 +1384,8 @@ mod def {
                         .out_da
                         .offset(inverses_witness_section_offset as isize + i) += coeff;
                     // if i == 0 {
-                    //     println!("bump da at {} from inv by {coeff}", inverses_witness_section_offset as isize + i);
-                    // }
+                    //     println!("bump da at {} from inv by {coeff}",
+                    // inverses_witness_section_offset as isize + i); }
 
                     *vm.data
                         .as_ad
@@ -1616,9 +1622,9 @@ mod def {
 }
 
 pub struct Function {
-    pub name: String,
+    pub name:       String,
     pub frame_size: usize,
-    pub code: Vec<OpCode>,
+    pub code:       Vec<OpCode>,
 }
 
 impl Display for Function {
@@ -1632,7 +1638,7 @@ impl Display for Function {
 }
 
 pub struct Program {
-    pub functions: Vec<Function>,
+    pub functions:         Vec<Function>,
     pub global_frame_size: usize,
 }
 

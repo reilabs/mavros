@@ -17,9 +17,11 @@ impl Pass for StripWitnessOf {
     fn name(&self) -> &'static str {
         "strip_witness_of"
     }
+
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
+
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
     }

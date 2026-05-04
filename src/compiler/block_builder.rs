@@ -229,7 +229,7 @@ pub trait HLEmitter {
         let r = self.fresh_value();
         self.emit(OpCode::Const {
             result: r,
-            value: ConstValue::Field(value),
+            value:  ConstValue::Field(value),
         });
         r
     }
@@ -238,7 +238,7 @@ pub trait HLEmitter {
         let r = self.fresh_value();
         self.emit(OpCode::Const {
             result: r,
-            value: ConstValue::U(bits, value),
+            value:  ConstValue::U(bits, value),
         });
         r
     }
@@ -247,7 +247,7 @@ pub trait HLEmitter {
         let r = self.fresh_value();
         self.emit(OpCode::Const {
             result: r,
-            value: ConstValue::I(bits, value),
+            value:  ConstValue::I(bits, value),
         });
         r
     }
@@ -507,8 +507,8 @@ pub trait HLEmitter {
     fn read_global(&mut self, index: u64, typ: Type) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::ReadGlobal {
-            result: r,
-            offset: index,
+            result:      r,
+            offset:      index,
             result_type: typ,
         });
         r
@@ -944,7 +944,7 @@ fn ad_out_field(matrix: crate::compiler::ssa::DMatrix) -> usize {
 // ---------------------------------------------------------------------------
 
 pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType> {
-    pub function: &'a mut Function<Op, Ty>,
+    pub function:     &'a mut Function<Op, Ty>,
     pub instructions: &'a mut Vec<Op>,
 }
 
@@ -1045,8 +1045,8 @@ impl<'a, Op: Instruction, Ty: SSAType> FunctionBuilder<'a, Op, Ty> {
 /// function on `seal_and_switch` or `Drop`.
 pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType> {
     pub function: &'a mut Function<Op, Ty>,
-    block_id: BlockId,
-    block: Block<Op, Ty>,
+    block_id:     BlockId,
+    block:        Block<Op, Ty>,
 }
 
 impl<Op: Instruction, Ty: SSAType> Drop for BlockEmitter<'_, Op, Ty> {
@@ -1126,18 +1126,20 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         self.block.get_terminator().is_some()
     }
 
-    /// Build a loop with the three-block structure: header -> body -> back-edge.
+    /// Build a loop with the three-block structure: header -> body ->
+    /// back-edge.
     ///
     /// The caller provides:
     /// - `params`: `(initial_value, type)` for all loop-carried state
-    /// - `header`: receives an `InstrBuilder` targeting the header block and the
-    ///   loop parameter `ValueId`s; emits the condition check and returns the
-    ///   condition `ValueId`
-    /// - `body`: receives the emitter (at the body block) and the loop parameter
-    ///   `ValueId`s; emits the body and returns the updated parameter values
-    ///   (fed back to the header via the back-edge Jmp)
+    /// - `header`: receives an `InstrBuilder` targeting the header block and
+    ///   the loop parameter `ValueId`s; emits the condition check and returns
+    ///   the condition `ValueId`
+    /// - `body`: receives the emitter (at the body block) and the loop
+    ///   parameter `ValueId`s; emits the body and returns the updated parameter
+    ///   values (fed back to the header via the back-edge Jmp)
     ///
-    /// Returns the loop parameter `ValueId`s as seen from the continuation block.
+    /// Returns the loop parameter `ValueId`s as seen from the continuation
+    /// block.
     pub fn build_loop(
         &mut self,
         params: Vec<(ValueId, Ty)>,
@@ -1199,8 +1201,8 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
     ///   merge_blk(params...) → continues here
     ///
     /// `result_types` defines the merge block parameters.
-    /// `then_branch` and `else_branch` each receive the emitter and return values
-    /// that are passed to the merge block.
+    /// `then_branch` and `else_branch` each receive the emitter and return
+    /// values that are passed to the merge block.
     ///
     /// Returns the merge parameter `ValueId`s.
     pub fn build_if_else(
@@ -1265,10 +1267,12 @@ impl HLEmitter for HLBlockEmitter<'_> {
 }
 
 impl HLBlockEmitter<'_> {
-    /// Build a counted loop: `for i in 0..len { body(i, accumulators) -> updated_accumulators }`
+    /// Build a counted loop: `for i in 0..len { body(i, accumulators) ->
+    /// updated_accumulators }`
     ///
-    /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`),
-    /// and increment (`i + 1`). Returns only the accumulator values at loop exit.
+    /// Wrapper around `build_loop` that handles the u32 index, condition (`i <
+    /// len`), and increment (`i + 1`). Returns only the accumulator values
+    /// at loop exit.
     pub fn build_counted_loop(
         &mut self,
         len: usize,
@@ -1333,7 +1337,8 @@ impl LLEmitter for LLBlockEmitter<'_> {
 }
 
 impl LLBlockEmitter<'_> {
-    /// Build a counted loop: `for i in 0..count { body(i, accumulators) -> updated_accumulators }`
+    /// Build a counted loop: `for i in 0..count { body(i, accumulators) ->
+    /// updated_accumulators }`
     ///
     /// LL variant: uses i64 index with int_ult/int_add.
     pub fn build_counted_loop(

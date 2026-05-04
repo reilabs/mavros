@@ -27,13 +27,13 @@ pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 #[derive(Clone, Debug)]
 struct ArrayData {
     table_id: Option<usize>,
-    data: Vec<Value>,
+    data:     Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
 struct TupleData {
     table_id: Option<usize>,
-    data: Vec<Value>,
+    data:     Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +85,7 @@ impl Value {
     pub fn add(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs + rhs),
-            (_, _) => {
+            (..) => {
                 let lhs = self.expect_linear_combination();
                 let rhs = other.expect_linear_combination();
                 let mut lhs_i = 0;
@@ -139,7 +139,7 @@ impl Value {
                 let inv = Value::Const(ark_bn254::Fr::ONE / rhs);
                 self.mul(&inv)
             }
-            (_, _) => panic!("expected constant"),
+            (..) => panic!("expected constant"),
         }
     }
 
@@ -220,7 +220,7 @@ impl Value {
                 }
                 Value::LC(result)
             }
-            (_, _) => panic!("expected constant or linear combination and constant"),
+            (..) => panic!("expected constant or linear combination and constant"),
         }
     }
 
@@ -283,7 +283,7 @@ impl Value {
     pub fn mk_tuple(fields: Vec<Value>) -> Value {
         Value::Tuple(Rc::new(RefCell::new(TupleData {
             table_id: None,
-            data: fields,
+            data:     fields,
         })))
     }
 }
@@ -292,7 +292,7 @@ impl Value {
 pub struct LookupConstraint {
     pub table_id: usize,
     pub elements: Vec<LC>,
-    pub flag: LC,
+    pub flag:     LC,
 }
 
 #[derive(Clone, Debug)]
@@ -304,9 +304,9 @@ pub enum Table {
 
 #[derive(Clone)]
 pub struct R1CGen {
-    constraints: Vec<R1C>,
-    tables: Vec<Table>,
-    lookups: Vec<LookupConstraint>,
+    constraints:  Vec<R1C>,
+    tables:       Vec<Table>,
+    lookups:      Vec<LookupConstraint>,
     next_witness: usize,
 }
 
@@ -358,7 +358,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
-                    flag: flag_lc.clone(),
+                    flag:     flag_lc.clone(),
                 });
             }
             super::ssa::LookupTarget::DynRangecheck(v) => {
@@ -382,7 +382,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
-                    flag: flag_lc.clone(),
+                    flag:     flag_lc.clone(),
                 });
             }
             super::ssa::LookupTarget::Spread(bits) => {
@@ -592,7 +592,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn assert_bool(&self, _ctx: &mut R1CGen) {
         let v = self.expect_constant();
-        assert!(v != ark_bn254::Fr::from(0u64), "assert failed: value is zero");
+        assert!(
+            v != ark_bn254::Fr::from(0u64),
+            "assert failed: value is zero"
+        );
     }
 
     fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, _ctx: &mut R1CGen) {
@@ -612,14 +615,23 @@ impl symbolic_executor::Value<R1CGen> for Value {
                         let a_neg = a_int >= half;
                         let b_neg = b_int >= half;
                         let result = match (a_neg, b_neg) {
-                            (true, false) => true,   // negative < positive
-                            (false, true) => false,  // positive >= negative
-                            _ => a_int < b_int,      // same sign: compare directly
+                            (true, false) => true,  // negative < positive
+                            (false, true) => false, // positive >= negative
+                            _ => a_int < b_int,     // same sign: compare directly
                         };
-                        assert!(result, "assert_cmp lt (signed) failed: {:?} >= {:?}", a_val, b_val);
+                        assert!(
+                            result,
+                            "assert_cmp lt (signed) failed: {:?} >= {:?}",
+                            a_val, b_val
+                        );
                     }
                     _ => {
-                        assert!(a_val < b_val, "assert_cmp lt failed: {:?} >= {:?}", a_val, b_val);
+                        assert!(
+                            a_val < b_val,
+                            "assert_cmp lt failed: {:?} >= {:?}",
+                            a_val,
+                            b_val
+                        );
                     }
                 }
             }
@@ -856,10 +868,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
 impl R1CGen {
     pub fn new() -> Self {
         Self {
-            constraints: vec![],
+            constraints:  vec![],
             next_witness: 0,
-            tables: vec![],
-            lookups: vec![],
+            tables:       vec![],
+            lookups:      vec![],
         }
     }
 
@@ -917,15 +929,15 @@ impl R1CGen {
     pub fn seal(self) -> R1CS {
         // Algebraic section
         let mut witness_layout = WitnessLayout {
-            algebraic_size: self.next_witness,
+            algebraic_size:      self.next_witness,
             multiplicities_size: 0,
-            challenges_size: 0,
-            tables_data_size: 0,
-            lookups_data_size: 0,
+            challenges_size:     0,
+            tables_data_size:    0,
+            lookups_data_size:   0,
         };
         let mut constraints_layout = ConstraintsLayout {
-            algebraic_size: self.constraints.len(),
-            tables_data_size: 0,
+            algebraic_size:    self.constraints.len(),
+            tables_data_size:  0,
             lookups_data_size: 0,
         };
         let mut result = self.constraints;

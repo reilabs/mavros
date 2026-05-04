@@ -16,13 +16,13 @@ pub enum ReplacementKind {
 
 pub struct ReplacementSpec {
     lowlevel_name: &'static str,
-    kind: ReplacementKind,
+    kind:          ReplacementKind,
 }
 
 pub struct ReplacementCrate {
-    pub file_name: &'static str,
-    pub dep_name: &'static str,
-    pub source: &'static str,
+    pub file_name:    &'static str,
+    pub dep_name:     &'static str,
+    pub source:       &'static str,
     pub replacements: &'static [ReplacementSpec],
 }
 
@@ -47,7 +47,8 @@ impl ReplacementCrate {
     }
 }
 
-/// Scan the monomorphizer's finished functions to find which LowLevel intrinsics are actually used.
+/// Scan the monomorphizer's finished functions to find which LowLevel
+/// intrinsics are actually used.
 pub fn find_needed_lowlevels(monomorphizer: &Monomorphizer) -> HashSet<String> {
     let mut needed = HashSet::new();
     for (_, func) in monomorphizer.finished_functions() {
@@ -65,12 +66,12 @@ pub fn find_needed_lowlevels(monomorphizer: &Monomorphizer) -> HashSet<String> {
 
 pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
     ReplacementCrate {
-        file_name: "poseidon2_permutation.nr",
-        dep_name: "poseidon2_permutation",
-        source: include_str!("../stdlib_replacements/src/poseidon2_permutation.nr"),
+        file_name:    "poseidon2_permutation.nr",
+        dep_name:     "poseidon2_permutation",
+        source:       include_str!("../stdlib_replacements/src/poseidon2_permutation.nr"),
         replacements: &[ReplacementSpec {
             lowlevel_name: "poseidon2_permutation",
-            kind: ReplacementKind::ByArraySize(&[
+            kind:          ReplacementKind::ByArraySize(&[
                 ("t2", 2),
                 ("t3", 3),
                 ("t4", 4),
@@ -81,17 +82,18 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
         }],
     },
     ReplacementCrate {
-        file_name: "sha256_compression.nr",
-        dep_name: "sha256_compression",
-        source: include_str!("../stdlib_replacements/src/sha256_compression.nr"),
+        file_name:    "sha256_compression.nr",
+        dep_name:     "sha256_compression",
+        source:       include_str!("../stdlib_replacements/src/sha256_compression.nr"),
         replacements: &[ReplacementSpec {
             lowlevel_name: "sha256_compression",
-            kind: ReplacementKind::Single("sha256_compression"),
+            kind:          ReplacementKind::Single("sha256_compression"),
         }],
     },
 ];
 
-/// Look up named functions from the root module of a crate, returning their metadata.
+/// Look up named functions from the root module of a crate, returning their
+/// metadata.
 fn find_functions_in_crate(
     context: &Context,
     crate_id: noirc_frontend::graph::CrateId,
@@ -110,7 +112,8 @@ fn find_functions_in_crate(
 }
 
 /// Prepare a replacement crate and look up its functions.
-/// Must be called before creating the Monomorphizer (which borrows context.def_interner).
+/// Must be called before creating the Monomorphizer (which borrows
+/// context.def_interner).
 pub fn prepare_replacement_crate(
     context: &mut Context,
     crate_id: noirc_frontend::graph::CrateId,
@@ -137,7 +140,8 @@ pub fn prepare_replacement_crate(
     ))
 }
 
-/// Monomorphize replacement functions and register them as lowlevel replacements.
+/// Monomorphize replacement functions and register them as lowlevel
+/// replacements.
 pub fn add_lowlevel_replacements(
     replacement: &ReplacementCrate,
     functions: &[(String, FuncId, noirc_errors::Location, noirc_frontend::Type)],

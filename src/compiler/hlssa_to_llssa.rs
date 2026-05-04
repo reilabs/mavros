@@ -60,7 +60,8 @@ fn rc_array_struct(elem_type: &Type, count: usize) -> LLStruct {
     LLStruct::rc_array(elem_struct(elem_type), count)
 }
 
-/// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
+/// Convert an HLSSA element type to an LLFieldType for use in tuple struct
+/// layouts.
 fn tuple_field_type(ty: &Type) -> LLFieldType {
     match &ty.expr {
         TypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
@@ -96,11 +97,12 @@ fn array_info(ty: &Type) -> (&Type, usize) {
 
 struct DropFnEntry {
     hlssa_type: Type,
-    fn_id: FunctionId,
+    fn_id:      FunctionId,
 }
 
-/// Get or create a drop function for a type that needs dropping (currently Array or WitnessOf).
-/// For arrays, recursively creates drop functions for inner elements that need dropping.
+/// Get or create a drop function for a type that needs dropping (currently
+/// Array or WitnessOf). For arrays, recursively creates drop functions for
+/// inner elements that need dropping.
 fn get_or_create_drop_fn(
     ty: &Type,
     llssa: &mut LLSSA,
@@ -168,14 +170,14 @@ impl AdBumpIds {
 }
 
 struct AdFunctions {
-    bumps: Option<AdBumpIds>,
+    bumps:   Option<AdBumpIds>,
     ad_drop: Option<FunctionId>,
 }
 
 impl AdFunctions {
     fn new() -> Self {
         Self {
-            bumps: None,
+            bumps:   None,
             ad_drop: None,
         }
     }
@@ -440,7 +442,8 @@ fn lower_function(
             );
         }
 
-        // Lower terminator (into current block, which may have changed due to block splits)
+        // Lower terminator (into current block, which may have changed due to block
+        // splits)
         if let Some(terminator) = block.get_terminator() {
             lower_terminator(terminator, &mut emitter, &val_map, &block_map);
         }
@@ -539,7 +542,8 @@ fn lower_instruction(
                     match kind {
                         BinaryArithOpKind::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
                         _ => panic!(
-                            "Unsupported WitnessOf arith op: {:?} (should be lowered by WitnessLowering)",
+                            "Unsupported WitnessOf arith op: {:?} (should be lowered by \
+                             WitnessLowering)",
                             kind
                         ),
                     }
@@ -770,7 +774,8 @@ fn lower_instruction(
                         // Field → Field: identity cast (no-op)
                         val_map.insert(*result, ll_value);
                     } else {
-                        // U(n)/I(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
+                        // U(n)/I(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs,
+                        // FieldFromLimbs
                         let val64 = match &source_type.expr {
                             TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => {
                                 e.zext(ll_value, 64)
@@ -947,7 +952,7 @@ fn lower_instruction(
             let ll_value = val_map[value];
             let r = e.fresh_value();
             e.emit_ll(LLOp::GlobalAddr {
-                result: r,
+                result:    r,
                 global_id: *global,
             });
             e.ll_store(r, ll_value);
@@ -960,7 +965,7 @@ fn lower_instruction(
         } => {
             let r = e.fresh_value();
             e.emit_ll(LLOp::GlobalAddr {
-                result: r,
+                result:    r,
                 global_id: *offset as usize,
             });
             let ll_type = lower_type(result_type);
@@ -973,7 +978,7 @@ fn lower_instruction(
             // Load the value from the global slot, then call its drop function.
             let r = e.fresh_value();
             e.emit_ll(LLOp::GlobalAddr {
-                result: r,
+                result:    r,
                 global_id: *global,
             });
             let ll_type = lower_type(global_type);
@@ -999,8 +1004,8 @@ fn lower_instruction(
             let reason = match (radix, &value_type.expr) {
                 (Radix::Dyn(_), _) => "ToRadix with a dynamic radix is not supported".to_string(),
                 (Radix::Bytes, TypeExpr::WitnessOf(_)) => {
-                    "ToRadix on a witness value is not supported; witness byte decomposition \
-                     must be lowered via constrained byte decomposition before this pass"
+                    "ToRadix on a witness value is not supported; witness byte decomposition must \
+                     be lowered via constrained byte decomposition before this pass"
                         .to_string()
                 }
                 (Radix::Bytes, _) => format!(
@@ -1649,8 +1654,8 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
 
     if let Some(drop_id) = ad_fns.ad_drop {
         let bumps = ad_fns.bumps.as_ref().expect(
-            "ICE: ad_drop allocated without bump functions. \
-             This is a bug in AdFunctions — get_drop_fn must call ensure_bumps.",
+            "ICE: ad_drop allocated without bump functions. This is a bug in AdFunctions — \
+             get_drop_fn must call ensure_bumps.",
         );
         let func = generate_ad_drop_function(bumps, drop_id);
         let _old = llssa.take_function(drop_id);
@@ -2163,11 +2168,7 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
     e.ll_store(cursor_slot, next);
 }
 
-fn write_tape_entry_field(
-    e: &mut LLBlockEmitter<'_>,
-    cursor_field: usize,
-    field_val: ValueId,
-) {
+fn write_tape_entry_field(e: &mut LLBlockEmitter<'_>, cursor_field: usize, field_val: ValueId) {
     // Same structure as `write_field_cursor` used by Constrain.
     let cursor_slot = e.witgen_vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);

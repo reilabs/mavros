@@ -285,7 +285,7 @@ enum StructInputType {
 #[derive(Debug)]
 struct StructInput {
     name: String,
-    val: StructInputType,
+    val:  StructInputType,
 }
 
 impl StructInput {
@@ -332,7 +332,7 @@ enum Input {
 
 #[derive(Debug)]
 struct OpCodeDef {
-    name: String,
+    name:   String,
     is_raw: bool,
     inputs: Vec<Input>,
 }
@@ -495,7 +495,7 @@ fn parse_unannotated(ident: Ident, ty: &syn::Type) -> Input {
             }
             return Input::Struct(StructInput {
                 name: ident.to_string(),
-                val: StructInputType::Host(parse_host_type(ty)),
+                val:  StructInputType::Host(parse_host_type(ty)),
             });
         }
         syn::Type::Reference(intype) => match intype.elem.as_ref() {
@@ -506,21 +506,21 @@ fn parse_unannotated(ident: Ident, ty: &syn::Type) -> Input {
                 } else {
                     return Input::Struct(StructInput {
                         name: ident.to_string(),
-                        val: StructInputType::Host(parse_host_type(ty)),
+                        val:  StructInputType::Host(parse_host_type(ty)),
                     });
                 }
             }
             _ => {
                 return Input::Struct(StructInput {
                     name: ident.to_string(),
-                    val: StructInputType::Host(parse_host_type(ty)),
+                    val:  StructInputType::Host(parse_host_type(ty)),
                 });
             }
         },
         _ => {
             return Input::Struct(StructInput {
                 name: ident.to_string(),
-                val: StructInputType::Host(parse_host_type(ty)),
+                val:  StructInputType::Host(parse_host_type(ty)),
             });
         }
     }
@@ -534,7 +534,7 @@ fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
             }
             return Input::Struct(StructInput {
                 name: ident.to_string(),
-                val: StructInputType::Out(parse_guest_type(&ty.elem)),
+                val:  StructInputType::Out(parse_guest_type(&ty.elem)),
             });
         }
         _ => {
@@ -546,7 +546,7 @@ fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
 fn parse_frame(ident: Ident, ty: &syn::Type) -> Input {
     return Input::Struct(StructInput {
         name: ident.to_string(),
-        val: StructInputType::Frame(parse_guest_type(ty)),
+        val:  StructInputType::Frame(parse_guest_type(ty)),
     });
 }
 

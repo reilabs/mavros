@@ -42,7 +42,7 @@ impl TypeConverter {
                 let inner_type = self.convert_type(inner);
                 inner_type.ref_of()
             }
-            AstType::Function(_, _, _, _) => Type::function(),
+            AstType::Function(..) => Type::function(),
             AstType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
                 Type::u(8).array_of(*len as usize)

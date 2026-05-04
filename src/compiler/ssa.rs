@@ -45,15 +45,15 @@ pub trait Instruction: Clone + std::fmt::Debug + 'static {
 
 #[derive(Clone)]
 pub struct SSA<Op: Instruction, Ty: SSAType> {
-    functions: HashMap<FunctionId, Function<Op, Ty>>,
+    functions:         HashMap<FunctionId, Function<Op, Ty>>,
     /// Type of each global slot (indexed by slot number)
-    global_types: Vec<Ty>,
+    global_types:      Vec<Ty>,
     /// Function that initializes all globals (emits InitGlobal opcodes)
-    globals_init_fn: Option<FunctionId>,
+    globals_init_fn:   Option<FunctionId>,
     /// Function that drops all globals (emits DropGlobal opcodes)
     globals_deinit_fn: Option<FunctionId>,
-    main_id: FunctionId,
-    next_function_id: u64,
+    main_id:           FunctionId,
+    next_function_id:  u64,
 }
 
 pub type HLSSA = SSA<OpCode, Type>;
@@ -87,12 +87,12 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
     pub fn prepare_rebuild(self) -> (SSA<Op, Ty>, HashMap<FunctionId, Function<Op, Ty>>, Vec<Ty>) {
         (
             SSA {
-                functions: HashMap::new(),
-                global_types: Vec::new(),
-                globals_init_fn: self.globals_init_fn,
+                functions:         HashMap::new(),
+                global_types:      Vec::new(),
+                globals_init_fn:   self.globals_init_fn,
                 globals_deinit_fn: self.globals_deinit_fn,
-                main_id: self.main_id,
-                next_function_id: self.next_function_id,
+                main_id:           self.main_id,
+                next_function_id:  self.next_function_id,
             },
             self.functions,
             self.global_types,
@@ -213,11 +213,11 @@ pub enum CallTarget {
 #[derive(Clone)]
 pub struct Function<Op: Instruction, Ty: SSAType> {
     entry_block: BlockId,
-    blocks: HashMap<BlockId, Block<Op, Ty>>,
-    name: String,
-    returns: Vec<Ty>,
-    next_block: u64,
-    next_value: u64,
+    blocks:      HashMap<BlockId, Block<Op, Ty>>,
+    name:        String,
+    returns:     Vec<Ty>,
+    next_block:  u64,
+    next_value:  u64,
 }
 
 impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
@@ -266,11 +266,11 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         (
             Function {
                 entry_block: self.entry_block,
-                blocks: HashMap::new(),
-                next_block: self.next_block,
-                name: self.name,
-                returns: vec![],
-                next_value: self.next_value,
+                blocks:      HashMap::new(),
+                next_block:  self.next_block,
+                name:        self.name,
+                returns:     vec![],
+                next_value:  self.next_value,
             },
             self.blocks,
             self.returns,
@@ -456,9 +456,9 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
 
 #[derive(Clone)]
 pub struct Block<Op: Instruction, Ty: SSAType> {
-    parameters: Vec<(ValueId, Ty)>,
+    parameters:   Vec<(ValueId, Ty)>,
     instructions: Vec<Op>,
-    terminator: Option<Terminator>,
+    terminator:   Option<Terminator>,
 }
 
 impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
@@ -515,9 +515,9 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
 impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     pub fn empty() -> Self {
         Block {
-            parameters: Vec::new(),
+            parameters:   Vec::new(),
             instructions: Vec::new(),
-            terminator: None,
+            terminator:   None,
         }
     }
 
@@ -711,63 +711,63 @@ pub enum Radix<V> {
 #[derive(Debug, Clone)]
 pub enum OpCode {
     Cmp {
-        kind: CmpKind,
+        kind:   CmpKind,
         result: ValueId,
-        lhs: ValueId,
-        rhs: ValueId,
+        lhs:    ValueId,
+        rhs:    ValueId,
     },
     BinaryArithOp {
-        kind: BinaryArithOpKind,
+        kind:   BinaryArithOpKind,
         result: ValueId,
-        lhs: ValueId,
-        rhs: ValueId,
+        lhs:    ValueId,
+        rhs:    ValueId,
     },
     Cast {
         result: ValueId,
-        value: ValueId,
+        value:  ValueId,
         target: CastTarget,
     },
     Truncate {
-        result: ValueId,
-        value: ValueId,
-        to_bits: usize,
+        result:    ValueId,
+        value:     ValueId,
+        to_bits:   usize,
         from_bits: usize,
     },
     SExt {
-        result: ValueId,
-        value: ValueId,
+        result:    ValueId,
+        value:     ValueId,
         from_bits: usize,
-        to_bits: usize,
+        to_bits:   usize,
     },
     Not {
         result: ValueId,
-        value: ValueId,
+        value:  ValueId,
     },
     MkSeq {
-        result: ValueId,
-        elems: Vec<ValueId>,
-        seq_type: SeqType,
+        result:    ValueId,
+        elems:     Vec<ValueId>,
+        seq_type:  SeqType,
         elem_type: Type,
     },
     Alloc {
-        result: ValueId,
+        result:    ValueId,
         elem_type: Type,
     },
     Store {
-        ptr: ValueId,
+        ptr:   ValueId,
         value: ValueId,
     },
     Load {
         result: ValueId,
-        ptr: ValueId,
+        ptr:    ValueId,
     },
     Assert {
         value: ValueId,
     },
     AssertCmp {
         kind: CmpKind,
-        lhs: ValueId,
-        rhs: ValueId,
+        lhs:  ValueId,
+        rhs:  ValueId,
     },
     AssertR1C {
         a: ValueId,
@@ -775,74 +775,74 @@ pub enum OpCode {
         c: ValueId,
     },
     Call {
-        results: Vec<ValueId>,
-        function: CallTarget,
-        args: Vec<ValueId>,
+        results:       Vec<ValueId>,
+        function:      CallTarget,
+        args:          Vec<ValueId>,
         unconstrained: bool,
     },
     ArrayGet {
         result: ValueId,
-        array: ValueId,
-        index: ValueId,
+        array:  ValueId,
+        index:  ValueId,
     },
     ArraySet {
         result: ValueId,
-        array: ValueId,
-        index: ValueId,
-        value: ValueId,
+        array:  ValueId,
+        index:  ValueId,
+        value:  ValueId,
     },
     SlicePush {
-        dir: SliceOpDir,
+        dir:    SliceOpDir,
         result: ValueId,
-        slice: ValueId,
+        slice:  ValueId,
         values: Vec<ValueId>,
     },
     SliceLen {
         result: ValueId,
-        slice: ValueId,
+        slice:  ValueId,
     },
     Select {
         result: ValueId,
-        cond: ValueId,
-        if_t: ValueId,
-        if_f: ValueId,
+        cond:   ValueId,
+        if_t:   ValueId,
+        if_f:   ValueId,
     },
     ToBits {
-        result: ValueId,
-        value: ValueId,
+        result:     ValueId,
+        value:      ValueId,
         endianness: Endianness,
-        count: usize,
+        count:      usize,
     },
     ToRadix {
-        result: ValueId,
-        value: ValueId,
-        radix: Radix<ValueId>,
+        result:     ValueId,
+        value:      ValueId,
+        radix:      Radix<ValueId>,
         endianness: Endianness,
-        count: usize,
+        count:      usize,
     },
     MemOp {
-        kind: MemOp,
+        kind:  MemOp,
         value: ValueId,
     },
     ValueOf {
         result: ValueId,
-        value: ValueId,
+        value:  ValueId,
     },
     WriteWitness {
         result: Option<ValueId>,
-        value: ValueId,
+        value:  ValueId,
         pinned: bool,
     },
     FreshWitness {
-        result: ValueId,
+        result:      ValueId,
         result_type: Type,
     },
     NextDCoeff {
         result: ValueId,
     },
     BumpD {
-        matrix: DMatrix,
-        variable: ValueId,
+        matrix:      DMatrix,
+        variable:    ValueId,
         sensitivity: ValueId,
     },
     Constrain {
@@ -851,73 +851,73 @@ pub enum OpCode {
         c: ValueId,
     },
     Lookup {
-        target: LookupTarget<ValueId>,
-        keys: Vec<ValueId>,
+        target:  LookupTarget<ValueId>,
+        keys:    Vec<ValueId>,
         results: Vec<ValueId>,
-        flag: ValueId,
+        flag:    ValueId,
     },
     DLookup {
-        target: LookupTarget<ValueId>,
-        keys: Vec<ValueId>,
+        target:  LookupTarget<ValueId>,
+        keys:    Vec<ValueId>,
         results: Vec<ValueId>,
-        flag: ValueId,
+        flag:    ValueId,
     },
     MulConst {
-        result: ValueId,
+        result:    ValueId,
         const_val: ValueId,
-        var: ValueId,
+        var:       ValueId,
     },
     Rangecheck {
-        value: ValueId,
+        value:    ValueId,
         max_bits: usize,
     },
     ReadGlobal {
-        result: ValueId,
-        offset: u64,
+        result:      ValueId,
+        offset:      u64,
         result_type: Type,
     },
     TupleProj {
         result: ValueId,
-        tuple: ValueId,
-        idx: usize,
+        tuple:  ValueId,
+        idx:    usize,
     },
     MkTuple {
-        result: ValueId,
-        elems: Vec<ValueId>,
+        result:        ValueId,
+        elems:         Vec<ValueId>,
         element_types: Vec<Type>,
     },
     Todo {
-        payload: String,
-        results: Vec<ValueId>,
+        payload:      String,
+        results:      Vec<ValueId>,
         result_types: Vec<Type>,
     },
     InitGlobal {
         global: usize,
-        value: ValueId,
+        value:  ValueId,
     },
     DropGlobal {
         global: usize,
     },
     Const {
         result: ValueId,
-        value: ConstValue,
+        value:  ConstValue,
     },
     Spread {
         result: ValueId,
-        value: ValueId,
+        value:  ValueId,
         /// Number of input bits (1..=16).
-        bits: u8,
+        bits:   u8,
     },
     Unspread {
-        result_odd: ValueId,
+        result_odd:  ValueId,
         result_even: ValueId,
-        value: ValueId,
+        value:       ValueId,
         /// Number of input bits per half (1..=16).
-        bits: u8,
+        bits:        u8,
     },
     Guard {
         condition: ValueId,
-        inner: Box<OpCode>,
+        inner:     Box<OpCode>,
     },
 }
 
@@ -1534,7 +1534,8 @@ impl Instruction for OpCode {
                 const_val: b,
                 var: c,
             } => vec![b, c].into_iter(),
-            Self::Assert { value: c } | Self::Load { result: _, ptr: c }
+            Self::Assert { value: c }
+            | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
                 value: c,
@@ -1926,7 +1927,8 @@ impl Instruction for OpCode {
                 variable: b,
                 sensitivity: c,
             } => vec![b, c].into_iter(),
-            Self::Assert { value: c } | Self::Load { result: _, ptr: c }
+            Self::Assert { value: c }
+            | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
                 value: c,
@@ -2337,10 +2339,10 @@ pub fn spread_bits(v: u128, bits: usize) -> u128 {
     );
 
     let mut x = v;
-    x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128;
+    x = (x | (x << 32)) & 0x0000_0000_ffff_ffff_0000_0000_ffff_ffffu128;
+    x = (x | (x << 16)) & 0x0000_ffff_0000_ffff_0000_ffff_0000_ffffu128;
+    x = (x | (x << 8)) & 0x00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ffu128;
+    x = (x | (x << 4)) & 0x0f0f_0f0f_0f0f_0f0f_0f0f_0f0f_0f0f_0f0fu128;
     x = (x | (x << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333u128;
     x = (x | (x << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555u128;
     x
@@ -2355,11 +2357,11 @@ pub fn unspread_bits(v: u128, bits: usize) -> (u128, u128) {
     fn compact_bits(mut x: u128) -> u128 {
         x &= 0x5555_5555_5555_5555_5555_5555_5555_5555u128;
         x = (x | (x >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333u128;
-        x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128;
-        x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128;
-        x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128;
-        x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128;
-        x = (x | (x >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFFu128;
+        x = (x | (x >> 2)) & 0x0f0f_0f0f_0f0f_0f0f_0f0f_0f0f_0f0f_0f0fu128;
+        x = (x | (x >> 4)) & 0x00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ffu128;
+        x = (x | (x >> 8)) & 0x0000_ffff_0000_ffff_0000_ffff_0000_ffffu128;
+        x = (x | (x >> 16)) & 0x0000_0000_ffff_ffff_0000_0000_ffff_ffffu128;
+        x = (x | (x >> 32)) & 0x0000_0000_0000_0000_ffff_ffff_ffff_ffffu128;
         x
     }
 

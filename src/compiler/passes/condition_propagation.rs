@@ -50,14 +50,14 @@ impl ConditionPropagation {
                 let mut replacements = ValueReplacements::new();
                 let replaces = replaces
                     .iter()
-                    .filter(|(cond_block, _, _)| cfg.dominates(*cond_block, block_id));
+                    .filter(|(cond_block, ..)| cfg.dominates(*cond_block, block_id));
 
                 let mut const_opcodes = Vec::new();
                 for (_, vid, value) in replaces {
                     let const_id = function.fresh_value();
                     const_opcodes.push(OpCode::Const {
                         result: const_id,
-                        value: ConstValue::U(1, if *value { 1 } else { 0 }),
+                        value:  ConstValue::U(1, if *value { 1 } else { 0 }),
                     });
                     replacements.insert(*vid, const_id);
                 }

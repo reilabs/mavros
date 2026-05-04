@@ -68,8 +68,9 @@ impl Mem2Reg {
         let mut value_replacements = ValueReplacements::new();
 
         // Traverse the CFG in domination pre-order
-        // This ensures that for each ptr the last value is already defined when we enter the block:
-        // either it is defined by some dominator, or it is a phi parameter.
+        // This ensures that for each ptr the last value is already defined when we
+        // enter the block: either it is defined by some dominator, or it is a
+        // phi parameter.
         for block_id in cfg.get_domination_pre_order() {
             // fetch all possible values from the parent block
             let mut values = if let Some(parent) = cfg.get_immediate_dominator(block_id) {
@@ -178,8 +179,9 @@ impl Mem2Reg {
         }
     }
 
-    // returns for each block the vector of (param_id, value_id), where param_id is the id of a new parameter,
-    // and value_id is the id of the pointer that is being replaced
+    // returns for each block the vector of (param_id, value_id), where param_id is
+    // the id of a new parameter, and value_id is the id of the pointer that is
+    // being replaced
     fn initialize_phis(
         &self,
         function: &mut HLFunction,
@@ -249,7 +251,8 @@ impl Mem2Reg {
                         continue; // If the pointer is not defined here, there's no need for a phi.
                     }
                     debug!(
-                        "Block {}\tneeds phi for v{}\tbecause it's in the dominance frontier of {}\twhich contains a write",
+                        "Block {}\tneeds phi for v{}\tbecause it's in the dominance frontier of \
+                         {}\twhich contains a write",
                         new_block.0, var.0, block.0
                     );
                     result.entry(*var).or_default().insert(new_block);

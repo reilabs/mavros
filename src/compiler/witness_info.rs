@@ -73,7 +73,8 @@ impl WitnessType {
         }
     }
 
-    /// Join two witness types (least upper bound). Eagerly computes concrete result.
+    /// Join two witness types (least upper bound). Eagerly computes concrete
+    /// result.
     pub fn join(&self, other: &WitnessType) -> WitnessType {
         match (self, other) {
             (WitnessType::Scalar(t1), WitnessType::Scalar(t2)) => WitnessType::Scalar(t1.join(*t2)),
@@ -112,7 +113,7 @@ impl WitnessType {
             WitnessType::Array(_, inner) => Some(*inner.clone()),
             WitnessType::Ref(_, inner) => Some(*inner.clone()),
             WitnessType::Scalar(_) => None,
-            WitnessType::Tuple(_, _) => {
+            WitnessType::Tuple(..) => {
                 panic!("Error: child_witness_type shouldn't be called for Tuple values")
             }
         }
@@ -138,7 +139,7 @@ impl WitnessType {
             WitnessType::Array(top, inner) => {
                 WitnessType::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
             }
-            WitnessType::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
+            WitnessType::Ref(..) => self.with_toplevel_info(self.toplevel_info().join(info)),
             WitnessType::Tuple(top, children) => WitnessType::Tuple(
                 *top,
                 children
@@ -152,10 +153,10 @@ impl WitnessType {
 
 #[derive(Clone)]
 pub struct FunctionWitnessType {
-    pub returns_witness: Vec<WitnessType>,
-    pub cfg_witness: WitnessInfo,
-    pub parameters: Vec<WitnessType>,
-    pub block_cfg_witness: HashMap<BlockId, WitnessInfo>,
+    pub returns_witness:     Vec<WitnessType>,
+    pub cfg_witness:         WitnessInfo,
+    pub parameters:          Vec<WitnessType>,
+    pub block_cfg_witness:   HashMap<BlockId, WitnessInfo>,
     pub value_witness_types: HashMap<ValueId, WitnessType>,
 }
 

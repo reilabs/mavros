@@ -16,7 +16,8 @@ use crate::compiler::ssa::{
 
 use super::type_converter::TypeConverter;
 
-/// A LowLevel function replacement: either a single function or a family dispatched by array size.
+/// A LowLevel function replacement: either a single function or a family
+/// dispatched by array size.
 pub enum LowLevelReplacement {
     Single(AstFuncId),
     ByArraySize(HashMap<u32, AstFuncId>),
@@ -33,9 +34,10 @@ enum AccessStep {
 
 /// Loop context for break/continue support.
 struct LoopContext {
-    loop_header: BlockId,
-    exit_block: BlockId,
-    /// Only for `for` loops — (index_value, bit_size), used by Continue to increment.
+    loop_header:    BlockId,
+    exit_block:     BlockId,
+    /// Only for `for` loops — (index_value, bit_size), used by Continue to
+    /// increment.
     for_loop_index: Option<(ValueId, usize)>,
 }
 
@@ -44,27 +46,27 @@ pub struct ExpressionConverter<'a> {
     /// Maps LocalId to ValueId for variable bindings.
     /// For mutable variables, this stores the pointer to the value.
     /// For immutable variables, this stores the value directly.
-    bindings: HashMap<LocalId, ValueId>,
+    bindings:               HashMap<LocalId, ValueId>,
     /// Tracks which LocalIds are mutable (their binding is a pointer)
-    mutable_locals: HashSet<LocalId>,
+    mutable_locals:         HashSet<LocalId>,
     /// Maps AST FuncId to SSA FunctionId
-    function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+    function_mapper:        &'a HashMap<AstFuncId, FunctionId>,
     /// Set of AST function IDs that are natively unconstrained
     natively_unconstrained: &'a HashSet<AstFuncId>,
     /// Type converter
-    type_converter: TypeConverter,
+    type_converter:         TypeConverter,
     /// Stack of enclosing loop contexts for break/continue
-    loop_stack: Vec<LoopContext>,
+    loop_stack:             Vec<LoopContext>,
     /// Whether the current function is unconstrained
-    in_unconstrained: bool,
+    in_unconstrained:       bool,
     /// Maps GlobalId to global slot index
-    global_slots: &'a HashMap<GlobalId, usize>,
+    global_slots:           &'a HashMap<GlobalId, usize>,
     /// Dedup cache for constants
-    const_cache: HashMap<ConstValue, ValueId>,
+    const_cache:            HashMap<ConstValue, ValueId>,
     /// Maps LowLevel function name to its replacement
-    lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
+    lowlevel_replacements:  &'a HashMap<String, LowLevelReplacement>,
     /// Current block being emitted into
-    current_block: BlockId,
+    current_block:          BlockId,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -103,7 +105,7 @@ impl<'a> ExpressionConverter<'a> {
         let entry = b.function().get_entry_id();
         b.block(entry).emit(OpCode::Const {
             result: vid,
-            value: cv.clone(),
+            value:  cv.clone(),
         });
         self.const_cache.insert(cv, vid);
         vid
@@ -114,7 +116,8 @@ impl<'a> ExpressionConverter<'a> {
         self.bindings.insert(local_id, value);
     }
 
-    /// Bind a mutable local variable - allocates a pointer and stores the initial value
+    /// Bind a mutable local variable - allocates a pointer and stores the
+    /// initial value
     pub fn bind_local_mut(
         &mut self,
         local_id: LocalId,
@@ -408,7 +411,8 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    /// Synthesize a tuple "set" by projecting all fields, replacing one, and rebuilding.
+    /// Synthesize a tuple "set" by projecting all fields, replacing one, and
+    /// rebuilding.
     fn synthesize_tuple_set(
         &mut self,
         tuple: ValueId,
@@ -444,7 +448,8 @@ impl<'a> ExpressionConverter<'a> {
         e.mk_tuple(elements, element_types)
     }
 
-    /// Read an LValue as a value (for Dereference: get the pointer that the lvalue holds).
+    /// Read an LValue as a value (for Dereference: get the pointer that the
+    /// lvalue holds).
     fn convert_lvalue_to_value(
         &mut self,
         lvalue: &LValue,
@@ -464,7 +469,8 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     /// Flatten an LValue into (root_pointer, root_noir_type, access_steps).
-    /// Walks the LValue tree to the root Ident and collects steps in root-to-leaf order.
+    /// Walks the LValue tree to the root Ident and collects steps in
+    /// root-to-leaf order.
     fn flatten_lvalue(
         &mut self,
         lvalue: &LValue,
@@ -584,7 +590,8 @@ impl<'a> ExpressionConverter<'a> {
         while_expr: &While,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
+        // Create blocks: loop_header evaluates condition, loop_body runs body,
+        // exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
@@ -777,7 +784,8 @@ impl<'a> ExpressionConverter<'a> {
                     let is_deref = matches!(inner.as_ref(), Expression::Unary(u) if matches!(u.operator, noirc_frontend::ast::UnaryOp::Dereference { .. }));
                     if !is_deref {
                         todo!(
-                            "&mut on tuple field requiring pointer splicing not yet supported: {:?}",
+                            "&mut on tuple field requiring pointer splicing not yet supported: \
+                             {:?}",
                             unary.rhs
                         );
                     }
@@ -1266,7 +1274,7 @@ impl<'a> ExpressionConverter<'a> {
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let bit_size = match &call.arguments[1] {
                     Expression::Literal(
-                        noirc_frontend::monomorphization::ast::Literal::Integer(sf, _, _),
+                        noirc_frontend::monomorphization::ast::Literal::Integer(sf, ..),
                     ) => sf.to_u128() as usize,
                     other => panic!(
                         "apply_range_constraint bit_size must be a constant, got {:?}",

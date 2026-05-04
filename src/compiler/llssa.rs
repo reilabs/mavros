@@ -22,12 +22,15 @@ impl LLType {
     pub fn i1() -> Self {
         LLType::Int(1)
     }
+
     pub fn i32() -> Self {
         LLType::Int(32)
     }
+
     pub fn i64() -> Self {
         LLType::Int(64)
     }
+
     pub fn ptr() -> Self {
         LLType::Ptr
     }
@@ -52,6 +55,59 @@ pub struct LLStruct {
 }
 
 impl LLStruct {
+    /// AD tag constants.
+    pub const AD_TAG_CONST: u64 = 0;
+    pub const AD_TAG_MUL_CONST: u64 = 3;
+    pub const AD_TAG_SUM: u64 = 2;
+    pub const AD_TAG_WITNESS: u64 = 1;
+    pub const AD_VM_COEFFS: usize = 3;
+    pub const AD_VM_COEFFS_BASE: usize = 5;
+    /// Cursor for the constraints tables section. Mirrors VM
+    /// `current_cnst_tables_off`.
+    pub const AD_VM_CURRENT_CNST_TABLES_OFF: usize = 7;
+    pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
+    /// Cursor for the witness multiplicities section.
+    pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
+    pub const AD_VM_CURRENT_WIT_OFF: usize = 4;
+    /// Cursor for the witness tables section.
+    pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
+    pub const AD_VM_OUT_DA: usize = 0;
+    pub const AD_VM_OUT_DB: usize = 1;
+    pub const AD_VM_OUT_DC: usize = 2;
+    pub const TABLE_INFO_INV_CNST_OFF: usize = 1;
+    pub const TABLE_INFO_INV_WIT_OFF: usize = 2;
+    pub const TABLE_INFO_LENGTH: usize = 5;
+    pub const TABLE_INFO_MULTS_BASE: usize = 0;
+    pub const TABLE_INFO_NUM_INDICES: usize = 3;
+    pub const TABLE_INFO_NUM_VALUES: usize = 4;
+    pub const WITGEN_VM_A: usize = 1;
+    pub const WITGEN_VM_B: usize = 2;
+    pub const WITGEN_VM_C: usize = 3;
+    /// Cursor into the constraints-region tables section (advances on
+    /// first-use claims by each table's footprint). Forward-side, written-
+    /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
+    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 12;
+    /// Cursor into the post-commitment witness tables section (relative to
+    /// `challenges_start`).
+    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 13;
+    pub const WITGEN_VM_INPUTS: usize = 8;
+    pub const WITGEN_VM_LOOKUPS_A: usize = 5;
+    pub const WITGEN_VM_LOOKUPS_B: usize = 6;
+    pub const WITGEN_VM_LOOKUPS_C: usize = 7;
+    /// Cursor into the witness multiplicities section. Mirrors VM
+    /// `multiplicities_witness`: each first-use lookup snapshots this into
+    /// its slot, then bumps it by the table's length.
+    pub const WITGEN_VM_MULTS_CURSOR: usize = 4;
+    /// Capacity of the host-allocated table-info buffer.
+    pub const WITGEN_VM_TABLES_CAP: usize = 10;
+    /// Cursor counting allocated tables. Each first-use claim assigns the
+    /// current `tables_len` as the new table id, then bumps it.
+    /// Mirrors `vm.tables.len()`.
+    pub const WITGEN_VM_TABLES_LEN: usize = 9;
+    /// Base pointer to the host-allocated table-info buffer.
+    pub const WITGEN_VM_TABLES_PTR: usize = 11;
+    pub const WITGEN_VM_WITNESS: usize = 0;
+
     pub fn new(fields: Vec<LLFieldType>) -> Self {
         LLStruct { fields }
     }
@@ -81,7 +137,8 @@ impl LLStruct {
         Self::new(vec![LLFieldType::Int(64)])
     }
 
-    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
+    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id,
+    /// InlineArray(elem_struct, count) }
     pub fn rc_array(elem: LLStruct, count: usize) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
@@ -120,7 +177,8 @@ impl LLStruct {
         ])
     }
 
-    /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db), FieldElem(dc) }
+    /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db),
+    /// FieldElem(dc) }
     pub fn ad_sum_node() -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
@@ -155,14 +213,8 @@ impl LLStruct {
         ])
     }
 
-    pub const TABLE_INFO_MULTS_BASE: usize = 0;
-    pub const TABLE_INFO_INV_CNST_OFF: usize = 1;
-    pub const TABLE_INFO_INV_WIT_OFF: usize = 2;
-    pub const TABLE_INFO_NUM_INDICES: usize = 3;
-    pub const TABLE_INFO_NUM_VALUES: usize = 4;
-    pub const TABLE_INFO_LENGTH: usize = 5;
-
-    /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
+    /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value),
+    /// FieldElem(da), FieldElem(db), FieldElem(dc) }
     pub fn ad_mul_const_node() -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
@@ -197,34 +249,6 @@ impl LLStruct {
         ])
     }
 
-    pub const WITGEN_VM_WITNESS: usize = 0;
-    pub const WITGEN_VM_A: usize = 1;
-    pub const WITGEN_VM_B: usize = 2;
-    pub const WITGEN_VM_C: usize = 3;
-    /// Cursor into the witness multiplicities section. Mirrors VM
-    /// `multiplicities_witness`: each first-use lookup snapshots this into
-    /// its slot, then bumps it by the table's length.
-    pub const WITGEN_VM_MULTS_CURSOR: usize = 4;
-    pub const WITGEN_VM_LOOKUPS_A: usize = 5;
-    pub const WITGEN_VM_LOOKUPS_B: usize = 6;
-    pub const WITGEN_VM_LOOKUPS_C: usize = 7;
-    pub const WITGEN_VM_INPUTS: usize = 8;
-    /// Cursor counting allocated tables. Each first-use claim assigns the
-    /// current `tables_len` as the new table id, then bumps it.
-    /// Mirrors `vm.tables.len()`.
-    pub const WITGEN_VM_TABLES_LEN: usize = 9;
-    /// Capacity of the host-allocated table-info buffer.
-    pub const WITGEN_VM_TABLES_CAP: usize = 10;
-    /// Base pointer to the host-allocated table-info buffer.
-    pub const WITGEN_VM_TABLES_PTR: usize = 11;
-    /// Cursor into the constraints-region tables section (advances on
-    /// first-use claims by each table's footprint). Forward-side, written-
-    /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
-    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 12;
-    /// Cursor into the post-commitment witness tables section (relative to
-    /// `challenges_start`).
-    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 13;
-
     /// VM struct used by the reverse AD entrypoint.
     ///
     /// Keep this in field-index order with `mavros-wasm-layout`.
@@ -243,34 +267,14 @@ impl LLStruct {
         ])
     }
 
-    pub const AD_VM_OUT_DA: usize = 0;
-    pub const AD_VM_OUT_DB: usize = 1;
-    pub const AD_VM_OUT_DC: usize = 2;
-    pub const AD_VM_COEFFS: usize = 3;
-    pub const AD_VM_CURRENT_WIT_OFF: usize = 4;
-    pub const AD_VM_COEFFS_BASE: usize = 5;
-    pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
-    /// Cursor for the constraints tables section. Mirrors VM
-    /// `current_cnst_tables_off`.
-    pub const AD_VM_CURRENT_CNST_TABLES_OFF: usize = 7;
-    /// Cursor for the witness tables section.
-    pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
-    /// Cursor for the witness multiplicities section.
-    pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
-
-    /// AD tag constants.
-    pub const AD_TAG_CONST: u64 = 0;
-    pub const AD_TAG_WITNESS: u64 = 1;
-    pub const AD_TAG_SUM: u64 = 2;
-    pub const AD_TAG_MUL_CONST: u64 = 3;
-
-    /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
-    /// Value-safe structs can be used as SSA values (`LLType::Struct`).
+    /// A struct is value-safe if all fields are Int, Ptr, or
+    /// Inline(value_safe). Value-safe structs can be used as SSA values
+    /// (`LLType::Struct`).
     pub fn is_value_safe(&self) -> bool {
         self.fields.iter().all(|f| match f {
             LLFieldType::Int(_) | LLFieldType::Ptr => true,
             LLFieldType::Inline(inner) => inner.is_value_safe(),
-            LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => false,
+            LLFieldType::InlineArray(..) | LLFieldType::FlexArray(_) => false,
         })
     }
 }
@@ -306,7 +310,7 @@ impl LLFieldType {
             LLFieldType::Int(bits) => LLType::Int(*bits),
             LLFieldType::Ptr => LLType::Ptr,
             LLFieldType::Inline(s) => LLType::Struct(s.clone()),
-            LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => {
+            LLFieldType::InlineArray(..) | LLFieldType::FlexArray(_) => {
                 panic!("InlineArray/FlexArray fields are memory-only; cannot convert to LLType")
             }
         }
@@ -408,8 +412,8 @@ pub enum LLOp {
     // ── Constants ────────────────────────────────────────────────────────
     IntConst {
         result: ValueId,
-        bits: u32,
-        value: u64,
+        bits:   u32,
+        value:  u64,
     },
     NullPtr {
         result: ValueId,
@@ -417,128 +421,128 @@ pub enum LLOp {
 
     // ── Integer Arithmetic ──────────────────────────────────────────────
     IntArith {
-        kind: IntArithOp,
+        kind:   IntArithOp,
         result: ValueId,
-        a: ValueId,
-        b: ValueId,
+        a:      ValueId,
+        b:      ValueId,
     },
     Not {
         result: ValueId,
-        value: ValueId,
+        value:  ValueId,
     },
 
     // ── Integer Comparison ──────────────────────────────────────────────
     IntCmp {
-        kind: IntCmpOp,
+        kind:   IntCmpOp,
         result: ValueId,
-        a: ValueId,
-        b: ValueId,
+        a:      ValueId,
+        b:      ValueId,
     },
 
     // ── Width conversion ────────────────────────────────────────────────
     Truncate {
-        result: ValueId,
-        value: ValueId,
+        result:  ValueId,
+        value:   ValueId,
         to_bits: u32,
     },
     ZExt {
-        result: ValueId,
-        value: ValueId,
+        result:  ValueId,
+        value:   ValueId,
         to_bits: u32,
     },
 
     // ── Field Arithmetic ────────────────────────────────────────────────
     FieldArith {
-        kind: FieldArithOp,
+        kind:   FieldArithOp,
         result: ValueId,
-        a: ValueId,
-        b: ValueId,
+        a:      ValueId,
+        b:      ValueId,
     },
     FieldNeg {
         result: ValueId,
-        src: ValueId,
+        src:    ValueId,
     },
     FieldEq {
         result: ValueId,
-        a: ValueId,
-        b: ValueId,
+        a:      ValueId,
+        b:      ValueId,
     },
     FieldToLimbs {
         result: ValueId,
-        src: ValueId,
+        src:    ValueId,
     },
     FieldFromLimbs {
         result: ValueId,
-        limbs: ValueId,
+        limbs:  ValueId,
     },
 
     // ── Aggregate ───────────────────────────────────────────────────────
     MkStruct {
-        result: ValueId,
+        result:      ValueId,
         struct_type: LLStruct,
-        fields: Vec<ValueId>,
+        fields:      Vec<ValueId>,
     },
     ExtractField {
-        result: ValueId,
-        value: ValueId,
+        result:      ValueId,
+        value:       ValueId,
         struct_type: LLStruct,
-        field: usize,
+        field:       usize,
     },
     // ── Memory ──────────────────────────────────────────────────────────
     HeapAlloc {
-        result: ValueId,
+        result:      ValueId,
         struct_type: LLStruct,
-        flex_count: Option<ValueId>,
+        flex_count:  Option<ValueId>,
     },
     Free {
         ptr: ValueId,
     },
     Load {
         result: ValueId,
-        ptr: ValueId,
-        ty: LLType,
+        ptr:    ValueId,
+        ty:     LLType,
     },
     Store {
-        ptr: ValueId,
+        ptr:   ValueId,
         value: ValueId,
     },
     StructFieldPtr {
-        result: ValueId,
-        ptr: ValueId,
+        result:      ValueId,
+        ptr:         ValueId,
         struct_type: LLStruct,
-        field: usize,
+        field:       usize,
     },
     ArrayElemPtr {
-        result: ValueId,
-        ptr: ValueId,
+        result:    ValueId,
+        ptr:       ValueId,
         elem_type: LLStruct,
-        index: ValueId,
+        index:     ValueId,
     },
     Memcpy {
-        dst: ValueId,
-        src: ValueId,
+        dst:         ValueId,
+        src:         ValueId,
         struct_type: LLStruct,
-        count: Option<ValueId>,
+        count:       Option<ValueId>,
     },
 
     // ── Selection ───────────────────────────────────────────────────────
     Select {
         result: ValueId,
-        cond: ValueId,
-        if_t: ValueId,
-        if_f: ValueId,
+        cond:   ValueId,
+        if_t:   ValueId,
+        if_f:   ValueId,
     },
 
     // ── Calls ───────────────────────────────────────────────────────────
     Call {
         results: Vec<ValueId>,
-        func: FunctionId,
-        args: Vec<ValueId>,
+        func:    FunctionId,
+        args:    Vec<ValueId>,
     },
 
     // ── Globals ─────────────────────────────────────────────────────────
     GlobalAddr {
-        result: ValueId,
+        result:    ValueId,
         global_id: usize,
     },
 

@@ -18,7 +18,8 @@ use crate::compiler::{
 pub struct UntaintControlFlow {}
 
 /// Look up the witness level for a value, defaulting to Pure for values
-/// not present in the witness type map (e.g., values created after type inference).
+/// not present in the witness type map (e.g., values created after type
+/// inference).
 fn get_witness_or_pure(
     function_wt: &FunctionWitnessType,
     v: crate::compiler::ssa::ValueId,
@@ -35,7 +36,7 @@ fn maybe_guard(instrs: &mut Vec<OpCode>, taint: Option<ValueId>, instr: OpCode) 
     match taint {
         Some(taint) => instrs.push(OpCode::Guard {
             condition: taint,
-            inner: Box::new(instr),
+            inner:     Box::new(instr),
         }),
         None => instrs.push(instr),
     }
@@ -102,7 +103,7 @@ impl UntaintControlFlow {
                         let child = r_wt.child_witness_type().unwrap();
                         let child_typ = apply_witness_type(l, &child);
                         OpCode::Alloc {
-                            result: r,
+                            result:    r,
                             elem_type: child_typ,
                         }
                     }
@@ -118,9 +119,9 @@ impl UntaintControlFlow {
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkSeq {
-                            result: r,
-                            elems: l,
-                            seq_type: stp,
+                            result:    r,
+                            elems:     l,
+                            seq_type:  stp,
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
@@ -136,8 +137,8 @@ impl UntaintControlFlow {
                             panic!("MkTuple result should have Tuple witness type")
                         };
                         OpCode::MkTuple {
-                            result: r,
-                            elems: l,
+                            result:        r,
+                            elems:         l,
                             element_types: tps
                                 .iter()
                                 .zip(child_wts.iter())
@@ -150,8 +151,8 @@ impl UntaintControlFlow {
                         offset: l,
                         result_type: tp,
                     } => OpCode::ReadGlobal {
-                        result: r,
-                        offset: l,
+                        result:      r,
+                        offset:      l,
                         result_type: tp,
                     },
                     OpCode::Todo {
@@ -184,13 +185,12 @@ impl UntaintControlFlow {
     // Step 2: Cast insertion + control flow linearization
     //
     // After types are baked in and flow/type analysis is recomputed:
-    //  - Linearizes witness-conditional branches: witness JmpIf is replaced
-    //    by unconditional Jmp + Select at merge points; instructions in
-    //    tainted blocks are wrapped in Guard.
-    //  - Inserts WitnessOf casts at typed-slot boundaries (MkSeq elems,
-    //    ArraySet value, SlicePush values, Store value, Select operands,
-    //    Jmp args, Return values) where the actual type doesn't match the
-    //    expected slot type.
+    //  - Linearizes witness-conditional branches: witness JmpIf is replaced by
+    //    unconditional Jmp + Select at merge points; instructions in tainted blocks
+    //    are wrapped in Guard.
+    //  - Inserts WitnessOf casts at typed-slot boundaries (MkSeq elems, ArraySet
+    //    value, SlicePush values, Store value, Select operands, Jmp args, Return
+    //    values) where the actual type doesn't match the expected slot type.
     //  - Pushes cfg_witness arg to constrained calls; strips WitnessOf from
     //    unconstrained call args via ValueOf.
     // -----------------------------------------------------------------------
@@ -285,7 +285,8 @@ impl UntaintControlFlow {
                     let cond_wt = get_witness_or_pure(function_wt, cond);
                     match cond_wt {
                         ConstantWitness::Pure => {
-                            // Pure JmpIf: insert casts at Jmp boundaries in branch blocks
+                            // Pure JmpIf: insert casts at Jmp boundaries in
+                            // branch blocks
                             // (handled when those blocks are processed)
                         }
                         ConstantWitness::Witness => {
@@ -293,10 +294,10 @@ impl UntaintControlFlow {
                                 Some(tnt) => {
                                     let result_val = function.fresh_value();
                                     new_instructions.push(OpCode::BinaryArithOp {
-                                        kind: BinaryArithOpKind::And,
+                                        kind:   BinaryArithOpKind::And,
                                         result: result_val,
-                                        lhs: tnt,
-                                        rhs: cond,
+                                        lhs:    tnt,
+                                        rhs:    cond,
                                     });
                                     result_val
                                 }
@@ -318,14 +319,16 @@ impl UntaintControlFlow {
 
                                 if merge == function.get_entry_id() {
                                     panic!(
-                                        "TODO: jump back into entry not supported yet. Is it even possible?"
+                                        "TODO: jump back into entry not supported yet. Is it even \
+                                         possible?"
                                     )
                                 }
 
                                 let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
                                 if jumps.len() != 1 {
                                     panic!(
-                                        "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                        "TODO: handle multiple jumps into merge {:?} {:?} {:?} \
+                                         {:?}",
                                         block_id, if_true, merge, jumps
                                     );
                                 }
@@ -339,7 +342,8 @@ impl UntaintControlFlow {
                                 {
                                     Some(Terminator::Jmp(_, args)) => args,
                                     _ => panic!(
-                                        "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
+                                        "Impossible – out jump must be a JMP, otherwise the join \
+                                         point wouldn't be a join point"
                                     ),
                                 };
 
@@ -350,20 +354,21 @@ impl UntaintControlFlow {
                                 let jumps = cfg.get_jumps_into_merge_from_branch(if_false, merge);
                                 if jumps.len() != 1 {
                                     panic!(
-                                        "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                        "TODO: handle multiple jumps into merge {:?} {:?} {:?} \
+                                         {:?}",
                                         block_id, if_false, merge, jumps
                                     );
                                 }
                                 let out_false_block = jumps[0];
-                                let args_passed_from_rhs = match function
-                                    .get_block_mut(out_false_block)
-                                    .take_terminator()
-                                {
-                                    Some(Terminator::Jmp(_, args)) => args,
-                                    _ => panic!(
-                                        "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
-                                    ),
-                                };
+                                let args_passed_from_rhs =
+                                    match function.get_block_mut(out_false_block).take_terminator()
+                                    {
+                                        Some(Terminator::Jmp(_, args)) => args,
+                                        _ => panic!(
+                                            "Impossible – out jump must be a JMP, otherwise the \
+                                             join point wouldn't be a join point"
+                                        ),
+                                    };
 
                                 let merger_block = function.add_block();
                                 function
@@ -459,7 +464,8 @@ impl UntaintControlFlow {
         }
     }
 
-    /// Process a single instruction: apply cast insertion, then Guard-wrap if tainted.
+    /// Process a single instruction: apply cast insertion, then Guard-wrap if
+    /// tainted.
     fn process_instruction(
         &self,
         instruction: OpCode,
@@ -556,9 +562,9 @@ impl UntaintControlFlow {
                     new_instructions,
                     block_taint,
                     OpCode::MkSeq {
-                        result: r,
-                        elems: new_vs,
-                        seq_type: s,
+                        result:    r,
+                        elems:     new_vs,
+                        seq_type:  s,
                         elem_type: target_elem_type,
                     },
                 );
@@ -711,7 +717,8 @@ fn convert_if_needed(
 }
 
 /// Convert a value from source_type to target_type. Uses unrolled element-wise
-/// conversion for arrays (no loop blocks needed), so this is safe inside guarded regions.
+/// conversion for arrays (no loop blocks needed), so this is safe inside
+/// guarded regions.
 fn emit_value_conversion(
     value: ValueId,
     source_type: &Type,

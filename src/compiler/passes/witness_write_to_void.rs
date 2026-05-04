@@ -11,9 +11,11 @@ impl Pass for WitnessWriteToVoid {
     fn name(&self) -> &'static str {
         "witness_write_to_void"
     }
+
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         self.do_run(ssa);
     }
+
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
     }
@@ -72,7 +74,8 @@ impl WitnessWriteToVoid {
             }
 
             for (_, block) in function.get_blocks_mut() {
-                // Remove ValueOf instructions and Guard-wrapped ValueOf (identity in witgen pipeline)
+                // Remove ValueOf instructions and Guard-wrapped ValueOf (identity in witgen
+                // pipeline)
                 let old_instructions = block.take_instructions();
                 let new_instructions = old_instructions
                     .into_iter()

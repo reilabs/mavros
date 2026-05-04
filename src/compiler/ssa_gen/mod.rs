@@ -1,7 +1,7 @@
 //! SSA generation from Noir's monomorphized program.
 //!
-//! This module converts the monomorphized program directly to mavros SSA format,
-//! bypassing the intermediate Noir SSA representation.
+//! This module converts the monomorphized program directly to mavros SSA
+//! format, bypassing the intermediate Noir SSA representation.
 
 mod expression_converter;
 mod type_converter;
@@ -22,19 +22,19 @@ use type_converter::TypeConverter;
 /// Converts a monomorphized Program to SSA.
 pub struct SsaConverter {
     /// Maps AST function IDs to SSA function IDs (constrained context)
-    constrained_mapper: HashMap<AstFuncId, FunctionId>,
+    constrained_mapper:     HashMap<AstFuncId, FunctionId>,
     /// Maps AST function IDs to SSA function IDs (unconstrained context).
     /// For natively unconstrained functions, same ID as constrained_mapper.
     /// For constrained functions, points to a separate unconstrained variant.
-    unconstrained_mapper: HashMap<AstFuncId, FunctionId>,
+    unconstrained_mapper:   HashMap<AstFuncId, FunctionId>,
     /// Set of AST function IDs that are natively unconstrained
     natively_unconstrained: HashSet<AstFuncId>,
     /// Maps GlobalId to global slot index
-    global_slots: HashMap<GlobalId, usize>,
+    global_slots:           HashMap<GlobalId, usize>,
     /// Type converter
-    type_converter: TypeConverter,
+    type_converter:         TypeConverter,
     /// Maps LowLevel function name to its replacement
-    lowlevel_replacements: HashMap<String, LowLevelReplacement>,
+    lowlevel_replacements:  HashMap<String, LowLevelReplacement>,
 }
 
 impl SsaConverter {
@@ -76,7 +76,8 @@ impl SsaConverter {
             }
         }
 
-        // Phase 2: Convert globals (must be before function conversion so global_slots are available)
+        // Phase 2: Convert globals (must be before function conversion so global_slots
+        // are available)
         if !program.globals.is_empty() {
             self.convert_globals(program, &mut ssa);
         }
@@ -187,7 +188,8 @@ impl SsaConverter {
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
 
         // Topological sort: process globals in dependency order.
-        // Build adjacency: each global depends on other globals referenced in its initializer.
+        // Build adjacency: each global depends on other globals referenced in its
+        // initializer.
         let all_ids: Vec<GlobalId> = program.globals.keys().copied().collect();
         let mut visited = std::collections::HashSet::new();
         let mut in_stack = std::collections::HashSet::new();

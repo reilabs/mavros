@@ -16,14 +16,14 @@ pub struct BoxedLayout(pub u64);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DataType {
-    PrimArray = 0,
+    PrimArray  = 0,
     BoxedArray = 1,
-    ADConst = 2,
-    ADWitness = 3,
-    ADSum = 4,
+    ADConst    = 2,
+    ADWitness  = 3,
+    ADSum      = 4,
     ADMulConst = 5,
-    Struct = 6,
-    RefCell = 7,
+    Struct     = 6,
+    RefCell    = 7,
 }
 
 // BoxedLayout packing scheme:
@@ -116,7 +116,7 @@ impl BoxedLayout {
     pub fn child_sizes(&self) -> Vec<usize> {
         let mut sizes = Vec::new();
         for field_index in 0..14 {
-            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xF) as usize;
+            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xf) as usize;
             let field_size = field_metadata & 0x7;
             if field_size > 0 {
                 sizes.push(field_size);
@@ -125,12 +125,13 @@ impl BoxedLayout {
         sizes
     }
 
-    /// Returns a vector indicating which fields are reference-counted (heap-allocated).
-    /// Each field's 4-bit metadata encodes: [1 bit: refcounted][3 bits: size]
+    /// Returns a vector indicating which fields are reference-counted
+    /// (heap-allocated). Each field's 4-bit metadata encodes: [1 bit:
+    /// refcounted][3 bits: size]
     pub fn refcounted_flags(&self) -> Vec<bool> {
         let mut flags = Vec::new();
         for field_index in 0..14 {
-            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xF) as usize;
+            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xf) as usize;
             let field_size = field_metadata & 0x7;
             let is_refcounted = (field_metadata & 0x8) != 0;
             if field_size > 0 {
@@ -177,15 +178,15 @@ pub struct ADWitness {
 pub struct ADMulConst {
     pub coeff: Field,
     pub value: BoxedValue,
-    pub da: Field,
-    pub db: Field,
-    pub dc: Field,
+    pub da:    Field,
+    pub db:    Field,
+    pub dc:    Field,
 }
 
 #[derive(Clone, Copy)]
 pub struct ADSum {
-    pub a: BoxedValue,
-    pub b: BoxedValue,
+    pub a:  BoxedValue,
+    pub b:  BoxedValue,
     pub da: Field,
     pub db: Field,
     pub dc: Field,
@@ -205,7 +206,8 @@ impl BoxedValue {
             *ptr.offset(1) = 1;
             *ptr.offset(2) = u64::MAX; // table_id sentinel: no table assigned
         }
-        // println!("allocing {:?} of size {} ({:?})", ptr, arr_size, layout.data_type());
+        // println!("allocing {:?} of size {} ({:?})", ptr, arr_size,
+        // layout.data_type());
         Self(ptr)
     }
 
@@ -468,8 +470,8 @@ impl BoxedValue {
         //     if meta.ptr_elems() {
         //         // println!("Array has ptr elements, dropping");
         //         for i in 0..meta.size() {
-        //             let elem = unsafe { *(self.idx(i, 1) as *mut BoxedValue) };
-        //             elem.dec_rc(vm);
+        //             let elem = unsafe { *(self.idx(i, 1) as *mut BoxedValue)
+        // };             elem.dec_rc(vm);
         //         }
         //     }
         //     unsafe {

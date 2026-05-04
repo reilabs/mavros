@@ -17,12 +17,12 @@ pub struct PrepareEntryPoint {
 
 struct PrepareFnEntry {
     hlssa_type: Type,
-    fn_id: FunctionId,
+    fn_id:      FunctionId,
 }
 
 struct ReconstructFnEntry {
     hlssa_type: Type,
-    fn_id: FunctionId,
+    fn_id:      FunctionId,
 }
 
 impl Pass for PrepareEntryPoint {
@@ -131,7 +131,8 @@ impl PrepareEntryPoint {
     }
 
     /// Insert pinned WriteWitness instructions in wrapper_main entry.
-    /// The first write emits constant one for witness[0], then writes each entry param.
+    /// The first write emits constant one for witness[0], then writes each
+    /// entry param.
     fn insert_witness_writes(ssa: &mut HLSSA) {
         let main = ssa.get_main_mut();
         let entry_id = main.get_entry_id();
@@ -149,36 +150,39 @@ impl PrepareEntryPoint {
         let mut write_witness_instructions = vec![
             OpCode::Const {
                 result: one_const_value,
-                value: ConstValue::Field(ark_bn254::Fr::from(1u64)),
+                value:  ConstValue::Field(ark_bn254::Fr::from(1u64)),
             },
             OpCode::WriteWitness {
                 result: Some(witness_one_value),
-                value: one_const_value,
+                value:  one_const_value,
                 pinned: true,
             },
         ];
 
         // Create pinned WriteWitness for each param and build replacements.
-        // These must be pinned so they survive DCE even when their results become unused
-        // (e.g. when inter-procedural DCE prunes call args to original_main).
+        // These must be pinned so they survive DCE even when their results become
+        // unused (e.g. when inter-procedural DCE prunes call args to
+        // original_main).
         let mut replacements = ValueReplacements::new();
         for (param_id, param_type) in &params {
             if param_type.is_witness_of() {
                 panic!(
-                    "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main parameter reconstruction: {:?}",
+                    "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main \
+                     parameter reconstruction: {:?}",
                     param_id.0, param_type
                 );
             }
             let witness_val = main.fresh_value();
             write_witness_instructions.push(OpCode::WriteWitness {
                 result: Some(witness_val),
-                value: *param_id,
+                value:  *param_id,
                 pinned: true,
             });
             replacements.insert(*param_id, witness_val);
         }
 
-        // Prepend WriteWitness instructions and apply replacements to existing instructions
+        // Prepend WriteWitness instructions and apply replacements to existing
+        // instructions
         let entry_block = main.get_block_mut(entry_id);
         let old_instructions = entry_block.take_instructions();
         let mut new_instructions = write_witness_instructions;
@@ -266,9 +270,9 @@ impl PrepareEntryPoint {
                         let reconstructed = function.fresh_value();
                         let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
                         new_instructions.push(OpCode::Call {
-                            results: vec![reconstructed],
-                            function: CallTarget::Static(prepare_fn),
-                            args: vec![result_vid],
+                            results:       vec![reconstructed],
+                            function:      CallTarget::Static(prepare_fn),
+                            args:          vec![result_vid],
                             unconstrained: false,
                         });
                         replacements.insert(result_vid, reconstructed);
@@ -667,7 +671,7 @@ impl PrepareEntryPoint {
 
         match &typ.expr {
             TypeExpr::Field => new_parameters.push((value_id, typ.clone())),
-            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
+            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Array(..) | TypeExpr::Tuple(_) => {
                 let input_len = Self::flattened_field_count(typ);
                 let mut fields = Vec::with_capacity(input_len);
                 for _ in 0..input_len {
@@ -678,16 +682,16 @@ impl PrepareEntryPoint {
 
                 let input_array = function.fresh_value();
                 new_instructions.push(OpCode::MkSeq {
-                    result: input_array,
-                    elems: fields,
-                    seq_type: SeqType::Array(input_len),
+                    result:    input_array,
+                    elems:     fields,
+                    seq_type:  SeqType::Array(input_len),
                     elem_type: Type::field(),
                 });
                 let fn_id = Self::find_reconstruct_fn(typ, reconstruct_fns);
                 new_instructions.push(OpCode::Call {
-                    results: vec![value_id],
-                    function: CallTarget::Static(fn_id),
-                    args: vec![input_array],
+                    results:       vec![value_id],
+                    function:      CallTarget::Static(fn_id),
+                    args:          vec![input_array],
                     unconstrained: false,
                 });
             }

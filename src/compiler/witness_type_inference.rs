@@ -13,15 +13,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct SpecKey {
     original_func_id: FunctionId,
-    arg_types: Vec<WitnessType>,
-    cfg_witness: ConstantWitness,
+    arg_types:        Vec<WitnessType>,
+    cfg_witness:      ConstantWitness,
 }
 
 #[derive(Clone, Debug)]
 struct SpecValue {
     specialized_func_id: FunctionId,
-    return_types: Vec<WitnessType>,
-    arg_types_out: Vec<WitnessType>,
+    return_types:        Vec<WitnessType>,
+    arg_types_out:       Vec<WitnessType>,
 }
 
 // ---------------------------------------------------------------------------
@@ -29,19 +29,20 @@ struct SpecValue {
 // ---------------------------------------------------------------------------
 
 struct PropagationResult {
-    return_types: Vec<WitnessType>,
+    return_types:  Vec<WitnessType>,
     arg_types_out: Vec<WitnessType>,
-    value_wt: HashMap<ValueId, WitnessType>,
-    block_cfg: HashMap<BlockId, ConstantWitness>,
-    /// Call sites discovered: (callee_func_id, arg_types, cfg_witness, return_value_ids, arg_value_ids)
-    call_sites: Vec<CallSiteInfo>,
+    value_wt:      HashMap<ValueId, WitnessType>,
+    block_cfg:     HashMap<BlockId, ConstantWitness>,
+    /// Call sites discovered: (callee_func_id, arg_types, cfg_witness,
+    /// return_value_ids, arg_value_ids)
+    call_sites:    Vec<CallSiteInfo>,
 }
 
 #[derive(Clone)]
 struct CallSiteInfo {
     callee_func_id: FunctionId,
-    arg_types: Vec<WitnessType>,
-    cfg_witness: ConstantWitness,
+    arg_types:      Vec<WitnessType>,
+    cfg_witness:    ConstantWitness,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +80,8 @@ impl WitnessTypeInference {
         let main_id = ssa.get_main_id();
         let main_func = ssa.get_function(main_id);
 
-        // 1. Compute main's arg types: all Pure (WriteWitness in PrepareEntryPoint bridges to Witness)
+        // 1. Compute main's arg types: all Pure (WriteWitness in PrepareEntryPoint
+        //    bridges to Witness)
         let main_arg_types: Vec<WitnessType> = main_func
             .get_entry()
             .get_parameters()
@@ -97,8 +99,8 @@ impl WitnessTypeInference {
         // 2. Register main specialization
         let main_key = SpecKey {
             original_func_id: main_id,
-            arg_types: main_arg_types.clone(),
-            cfg_witness: main_cfg_witness,
+            arg_types:        main_arg_types.clone(),
+            cfg_witness:      main_cfg_witness,
         };
 
         // Clone main function as specialized version, set as entry point
@@ -116,8 +118,8 @@ impl WitnessTypeInference {
             main_key.clone(),
             SpecValue {
                 specialized_func_id: main_specialized_id,
-                return_types: main_return_types,
-                arg_types_out: main_arg_types.clone(),
+                return_types:        main_return_types,
+                arg_types_out:       main_arg_types.clone(),
             },
         );
         worklist.push_back(main_key.clone());
@@ -159,8 +161,8 @@ impl WitnessTypeInference {
             for call_site in &result.call_sites {
                 let callee_key = SpecKey {
                     original_func_id: call_site.callee_func_id,
-                    arg_types: call_site.arg_types.clone(),
-                    cfg_witness: call_site.cfg_witness,
+                    arg_types:        call_site.arg_types.clone(),
+                    cfg_witness:      call_site.cfg_witness,
                 };
 
                 // Track caller relationship
@@ -185,8 +187,8 @@ impl WitnessTypeInference {
                         callee_key.clone(),
                         SpecValue {
                             specialized_func_id: specialized_id,
-                            return_types: callee_return_types,
-                            arg_types_out: callee_key.arg_types.clone(),
+                            return_types:        callee_return_types,
+                            arg_types_out:       callee_key.arg_types.clone(),
                         },
                     );
                     queued.insert(callee_key.clone());
@@ -207,7 +209,8 @@ impl WitnessTypeInference {
             }
         }
 
-        // 4. Update Call targets in specialized functions to point to specialized callees
+        // 4. Update Call targets in specialized functions to point to specialized
+        //    callees
         for (spec_key, spec_value) in &specializations {
             let func = ssa.get_function(spec_key.original_func_id);
             let cfg = flow_analysis.get_function_cfg(spec_key.original_func_id);
@@ -244,8 +247,8 @@ impl WitnessTypeInference {
                         let call_site = call_site_iter.next().unwrap();
                         let callee_key = SpecKey {
                             original_func_id: call_site.callee_func_id,
-                            arg_types: call_site.arg_types.clone(),
-                            cfg_witness: call_site.cfg_witness,
+                            arg_types:        call_site.arg_types.clone(),
+                            cfg_witness:      call_site.cfg_witness,
                         };
                         let callee_spec = specializations.get(&callee_key).unwrap();
                         *func_id = callee_spec.specialized_func_id;
@@ -382,8 +385,8 @@ impl WitnessTypeInference {
                         .collect();
                     call_sites.push(CallSiteInfo {
                         callee_func_id: *callee_id,
-                        arg_types: callee_arg_types,
-                        cfg_witness: block_cw,
+                        arg_types:      callee_arg_types,
+                        cfg_witness:    block_cw,
                     });
                 }
             }
@@ -420,7 +423,7 @@ impl WitnessTypeInference {
             .zip(arg_types.iter())
             .map(|((value_id, _), original_arg)| {
                 match original_arg {
-                    WitnessType::Ref(_, _) => {
+                    WitnessType::Ref(..) => {
                         // Look up the alloc_inner for this ref value
                         if let Some(inner) = alloc_inner.get(value_id) {
                             WitnessType::Ref(ConstantWitness::Pure, Box::new(inner.clone()))
@@ -637,8 +640,8 @@ impl WitnessTypeInference {
                                 .collect();
                             let callee_key = SpecKey {
                                 original_func_id: *callee_id,
-                                arg_types: callee_arg_types,
-                                cfg_witness: block_cw,
+                                arg_types:        callee_arg_types,
+                                cfg_witness:      block_cw,
                             };
 
                             if let Some(callee_spec) = specializations.get(&callee_key) {
@@ -841,8 +844,9 @@ impl WitnessTypeInference {
         ptr: &ValueId,
         alloc_inner: &HashMap<ValueId, WitnessType>,
     ) -> Option<ValueId> {
-        // In SSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
-        // If there's no alloc_inner entry, it's an external ref (function parameter).
+        // In SSA, the alloc origin IS the ptr value itself if it was an Alloc
+        // instruction. If there's no alloc_inner entry, it's an external ref
+        // (function parameter).
         if alloc_inner.contains_key(ptr) {
             Some(*ptr)
         } else {
@@ -857,10 +861,10 @@ impl WitnessTypeInference {
         block_cfg: &HashMap<BlockId, ConstantWitness>,
     ) -> FunctionWitnessType {
         FunctionWitnessType {
-            returns_witness: spec_value.return_types.clone(),
-            cfg_witness: spec_key.cfg_witness,
-            parameters: spec_key.arg_types.clone(),
-            block_cfg_witness: block_cfg.clone(),
+            returns_witness:     spec_value.return_types.clone(),
+            cfg_witness:         spec_key.cfg_witness,
+            parameters:          spec_key.arg_types.clone(),
+            block_cfg_witness:   block_cfg.clone(),
             value_witness_types: value_wt.clone(),
         }
     }

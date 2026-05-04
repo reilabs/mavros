@@ -114,9 +114,9 @@ impl WitnessLowering {
                                 })
                                 .collect();
                             emitter.emit(OpCode::MkSeq {
-                                result: r,
-                                elems: new_vs,
-                                seq_type: s,
+                                result:    r,
+                                elems:     new_vs,
+                                seq_type:  s,
                                 elem_type: new_elem_type,
                             });
                         }
@@ -125,7 +125,7 @@ impl WitnessLowering {
                             elem_type: tp,
                         } => {
                             emitter.emit(OpCode::Alloc {
-                                result: r,
+                                result:    r,
                                 elem_type: self.witness_lowering_in_type(&tp),
                             });
                         }
@@ -136,18 +136,18 @@ impl WitnessLowering {
                             let new_val = emitter.fresh_value();
                             emitter.emit(OpCode::NextDCoeff { result: new_val });
                             emitter.emit(OpCode::BumpD {
-                                matrix: DMatrix::A,
-                                variable: a,
+                                matrix:      DMatrix::A,
+                                variable:    a,
                                 sensitivity: new_val,
                             });
                             emitter.emit(OpCode::BumpD {
-                                matrix: DMatrix::B,
-                                variable: b,
+                                matrix:      DMatrix::B,
+                                variable:    b,
                                 sensitivity: new_val,
                             });
                             emitter.emit(OpCode::BumpD {
-                                matrix: DMatrix::C,
-                                variable: c,
+                                matrix:      DMatrix::C,
+                                variable:    c,
                                 sensitivity: new_val,
                             });
                         }
@@ -210,15 +210,15 @@ impl WitnessLowering {
                                             emitter.field_const(ark_bn254::Fr::from(-1i64));
                                         let neg_b = emitter.fresh_value();
                                         emitter.emit(OpCode::MulConst {
-                                            result: neg_b,
+                                            result:    neg_b,
                                             const_val: neg_one,
-                                            var: b,
+                                            var:       b,
                                         });
                                         emitter.emit(OpCode::BinaryArithOp {
-                                            kind: BinaryArithOpKind::Add,
+                                            kind:   BinaryArithOpKind::Add,
                                             result: r,
-                                            lhs: a,
-                                            rhs: neg_b,
+                                            lhs:    a,
+                                            rhs:    neg_b,
                                         });
                                     }
                                     _ => {
@@ -240,9 +240,9 @@ impl WitnessLowering {
                                     }
                                     BinaryArithOpKind::Mul => {
                                         emitter.emit(OpCode::MulConst {
-                                            result: r,
+                                            result:    r,
                                             const_val: pure,
-                                            var: wit,
+                                            var:       wit,
                                         });
                                     }
                                     BinaryArithOpKind::Div if a == wit => {
@@ -250,15 +250,15 @@ impl WitnessLowering {
                                         let one = emitter.field_const(ark_bn254::Fr::from(1u64));
                                         let inv_pure = emitter.fresh_value();
                                         emitter.emit(OpCode::BinaryArithOp {
-                                            kind: BinaryArithOpKind::Div,
+                                            kind:   BinaryArithOpKind::Div,
                                             result: inv_pure,
-                                            lhs: one,
-                                            rhs: pure,
+                                            lhs:    one,
+                                            rhs:    pure,
                                         });
                                         emitter.emit(OpCode::MulConst {
-                                            result: r,
+                                            result:    r,
                                             const_val: inv_pure,
-                                            var: wit,
+                                            var:       wit,
                                         });
                                     }
                                     BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
@@ -274,15 +274,15 @@ impl WitnessLowering {
                                             emitter.field_const(ark_bn254::Fr::from(-1i64));
                                         let neg_rhs = emitter.fresh_value();
                                         emitter.emit(OpCode::MulConst {
-                                            result: neg_rhs,
+                                            result:    neg_rhs,
                                             const_val: neg_one,
-                                            var: rhs_ref,
+                                            var:       rhs_ref,
                                         });
                                         emitter.emit(OpCode::BinaryArithOp {
-                                            kind: BinaryArithOpKind::Add,
+                                            kind:   BinaryArithOpKind::Add,
                                             result: r,
-                                            lhs: lhs_ref,
-                                            rhs: neg_rhs,
+                                            lhs:    lhs_ref,
+                                            rhs:    neg_rhs,
                                         });
                                     }
                                     BinaryArithOpKind::And
@@ -448,7 +448,7 @@ impl WitnessLowering {
                                 );
                             }
                         }
-                        Terminator::JmpIf(_, _, _) => {}
+                        Terminator::JmpIf(..) => {}
                         Terminator::Return(_) => {}
                     }
                     emitter.set_terminator(terminator);
@@ -457,10 +457,10 @@ impl WitnessLowering {
         }
     }
 
-    /// Emit instructions to convert a value from `source_type` to `target_type`.
-    /// For scalars (Field/U), emits a CastToWitnessOf instruction inline.
-    /// For arrays, generates a loop that converts each element, which splits the
-    /// current block and creates new blocks.
+    /// Emit instructions to convert a value from `source_type` to
+    /// `target_type`. For scalars (Field/U), emits a CastToWitnessOf
+    /// instruction inline. For arrays, generates a loop that converts each
+    /// element, which splits the current block and creates new blocks.
     fn emit_value_conversion(
         &self,
         value: ValueId,
@@ -550,7 +550,8 @@ impl WitnessLowering {
         results[0]
     }
 
-    /// Create a dummy array of the given target type, properly laid out in memory.
+    /// Create a dummy array of the given target type, properly laid out in
+    /// memory.
     fn create_dummy_array(
         &self,
         elem_type: &Type,
@@ -585,7 +586,8 @@ impl WitnessLowering {
         }
     }
 
-    /// Convert a value to the given target type if its converted type doesn't already match.
+    /// Convert a value to the given target type if its converted type doesn't
+    /// already match.
     fn convert_if_needed(
         &self,
         value: ValueId,

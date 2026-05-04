@@ -1,14 +1,16 @@
 # LLSSA Design
 
-Low-Level SSA: a target-independent IR between HLSSA and codegen backends (LLVM/WASM, eventually VM).
+Low-Level SSA: a target-independent IR between HLSSA and codegen backends (LLVM/WASM, eventually
+VM).
 
 ## Motivation
 
 HLSSA lowers directly to WASM and the custom VM. Both targets must implement a complex runtime:
-reference counting, copy-on-write arrays, layout-descriptor-driven traversal, etc. Adding LLVM as
-a target would mean reimplementing all of this a third time.
+reference counting, copy-on-write arrays, layout-descriptor-driven traversal, etc. Adding LLVM as a
+target would mean reimplementing all of this a third time.
 
 LLSSA eliminates the runtime by making everything explicit. By the time code reaches LLSSA:
+
 - RC is just struct fields manipulated with Load/Store/Add/Sub
 - CoW is just branches that compare the RC and conditionally copy
 - Drop is a generated function that decrements RC and frees if zero
@@ -324,16 +326,16 @@ pub enum LLOp {
 
 ### Type Mapping
 
-| HLSSA Type | LLSSA Type | Notes |
-|---|---|---|
-| `Field` | `Struct(FieldElem)` | 4 x Int(64) by value |
-| `U(n)` | `Int(n)` | Direct mapping |
-| `Array(T, N)` | `Ptr` | Ptr to `RcArrayN_T` struct |
-| `Slice(T)` | `Ptr` | Ptr to `DynSlice_T` struct |
-| `Ref(T)` | `Ptr` | Ptr to heap-allocated T |
-| `Tuple(...)` | `Struct(...)` or `Ptr` | Small tuples: value. Heap/RC'd: Ptr to struct. |
-| `WitnessOf(T)` | same as `T` | Absent in witgen path (stripped). **TODO**: AD path still has WitnessOf — lowering should ICE if encountered until AD design is done. |
-| `Function` | never reaches LLSSA | Eliminated by defunctionalization |
+| HLSSA Type     | LLSSA Type             | Notes                                                                                                                                 |
+| -------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `Field`        | `Struct(FieldElem)`    | 4 x Int(64) by value                                                                                                                  |
+| `U(n)`         | `Int(n)`               | Direct mapping                                                                                                                        |
+| `Array(T, N)`  | `Ptr`                  | Ptr to `RcArrayN_T` struct                                                                                                            |
+| `Slice(T)`     | `Ptr`                  | Ptr to `DynSlice_T` struct                                                                                                            |
+| `Ref(T)`       | `Ptr`                  | Ptr to heap-allocated T                                                                                                               |
+| `Tuple(...)`   | `Struct(...)` or `Ptr` | Small tuples: value. Heap/RC'd: Ptr to struct.                                                                                        |
+| `WitnessOf(T)` | same as `T`            | Absent in witgen path (stripped). **TODO**: AD path still has WitnessOf — lowering should ICE if encountered until AD design is done. |
+| `Function`     | never reaches LLSSA    | Eliminated by defunctionalization                                                                                                     |
 
 ### Operation Lowering
 
@@ -579,65 +581,64 @@ LLSSA:
 
 #### Builtin Operations
 
-`ToBits`, `ToRadix`, `Rangecheck`, `Lookup` — lowered to calls to generated LLSSA helper
-functions. These are complex enough that they deserve their own generated routines rather than
-being inlined at every use site.
+`ToBits`, `ToRadix`, `Rangecheck`, `Lookup` — lowered to calls to generated LLSSA helper functions.
+These are complex enough that they deserve their own generated routines rather than being inlined at
+every use site.
 
 ## Target Codegen Mapping
 
 ### LLVM
 
-| LLSSA | LLVM IR |
-|---|---|
-| `Int(1)` | `i1` |
-| `Int(8)` | `i8` |
-| `Int(32)` | `i32` |
-| `Int(64)` | `i64` |
-| `Ptr` | `ptr` (opaque pointer) |
-| `Struct(FieldElem)` | `[4 x i64]` or `{ i64, i64, i64, i64 }` |
-| `MkStruct` | aggregate literal / `insertvalue` chain |
-| `ExtractField` | `extractvalue` |
-| `InsertField` | `insertvalue` |
-| `StructFieldPtr` | `getelementptr %struct_type, ptr %p, i32 0, i32 field` |
-| `ArrayElemPtr` | `getelementptr %elem_type, ptr %p, i64 %index` |
-| `HeapAlloc` | `call @malloc(size)` — size computed from LLVM's `sizeof` |
-| `Free` | `call @free(ptr)` |
-| `FieldArith` | `call @bn254_{add,sub,mul,div}(...)` |
-| `Select` | `select` |
-| `Trap` | `call @llvm.trap()` + `unreachable` |
+| LLSSA               | LLVM IR                                                   |
+| ------------------- | --------------------------------------------------------- |
+| `Int(1)`            | `i1`                                                      |
+| `Int(8)`            | `i8`                                                      |
+| `Int(32)`           | `i32`                                                     |
+| `Int(64)`           | `i64`                                                     |
+| `Ptr`               | `ptr` (opaque pointer)                                    |
+| `Struct(FieldElem)` | `[4 x i64]` or `{ i64, i64, i64, i64 }`                   |
+| `MkStruct`          | aggregate literal / `insertvalue` chain                   |
+| `ExtractField`      | `extractvalue`                                            |
+| `InsertField`       | `insertvalue`                                             |
+| `StructFieldPtr`    | `getelementptr %struct_type, ptr %p, i32 0, i32 field`    |
+| `ArrayElemPtr`      | `getelementptr %elem_type, ptr %p, i64 %index`            |
+| `HeapAlloc`         | `call @malloc(size)` — size computed from LLVM's `sizeof` |
+| `Free`              | `call @free(ptr)`                                         |
+| `FieldArith`        | `call @bn254_{add,sub,mul,div}(...)`                      |
+| `Select`            | `select`                                                  |
+| `Trap`              | `call @llvm.trap()` + `unreachable`                       |
 
 ### WASM (via LLVM)
 
-Same as LLVM, but `Int(1)` and `Int(8)` promote to `i32`. Pointer type becomes `i32` on wasm32.
-LLVM handles this automatically via the target triple.
+Same as LLVM, but `Int(1)` and `Int(8)` promote to `i32`. Pointer type becomes `i32` on wasm32. LLVM
+handles this automatically via the target triple.
 
 ### VM (future migration)
 
-| LLSSA | VM Bytecode |
-|---|---|
-| `Int(n)` (n <= 64) | 1 frame slot (u64) |
-| `Ptr` | 1 frame slot (host pointer as u64) |
-| `Struct(FieldElem)` | 4 frame slots (LIMBS) |
-| `StructFieldPtr` | `ptr + precomputed_offset` |
-| `HeapAlloc` | `call vm.alloc(layout)` |
-| `Free` | `call vm.dealloc(ptr)` |
-| `FieldArith` | `field_{add,sub,mul,div}` bytecode op |
+| LLSSA               | VM Bytecode                           |
+| ------------------- | ------------------------------------- |
+| `Int(n)` (n <= 64)  | 1 frame slot (u64)                    |
+| `Ptr`               | 1 frame slot (host pointer as u64)    |
+| `Struct(FieldElem)` | 4 frame slots (LIMBS)                 |
+| `StructFieldPtr`    | `ptr + precomputed_offset`            |
+| `HeapAlloc`         | `call vm.alloc(layout)`               |
+| `Free`              | `call vm.dealloc(ptr)`                |
+| `FieldArith`        | `field_{add,sub,mul,div}` bytecode op |
 
 ## Open Questions / Future Work
 
 - **AD pipeline**: Deferred. AD values (ADConst, ADWitness, ADSum, ADMulConst) and derivative
-  operations (BumpD, NextDCoeff) will need their own LLSSA representation when we get to it.
-  The key challenge is that AD currently uses backpropagation during RC drop — in LLSSA this
-  would become explicit code in the generated drop functions.
+  operations (BumpD, NextDCoeff) will need their own LLSSA representation when we get to it. The key
+  challenge is that AD currently uses backpropagation during RC drop — in LLSSA this would become
+  explicit code in the generated drop functions.
 
-- **R1CS path**: Currently LLSSA targets the witgen (execution) path. The R1CS constraint
-  generation path stays on HLSSA for now. Long-term, constraint generation might also go
-  through LLSSA or a parallel lowering.
+- **R1CS path**: Currently LLSSA targets the witgen (execution) path. The R1CS constraint generation
+  path stays on HLSSA for now. Long-term, constraint generation might also go through LLSSA or a
+  parallel lowering.
 
-- **Optimization passes on LLSSA**: Once LLSSA exists, we can run target-independent
-  optimizations: dead code elimination, common subexpression elimination on pointer arithmetic,
-  etc. These are simpler than HLSSA-level optimizations because the
-  IR is lower-level and more uniform.
+- **Optimization passes on LLSSA**: Once LLSSA exists, we can run target-independent optimizations:
+  dead code elimination, common subexpression elimination on pointer arithmetic, etc. These are
+  simpler than HLSSA-level optimizations because the IR is lower-level and more uniform.
 
 - **Slice capacity vs length**: Currently slices store `len` (number of elements). If we want
   amortized O(1) push, we may need separate `len` and `capacity` fields. For now, every push

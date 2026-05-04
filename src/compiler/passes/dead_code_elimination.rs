@@ -28,31 +28,33 @@ enum ValueDefinition {
 
 pub struct Config {
     pub witness_shape_frozen: bool,
-    /// When true, all blocks are marked as live, preventing removal of empty intermediate blocks.
-    /// This is a workaround for untaint_control_flow not handling multiple merge predecessors.
-    /// TODO: Remove this option once untaint_control_flow properly handles multiple jumps into merge blocks.
-    pub preserve_all_blocks: bool,
+    /// When true, all blocks are marked as live, preventing removal of empty
+    /// intermediate blocks. This is a workaround for untaint_control_flow
+    /// not handling multiple merge predecessors. TODO: Remove this option
+    /// once untaint_control_flow properly handles multiple jumps into merge
+    /// blocks.
+    pub preserve_all_blocks:  bool,
 }
 
 impl Config {
     pub fn pre_r1c() -> Self {
         Self {
             witness_shape_frozen: false,
-            preserve_all_blocks: false,
+            preserve_all_blocks:  false,
         }
     }
 
     pub fn post_r1c() -> Self {
         Self {
             witness_shape_frozen: true,
-            preserve_all_blocks: false,
+            preserve_all_blocks:  false,
         }
     }
 
     pub fn preserve_blocks() -> Self {
         Self {
             witness_shape_frozen: false,
-            preserve_all_blocks: true,
+            preserve_all_blocks:  true,
         }
     }
 }
@@ -206,7 +208,7 @@ impl DCE {
                     let function_cfg = cfg.get_function_cfg(function_id);
                     let function = ssa.get_function(function_id);
 
-                    if let Some(Terminator::JmpIf(condition, _, _)) =
+                    if let Some(Terminator::JmpIf(condition, ..)) =
                         function.get_block(block_id).get_terminator()
                     {
                         worklist.push(WorkItem::LiveValue(function_id, *condition));
@@ -217,7 +219,7 @@ impl DCE {
                         live_branches.entry(function_id).or_default().insert(pd);
 
                         match function.get_block(pd).get_terminator() {
-                            Some(Terminator::JmpIf(condition, _, _)) => {
+                            Some(Terminator::JmpIf(condition, ..)) => {
                                 worklist.push(WorkItem::LiveValue(function_id, *condition));
                             }
                             _ => panic!("ICE: It's a frontier, must end with a conditional"),
@@ -268,10 +270,14 @@ impl DCE {
                                     {
                                         for (caller_fn, caller_block, caller_i) in callsites {
                                             // Only propagate callee param liveness to callsite args
-                                            // if the callsite instruction is already live. Constrained
-                                            // calls are always initially live so this passes immediately.
-                                            // Unconstrained calls may be dead; when they later become
-                                            // live, LiveInstruction handling will propagate at that point.
+                                            // if the callsite instruction is already live.
+                                            // Constrained
+                                            // calls are always initially live so this passes
+                                            // immediately.
+                                            // Unconstrained calls may be dead; when they later
+                                            // become
+                                            // live, LiveInstruction handling will propagate at that
+                                            // point.
                                             if !self.instruction_live(
                                                 &live_instructions,
                                                 *caller_fn,
@@ -287,7 +293,8 @@ impl DCE {
                                             {
                                                 assert!(
                                                     *i < args.len(),
-                                                    "ICE: live callee entry param index out of bounds at callsite"
+                                                    "ICE: live callee entry param index out of \
+                                                     bounds at callsite"
                                                 );
                                                 worklist.push(WorkItem::LiveValue(
                                                     *caller_fn, args[*i],
@@ -307,7 +314,8 @@ impl DCE {
                                     Some(Terminator::Jmp(_, params)) => {
                                         assert!(
                                             *i < params.len(),
-                                            "ICE: phi param index out of bounds in predecessor jump"
+                                            "ICE: phi param index out of bounds in predecessor \
+                                             jump"
                                         );
                                         worklist.push(WorkItem::LiveValue(function_id, params[*i]));
                                     }

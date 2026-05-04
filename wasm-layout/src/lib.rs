@@ -6,7 +6,8 @@
 //!   - `src/compiler/llssa_llvm_codegen.rs`, which emits GEP/load/store ops
 //!     into `vm_ptr` for the generated forward-pass writes and AD helpers.
 //!
-//! All offsets are in bytes. wasm32: pointers are 4 bytes, usize/i32 is 4 bytes.
+//! All offsets are in bytes. wasm32: pointers are 4 bytes, usize/i32 is 4
+//! bytes.
 //!
 //! ## Lookup tables
 //!
@@ -56,18 +57,18 @@ const _: () = assert!(TABLE_INFO_SLOT_SIZE == TABLE_INFO_LENGTH_OFFSET + 4);
 //
 // Cursors (kind-agnostic):
 //   - witness, a, b, c (writing cursors into the witness/constraint vectors)
-//   - mults_cursor (cursor into the witness multiplicities section; first-
-//     use lookups snapshot it, then bump by their table's length)
+//   - mults_cursor (cursor into the witness multiplicities section; first- use
+//     lookups snapshot it, then bump by their table's length)
 //   - lookups_a, lookups_b, lookups_c (lookup-tape write cursors)
 //   - inputs (immutable input base pointer)
-//   - tables_len (count of claimed tables; first-use claim assigns it as
-//     the new table id and then bumps it)
+//   - tables_len (count of claimed tables; first-use claim assigns it as the
+//     new table id and then bumps it)
 //   - tables_cap (capacity of the host-allocated table-info buffer)
 //   - tables_ptr (base pointer to the host-allocated table-info buffer)
-//   - current_cnst_tables_off (cursor into the tables region of the
-//     constraints section)
-//   - current_wit_tables_off (cursor into the post-commitment witness
-//     tables section, relative to `challenges_start`)
+//   - current_cnst_tables_off (cursor into the tables region of the constraints
+//     section)
+//   - current_wit_tables_off (cursor into the post-commitment witness tables
+//     section, relative to `challenges_start`)
 //
 pub const WITGEN_WITNESS_PTR_OFFSET: u32 = 0;
 pub const WITGEN_A_PTR_OFFSET: u32 = 4;
@@ -96,8 +97,8 @@ pub const WITGEN_VM_STRUCT_SIZE: u32 = 56;
 //   - ad_coeffs_base (immutable base for random-access reads)
 //   - current_lookup_wit_off (cursor for lookup-section witness writes)
 //   - current_cnst_tables_off, current_wit_tables_off,
-//     current_wit_multiplicities_off (table-region cursors; first-use
-//     lookups snapshot and bump)
+//     current_wit_multiplicities_off (table-region cursors; first-use lookups
+//     snapshot and bump)
 
 pub const AD_OUT_DA_PTR_OFFSET: u32 = 0;
 pub const AD_OUT_DB_PTR_OFFSET: u32 = 4;

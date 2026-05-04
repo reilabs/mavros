@@ -156,12 +156,12 @@ fn prepare_dispatch(program: &mut [u64]) {
 }
 
 pub struct WitgenResult {
-    pub out_wit_pre_comm: Vec<Field>,
+    pub out_wit_pre_comm:  Vec<Field>,
     pub out_wit_post_comm: Vec<Field>,
-    pub out_a: Vec<Field>,
-    pub out_b: Vec<Field>,
-    pub out_c: Vec<Field>,
-    pub instrumenter: AllocationInstrumenter,
+    pub out_a:             Vec<Field>,
+    pub out_b:             Vec<Field>,
+    pub out_c:             Vec<Field>,
+    pub instrumenter:      AllocationInstrumenter,
 }
 
 /// Intermediate result from phase 1 of witness generation.
@@ -171,18 +171,19 @@ pub struct WitgenResult {
 /// are available).
 #[derive(Clone)]
 pub struct Phase1Result {
-    pub out_wit_pre_comm: Vec<Field>,
+    pub out_wit_pre_comm:  Vec<Field>,
     pub out_wit_post_comm: Vec<Field>,
-    pub out_a: Vec<Field>,
-    pub out_b: Vec<Field>,
-    pub out_c: Vec<Field>,
-    pub tables: Vec<TableInfo>,
-    pub instrumenter: AllocationInstrumenter,
+    pub out_a:             Vec<Field>,
+    pub out_b:             Vec<Field>,
+    pub out_c:             Vec<Field>,
+    pub tables:            Vec<TableInfo>,
+    pub instrumenter:      AllocationInstrumenter,
 }
 
 fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) {
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
-        // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
+        // We used this as a *mut u64 when writing multiplicities, so we need to convert
+        // to an actual field element
         wit[i] = Field::from(wit[i].0.0[0]);
     }
 }
@@ -203,7 +204,8 @@ pub fn run_phase1(
     let mut out_c = vec![Field::ZERO; constraints_layout.size()];
     let mut out_wit_pre_comm = vec![Field::ZERO; witness_layout.pre_commitment_size()];
     let flat_inputs = flatten_param_vec(ordered_inputs);
-    // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
+    // The program itself writes inputs to the witness tape via pinned WriteWitness
+    // instructions.
     let mut out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
@@ -495,12 +497,12 @@ pub fn run_phase2(
     }
 
     WitgenResult {
-        out_wit_pre_comm: phase1.out_wit_pre_comm,
+        out_wit_pre_comm:  phase1.out_wit_pre_comm,
         out_wit_post_comm: phase1.out_wit_post_comm,
-        out_a: phase1.out_a,
-        out_b: phase1.out_b,
-        out_c: phase1.out_c,
-        instrumenter: phase1.instrumenter,
+        out_a:             phase1.out_a,
+        out_b:             phase1.out_b,
+        out_c:             phase1.out_c,
+        instrumenter:      phase1.instrumenter,
     }
 }
 

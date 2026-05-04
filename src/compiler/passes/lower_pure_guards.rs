@@ -13,23 +13,25 @@ use crate::compiler::{
 ///
 /// After UntaintControlFlow, Guards wrap operations in witness-conditional
 /// blocks. Many of these Guards are unnecessary because the inner operation
-/// is a pure computation that doesn't generate constraints or have side effects.
+/// is a pure computation that doesn't generate constraints or have side
+/// effects.
 ///
 /// Classification:
-/// - **Always unwrap** (no constraints, no side effects, can't fail):
-///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, Truncate, ExtractTupleField,
-///   MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
-/// - **Lower with OOB check** (can fail on out-of-bounds index):
-///   ArrayGet — if OOB, assert !cond and produce default; else array_get.
-/// - **Lower with OOB check + passthrough** (RC-tracked allocation):
-///   ArraySet — if OOB, assert !cond and pass through array; else array_set.
-/// - **Lower with overflow check** (pure inputs only, can fail):
-///   Integer Add/Sub/Mul/Shl — widen, compute, if overflow assert !cond and produce 0; else narrow.
-/// - **Lower with div-zero check** (pure inputs only, can fail):
-///   Div/Mod — if divisor==0 assert !cond and produce 0; else compute.
-/// - **Keep as Guard** (side-effectful or generates constraints):
-///   Store, Call, WriteWitness, Assert, AssertCmp, AssertR1C, Constrain, Rangecheck,
-///   and failable ops with witness inputs (SExt, integer arith).
+/// - **Always unwrap** (no constraints, no side effects, can't fail): Const,
+///   Cmp, Not, And, Or, Xor, Shr, Cast, Truncate, ExtractTupleField, MkTuple,
+///   MkSeq, Load, Select, Field Add/Sub/Mul, etc.
+/// - **Lower with OOB check** (can fail on out-of-bounds index): ArrayGet — if
+///   OOB, assert !cond and produce default; else array_get.
+/// - **Lower with OOB check + passthrough** (RC-tracked allocation): ArraySet —
+///   if OOB, assert !cond and pass through array; else array_set.
+/// - **Lower with overflow check** (pure inputs only, can fail): Integer
+///   Add/Sub/Mul/Shl — widen, compute, if overflow assert !cond and produce 0;
+///   else narrow.
+/// - **Lower with div-zero check** (pure inputs only, can fail): Div/Mod — if
+///   divisor==0 assert !cond and produce 0; else compute.
+/// - **Keep as Guard** (side-effectful or generates constraints): Store, Call,
+///   WriteWitness, Assert, AssertCmp, AssertR1C, Constrain, Rangecheck, and
+///   failable ops with witness inputs (SExt, integer arith).
 pub struct LowerPureGuards {}
 
 impl Pass for LowerPureGuards {
@@ -313,8 +315,8 @@ impl LowerPureGuards {
 
     /// Lower `Guard(cond, arith_op(lhs, rhs) -> result)` for integer overflow.
     ///
-    /// Widens to double-width, performs the op, checks if it fits in the original width.
-    /// On overflow: constrains !cond, produces a default 0.
+    /// Widens to double-width, performs the op, checks if it fits in the
+    /// original width. On overflow: constrains !cond, produces a default 0.
     fn lower_overflow_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -417,8 +419,8 @@ impl LowerPureGuards {
                 let zero_u1 = e.u_const(1, 0);
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
-                    lhs: condition,
-                    rhs: zero_u1,
+                    lhs:  condition,
+                    rhs:  zero_u1,
                 });
                 let default_val = match &lhs_type.expr {
                     TypeExpr::U(b) => e.u_const(*b, 0),
@@ -446,7 +448,8 @@ impl LowerPureGuards {
     ///
     /// Pattern:
     ///   oob = idx >= len(array)
-    ///   if oob { assert !cond; result = array } else { result = array_set(array, idx, value) }
+    ///   if oob { assert !cond; result = array } else { result =
+    /// array_set(array, idx, value) }
     fn lower_array_set_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -468,8 +471,8 @@ impl LowerPureGuards {
                 let zero = e.u_const(1, 0);
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
-                    lhs: condition,
-                    rhs: zero,
+                    lhs:  condition,
+                    rhs:  zero,
                 });
                 vec![array]
             },
@@ -481,7 +484,8 @@ impl LowerPureGuards {
     /// Lower `Guard(cond, ArrayGet(array, idx) -> result)`.
     ///
     /// Pattern:
-    ///   if oob { assert !cond; result = default } else { result = array_get(array, idx) }
+    ///   if oob { assert !cond; result = default } else { result =
+    /// array_get(array, idx) }
     fn lower_array_get_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -506,8 +510,8 @@ impl LowerPureGuards {
                 let zero = e.u_const(1, 0);
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
-                    lhs: condition,
-                    rhs: zero,
+                    lhs:  condition,
+                    rhs:  zero,
                 });
                 vec![self.default_scalar(e, &elem_type)]
             },
@@ -581,8 +585,8 @@ impl LowerPureGuards {
                 let zero = e.u_const(1, 0);
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
-                    lhs: condition,
-                    rhs: zero,
+                    lhs:  condition,
+                    rhs:  zero,
                 });
                 vec![if signed {
                     e.i_const(bits, 0)

@@ -53,3 +53,64 @@ for Mavros:
   They are most easily run using `make func-test`.
 - The **unit tests** in the codebase can be run simply using `make unit-test`.
 
+## Debugging
+
+This section contains a few debugging tips for working on Mavros.
+
+- **IR Graph Output:** Passing `--draw-graphs` to the `mavros` binary generates a `mavros_debug/`
+  folder in the project root. This contains an SSA diagram and CFG graph for each compiler pass.
+  Doing this requires [graphviz](https://graphviz.org), which is provided in the
+  [self-contained development environment](#building).
+
+## PRs
+
+Mavros operates on a fork-and-PR [model](https://en.wikipedia.org/wiki/Fork_and_pull_model) for
+contributing new code to `main`. The workflow is as follows:
+
+1. Fork the repository if needed.
+2. Create a new branch to contain your work with a descriptive name.
+3. Perform your changes and commit them (in a single commit or across multiple commits) with a
+   descriptive commit message.
+4. Pull-request this branch against `main` in the Mavros repository. Make sure that your code passes
+   `make lint` without any warnings or errors.
+
+## Workspace Crates
+
+The following is a summary of the crates in the workspace and their roles.
+
+| Crate                 | Description                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `mavros` (root)       | Main compiler crate. Contains the CLI binary, compiler pipeline (SSA → R1CS), driver, and public API.              |
+| `mavros-artifacts`    | Shared data types: `R1CS`, `R1C`, `WitnessLayout`, `ConstraintsLayout`, `Field`. Used by both the compiler and VM. |
+| `mavros-vm`           | Bytecode interpreter that runs witness generation and automatic differentiation programs.                          |
+| `opcode-gen`          | Proc-macro crate that generates VM opcode definitions.                                                             |
+| `ssa-builder`         | Proc-macro crate with helpers for constructing SSA IR.                                                             |
+| `mavros-wasm-runtime` | Minimal runtime compiled to WebAssembly, used when emitting `.wasm` witness generation targets.                    |
+
+## WASM Output
+
+Mavros can emit the witness generation binary as a [WebAssembly](https://webassembly.org) `.wasm`
+file in addition to (or instead of) executing it natively. This is designed for hosts—such as
+browsers or a mobile device that can only load signed code—that prefer to execute using WASM.
+
+```bash
+mavros --emit-wasm
+```
+
+This works as follows:
+
+1. The compiler lowers the witness generator SSA to LLVM IR (using
+   [`inkwell`](https://github.com/TheDan64/inkwell)/LLVM 22), compiling it for the `wasm32` target.
+   `wasm32` target.
+2. The generated WASM calls a small set of external functions (`__field_mul`, `__write_witness`,
+   `__write_a/b/c`) that are implemented in the [`mavros-wasm-runtime`](../wasm-runtime/) crate.
+   This runtime handles BN254 field arithmetic and writes outputs into memory.
+3. A `.wasm.meta.json` sidecar file is written alongside the `.wasm` with the ABI and R1CS layout
+   info, so the host knows how to set up the witness generator's inputs and interpret its outputs.
+
+Running with `--emit-wasm` will execute the full compilation pipeline, and _additionall_ emit the
+`mavros_debug/witgen.wasm` and `mavros_debug/witgen.wasm.meta.json`. This can be combined with the
+`--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file.
+
+> **Note:** WASM output is only currently available via the default command (no subcommand), not via
+> `mavros compile`.

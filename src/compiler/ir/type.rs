@@ -105,8 +105,8 @@ impl Type {
     pub fn witness_of(inner: Type) -> Self {
         assert!(
             !matches!(inner.expr, TypeExpr::WitnessOf(_)),
-            "ICE: attempted to construct WitnessOf(WitnessOf(...)). \
-             Double witness wrapping indicates a logic error. Inner type: {:?}",
+            "ICE: attempted to construct WitnessOf(WitnessOf(...)). Double witness wrapping \
+             indicates a logic error. Inner type: {:?}",
             inner.expr
         );
         Type {
@@ -265,7 +265,8 @@ impl Type {
         }
     }
 
-    /// Strip one level of WitnessOf. Returns inner if WitnessOf, self otherwise.
+    /// Strip one level of WitnessOf. Returns inner if WitnessOf, self
+    /// otherwise.
     pub fn strip_witness(&self) -> Self {
         match &self.expr {
             TypeExpr::WitnessOf(inner) => *inner.clone(),
@@ -330,14 +331,16 @@ impl Type {
 
     /// Returns true if converting from `self` to `target` requires inserting
     /// WitnessOf cast(s). This is the case when `self` is a strict subtype of
-    /// `target` (same structure but `target` has WitnessOf where `self` doesn't).
+    /// `target` (same structure but `target` has WitnessOf where `self`
+    /// doesn't).
     pub fn needs_witness_cast(&self, target: &Type) -> bool {
         self != target && self.is_subtype_of(target)
     }
 
     // --- Join (least upper bound) ---
 
-    /// Compute the least upper bound (join) of two types in the WitnessOf lattice.
+    /// Compute the least upper bound (join) of two types in the WitnessOf
+    /// lattice.
     ///
     /// Used for merge points (phi nodes) where two branches may produce
     /// different witness-ness levels.

@@ -84,11 +84,7 @@ impl Pass for ExplicitWitness {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(
-            ssa,
-            store.get::<TypeInfo>(),
-            store.get::<ValueRanges>(),
-        );
+        self.do_run(ssa, store.get::<TypeInfo>(), store.get::<ValueRanges>());
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -301,7 +297,7 @@ impl ExplicitWitness {
                         self.gen_witness_rangecheck_bits(b, arith_result, bits, one);
                         b.push(OpCode::Cast {
                             result: res,
-                            value: arith_result,
+                            value:  arith_result,
                             target: CastTarget::U(bits),
                         });
                     }
@@ -312,8 +308,8 @@ impl ExplicitWitness {
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_mul(
-                            b, l_field, r_field, bits, one, res, l_taint, r_taint,
-                            &l_range, &r_range,
+                            b, l_field, r_field, bits, one, res, l_taint, r_taint, &l_range,
+                            &r_range,
                         );
                     }
                     _ => {
@@ -324,7 +320,7 @@ impl ExplicitWitness {
                             let mul_hint = b.mul(l_plain, r_plain);
                             b.push(OpCode::WriteWitness {
                                 result: Some(res),
-                                value: mul_hint,
+                                value:  mul_hint,
                                 pinned: false,
                             });
                             b.constrain(l, r, res);
@@ -475,7 +471,8 @@ impl ExplicitWitness {
                     }
                     _ => {
                         panic!(
-                            "Bitwise {:?} on witness operands is only supported for unsigned int, got type {:?}",
+                            "Bitwise {:?} on witness operands is only supported for unsigned int, \
+                             got type {:?}",
                             kind,
                             l_type.strip_witness()
                         );
@@ -522,7 +519,11 @@ impl ExplicitWitness {
                 };
                 b.constrain(v_field, one_field, one_field);
             }
-            OpCode::AssertCmp { kind, lhs: l, rhs: r } => {
+            OpCode::AssertCmp {
+                kind,
+                lhs: l,
+                rhs: r,
+            } => {
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
                 let l_taint = l_type.is_witness_of();
@@ -699,10 +700,10 @@ impl ExplicitWitness {
                     let cond_times_diff = b.mul(l_sub_r, cond_field);
                     // result = cond * (l - r) + r
                     b.push(OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Add,
+                        kind:   BinaryArithOpKind::Add,
                         result: res,
-                        lhs: cond_times_diff,
-                        rhs: r_field,
+                        lhs:    cond_times_diff,
+                        rhs:    r_field,
                     });
                     return;
                 }
@@ -718,7 +719,7 @@ impl ExplicitWitness {
                 if is_field {
                     b.push(OpCode::WriteWitness {
                         result: Some(res),
-                        value: select_hint,
+                        value:  select_hint,
                         pinned: false,
                     });
                 } else {
@@ -728,7 +729,7 @@ impl ExplicitWitness {
                     let ww_res = b.fresh_value();
                     b.push(OpCode::WriteWitness {
                         result: Some(ww_res),
-                        value: select_hint,
+                        value:  select_hint,
                         pinned: false,
                     });
                     let cast_target = match l_type.strip_witness().expr {
@@ -738,12 +739,13 @@ impl ExplicitWitness {
                     };
                     b.push(OpCode::Cast {
                         result: res,
-                        value: ww_res,
+                        value:  ww_res,
                         target: cast_target,
                     });
                 }
                 // Goal is to assert 0 = cond * l + (1 - cond) * r - res
-                // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
+                // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res -
+                // r)
                 let l_sub_r = b.sub(l_field, r_field);
                 let res_field = b.cast_to_field(res);
                 let res_sub_r = b.sub(res_field, r_field);
@@ -810,7 +812,14 @@ impl ExplicitWitness {
                 };
                 let value_range = function_value_ranges.get(value);
                 self.gen_sext(
-                    b, value_field, from_bits, to_bits, one, i_taint, result, &value_range,
+                    b,
+                    value_field,
+                    from_bits,
+                    to_bits,
+                    one,
+                    i_taint,
+                    result,
+                    &value_range,
                 );
             }
             OpCode::Not { result, value } => {
@@ -1001,18 +1010,24 @@ impl ExplicitWitness {
                     // Bind results
                     b.push(OpCode::Cast {
                         result: result_odd,
-                        value: odd_wit,
+                        value:  odd_wit,
                         target: CastTarget::U(bits as usize),
                     });
                     b.push(OpCode::Cast {
                         result: result_even,
-                        value: even_wit,
+                        value:  even_wit,
                         target: CastTarget::U(bits as usize),
                     });
                 }
             }
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(b, function_type_info, function_value_ranges, condition, *inner);
+                self.lower_guard(
+                    b,
+                    function_type_info,
+                    function_value_ranges,
+                    condition,
+                    *inner,
+                );
             }
         }
     }
@@ -1073,7 +1088,8 @@ impl ExplicitWitness {
                 b.constrain(cond_field, diff, zero);
             }
             OpCode::Store { ptr, value: v } => {
-                // Guard(cond, Store(ptr, v)) → old = Load(ptr); new = Select(cond, v, old); Store(ptr, new)
+                // Guard(cond, Store(ptr, v)) → old = Load(ptr); new = Select(cond, v, old);
+                // Store(ptr, new)
                 let old_value = b.load(ptr);
                 let new_value = b.select(condition, v, old_value);
                 b.store(ptr, new_value);
@@ -1112,7 +1128,14 @@ impl ExplicitWitness {
                 };
                 let value_range = function_value_ranges.get(value);
                 self.gen_sext(
-                    b, value_field, from_bits, to_bits, cond_field, true, result, &value_range,
+                    b,
+                    value_field,
+                    from_bits,
+                    to_bits,
+                    cond_field,
+                    true,
+                    result,
+                    &value_range,
                 );
             }
             OpCode::BinaryArithOp {
@@ -1185,7 +1208,7 @@ impl ExplicitWitness {
                         self.gen_witness_rangecheck_bits(b, arith_result, bits, cond_field);
                         b.push(OpCode::Cast {
                             result: res,
-                            value: arith_result,
+                            value:  arith_result,
                             target: CastTarget::U(bits),
                         });
                     }
@@ -1196,8 +1219,8 @@ impl ExplicitWitness {
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_mul(
-                            b, l_field, r_field, bits, cond_field, res, l_taint, r_taint,
-                            &l_range, &r_range,
+                            b, l_field, r_field, bits, cond_field, res, l_taint, r_taint, &l_range,
+                            &r_range,
                         );
                     }
                     _ if l_taint && r_taint => {
@@ -1207,7 +1230,7 @@ impl ExplicitWitness {
                         let mul_hint = b.mul(l_plain, r_plain);
                         b.push(OpCode::WriteWitness {
                             result: Some(res),
-                            value: mul_hint,
+                            value:  mul_hint,
                             pinned: false,
                         });
                         b.constrain(l, r, res);
@@ -1234,8 +1257,8 @@ impl ExplicitWitness {
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_divmod(
-                            b, l, r, bits, kind, cond_field, res, l_taint, r_taint,
-                            &l_range, &r_range,
+                            b, l, r, bits, kind, cond_field, res, l_taint, r_taint, &l_range,
+                            &r_range,
                         );
                     }
                     TypeExpr::U(_) => {
@@ -1310,7 +1333,8 @@ impl ExplicitWitness {
     /// 5. Constrain borrow is boolean
     /// 6. Compute resultLo = modulusLoMinusOne - lo + borrow * 2^128 + 1
     /// 7. Compute resultHi = modulusHi - hi - borrow
-    /// 8. Range-check resultHi and resultLo to 128 bits (proves value < modulus)
+    /// 8. Range-check resultHi and resultLo to 128 bits (proves value <
+    ///    modulus)
     /// 9. Return truncated value from low `to_bits/8` bytes
     fn gen_witness_truncate(
         &self,
@@ -1322,7 +1346,8 @@ impl ExplicitWitness {
     ) {
         assert!(to_bits <= 256);
 
-        // BN254 modulus: p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+        // BN254 modulus: p =
+        // 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
         // modulusHi = upper 128 bits
         let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
         // modulusLoMinusOne = lower 128 bits - 1
@@ -1337,16 +1362,17 @@ impl ExplicitWitness {
         let pure_value = b.value_of(value);
         let bytes_arr = b.fresh_value();
         b.push(OpCode::ToRadix {
-            result: bytes_arr,
-            value: pure_value,
-            radix: Radix::Bytes,
+            result:     bytes_arr,
+            value:      pure_value,
+            radix:      Radix::Bytes,
             endianness: Endianness::Big,
-            count: 32,
+            count:      32,
         });
 
         // Extract each byte, write as witness, range-check.
         // Simultaneously accumulate 4 x 64-bit limbs and the full 256-bit sum.
-        // Witness only 31 bytes; compute byte[31] = value - partial*256 (saves 1 witness + 1 constraint).
+        // Witness only 31 bytes; compute byte[31] = value - partial*256 (saves 1
+        // witness + 1 constraint).
         let mut bytes = Vec::with_capacity(32);
         let mut limbs = [zero; 4]; // 64-bit limbs, big-endian
         let mut full_sum = zero;
@@ -1385,8 +1411,9 @@ impl ExplicitWitness {
         let lo = b.add(lo_upper, limbs[3]);
 
         // Step 4: Compute borrow hint via 2-limb comparison
-        // borrow = 1 if lo > modulusLoMinusOne, i.e. (limb2, limb3) > (mod_limb2, mod_limb3)
-        // = mod_limb2 < limb2 || (mod_limb2 == limb2 && mod_limb3 < limb3)
+        // borrow = 1 if lo > modulusLoMinusOne, i.e. (limb2, limb3) > (mod_limb2,
+        // mod_limb3) = mod_limb2 < limb2 || (mod_limb2 == limb2 && mod_limb3 <
+        // limb3)
         let limb2_pure = b.value_of(limbs[2]);
         let limb3_pure = b.value_of(limbs[3]);
         let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
@@ -1421,7 +1448,8 @@ impl ExplicitWitness {
         self.gen_witness_rangecheck_bits(b, result_lo, 128, flag);
 
         // Step 9: Recover truncated value from low bytes of the decomposition
-        // In big-endian, the low bytes are bytes[start..32], where the first may be partial.
+        // In big-endian, the low bytes are bytes[start..32], where the first may be
+        // partial.
         let full_bytes = to_bits / 8;
         let partial_bits = to_bits % 8;
         let start = 32 - full_bytes - if partial_bits > 0 { 1 } else { 0 };
@@ -1448,10 +1476,10 @@ impl ExplicitWitness {
         }
     }
 
-    /// Split a byte witness into hi (`8 - lo_size` bits) and lo (`lo_size` bits).
-    /// Rangechecks both parts via gap checks to 8 bits, constrains the split
-    /// correctness (`hi * 2^lo_size + lo = byte_wit`), and returns `lo_wit`
-    /// for use in reconstruction.
+    /// Split a byte witness into hi (`8 - lo_size` bits) and lo (`lo_size`
+    /// bits). Rangechecks both parts via gap checks to 8 bits, constrains
+    /// the split correctness (`hi * 2^lo_size + lo = byte_wit`), and
+    /// returns `lo_wit` for use in reconstruction.
     fn split_partial_byte(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1492,13 +1520,13 @@ impl ExplicitWitness {
     /// Rangecheck `value ∈ [0, 2^bits)` for any `bits ≥ 1`.
     ///
     /// Cost:
-    ///   bits == 1                     → 0 lookups (boolean check, 2 algebraic constraints)
-    ///   bits == 8q (byte-aligned)     → q lookups
+    ///   bits == 1                     → 0 lookups (boolean check, 2 algebraic
+    /// constraints)   bits == 8q (byte-aligned)     → q lookups
     ///   bits == 8q + r, r ∈ (0, 8)    → q + 2 lookups
     ///
-    /// The non-byte-aligned case extends the byte-decomposition trick: rangecheck all
-    /// q+1 byte chunks normally, then add a single byte rangecheck of
-    /// `(2^r - 1) - top_chunk` to prove `top_chunk < 2^r`.
+    /// The non-byte-aligned case extends the byte-decomposition trick:
+    /// rangecheck all q+1 byte chunks normally, then add a single byte
+    /// rangecheck of `(2^r - 1) - top_chunk` to prove `top_chunk < 2^r`.
     fn gen_witness_rangecheck_bits(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1529,11 +1557,11 @@ impl ExplicitWitness {
         let pure_value = b.value_of(value);
         let bytes_val = b.fresh_value();
         b.push(OpCode::ToRadix {
-            result: bytes_val,
-            value: pure_value,
-            radix: Radix::Bytes,
+            result:     bytes_val,
+            value:      pure_value,
+            radix:      Radix::Bytes,
             endianness: Endianness::Big,
-            count: total_chunks,
+            count:      total_chunks,
         });
         let two_to_8 = b.field_const(Field::from(256));
 
@@ -1554,7 +1582,8 @@ impl ExplicitWitness {
             partial = b.add(shift_prev, byte_wit);
         }
         // Compute the LSB chunk as value - partial*256; rangecheck proves it's a byte,
-        // which implicitly constrains the reconstruction (no separate constraint needed).
+        // which implicitly constrains the reconstruction (no separate constraint
+        // needed).
         let partial_shifted = b.mul(partial, two_to_8);
         let lsb = b.sub(value, partial_shifted);
         b.lookup_rngchk_8(lsb, flag);
@@ -1572,8 +1601,8 @@ impl ExplicitWitness {
         }
     }
 
-    /// Lower a witness-tainted Lt comparison, emitting the result into `result`.
-    /// Generates range-check constraints to prove the comparison.
+    /// Lower a witness-tainted Lt comparison, emitting the result into
+    /// `result`. Generates range-check constraints to prove the comparison.
     fn lower_witness_lt(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1648,18 +1677,21 @@ impl ExplicitWitness {
 
     /// Extract the sign bit (MSB) of an n-bit value.
     /// Requires: `value` is already rangechecked to n bits.
-    /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
+    /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0,
+    /// 2^(n-1)).
     ///
     /// `value_range` is the analyzer's bound on the underlying integer; if it
-    /// proves the sign bit is 0 (i.e. value ∈ [0, 2^(n-1))), this short-circuits
-    /// to the field constant 0 and emits no witness, rangecheck, or constraint.
+    /// proves the sign bit is 0 (i.e. value ∈ [0, 2^(n-1))), this
+    /// short-circuits to the field constant 0 and emits no witness,
+    /// rangecheck, or constraint.
     ///
     /// For witness inputs: writes sign as a witness with a boolean check, then
     /// computes low = value - sign * 2^(n-1) and rangechecks low ∈ [0, 2^(n-1))
     /// directly via `gen_witness_rangecheck_bits`. For byte-aligned `bits` this
     /// costs `bits/8 + 1` lookups (e.g. n=64 → 9, n=32 → 5, n=16 → 3).
     ///
-    /// For pure inputs: computes sign as a pure hint (no witnesses or constraints).
+    /// For pure inputs: computes sign as a pure hint (no witnesses or
+    /// constraints).
     fn extract_sign_bit(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -1731,8 +1763,9 @@ impl ExplicitWitness {
     /// Signed n-bit add/sub gadget for witness variables.
     ///
     /// Modular reduction:
-    ///   ADD: a + b = result + carry * 2^n      (carry ∈ {0,1}, result ∈ [0, 2^n))
-    ///   SUB: a - b + 2^n = result + borrow * 2^n  (borrow ∈ {0,1}, result ∈ [0, 2^n))
+    ///   ADD: a + b = result + carry * 2^n      (carry ∈ {0,1}, result ∈ [0,
+    /// 2^n))   SUB: a - b + 2^n = result + borrow * 2^n  (borrow ∈ {0,1},
+    /// result ∈ [0, 2^n))
     ///
     /// Overflow rejection (Noir arithmetic is non-wrapping):
     ///   ADD: carry + sign(result) = sign(a) + sign(b)
@@ -1791,8 +1824,7 @@ impl ExplicitWitness {
 
                 // Extract sign bit of result for overflow check (skipped when
                 // range proves result is non-negative).
-                let sign_r =
-                    self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
+                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
 
                 // Signed overflow iff carry_into_MSB != carry_out_of_MSB.
                 // The MSB full-adder gives: s_a + s_b + carry_in = s_r + 2*carry_out.
@@ -1831,8 +1863,7 @@ impl ExplicitWitness {
 
                 // Extract sign bit of result for overflow check (skipped when
                 // range proves result is non-negative).
-                let sign_r =
-                    self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
+                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
 
                 // Subtraction a - b is computed as a + ~b + 1 (two's complement).
                 // At the MSB column the full-adder sees:
@@ -2058,7 +2089,7 @@ impl ExplicitWitness {
             let q_hint_field = b.cast_to_field(q_hint);
             b.push(OpCode::WriteWitness {
                 result: Some(result),
-                value: q_hint_field,
+                value:  q_hint_field,
                 pinned: false,
             });
             b.constrain(result, divisor, a);
@@ -2078,7 +2109,7 @@ impl ExplicitWitness {
             let q_hint_field = b.cast_to_field(q_hint);
             b.push(OpCode::WriteWitness {
                 result: Some(result),
-                value: q_hint_field,
+                value:  q_hint_field,
                 pinned: false,
             });
             b.constrain(result, divisor, a);
@@ -2088,8 +2119,8 @@ impl ExplicitWitness {
     /// Multi-bit witness And/Or/Xor via spread tables.
     ///
     /// Uses the identity: spread(a) + spread(b) = 2*spread(a&b) + spread(a^b)
-    /// Each operand is decomposed into bytes, each byte spread via lookup table,
-    /// then per-byte and/xor are extracted and verified.
+    /// Each operand is decomposed into bytes, each byte spread via lookup
+    /// table, then per-byte and/xor are extracted and verified.
     fn gen_witness_bitwise(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2125,7 +2156,8 @@ impl ExplicitWitness {
 
         // Step 2: Per-byte witness generation, while reconstructing full-word values.
         // For the last xor byte, compute its spread from the bitwise identity
-        // spread(a)+spread(b) = 2*spread(and)+spread(xor), saving 1 witness + 1 constraint.
+        // spread(a)+spread(b) = 2*spread(and)+spread(xor), saving 1 witness + 1
+        // constraint.
         let mut and_word = zero;
         let mut xor_word = zero;
         let mut and_spread_word = zero;
@@ -2185,8 +2217,8 @@ impl ExplicitWitness {
     /// Returns (pure_bytes, reconstructed_spread) in big-endian order.
     /// pure_bytes: for use in hint computations (never witness-typed).
     ///
-    /// When `is_witness` is false, the operand is pure (e.g. a constant in `a & 0xff`),
-    /// so we compute spreads purely without witnesses or lookups.
+    /// When `is_witness` is false, the operand is pure (e.g. a constant in `a &
+    /// 0xff`), so we compute spreads purely without witnesses or lookups.
     fn spread_decompose(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2300,7 +2332,7 @@ impl ExplicitWitness {
             TypeExpr::I(s) => CastTarget::I(*s),
             TypeExpr::Field => CastTarget::Field,
             TypeExpr::WitnessOf(_) => CastTarget::Field,
-            TypeExpr::Array(_, _) => {
+            TypeExpr::Array(..) => {
                 todo!("array types in witnessed array reads")
             }
             TypeExpr::Slice(_) => {

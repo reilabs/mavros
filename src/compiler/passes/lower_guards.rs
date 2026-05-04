@@ -51,7 +51,8 @@ impl LowerGuards {
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
         // Process blocks iteratively. We collect block IDs upfront, but new blocks
-        // created during lowering don't need processing (they contain no Guards/Selects).
+        // created during lowering don't need processing (they contain no
+        // Guards/Selects).
         let block_ids: Vec<_> = function.get_blocks().map(|(bid, _)| *bid).collect();
 
         for block_id in block_ids {

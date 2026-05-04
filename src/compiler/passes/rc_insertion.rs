@@ -68,12 +68,13 @@ impl RCInsertion {
                         .chunk_by(|v1| *v1)
                         .into_iter()
                     {
-                        // This is potentially aliasing, so we need to bump RC by 1 for each repetition.
-                        // We then decrease by one, because the original value dies here.
+                        // This is potentially aliasing, so we need to bump RC by 1 for each
+                        // repetition. We then decrease by one, because the
+                        // original value dies here.
                         let count = count.count() - 1;
                         if self.needs_rc(type_info, value) && count > 0 {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(count),
+                                kind:  MemOp::Bump(count),
                                 value: *value,
                             });
                         }
@@ -98,16 +99,17 @@ impl RCInsertion {
                         }
                         if self.needs_rc(type_info, value) && count > 0 {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(count),
+                                kind:  MemOp::Bump(count),
                                 value: *value,
                             });
                         }
                     }
                     currently_live.extend(values);
                 }
-                Terminator::JmpIf(_cond, _, _) => {
+                Terminator::JmpIf(_cond, ..) => {
                     // Not inserting RCs for the condition, because it's
-                    // necessarily boolean and therefore doesn't matter if it lives.
+                    // necessarily boolean and therefore doesn't matter if it
+                    // lives.
                 }
             }
 
@@ -128,14 +130,15 @@ impl RCInsertion {
                         for input in rcd_inputs.iter() {
                             if currently_live.contains(input) {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
+                                    kind:  MemOp::Bump(1),
                                     value: *input,
                                 });
                             }
                         }
                         if self.needs_rc(type_info, r) && !currently_live.contains(r) {
                             panic!(
-                                "ICE: Result of BinaryArithOp is immediately dropped. This is a bug."
+                                "ICE: Result of BinaryArithOp is immediately dropped. This is a \
+                                 bug."
                             )
                         }
                         currently_live.extend(rcd_inputs);
@@ -147,7 +150,7 @@ impl RCInsertion {
                     } => {
                         if currently_live.contains(v) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(1),
+                                kind:  MemOp::Bump(1),
                                 value: *v,
                             });
                         }
@@ -165,7 +168,7 @@ impl RCInsertion {
                         if !currently_live.contains(tuple) {
                             // The tuple dies here, so we drop it _after_ the read.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *tuple,
                             });
                         }
@@ -174,12 +177,13 @@ impl RCInsertion {
                                 // The result gets a bump to the RC counter, because
                                 // it's now both accessed here and in the array.
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
+                                    kind:  MemOp::Bump(1),
                                     value: *result,
                                 });
                             } else {
                                 panic!(
-                                    "ICE: Result of TupleProj (V{} in block {}) is not live. This is a bug.",
+                                    "ICE: Result of TupleProj (V{} in block {}) is not live. This \
+                                     is a bug.",
                                     result.0, block_id.0
                                 )
                             }
@@ -206,17 +210,20 @@ impl RCInsertion {
                         if self.needs_rc(type_info, v) {
                             if !currently_live.contains(r) {
                                 panic!(
-                                    "ICE: Result of aliasing Cast is immediately dropped. This is a bug."
+                                    "ICE: Result of aliasing Cast is immediately dropped. This is \
+                                     a bug."
                                 );
                             }
                             if currently_live.contains(v) {
-                                // Both input and output are live — two refs to the same boxed value.
+                                // Both input and output are live — two refs to the same boxed
+                                // value.
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
+                                    kind:  MemOp::Bump(1),
                                     value: *v,
                                 });
                             }
-                            // If only result is live (input dead), no RC op needed — single alias.
+                            // If only result is live (input dead), no RC op
+                            // needed — single alias.
                         }
                         currently_live.insert(*v);
                         new_instructions.push(instruction);
@@ -282,7 +289,7 @@ impl RCInsertion {
                         for input in rcd_inputs.iter() {
                             if !currently_live.contains(input) {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Drop,
+                                    kind:  MemOp::Drop,
                                     value: *input,
                                 });
                             }
@@ -298,7 +305,7 @@ impl RCInsertion {
                         // but the actual value is not used.
                         if !currently_live.contains(r) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *r,
                             });
                         }
@@ -311,7 +318,7 @@ impl RCInsertion {
                     } => {
                         if !currently_live.contains(v) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *v,
                             });
                         }
@@ -343,7 +350,7 @@ impl RCInsertion {
                                 }
                                 if count > 0 {
                                     new_instructions.push(OpCode::MemOp {
-                                        kind: MemOp::Bump(count),
+                                        kind:  MemOp::Bump(count),
                                         value: *input,
                                     });
                                 }
@@ -351,10 +358,14 @@ impl RCInsertion {
                         }
                         if !currently_live.contains(result) {
                             panic!("ICE: Result of MkSeq is immediately dropped. This is a bug.")
-                            // The line below is the temporary solution if we run into this ever.
-                            // It should be debugged properly though, we expect DCE to sweep this
+                            // The line below is the temporary solution if we
+                            // run into this ever.
+                            // It should be debugged properly though, we expect
+                            // DCE to sweep this
                             // entire instruction.
-                            // new_instructions.push(OpCode::MemOp(MemOp::DropAndSweep, *result));
+                            // new_instructions.
+                            // push(OpCode::MemOp(MemOp::DropAndSweep,
+                            // *result));
                         }
                         currently_live.extend(inputs);
                     }
@@ -364,7 +375,7 @@ impl RCInsertion {
                     } => {
                         if self.needs_rc(type_info, result) && !currently_live.contains(result) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *result,
                             });
                         }
@@ -378,7 +389,7 @@ impl RCInsertion {
                         let value = *value;
                         if !currently_live.contains(&ptr) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: ptr,
                             });
                         }
@@ -395,19 +406,20 @@ impl RCInsertion {
                     OpCode::Load { result, ptr } => {
                         if !currently_live.contains(ptr) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *ptr,
                             });
                         }
                         if self.needs_rc(type_info, result) {
                             if currently_live.contains(result) {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
+                                    kind:  MemOp::Bump(1),
                                     value: *result,
                                 });
                             } else {
                                 panic!(
-                                    "ICE: Result of Load (V{} in block {}) is not live. This is a bug.",
+                                    "ICE: Result of Load (V{} in block {}) is not live. This is a \
+                                     bug.",
                                     result.0, block_id.0
                                 );
                             }
@@ -430,7 +442,7 @@ impl RCInsertion {
                                 && !currently_live.contains(return_id)
                             {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Drop,
+                                    kind:  MemOp::Drop,
                                     value: *return_id,
                                 });
                             }
@@ -450,7 +462,7 @@ impl RCInsertion {
                             }
                             if self.needs_rc(type_info, param) && count > 0 {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(count),
+                                    kind:  MemOp::Bump(count),
                                     value: *param,
                                 });
                             }
@@ -465,7 +477,7 @@ impl RCInsertion {
                         if !currently_live.contains(array) {
                             // The array dies here, so we drop it _after_ the read.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *array,
                             });
                         }
@@ -474,12 +486,13 @@ impl RCInsertion {
                                 // The result gets a bump to the RC counter, because
                                 // it's now both accessed here and in the array.
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
+                                    kind:  MemOp::Bump(1),
                                     value: *result,
                                 });
                             } else {
                                 panic!(
-                                    "ICE: Result of ArrayGet (V{} in block {}) is not live. This is a bug.",
+                                    "ICE: Result of ArrayGet (V{} in block {}) is not live. This \
+                                     is a bug.",
                                     result.0, block_id.0
                                 )
                             }
@@ -499,7 +512,7 @@ impl RCInsertion {
                         if !currently_live.contains(slice) {
                             // The slice dies here, so we drop it _after_ the read.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *slice,
                             });
                         }
@@ -514,11 +527,12 @@ impl RCInsertion {
                         if self.needs_rc(type_info, r) {
                             if !currently_live.contains(r) {
                                 panic!(
-                                    "ICE: Result of ReadGlobal is immediately dropped. This is a bug."
+                                    "ICE: Result of ReadGlobal is immediately dropped. This is a \
+                                     bug."
                                 )
                             }
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(1),
+                                kind:  MemOp::Bump(1),
                                 value: *r,
                             });
                         }
@@ -533,26 +547,29 @@ impl RCInsertion {
                     } => {
                         new_instructions.push(instruction.clone());
                         if currently_live.contains(array) {
-                            // Array set will decrease the RC and oportunistically reuse the storage,
-                            // if it notices a refcount of 0. So we need to bump _before_
-                            // we enter it.
+                            // Array set will decrease the RC and oportunistically reuse the
+                            // storage, if it notices a refcount of 0.
+                            // So we need to bump _before_ we enter it.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(1),
+                                kind:  MemOp::Bump(1),
                                 value: *array,
                             });
                         }
                         if self.needs_rc(type_info, value) && currently_live.contains(value) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(1),
+                                kind:  MemOp::Bump(1),
                                 value: *value,
                             })
                         }
                         if !currently_live.contains(result) {
                             panic!("ICE: Result of ArraySet is immediately dropped. This is a bug.")
-                            // The line below is the temporary solution if we run into this ever.
-                            // It should be debugged properly though, we expect DCE to sweep this
+                            // The line below is the temporary solution if we
+                            // run into this ever.
+                            // It should be debugged properly though, we expect
+                            // DCE to sweep this
                             // entire instruction.
-                            // new_instructions.push(OpCode::MemOp(MemOp::Drop, *result));
+                            // new_instructions.push(OpCode::MemOp(MemOp::Drop,
+                            // *result));
                         }
                         currently_live.extend(vec![*array, *value]);
                     }
@@ -564,16 +581,16 @@ impl RCInsertion {
                     } => {
                         new_instructions.push(instruction.clone());
                         if currently_live.contains(slice) {
-                            // Slice push will decrease the RC and oportunistically reuse the storage,
-                            // if it notices a refcount of 0. So we need to bump _before_
-                            // we enter it.
+                            // Slice push will decrease the RC and oportunistically reuse the
+                            // storage, if it notices a refcount of 0.
+                            // So we need to bump _before_ we enter it.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(1),
+                                kind:  MemOp::Bump(1),
                                 value: *slice,
                             });
                             if self.needs_rc(type_info, slice) {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
+                                    kind:  MemOp::Bump(1),
                                     value: *slice,
                                 });
                             }
@@ -595,7 +612,7 @@ impl RCInsertion {
                                 }
                                 if count > 0 {
                                     new_instructions.push(OpCode::MemOp {
-                                        kind: MemOp::Bump(count),
+                                        kind:  MemOp::Bump(count),
                                         value: *value,
                                     });
                                 }
@@ -619,7 +636,7 @@ impl RCInsertion {
                         let v = *v;
                         if self.needs_rc(type_info, &v) && currently_live.contains(&v) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Bump(1),
+                                kind:  MemOp::Bump(1),
                                 value: v,
                             });
                         }
@@ -650,7 +667,7 @@ impl RCInsertion {
                         if !currently_live.contains(r) {
                             // We contend with this, because ToBits can be used for a range check.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *r,
                             });
                         }
@@ -667,7 +684,7 @@ impl RCInsertion {
                         if !currently_live.contains(r) {
                             // We contend with this, because ToRadix can be used for a range check.
                             new_instructions.push(OpCode::MemOp {
-                                kind: MemOp::Drop,
+                                kind:  MemOp::Drop,
                                 value: *r,
                             });
                         }
@@ -717,7 +734,7 @@ impl RCInsertion {
                                 }
                                 if count > 0 {
                                     new_instructions.push(OpCode::MemOp {
-                                        kind: MemOp::Bump(count),
+                                        kind:  MemOp::Bump(count),
                                         value: *input,
                                     });
                                 }
@@ -734,7 +751,7 @@ impl RCInsertion {
             for param in block.get_parameter_values() {
                 if self.needs_rc(type_info, param) && !currently_live.contains(param) {
                     new_instructions.push(OpCode::MemOp {
-                        kind: MemOp::Drop,
+                        kind:  MemOp::Drop,
                         value: *param,
                     });
                 }
@@ -767,7 +784,7 @@ impl RCInsertion {
                         .get_block_mut(source)
                         .set_terminator(Terminator::JmpIf(cond, t1, t2));
                 }
-                Terminator::Jmp(_, _) => {
+                Terminator::Jmp(..) => {
                     debug!("Will panic: {} -> {}", source.0, target.0);
                     debug!(
                         "Source live out: [{}]",
@@ -787,7 +804,8 @@ impl RCInsertion {
                     );
                     debug!("Difference: [{}]", diff.iter().map(|v| v.0).join(", "));
                     panic!(
-                        "ICE: Jmp is not expected - the value should have died in the source block."
+                        "ICE: Jmp is not expected - the value should have died in the source \
+                         block."
                     );
                 }
                 Terminator::Return(_) => {
@@ -798,7 +816,7 @@ impl RCInsertion {
             intermediate.set_terminator(Terminator::Jmp(target, vec![]));
             for value in diff {
                 intermediate.push_instruction(OpCode::MemOp {
-                    kind: MemOp::Drop,
+                    kind:  MemOp::Drop,
                     value: *value,
                 });
             }
@@ -813,7 +831,7 @@ impl RCInsertion {
     fn type_needs_rc(&self, value_type: &Type) -> bool {
         match &value_type.expr {
             TypeExpr::Ref(_) => true,
-            TypeExpr::Array(_, _) => true,
+            TypeExpr::Array(..) => true,
             TypeExpr::Slice(_) => true,
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,

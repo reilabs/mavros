@@ -14,18 +14,18 @@ use crate::compiler::ssa::{DefaultSsaAnnotator, Instruction, OpCode, SSA};
 
 #[derive(Clone, Copy)]
 pub struct AnalysisId {
-    type_id: TypeId,
-    type_name: &'static str,
-    dependencies: fn() -> Vec<AnalysisId>,
+    type_id:           TypeId,
+    type_name:         &'static str,
+    dependencies:      fn() -> Vec<AnalysisId>,
     compute_and_store: fn(&dyn Any, &mut AnalysisStore),
 }
 
 impl AnalysisId {
     pub fn of<A: Analysis<Op, Ty>, Op: Instruction, Ty: SSAType>() -> Self {
         Self {
-            type_id: TypeId::of::<A>(),
-            type_name: std::any::type_name::<A>(),
-            dependencies: <A as Analysis<Op, Ty>>::dependencies,
+            type_id:           TypeId::of::<A>(),
+            type_name:         std::any::type_name::<A>(),
+            dependencies:      <A as Analysis<Op, Ty>>::dependencies,
             compute_and_store: |ssa_any, store| {
                 if !store.contains_type(TypeId::of::<A>()) {
                     let ssa: &SSA<Op, Ty> = ssa_any
@@ -208,11 +208,11 @@ fn topo_sort(roots: Vec<AnalysisId>, store: &AnalysisStore) -> Vec<AnalysisId> {
 // ---------------------------------------------------------------------------
 
 pub struct PassManager<Op: Instruction = OpCode, Ty: SSAType = Type> {
-    passes: Vec<Box<dyn Pass<Op, Ty>>>,
-    analyses: AnalysisStore,
-    draw_cfg: bool,
+    passes:           Vec<Box<dyn Pass<Op, Ty>>>,
+    analyses:         AnalysisStore,
+    draw_cfg:         bool,
     debug_output_dir: Option<PathBuf>,
-    phase_label: String,
+    phase_label:      String,
 }
 
 impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {

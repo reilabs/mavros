@@ -95,7 +95,7 @@ impl FrameLayouter {
                 assert!(bits <= 64);
                 1
             }
-            TypeExpr::Array(_, _) => 1,  // Ptr
+            TypeExpr::Array(..) => 1,    // Ptr
             TypeExpr::Slice(_) => 1,     // Ptr
             TypeExpr::WitnessOf(_) => 1, // Ptr
             TypeExpr::Tuple(_) => 1,     // Ptr
@@ -121,17 +121,17 @@ impl FrameLayouter {
 }
 
 struct EmitterState {
-    code: Vec<bytecode::OpCode>,
+    code:            Vec<bytecode::OpCode>,
     block_entrances: HashMap<BlockId, usize>,
-    block_exits: HashMap<BlockId, usize>,
+    block_exits:     HashMap<BlockId, usize>,
 }
 
 impl EmitterState {
     fn new() -> Self {
         Self {
-            code: Vec::new(),
+            code:            Vec::new(),
             block_entrances: HashMap::new(),
-            block_exits: HashMap::new(),
+            block_exits:     HashMap::new(),
         }
     }
 
@@ -149,8 +149,8 @@ impl EmitterState {
 }
 
 struct GlobalFrameLayouter {
-    offsets: Vec<usize>,
-    sizes: Vec<usize>,
+    offsets:    Vec<usize>,
+    sizes:      Vec<usize>,
     total_size: usize,
 }
 
@@ -272,7 +272,8 @@ impl CodeGen {
         let entry = function.get_entry();
         let mut emitter = EmitterState::new();
 
-        // Entry block params need to be allocated at the beginning of the frame (after return address and return data pointer)
+        // Entry block params need to be allocated at the beginning of the frame (after
+        // return address and return data pointer)
         for (param, tp) in entry.get_parameters() {
             layouter.alloc_value(*param, tp);
         }
@@ -391,9 +392,9 @@ impl CodeGen {
         }
 
         bytecode::Function {
-            name: function.get_name().to_string(),
+            name:       function.get_name().to_string(),
             frame_size: layouter.next_free,
-            code: emitter.code,
+            code:       emitter.code,
         }
     }
 
@@ -421,16 +422,16 @@ impl CodeGen {
                         let result = layouter.alloc_field(*val);
                         emitter.push_op(bytecode::OpCode::AddField {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::AddInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            res:  result,
+                            a:    layouter.get_value(*op1),
+                            b:    layouter.get_value(*op2),
                             bits: *bits as u64,
                         });
                     }
@@ -438,8 +439,8 @@ impl CodeGen {
                         let result = layouter.alloc_ptr(*val);
                         emitter.push_op(bytecode::OpCode::AddBoxed {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for addition: {:?}", t),
@@ -454,16 +455,16 @@ impl CodeGen {
                         let result = layouter.alloc_field(*val);
                         emitter.push_op(bytecode::OpCode::SubField {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::SubInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            res:  result,
+                            a:    layouter.get_value(*op1),
+                            b:    layouter.get_value(*op2),
                             bits: *bits as u64,
                         });
                     }
@@ -479,16 +480,16 @@ impl CodeGen {
                         let result = layouter.alloc_field(*val);
                         emitter.push_op(bytecode::OpCode::DivField {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::U(_bits) => {
                         let result = layouter.alloc_u64(*val, *_bits);
                         emitter.push_op(bytecode::OpCode::DivU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::I(_) => panic!("Signed div not yet implemented"),
@@ -507,8 +508,8 @@ impl CodeGen {
                         let result = layouter.alloc_u64(*val, *_bits);
                         emitter.push_op(bytecode::OpCode::ModU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::I(_) => panic!("Signed mod not yet implemented"),
@@ -524,16 +525,16 @@ impl CodeGen {
                         let result = layouter.alloc_field(*val);
                         emitter.push_op(bytecode::OpCode::MulField {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::MulInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            res:  result,
+                            a:    layouter.get_value(*op1),
+                            b:    layouter.get_value(*op2),
                             bits: *bits as u64,
                         });
                     }
@@ -552,8 +553,8 @@ impl CodeGen {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::AndU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for bitwise and: {:?}", t),
@@ -568,8 +569,8 @@ impl CodeGen {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::OrU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for bitwise or: {:?}", t),
@@ -584,8 +585,8 @@ impl CodeGen {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::XorU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for bitwise xor: {:?}", t),
@@ -599,9 +600,9 @@ impl CodeGen {
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::ShlU64 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            res:  result,
+                            a:    layouter.get_value(*op1),
+                            b:    layouter.get_value(*op2),
                             bits: *bits as u64,
                         });
                     }
@@ -617,8 +618,8 @@ impl CodeGen {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::UshrU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for shift right: {:?}", t),
@@ -638,17 +639,17 @@ impl CodeGen {
                     match lhs_type {
                         TypeExpr::I(bits) => {
                             emitter.push_op(bytecode::OpCode::LtS64 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
+                                res:  result,
+                                a:    layouter.get_value(*op1),
+                                b:    layouter.get_value(*op2),
                                 bits: *bits as u64,
                             });
                         }
                         _ => {
                             emitter.push_op(bytecode::OpCode::LtU64 {
                                 res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
+                                a:   layouter.get_value(*op1),
+                                b:   layouter.get_value(*op2),
                             });
                         }
                     }
@@ -663,8 +664,8 @@ impl CodeGen {
                         let result = layouter.alloc_u64(*val, *bits);
                         emitter.push_op(bytecode::OpCode::EqU64 {
                             res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
+                            a:   layouter.get_value(*op1),
+                            b:   layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for comparison: {:?}", t),
@@ -678,19 +679,20 @@ impl CodeGen {
                     assert!(*to_bits <= 64);
                     let in_type = type_info.get_value_type(*op);
                     if in_type.is_field() {
-                        // TruncateFToU writes a full Field (4 limbs), so allocate Field-sized output
+                        // TruncateFToU writes a full Field (4 limbs), so allocate Field-sized
+                        // output
                         let result = layouter.alloc_field(*val);
                         emitter.push_op(bytecode::OpCode::TruncateFToU {
-                            res: result,
-                            a: layouter.get_value(*op),
+                            res:     result,
+                            a:       layouter.get_value(*op),
                             to_bits: *to_bits as u64,
                         });
                     } else {
                         let result = layouter.alloc_u64(*val, 64);
                         assert!(*from_bits <= 64);
                         emitter.push_op(bytecode::OpCode::TruncateU64 {
-                            res: result,
-                            a: layouter.get_value(*op),
+                            res:     result,
+                            a:       layouter.get_value(*op),
                             to_bits: *to_bits as u64,
                         });
                     }
@@ -709,7 +711,7 @@ impl CodeGen {
                             let tmp = layouter.alloc_temp_field();
                             emitter.push_op(bytecode::OpCode::CastU64ToField {
                                 res: tmp,
-                                a: layouter.get_value(*v),
+                                a:   layouter.get_value(*v),
                             });
                             tmp
                         } else {
@@ -717,7 +719,7 @@ impl CodeGen {
                         };
                         emitter.push_op(bytecode::OpCode::PureToWitnessRef {
                             res: layouter.alloc_ptr(*r),
-                            v: field_pos,
+                            v:   field_pos,
                         });
                         continue;
                     }
@@ -736,19 +738,19 @@ impl CodeGen {
                             emitter.push_op(bytecode::OpCode::MovFrame {
                                 target: result,
                                 source: layouter.get_value(*v),
-                                size: layouter.type_size(&l_type),
+                                size:   layouter.type_size(&l_type),
                             })
                         }
                         (TypeExpr::Field, TypeExpr::U(_) | TypeExpr::I(_)) => {
                             emitter.push_op(bytecode::OpCode::CastFieldToU64 {
                                 res: result,
-                                a: layouter.get_value(*v),
+                                a:   layouter.get_value(*v),
                             });
                         }
                         (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::Field) => {
                             emitter.push_op(bytecode::OpCode::CastU64ToField {
                                 res: result,
-                                a: layouter.get_value(*v),
+                                a:   layouter.get_value(*v),
                             });
                         }
                         _ => panic!("Unsupported cast: {:?} -> {:?}", l_type, r_type),
@@ -761,7 +763,7 @@ impl CodeGen {
                     let result = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     emitter.push_op(bytecode::OpCode::NotU64 {
                         res: result,
-                        a: layouter.get_value(*v),
+                        a:   layouter.get_value(*v),
                     });
                 }
                 ssa::OpCode::Constrain { a, b, c } => {
@@ -963,69 +965,61 @@ impl CodeGen {
                 } => {
                     // assert!(type_info.get_value_type(*r).is_array_or_slice());
                     emitter.push_op(bytecode::OpCode::IncRc {
-                        array: layouter.get_value(*r),
+                        array:  layouter.get_value(*r),
                         amount: *size as u64,
                     });
                 }
-                ssa::OpCode::AssertCmp { kind, lhs, rhs } => {
-                    match kind {
-                        ssa::CmpKind::Eq => {
-                            let lhs_type = type_info.get_value_type(*lhs);
-                            match &lhs_type.expr {
-                                TypeExpr::Field => {
-                                    emitter.push_op(bytecode::OpCode::AssertEqField {
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                    });
-                                }
-                                TypeExpr::U(_) | TypeExpr::I(_) => {
-                                    emitter.push_op(bytecode::OpCode::AssertEqU64 {
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                    });
-                                }
-                                t => panic!("Unsupported type for AssertCmp Eq in vm: {:?}", t),
+                ssa::OpCode::AssertCmp { kind, lhs, rhs } => match kind {
+                    ssa::CmpKind::Eq => {
+                        let lhs_type = type_info.get_value_type(*lhs);
+                        match &lhs_type.expr {
+                            TypeExpr::Field => {
+                                emitter.push_op(bytecode::OpCode::AssertEqField {
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
                             }
-                        }
-                        ssa::CmpKind::Lt => {
-                            let lhs_type = type_info.get_value_type(*lhs);
-                            let cmp_result = layouter.alloc_scratch(1);
-                            match &lhs_type.expr {
-                                TypeExpr::I(bits) => {
-                                    emitter.push_op(bytecode::OpCode::LtS64 {
-                                        res: cmp_result,
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                        bits: *bits as u64,
-                                    });
-                                }
-                                TypeExpr::U(_) => {
-                                    emitter.push_op(bytecode::OpCode::LtU64 {
-                                        res: cmp_result,
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                    });
-                                }
-                                t => panic!("Unsupported type for AssertCmp Lt in vm: {:?}", t),
+                            TypeExpr::U(_) | TypeExpr::I(_) => {
+                                emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
                             }
-                            let one = layouter.alloc_scratch(1);
-                            emitter.push_op(bytecode::OpCode::MovConst {
-                                res: one,
-                                val: 1,
-                            });
-                            emitter.push_op(bytecode::OpCode::AssertEqU64 {
-                                a: cmp_result,
-                                b: one,
-                            });
+                            t => panic!("Unsupported type for AssertCmp Eq in vm: {:?}", t),
                         }
                     }
-                }
+                    ssa::CmpKind::Lt => {
+                        let lhs_type = type_info.get_value_type(*lhs);
+                        let cmp_result = layouter.alloc_scratch(1);
+                        match &lhs_type.expr {
+                            TypeExpr::I(bits) => {
+                                emitter.push_op(bytecode::OpCode::LtS64 {
+                                    res:  cmp_result,
+                                    a:    layouter.get_value(*lhs),
+                                    b:    layouter.get_value(*rhs),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            TypeExpr::U(_) => {
+                                emitter.push_op(bytecode::OpCode::LtU64 {
+                                    res: cmp_result,
+                                    a:   layouter.get_value(*lhs),
+                                    b:   layouter.get_value(*rhs),
+                                });
+                            }
+                            t => panic!("Unsupported type for AssertCmp Lt in vm: {:?}", t),
+                        }
+                        let one = layouter.alloc_scratch(1);
+                        emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
+                        emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                            a: cmp_result,
+                            b: one,
+                        });
+                    }
+                },
                 ssa::OpCode::Assert { value } => {
                     let one = layouter.alloc_scratch(1);
-                    emitter.push_op(bytecode::OpCode::MovConst {
-                        res: one,
-                        val: 1,
-                    });
+                    emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
                     emitter.push_op(bytecode::OpCode::AssertEqU64 {
                         a: layouter.get_value(*value),
                         b: one,
@@ -1035,8 +1029,8 @@ impl CodeGen {
                     let tmp = layouter.alloc_scratch(4);
                     emitter.push_op(bytecode::OpCode::MulField {
                         res: tmp,
-                        a: layouter.get_value(*a),
-                        b: layouter.get_value(*b),
+                        a:   layouter.get_value(*a),
+                        b:   layouter.get_value(*b),
                     });
                     emitter.push_op(bytecode::OpCode::AssertEqField {
                         a: tmp,
@@ -1050,8 +1044,8 @@ impl CodeGen {
                     count,
                 } => {
                     emitter.push_op(bytecode::OpCode::ToBitsLe {
-                        res: layouter.alloc_value(*r, &type_info.get_value_type(*r)),
-                        val: layouter.get_value(*value),
+                        res:   layouter.alloc_value(*r, &type_info.get_value_type(*r)),
+                        val:   layouter.get_value(*value),
                         count: *count as u64,
                     });
                 }
@@ -1068,9 +1062,9 @@ impl CodeGen {
                     );
                     assert!(*c <= 32, "ToRadix byte count must be <= 32");
                     emitter.push_op(bytecode::OpCode::ToBytesBe {
-                        val: layouter.get_value(*v),
+                        val:   layouter.get_value(*v),
                         count: *c as u64,
-                        res: layouter.alloc_value(*r, &type_info.get_value_type(*r)),
+                        res:   layouter.alloc_value(*r, &type_info.get_value_type(*r)),
                     })
                 }
                 ssa::OpCode::ToRadix {
@@ -1118,16 +1112,16 @@ impl CodeGen {
                         let tmp = layouter.alloc_temp_field();
                         emitter.push_op(bytecode::OpCode::CastU64ToField {
                             res: tmp,
-                            a: layouter.get_value(*c),
+                            a:   layouter.get_value(*c),
                         });
                         tmp
                     } else {
                         layouter.get_value(*c)
                     };
                     emitter.push_op(bytecode::OpCode::MulConst {
-                        res: layouter.alloc_ptr(*r),
+                        res:   layouter.alloc_ptr(*r),
                         coeff: coeff_pos,
-                        v: layouter.get_value(*v),
+                        v:     layouter.get_value(*v),
                     });
                 }
                 ssa::OpCode::Rangecheck {
@@ -1135,7 +1129,7 @@ impl CodeGen {
                     max_bits,
                 } => {
                     emitter.push_op(bytecode::OpCode::Rangecheck {
-                        val: layouter.get_value(*val),
+                        val:      layouter.get_value(*val),
                         max_bits: *max_bits,
                     });
                 }
@@ -1149,7 +1143,7 @@ impl CodeGen {
                     assert!(results.len() == 0);
                     assert!(type_info.get_value_type(keys[0]).is_field());
                     emitter.push_op(bytecode::OpCode::Rngchk8Field {
-                        val: layouter.get_value(keys[0]),
+                        val:  layouter.get_value(keys[0]),
                         flag: layouter.get_value(*flag),
                     });
                 }
@@ -1183,7 +1177,7 @@ impl CodeGen {
                     assert!(results.len() == 0);
                     assert!(type_info.get_value_type(keys[0]).is_witness_of());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
-                        val: layouter.get_value(keys[0]),
+                        val:  layouter.get_value(keys[0]),
                         flag: layouter.get_value(*flag),
                     });
                 }
@@ -1216,10 +1210,10 @@ impl CodeGen {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 1);
                     emitter.push_op(bytecode::OpCode::SpreadLookupField {
-                        val: layouter.get_value(keys[0]),
+                        val:    layouter.get_value(keys[0]),
                         result: layouter.get_value(results[0]),
-                        flag: layouter.get_value(*flag),
-                        bits: *bits as usize,
+                        flag:   layouter.get_value(*flag),
+                        bits:   *bits as usize,
                     });
                 }
                 ssa::OpCode::DLookup {
@@ -1231,10 +1225,10 @@ impl CodeGen {
                     assert!(keys.len() == 1);
                     assert!(results.len() == 1);
                     emitter.push_op(bytecode::OpCode::DspreadLookupField {
-                        val: layouter.get_value(keys[0]),
+                        val:    layouter.get_value(keys[0]),
                         result: layouter.get_value(results[0]),
-                        flag: layouter.get_value(*flag),
-                        bits: *bits as usize,
+                        flag:   layouter.get_value(*flag),
+                        bits:   *bits as usize,
                     });
                 }
                 ssa::OpCode::Spread { result, value, .. } => {
@@ -1290,9 +1284,9 @@ impl CodeGen {
                 }
                 ssa::OpCode::InitGlobal { global, value } => {
                     emitter.push_op(bytecode::OpCode::InitGlobal {
-                        src: layouter.get_value(*value),
+                        src:           layouter.get_value(*value),
                         global_offset: global_layouter.get_offset(*global),
-                        size: global_layouter.get_size(*global),
+                        size:          global_layouter.get_size(*global),
                     });
                 }
                 ssa::OpCode::DropGlobal { global } => {
@@ -1385,7 +1379,7 @@ impl CodeGen {
                     emitter.push_op(bytecode::OpCode::Nop {});
                 }
             }
-            Terminator::JmpIf(_, _, _) => {
+            Terminator::JmpIf(..) => {
                 emitter.push_op(bytecode::OpCode::Nop {});
             }
             Terminator::Return(params) => {

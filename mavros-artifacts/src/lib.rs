@@ -96,12 +96,12 @@ impl Display for R1C {
 
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct WitnessLayout {
-    pub algebraic_size: usize,
+    pub algebraic_size:      usize,
     pub multiplicities_size: usize,
 
     pub challenges_size: usize,
 
-    pub tables_data_size: usize,
+    pub tables_data_size:  usize,
     pub lookups_data_size: usize,
 }
 
@@ -183,8 +183,8 @@ impl WitnessLayout {
 
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct ConstraintsLayout {
-    pub algebraic_size: usize,
-    pub tables_data_size: usize,
+    pub algebraic_size:    usize,
+    pub tables_data_size:  usize,
     pub lookups_data_size: usize,
 }
 
@@ -208,9 +208,9 @@ impl ConstraintsLayout {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct R1CS {
-    pub witness_layout: WitnessLayout,
+    pub witness_layout:     WitnessLayout,
     pub constraints_layout: ConstraintsLayout,
-    pub constraints: Vec<R1C>,
+    pub constraints:        Vec<R1C>,
 }
 
 impl R1CS {

@@ -114,11 +114,11 @@ impl CFGData {
 }
 
 struct CFGBuilder {
-    cfg: DiGraph<(), JumpType>,
+    cfg:           DiGraph<(), JumpType>,
     block_to_node: HashMap<BlockId, NodeIndex<u32>>,
     node_to_block: HashMap<NodeIndex<u32>, BlockId>,
-    entry_node: NodeIndex<u32>,
-    return_node: NodeIndex<u32>,
+    entry_node:    NodeIndex<u32>,
+    return_node:   NodeIndex<u32>,
 }
 
 impl CFGBuilder {
@@ -177,24 +177,24 @@ impl CFGBuilder {
         reverse_cfg.reverse();
         let reverse_cfg_data = CFGData::from_graph(reverse_cfg, self.return_node);
         CFG {
-            entry_node: self.entry_node,
-            return_node: self.return_node,
+            entry_node:    self.entry_node,
+            return_node:   self.return_node,
             block_to_node: self.block_to_node,
             node_to_block: self.node_to_block,
-            cfg: cfg_data,
-            reverse_cfg: reverse_cfg_data,
+            cfg:           cfg_data,
+            reverse_cfg:   reverse_cfg_data,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct CFG {
-    entry_node: NodeIndex<u32>,
-    return_node: NodeIndex<u32>,
+    entry_node:    NodeIndex<u32>,
+    return_node:   NodeIndex<u32>,
     block_to_node: HashMap<BlockId, NodeIndex<u32>>,
     node_to_block: HashMap<NodeIndex<u32>, BlockId>,
-    cfg: CFGData,
-    reverse_cfg: CFGData,
+    cfg:           CFGData,
+    reverse_cfg:   CFGData,
 }
 
 impl CFG {
@@ -516,7 +516,7 @@ impl CFG {
 
 #[derive(Debug, Clone)]
 pub struct CallGraph {
-    call_graph: DiGraph<(), ()>,
+    call_graph:   DiGraph<(), ()>,
     func_to_node: HashMap<FunctionId, NodeIndex<u32>>,
     node_to_func: HashMap<NodeIndex<u32>, FunctionId>,
 }
@@ -524,7 +524,7 @@ pub struct CallGraph {
 impl CallGraph {
     pub fn new() -> Self {
         CallGraph {
-            call_graph: DiGraph::new(),
+            call_graph:   DiGraph::new(),
             func_to_node: HashMap::new(),
             node_to_func: HashMap::new(),
         }
@@ -626,7 +626,7 @@ impl CallGraph {
 
 #[derive(Debug, Clone)]
 pub struct FlowAnalysis {
-    call_graph: CallGraph,
+    call_graph:        CallGraph,
     pub function_cfgs: HashMap<FunctionId, CFG>,
 }
 

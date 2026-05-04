@@ -154,8 +154,8 @@ pub fn run_compile(
     Ok(ExitCode::SUCCESS)
 }
 
-/// The main execution of the CLI utility (full pipeline). Should be called directly from the
-/// `main` function of the application.
+/// The main execution of the CLI utility (full pipeline). Should be called
+/// directly from the `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
     if args.pprint_r1cs {

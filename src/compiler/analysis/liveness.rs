@@ -15,11 +15,11 @@ pub enum InstructionPosition {
 
 pub struct InstructionPointer {
     pub position: InstructionPosition,
-    pub block: BlockId,
+    pub block:    BlockId,
 }
 
 pub struct BlockLiveness {
-    pub live_in: HashSet<ValueId>,
+    pub live_in:  HashSet<ValueId>,
     pub live_out: HashSet<ValueId>,
 }
 
@@ -74,7 +74,7 @@ impl LivenessAnalysis {
                         g.insert(*v);
                     }
                 }
-                Terminator::JmpIf(cond, _, _) => {
+                Terminator::JmpIf(cond, ..) => {
                     g.insert(*cond);
                 }
             }
@@ -107,7 +107,7 @@ impl LivenessAnalysis {
         while let Some(block_id) = queue.pop_front() {
             let visited = result.contains_key(&block_id);
             result.entry(block_id).or_insert(BlockLiveness {
-                live_in: HashSet::new(),
+                live_in:  HashSet::new(),
                 live_out: HashSet::new(),
             });
             let original_live_in = &result.get(&block_id).unwrap().live_in;
@@ -119,7 +119,7 @@ impl LivenessAnalysis {
                     &result
                         .get(&block_id)
                         .unwrap_or(&BlockLiveness {
-                            live_in: HashSet::new(),
+                            live_in:  HashSet::new(),
                             live_out: HashSet::new(),
                         })
                         .live_in,
@@ -140,7 +140,7 @@ impl LivenessAnalysis {
             result.insert(
                 block_id,
                 BlockLiveness {
-                    live_in: new_live_in,
+                    live_in:  new_live_in,
                     live_out: new_live_out,
                 },
             );

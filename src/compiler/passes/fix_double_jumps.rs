@@ -42,7 +42,7 @@ impl ValueReplacements {
                     *param = self.get_replacement(*param);
                 }
             }
-            Terminator::JmpIf(cond, _, _) => {
+            Terminator::JmpIf(cond, ..) => {
                 *cond = self.get_replacement(*cond);
             }
             Terminator::Return(vals) => {

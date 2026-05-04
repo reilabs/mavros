@@ -14,12 +14,15 @@ impl Pass for PullIntoAssert {
     fn name(&self) -> &'static str {
         "pull_into_assert"
     }
+
     fn needs(&self) -> Vec<AnalysisId> {
         vec![TypeInfo::id()]
     }
+
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<TypeInfo>());
     }
+
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id(), TypeInfo::id()]
     }
@@ -49,8 +52,7 @@ impl PullIntoAssert {
                 for instruction in block.take_instructions().into_iter() {
                     match instruction {
                         OpCode::Assert { value } => {
-                            new_instructions
-                                .extend(emit_assert(value, &defs, function_type_info));
+                            new_instructions.extend(emit_assert(value, &defs, function_type_info));
                         }
                         OpCode::AssertCmp {
                             kind: CmpKind::Eq,
@@ -97,8 +99,8 @@ fn emit_assert(
             rhs,
         }) => vec![OpCode::AssertCmp {
             kind: CmpKind::Lt,
-            lhs: *lhs,
-            rhs: *rhs,
+            lhs:  *lhs,
+            rhs:  *rhs,
         }],
 
         Some(OpCode::BinaryArithOp {

@@ -48,7 +48,7 @@ impl WitnessWriteToFresh {
                                 panic!("Expected numeric type, got {:?}", tp);
                             }
                             OpCode::FreshWitness {
-                                result: r.unwrap(),
+                                result:      r.unwrap(),
                                 result_type: tp.clone(),
                             }
                         }

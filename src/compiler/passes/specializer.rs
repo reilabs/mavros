@@ -37,7 +37,7 @@ enum ConstVal {
 struct Val(ValueId);
 
 struct SpecializationState {
-    function: HLFunction,
+    function:   HLFunction,
     const_vals: HashMap<ValueId, ConstVal>,
 }
 
@@ -192,7 +192,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::Or, _, _) => {
+            (BinaryArithOpKind::Or, ..) => {
                 let res = ctx.or(self.0, b.0);
                 Self(res)
             }
@@ -204,7 +204,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::Xor, _, _) => {
+            (BinaryArithOpKind::Xor, ..) => {
                 let res = ctx.xor(self.0, b.0);
                 Self(res)
             }
@@ -216,7 +216,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::Shl, _, _) => {
+            (BinaryArithOpKind::Shl, ..) => {
                 let res = ctx.shl(self.0, b.0);
                 Self(res)
             }
@@ -228,7 +228,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::Shr, _, _) => {
+            (BinaryArithOpKind::Shr, ..) => {
                 let res = ctx.shr(self.0, b.0);
                 Self(res)
             }
@@ -250,7 +250,13 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         }
     }
 
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, _lhs_type: &Type, ctx: &mut SpecializationState) {
+    fn assert_cmp(
+        kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        _lhs_type: &Type,
+        ctx: &mut SpecializationState,
+    ) {
         let l_const = ctx.const_vals.get(&a.0);
         let r_const = ctx.const_vals.get(&b.0);
         match kind {
@@ -765,7 +771,7 @@ impl symbolic_executor::Context<Val> for SpecializationState {
         }
         self.emit(OpCode::Guard {
             condition: condition.0,
-            inner: Box::new(new_inner),
+            inner:     Box::new(new_inner),
         });
         result_vals
     }
@@ -820,7 +826,7 @@ impl Specializer {
         let original_fn = ssa.get_function(signature.get_fun_id());
 
         let mut state = SpecializationState {
-            function: HLFunction::empty(name),
+            function:   HLFunction::empty(name),
             const_vals: HashMap::new(),
         };
 

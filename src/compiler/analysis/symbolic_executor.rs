@@ -70,10 +70,11 @@ where
 }
 
 pub trait Context<V> {
-    /// Called when a function call is encountered. If this returns Some, the function
-    /// body is skipped and the returned values are used as call results. For unconstrained
-    /// calls this MUST return Some, since unconstrained functions may contain JmpIfs on
-    /// unknown values that the symbolic executor cannot trace through.
+    /// Called when a function call is encountered. If this returns Some, the
+    /// function body is skipped and the returned values are used as call
+    /// results. For unconstrained calls this MUST return Some, since
+    /// unconstrained functions may contain JmpIfs on unknown values that
+    /// the symbolic executor cannot trace through.
     fn on_call(
         &mut self,
         func: FunctionId,
@@ -86,7 +87,8 @@ pub trait Context<V> {
     fn on_jmp(&mut self, target: BlockId, params: &mut [V], param_types: &[&Type]);
 
     // TODO it looks odd that this is the only opcode implemented here.
-    // This is the _new_ structure, so at some point we should migrate all other opcodes here.
+    // This is the _new_ structure, so at some point we should migrate all other
+    // opcodes here.
     fn lookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement lookup");
     }
@@ -107,10 +109,10 @@ pub trait Context<V> {
         panic!("ICE: backend does not implement slice_len");
     }
 
-    /// Handle a Guard instruction. Receives the inner opcode, the condition value,
-    /// all resolved inner inputs, and result types. Returns values for each result.
-    /// The implementer should nuke information on outputs and handle effectful ops
-    /// (e.g. Store → nuke ptr contents).
+    /// Handle a Guard instruction. Receives the inner opcode, the condition
+    /// value, all resolved inner inputs, and result types. Returns values
+    /// for each result. The implementer should nuke information on outputs
+    /// and handle effectful ops (e.g. Store → nuke ptr contents).
     fn on_guard(
         &mut self,
         inner: &OpCode,
@@ -446,7 +448,11 @@ impl SymbolicExecutor {
                         let v = scope[value.0 as usize].as_ref().unwrap();
                         V::assert_bool(v, ctx);
                     }
-                    crate::compiler::ssa::OpCode::AssertCmp { kind, lhs: a, rhs: b } => {
+                    crate::compiler::ssa::OpCode::AssertCmp {
+                        kind,
+                        lhs: a,
+                        rhs: b,
+                    } => {
                         let lhs_type = fn_type_info.get_value_type(*a);
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         let b = scope[b.0 as usize].as_ref().unwrap();

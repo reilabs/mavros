@@ -1,7 +1,8 @@
 //! LLSSA → LLVM Code Generation
 //!
 //! Translates LLSSA into LLVM IR, which can then be compiled to WebAssembly.
-//! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no TypeInfo needed.
+//! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no
+//! TypeInfo needed.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -53,24 +54,24 @@ fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
 
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
-    context: &'ctx Context,
-    module: Module<'ctx>,
-    builder: Builder<'ctx>,
-    value_map: HashMap<ValueId, BasicValueEnum<'ctx>>,
-    block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
-    function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
-    vm_ptr: Option<PointerValue<'ctx>>,
+    context:             &'ctx Context,
+    module:              Module<'ctx>,
+    builder:             Builder<'ctx>,
+    value_map:           HashMap<ValueId, BasicValueEnum<'ctx>>,
+    block_map:           HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
+    function_map:        HashMap<FunctionId, FunctionValue<'ctx>>,
+    vm_ptr:              Option<PointerValue<'ctx>>,
     // Runtime function declarations
-    field_mul_fn: Option<FunctionValue<'ctx>>,
-    field_add_fn: Option<FunctionValue<'ctx>>,
-    field_sub_fn: Option<FunctionValue<'ctx>>,
-    field_div_fn: Option<FunctionValue<'ctx>>,
-    malloc_fn: Option<FunctionValue<'ctx>>,
-    free_fn: Option<FunctionValue<'ctx>>,
+    field_mul_fn:        Option<FunctionValue<'ctx>>,
+    field_add_fn:        Option<FunctionValue<'ctx>>,
+    field_sub_fn:        Option<FunctionValue<'ctx>>,
+    field_div_fn:        Option<FunctionValue<'ctx>>,
+    malloc_fn:           Option<FunctionValue<'ctx>>,
+    free_fn:             Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
-    field_to_limbs_fn: Option<FunctionValue<'ctx>>,
+    field_to_limbs_fn:   Option<FunctionValue<'ctx>>,
     // Globals
-    globals: Vec<inkwell::values::GlobalValue<'ctx>>,
+    globals:             Vec<inkwell::values::GlobalValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -150,12 +151,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// The LLVM type for a field element, derived from `LLStruct::field_elem()`.
+    /// The LLVM type for a field element, derived from
+    /// `LLStruct::field_elem()`.
     fn field_llvm_type(&self) -> BasicTypeEnum<'ctx> {
         self.convert_struct_type(&LLStruct::field_elem())
     }
 
-    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::field_elem()`.
+    /// The LLVM type for raw (non-Montgomery) limbs, derived from
+    /// `LLStruct::field_elem()`.
     fn limbs_llvm_type(&self) -> BasicTypeEnum<'ctx> {
         self.convert_struct_type(&LLStruct::limbs())
     }
@@ -502,7 +505,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         let bw = lhs.get_type().get_bit_width();
                         let mask = lhs.get_type().const_int((bw - 1) as u64, false);
                         let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
-                        self.builder.build_left_shift(lhs, masked_rhs, name).unwrap()
+                        self.builder
+                            .build_left_shift(lhs, masked_rhs, name)
+                            .unwrap()
                     }
                     IntArithOp::UShr => {
                         let bw = lhs.get_type().get_bit_width();

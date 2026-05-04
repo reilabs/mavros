@@ -78,24 +78,24 @@ impl ArithmeticSimplifier {
                                             let cst = function.fresh_value();
                                             new_instructions.push(OpCode::Const {
                                                 result: cst,
-                                                value: ConstValue::U(*s, 1 << bits),
+                                                value:  ConstValue::U(*s, 1 << bits),
                                             });
                                             let r = function.fresh_value();
                                             let t = function.fresh_value();
                                             new_instructions.push(OpCode::Const {
                                                 result: t,
-                                                value: ConstValue::U(1, 1),
+                                                value:  ConstValue::U(1, 1),
                                             });
                                             new_instructions.push(OpCode::Cmp {
-                                                kind: CmpKind::Lt,
+                                                kind:   CmpKind::Lt,
                                                 result: r,
-                                                lhs: *v,
-                                                rhs: cst,
+                                                lhs:    *v,
+                                                rhs:    cst,
                                             });
                                             new_instructions.push(OpCode::AssertCmp {
                                                 kind: CmpKind::Eq,
-                                                lhs: r,
-                                                rhs: t,
+                                                lhs:  r,
+                                                rhs:  t,
                                             });
                                         }
                                         _ => panic!(

@@ -271,7 +271,8 @@ impl Types {
                 }
                 CallTarget::Dynamic(_) => {
                     panic!(
-                        "Dynamic calls should be eliminated by defunctionalization before type analysis"
+                        "Dynamic calls should be eliminated by defunctionalization before type \
+                         analysis"
                     );
                 }
             },

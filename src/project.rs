@@ -17,14 +17,15 @@ use crate::error::Error;
 use crate::lowlevel_replacement::REPLACEMENT_CRATES;
 
 pub struct Project {
-    project_root: PathBuf,
-    nargo_workspace: Workspace,
+    project_root:       PathBuf,
+    nargo_workspace:    Workspace,
     nargo_file_manager: FileManager,
     nargo_parsed_files: ParsedFiles,
 }
 
 /// Mavros stdlib extensions that get injected into the `std/` namespace.
-/// These must be added before the embedded stdlib so our modified `std/lib.nr` takes precedence.
+/// These must be added before the embedded stdlib so our modified `std/lib.nr`
+/// takes precedence.
 const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
     ("std/lib.nr", include_str!("../mavros_stdlib/lib.nr")),
     ("std/mavros.nr", include_str!("../mavros_stdlib/mavros.nr")),
