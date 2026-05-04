@@ -2159,6 +2159,8 @@ dependencies = [
  "noirc_driver",
  "noirc_errors",
  "noirc_frontend",
+ "num-bigint",
+ "num-traits",
  "petgraph 0.6.5",
  "plotters",
  "rand 0.8.5",
