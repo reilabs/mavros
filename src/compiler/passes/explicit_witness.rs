@@ -1674,7 +1674,6 @@ impl ExplicitWitness {
                 let diff_ov = b.sub(lhs_ov, rhs_ov);
                 b.constrain(flag, diff_ov, zero);
 
-                let _ = hint_result;
                 b.push(OpCode::Cast {
                     result,
                     value: result_lc,
@@ -1720,7 +1719,6 @@ impl ExplicitWitness {
                 let diff_ov = b.sub(lhs_ov, rhs_ov);
                 b.constrain(flag, diff_ov, zero);
 
-                let _ = hint_result;
                 b.push(OpCode::Cast {
                     result,
                     value: result_lc,
@@ -1797,7 +1795,6 @@ impl ExplicitWitness {
             self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
             self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
 
-            let _ = hint_result;
             result_lc
         };
 
