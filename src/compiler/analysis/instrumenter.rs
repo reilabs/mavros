@@ -533,7 +533,13 @@ impl Value {
         }
     }
 
-    fn assert_cmp(_kind: CmpKind, a: &Self, b: &Self, _lhs_type: &Type, instrumenter: &mut dyn OpInstrumenter) {
+    fn assert_cmp(
+        _kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        _lhs_type: &Type,
+        instrumenter: &mut dyn OpInstrumenter,
+    ) {
         if a.is_witness() || b.is_witness() {
             instrumenter.record_constraints(1);
         }
@@ -1308,13 +1314,18 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     }
 
     fn assert_bool(&self, instrumenter: &mut CostAnalysis) {
-        self.specialized
-            .assert_bool(instrumenter.get_specialized());
+        self.specialized.assert_bool(instrumenter.get_specialized());
         self.unspecialized
             .assert_bool(instrumenter.get_unspecialized());
     }
 
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, instrumenter: &mut CostAnalysis) {
+    fn assert_cmp(
+        kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        lhs_type: &Type,
+        instrumenter: &mut CostAnalysis,
+    ) {
         Value::assert_cmp(
             kind,
             &a.specialized,

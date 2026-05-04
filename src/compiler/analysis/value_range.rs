@@ -36,10 +36,7 @@ pub struct IntInterval {
 impl IntInterval {
     /// `(-∞, +∞)`.
     pub fn top() -> Self {
-        Self {
-            lo: None,
-            hi: None,
-        }
+        Self { lo: None, hi: None }
     }
 
     /// The unique empty interval (used as the bottom of the lattice). Any
@@ -338,11 +335,7 @@ fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
     // (which would happen for bits == 128 if we shifted u128 directly).
     let two_n = BigInt::one() << bits;
     let half = &two_n >> 1;
-    if value < half {
-        value
-    } else {
-        value - two_n
-    }
+    if value < half { value } else { value - two_n }
 }
 
 /// BN254 field modulus as a `BigInt`. Computed from ark-ff's `MODULUS`
@@ -463,10 +456,8 @@ impl ValueRangeAnalysis {
                         let mut joined: Option<IntInterval> = None;
                         for args in &pred_args {
                             if let Some(arg_id) = args.get(idx) {
-                                let arg_range = bounds
-                                    .get(arg_id)
-                                    .cloned()
-                                    .unwrap_or_else(IntInterval::top);
+                                let arg_range =
+                                    bounds.get(arg_id).cloned().unwrap_or_else(IntInterval::top);
                                 joined = Some(match joined {
                                     None => arg_range,
                                     Some(j) => j.join(&arg_range),
@@ -512,10 +503,7 @@ impl ValueRangeAnalysis {
     ) {
         use BinaryArithOpKind::*;
         let get = |bounds: &HashMap<ValueId, IntInterval>, v: ValueId| -> IntInterval {
-            bounds
-                .get(&v)
-                .cloned()
-                .unwrap_or_else(IntInterval::top)
+            bounds.get(&v).cloned().unwrap_or_else(IntInterval::top)
         };
         let cap_to_type = |result: ValueId, r: IntInterval| {
             r.intersect(&IntInterval::for_type(types.get_value_type(result)))
@@ -623,12 +611,7 @@ impl ValueRangeAnalysis {
                 result,
                 result_type,
             } => {
-                Self::overwrite(
-                    bounds,
-                    *result,
-                    IntInterval::for_type(result_type),
-                    changed,
-                );
+                Self::overwrite(bounds, *result, IntInterval::for_type(result_type), changed);
             }
 
             OpCode::ValueOf { result, value } => {
@@ -650,9 +633,7 @@ impl ValueRangeAnalysis {
                         // [a, b] → [mask − b, mask − a].
                         let mask = (BigInt::one() << *n) - BigInt::one();
                         match (&in_r.lo, &in_r.hi) {
-                            (Some(lo), Some(hi)) => {
-                                IntInterval::closed(&mask - hi, &mask - lo)
-                            }
+                            (Some(lo), Some(hi)) => IntInterval::closed(&mask - hi, &mask - lo),
                             _ => IntInterval::for_type(result_ty),
                         }
                     }
@@ -764,10 +745,7 @@ impl ValueRangeAnalysis {
             }
 
             OpCode::Select {
-                result,
-                if_t,
-                if_f,
-                ..
+                result, if_t, if_f, ..
             } => {
                 let t = get(bounds, *if_t);
                 let f = get(bounds, *if_f);

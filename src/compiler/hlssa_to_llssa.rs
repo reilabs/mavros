@@ -2163,11 +2163,7 @@ fn write_tape_entry_u64(e: &mut LLBlockEmitter<'_>, cursor_field: usize, value_u
     e.ll_store(cursor_slot, next);
 }
 
-fn write_tape_entry_field(
-    e: &mut LLBlockEmitter<'_>,
-    cursor_field: usize,
-    field_val: ValueId,
-) {
+fn write_tape_entry_field(e: &mut LLBlockEmitter<'_>, cursor_field: usize, field_val: ValueId) {
     // Same structure as `write_field_cursor` used by Constrain.
     let cursor_slot = e.witgen_vm_field_ptr(cursor_field);
     let cursor = e.ll_load(cursor_slot, LLType::Ptr);

@@ -15,6 +15,7 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            # Rust Toolchain
             (rust-bin.nightly.latest.default.override {
               extensions = [ 
                 "clippy" 
@@ -24,20 +25,27 @@
               ];
               targets = [ "wasm32-unknown-unknown" ];
             })
+
+            # Libraries
+            fontconfig
+            libffi
+            libiconv
+            libxml2
+            ncurses
+            openssl
+            zlib
+
+            # LLVM Dependencies
             llvmPackages.llvm
             llvmPackages.libclang
             llvmPackages.lld
-            pkg-config
-            openssl
-            nodejs_25
-            libffi
-            libxml2
-            ncurses
-            zlib
+
+            # Tools
+            dprint
             git
-            fontconfig
-            libiconv
             graphviz
+            nodejs_25
+            pkg-config
           ];
 
           LLVM_SYS_221_PREFIX = "${pkgs.lib.getDev llvmPackages.libllvm}";
