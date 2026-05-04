@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ark_ff::PrimeField;
 use num_bigint::{BigInt, Sign};
-use num_traits::{One, Signed, ToPrimitive, Zero};
+use num_traits::{One, Signed, Zero};
 use tracing::{Level, instrument};
 
 use crate::compiler::{
@@ -94,12 +94,18 @@ impl IntInterval {
         Self::closed(-half.clone(), half - BigInt::one())
     }
 
+    /// `[0, p − 1]` — the integer range of a Field element.
+    pub fn field_top() -> Self {
+        Self::closed(BigInt::zero(), bn254_modulus() - BigInt::one())
+    }
+
     /// Initial bound for a value of the given declared type, looking through
     /// `WitnessOf`. Non-numeric types get TOP.
     pub fn for_type(ty: &Type) -> Self {
         match &ty.strip_witness().expr {
             TypeExpr::U(n) => Self::unsigned_full(*n),
             TypeExpr::I(n) => Self::signed_full(*n),
+            TypeExpr::Field => Self::field_top(),
             _ => Self::top(),
         }
     }
@@ -199,49 +205,25 @@ impl IntInterval {
             return Self::empty();
         }
         // The four "extreme products" between endpoint pairs determine the
-        // hull: when an endpoint is ±∞, the corresponding products are ±∞ too,
-        // unless the other factor is 0.
+        // hull. `opt_mul` returns `None` when an endpoint is ±∞ (and the
+        // other factor is non-zero); below, any `None` in the candidates
+        // forces the corresponding side to ±∞ too.
         let products = [
             opt_mul(self.lo.as_ref(), other.lo.as_ref()),
             opt_mul(self.lo.as_ref(), other.hi.as_ref()),
             opt_mul(self.hi.as_ref(), other.lo.as_ref()),
             opt_mul(self.hi.as_ref(), other.hi.as_ref()),
         ];
-        let lo = products.iter().fold(None, |acc, p| match (acc, p) {
-            (None, _) => p.clone(),
-            (Some(_), None) => None,
-            (Some(a), Some(b)) => Some(if &a < b { a } else { b.clone() }),
-        });
-        // For hi, None means +∞ (a top endpoint); we want the maximum.
-        let hi = products.iter().fold(None, |acc, p| match (acc, p) {
-            (None, _) => p.clone(),
-            (Some(_), None) => None,
-            (Some(a), Some(b)) => Some(if &a > b { a } else { b.clone() }),
-        });
-        // The fold above conflates "I haven't seen anything yet" (acc = None)
-        // with "+∞ / -∞" (entry = None). Recompute cleanly:
-        Self::mul_hull(&products)
-    }
-
-    fn mul_hull(products: &[Option<BigInt>; 4]) -> Self {
-        // lo = min of all products, where None among the inputs means -∞ for
-        // the lo side and +∞ for the hi side. To distinguish, we build them
-        // separately: an input None contributes -∞ to the lo aggregation and
-        // +∞ to the hi aggregation.
-        let mut lo: Option<BigInt> = products[0].clone();
+        let mut lo = products[0].clone();
+        let mut hi = products[0].clone();
         for p in &products[1..] {
             lo = match (&lo, p) {
-                (None, _) => None,                 // -∞ stays -∞
-                (_, None) => None,                 // saw a -∞ candidate
+                (None, _) | (_, None) => None,
                 (Some(a), Some(b)) if b < a => Some(b.clone()),
                 _ => lo,
             };
-        }
-        let mut hi: Option<BigInt> = products[0].clone();
-        for p in &products[1..] {
             hi = match (&hi, p) {
-                (None, _) => None,
-                (_, None) => None,
+                (None, _) | (_, None) => None,
                 (Some(a), Some(b)) if b > a => Some(b.clone()),
                 _ => hi,
             };
@@ -342,19 +324,33 @@ fn opt_mul(a: Option<&BigInt>, b: Option<&BigInt>) -> Option<BigInt> {
 }
 
 /// Convert a `ConstValue::I(bits, encoded)` u128 bit pattern back to a
-/// signed `BigInt`. Two's-complement decode.
+/// signed `BigInt`. Two's-complement decode for any `bits ∈ [1, 128]`.
 fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
-    if bits == 0 || bits >= 128 {
-        return BigInt::from(encoded);
+    if bits == 0 {
+        return BigInt::zero();
     }
-    let sign_bit = 1u128 << (bits - 1);
-    if encoded & sign_bit == 0 {
-        BigInt::from(encoded)
+    let value = BigInt::from(encoded);
+    if bits > 128 {
+        // No upper bits to interpret; the encoding carries at most 128 bits.
+        return value;
+    }
+    // bits ∈ [1, 128]; build 2^bits and 2^(bits-1) without overflowing u128
+    // (which would happen for bits == 128 if we shifted u128 directly).
+    let two_n = BigInt::one() << bits;
+    let half = &two_n >> 1;
+    if value < half {
+        value
     } else {
-        // Negative: subtract 2^bits.
-        let two_n = BigInt::one() << bits;
-        BigInt::from(encoded) - two_n
+        value - two_n
     }
+}
+
+/// BN254 field modulus as a `BigInt`. Computed from ark-ff's `MODULUS`
+/// constant — single source of truth for the prime.
+fn bn254_modulus() -> BigInt {
+    let limbs = <Field as PrimeField>::MODULUS.0;
+    let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
+    BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }
 
 /// Convert a Field element to a `BigInt` (always non-negative, in `[0, p)`).
@@ -545,7 +541,17 @@ impl ValueRangeAnalysis {
             } => {
                 let in_r = get(bounds, *value);
                 let r = match target {
-                    CastTarget::Field => in_r,
+                    CastTarget::Field => {
+                        // A negative integer casts to its two's-complement
+                        // field encoding `p − |v|`, which doesn't preserve
+                        // the integer interpretation of the bound. Saturate
+                        // to `[0, p−1]` whenever the input may be negative.
+                        if in_r.is_non_negative() {
+                            in_r
+                        } else {
+                            IntInterval::field_top()
+                        }
+                    }
                     CastTarget::U(n) => {
                         // Source bits stay if they fit in [0, 2^n); otherwise
                         // we don't know what the wrap looks like.
@@ -576,10 +582,11 @@ impl ValueRangeAnalysis {
             } => {
                 let in_r = get(bounds, *value);
                 // Truncate semantics: result = value mod 2^to_bits, in [0, 2^to_bits).
-                // If the input is already in that range, preserve. Otherwise
-                // we lose precision and fall back to the full unsigned range.
+                // If the input is already inside that range, preserve it; otherwise
+                // saturate to the full unsigned range. (`in_r ⊆ cap` already
+                // implies non-negativity since `cap.lo == 0`.)
                 let cap = IntInterval::unsigned_full(*to_bits);
-                let r = if cap.intersect(&in_r) == in_r && in_r.is_non_negative() {
+                let r = if cap.intersect(&in_r) == in_r {
                     in_r
                 } else {
                     cap
@@ -630,16 +637,38 @@ impl ValueRangeAnalysis {
             }
 
             OpCode::Cmp { result, .. } => {
+                // Both Eq and Lt yield a u1 boolean regardless of operand types.
                 Self::overwrite(bounds, *result, IntInterval::unsigned_full(1), changed);
             }
 
-            OpCode::Not { result, .. } => {
-                Self::overwrite(
-                    bounds,
-                    *result,
-                    IntInterval::for_type(types.get_value_type(*result)),
-                    changed,
-                );
+            OpCode::Not { result, value } => {
+                let in_r = get(bounds, *value);
+                let result_ty = types.get_value_type(*result);
+                let r = match &result_ty.strip_witness().expr {
+                    TypeExpr::U(n) => {
+                        // Unsigned bitwise NOT: !x = (2^n − 1) − x.
+                        // [a, b] → [mask − b, mask − a].
+                        let mask = (BigInt::one() << *n) - BigInt::one();
+                        match (&in_r.lo, &in_r.hi) {
+                            (Some(lo), Some(hi)) => {
+                                IntInterval::closed(&mask - hi, &mask - lo)
+                            }
+                            _ => IntInterval::for_type(result_ty),
+                        }
+                    }
+                    TypeExpr::I(_) => {
+                        // Signed two's-complement NOT: !x = −x − 1.
+                        // [a, b] → [−b − 1, −a − 1].
+                        match (&in_r.lo, &in_r.hi) {
+                            (Some(lo), Some(hi)) => {
+                                IntInterval::closed(-hi - BigInt::one(), -lo - BigInt::one())
+                            }
+                            _ => IntInterval::for_type(result_ty),
+                        }
+                    }
+                    _ => IntInterval::for_type(result_ty),
+                };
+                Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }
 
             OpCode::BinaryArithOp {
@@ -656,10 +685,16 @@ impl ValueRangeAnalysis {
                     Sub => l.sub(&r_in),
                     Mul => l.mul(&r_in),
                     Div => {
-                        // Only useful if rhs is a positive constant.
-                        if let (Some(d_lo), Some(d_hi)) = (&r_in.lo, &r_in.hi) {
-                            if d_lo == d_hi && d_lo.is_positive() {
-                                l.div_const_pos(d_lo)
+                        // Signed div in Rust/Noir is truncated, not floored;
+                        // they only agree when the dividend is non-negative.
+                        // (Unsigned types satisfy this by construction.)
+                        if l.is_non_negative() {
+                            if let (Some(d_lo), Some(d_hi)) = (&r_in.lo, &r_in.hi) {
+                                if d_lo == d_hi && d_lo.is_positive() {
+                                    l.div_const_pos(d_lo)
+                                } else {
+                                    IntInterval::for_type(result_ty)
+                                }
                             } else {
                                 IntInterval::for_type(result_ty)
                             }
@@ -668,12 +703,20 @@ impl ValueRangeAnalysis {
                         }
                     }
                     Mod => {
-                        // result is in [0, |rhs| - 1], assuming Noir semantics.
-                        match (&r_in.lo, &r_in.hi) {
-                            (Some(lo), Some(hi)) if lo.is_positive() => {
-                                IntInterval::closed(BigInt::zero(), hi - BigInt::one())
+                        // Signed mod in Rust/Noir takes the dividend's sign, so
+                        // a negative dividend can produce a negative result. Only
+                        // narrow when the dividend is provably non-negative — this
+                        // is automatic for unsigned types and provable for
+                        // bound-narrowed signed values.
+                        if l.is_non_negative() {
+                            match (&r_in.lo, &r_in.hi) {
+                                (Some(lo), Some(hi)) if lo.is_positive() => {
+                                    IntInterval::closed(BigInt::zero(), hi - BigInt::one())
+                                }
+                                _ => IntInterval::for_type(result_ty),
                             }
-                            _ => IntInterval::for_type(result_ty),
+                        } else {
+                            IntInterval::for_type(result_ty)
                         }
                     }
                     And | Or | Xor => {
@@ -760,11 +803,6 @@ fn next_pow2_minus_one(m: &BigInt) -> BigInt {
         (BigInt::one() << (bits + 1)) - BigInt::one()
     }
 }
-
-// `ToPrimitive` / `Sign` are imported but only used inside helpers; keep them
-// for completeness even if some are currently unreferenced.
-#[allow(dead_code)]
-fn _suppress_unused_imports(_: &dyn ToPrimitive, _: Sign) {}
 
 impl Analysis for ValueRanges {
     fn dependencies() -> Vec<AnalysisId> {
