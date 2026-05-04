@@ -676,30 +676,33 @@ impl ValueRangeAnalysis {
                             _ => IntInterval::for_type(result_ty),
                         }
                     }
-                    And => {
-                        // Result fits in the narrower of the two operand widths.
-                        let l_hi = l.hi.clone().unwrap_or_else(|| {
-                            type_unsigned_max(result_ty).unwrap_or_else(|| BigInt::from(0))
-                        });
-                        let r_hi = r_in.hi.clone().unwrap_or_else(|| {
-                            type_unsigned_max(result_ty).unwrap_or_else(|| BigInt::from(0))
-                        });
-                        let cap = if l_hi <= r_hi { l_hi } else { r_hi };
-                        IntInterval::closed(BigInt::zero(), cap)
-                    }
-                    Or | Xor => {
-                        // result <= next_pow2(max(l.hi, r.hi)) - 1.
-                        match (&l.hi, &r_in.hi) {
-                            (Some(lh), Some(rh)) => {
-                                let m = if lh >= rh { lh.clone() } else { rh.clone() };
-                                if m.is_negative() {
-                                    IntInterval::for_type(result_ty)
-                                } else {
-                                    let cap = next_pow2_minus_one(&m);
-                                    IntInterval::closed(BigInt::zero(), cap)
-                                }
+                    And | Or | Xor => {
+                        // Bitwise ops on two's-complement signed values can
+                        // produce negative results when the sign bits of the
+                        // operands disagree (or both are 1, for AND). The
+                        // tight bounds below assume both operands are
+                        // non-negative; otherwise we fall back to the
+                        // result's full type range.
+                        if l.is_non_negative() && r_in.is_non_negative() {
+                            match (&l.hi, &r_in.hi) {
+                                (Some(lh), Some(rh)) => match kind {
+                                    And => {
+                                        // result ∈ [0, min(l.hi, r.hi)]
+                                        let cap = if lh <= rh { lh.clone() } else { rh.clone() };
+                                        IntInterval::closed(BigInt::zero(), cap)
+                                    }
+                                    Or | Xor => {
+                                        // result ∈ [0, next_pow2(max(l.hi, r.hi)) − 1]
+                                        let m = if lh >= rh { lh.clone() } else { rh.clone() };
+                                        let cap = next_pow2_minus_one(&m);
+                                        IntInterval::closed(BigInt::zero(), cap)
+                                    }
+                                    _ => unreachable!(),
+                                },
+                                _ => IntInterval::for_type(result_ty),
                             }
-                            _ => IntInterval::for_type(result_ty),
+                        } else {
+                            IntInterval::for_type(result_ty)
                         }
                     }
                     Shl | Shr => IntInterval::for_type(result_ty),
@@ -755,13 +758,6 @@ fn next_pow2_minus_one(m: &BigInt) -> BigInt {
         candidate
     } else {
         (BigInt::one() << (bits + 1)) - BigInt::one()
-    }
-}
-
-fn type_unsigned_max(ty: &Type) -> Option<BigInt> {
-    match &ty.strip_witness().expr {
-        TypeExpr::U(n) => Some((BigInt::one() << *n) - BigInt::one()),
-        _ => None,
     }
 }
 
