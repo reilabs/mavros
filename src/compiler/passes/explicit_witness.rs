@@ -23,8 +23,7 @@ use num_traits::{One, Signed};
 
 /// Number of bits needed to represent every value in the interval as a
 /// non-negative integer. Returns `None` if the interval may contain a negative
-/// value or has no upper bound — in that case the analyzer can't tell us how
-/// wide the byte decomposition needs to be.
+/// value or has no upper bound.
 fn value_range_unsigned_bit_width(r: &IntInterval) -> Option<usize> {
     let lo = r.lo.as_ref()?;
     let hi = r.hi.as_ref()?;
@@ -49,9 +48,8 @@ fn narrow_rangecheck_width(value_range: &IntInterval, default_bits: usize) -> us
     byte_aligned.min(default_bits)
 }
 
-/// Bound on `q` for `a / b` with `b` strictly positive. Returns the analyzer's
-/// derived bound, or `None` if we can't say anything (e.g. divisor's lower
-/// bound is 0).
+/// Bound on `q` for `a / b` with `b` strictly positive. Returns TOP if we
+/// can't say anything (e.g. divisor's lower bound is 0).
 fn quotient_bound(a_range: &IntInterval, b_range: &IntInterval) -> IntInterval {
     let (Some(a_hi), Some(b_lo)) = (a_range.hi.as_ref(), b_range.lo.as_ref()) else {
         return IntInterval::top();
@@ -72,21 +70,6 @@ fn remainder_bound(b_range: &IntInterval) -> IntInterval {
         return IntInterval::top();
     }
     IntInterval::closed(BigInt::from(0), b_hi - BigInt::one())
-}
-
-/// Byte-aligned width sufficient to hold every value in `r`'s range as its
-/// non-negative absolute value. Used for rangechecks on differences whose
-/// magnitude (not signed value) is what we're proving.
-fn abs_max_byte_width(r: &IntInterval, default_bits: usize) -> usize {
-    let (Some(lo), Some(hi)) = (r.lo.as_ref(), r.hi.as_ref()) else {
-        return default_bits;
-    };
-    let m = lo.abs().max(hi.abs());
-    if m.bits() == 0 {
-        return 1;
-    }
-    let byte_aligned = (((m.bits() as usize) + 7) / 8) * 8;
-    byte_aligned.min(default_bits)
 }
 
 pub struct ExplicitWitness {}
@@ -173,18 +156,7 @@ impl ExplicitWitness {
                             _ => unreachable!(),
                         };
                         let one = b.field_const(Field::ONE);
-                        // For Add: result range is l+r (non-negative), can narrow.
-                        // For Sub: result range may go negative (field wrap); the helper
-                        // returns the default width when lo is negative, so we stay safe.
-                        let l_range = function_value_ranges.get(l);
-                        let r_range = function_value_ranges.get(r);
-                        let result_range = match kind {
-                            BinaryArithOpKind::Add => l_range.add(&r_range),
-                            BinaryArithOpKind::Sub => l_range.sub(&r_range),
-                            _ => unreachable!(),
-                        };
-                        let rc_bits = narrow_rangecheck_width(&result_range, bits);
-                        self.gen_witness_rangecheck_bits(b, arith_result, rc_bits, one);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, one);
                         b.push(OpCode::Cast {
                             result,
                             value: arith_result,
@@ -326,11 +298,7 @@ impl ExplicitWitness {
                             b.mul(l_field, r_field)
                         };
                         let one = b.field_const(Field::ONE);
-                        let l_range = function_value_ranges.get(l);
-                        let r_range = function_value_ranges.get(r);
-                        let result_range = l_range.mul(&r_range);
-                        let rc_bits = narrow_rangecheck_width(&result_range, bits);
-                        self.gen_witness_rangecheck_bits(b, arith_result, rc_bits, one);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, one);
                         b.push(OpCode::Cast {
                             result: res,
                             value: arith_result,
@@ -823,10 +791,7 @@ impl ExplicitWitness {
                     } else {
                         b.cast_to_field(value)
                     };
-                    let value_range = function_value_ranges.get(value);
-                    self.gen_witness_truncate(
-                        b, value_field, to_bits, one, result, &value_range,
-                    );
+                    self.gen_witness_truncate(b, value_field, to_bits, one, result);
                 }
             }
             OpCode::SExt {
@@ -944,9 +909,7 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let one = b.field_const(Field::from(1));
-                    let value_range = function_value_ranges.get(value);
-                    let rc_bits = narrow_rangecheck_width(&value_range, max_bits);
-                    self.gen_witness_rangecheck_bits(b, value, rc_bits, one);
+                    self.gen_witness_rangecheck_bits(b, value, max_bits, one);
                 }
             }
             OpCode::ReadGlobal {
@@ -1127,8 +1090,7 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(condition)
                 };
-                let value_range = function_value_ranges.get(value);
-                self.gen_witness_truncate(b, value, to_bits, cond_field, result, &value_range);
+                self.gen_witness_truncate(b, value, to_bits, cond_field, result);
             }
             OpCode::SExt {
                 result,
@@ -1172,15 +1134,7 @@ impl ExplicitWitness {
                             BinaryArithOpKind::Sub => b.sub(l_field, r_field),
                             _ => unreachable!(),
                         };
-                        let l_range = function_value_ranges.get(l);
-                        let r_range = function_value_ranges.get(r);
-                        let result_range = match kind {
-                            BinaryArithOpKind::Add => l_range.add(&r_range),
-                            BinaryArithOpKind::Sub => l_range.sub(&r_range),
-                            _ => unreachable!(),
-                        };
-                        let rc_bits = narrow_rangecheck_width(&result_range, bits);
-                        self.gen_witness_rangecheck_bits(b, arith_result, rc_bits, cond_field);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, cond_field);
                         b.push(OpCode::Cast {
                             result,
                             value: arith_result,
@@ -1228,11 +1182,7 @@ impl ExplicitWitness {
                         } else {
                             b.mul(l_field, r_field)
                         };
-                        let l_range = function_value_ranges.get(l);
-                        let r_range = function_value_ranges.get(r);
-                        let result_range = l_range.mul(&r_range);
-                        let rc_bits = narrow_rangecheck_width(&result_range, bits);
-                        self.gen_witness_rangecheck_bits(b, arith_result, rc_bits, cond_field);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, cond_field);
                         b.push(OpCode::Cast {
                             result: res,
                             value: arith_result,
@@ -1341,9 +1291,7 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(condition)
                 };
-                let value_range = function_value_ranges.get(value);
-                let rc_bits = narrow_rangecheck_width(&value_range, max_bits);
-                self.gen_witness_rangecheck_bits(b, value, rc_bits, cond_field);
+                self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
             }
             inner => {
                 panic!("unrecognized op inside Guard: {:?}", inner);
@@ -1371,38 +1319,8 @@ impl ExplicitWitness {
         to_bits: usize,
         flag: ValueId,
         result: ValueId,
-        value_range: &IntInterval,
     ) {
         assert!(to_bits <= 256);
-
-        // Tier 1: value already fits in `to_bits`, so `value mod 2^to_bits = value`.
-        // Emit a no-op cast and let downstream consumers see `value` directly.
-        if value_range.fits_in_unsigned_bits(to_bits) {
-            b.push(OpCode::Cast {
-                result,
-                value,
-                target: CastTarget::Nop,
-            });
-            return;
-        }
-
-        // Tier 2: value provably fits in `bound_bits ≤ 248` bits → its byte
-        // decomposition is unique below `256^m < p`, so we can skip the
-        // canonical-form check. Cost: m byte rangechecks (vs 32 + 32 lookups
-        // for the canonical path).
-        if let Some(bound_bits) = value_range_unsigned_bit_width(value_range) {
-            if bound_bits <= 248 {
-                let m_from_bound = (bound_bits + 7) / 8;
-                // Need at least enough bytes to cover the truncation output.
-                let m_from_to_bits = (to_bits + 7) / 8;
-                let m = m_from_bound.max(m_from_to_bits).max(1);
-                self.gen_witness_truncate_short(b, value, to_bits, flag, result, m);
-                return;
-            }
-        }
-
-        // Tier 3: value could be a full-width Field element. Use the canonical
-        // form check.
 
         // BN254 modulus: p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
         // modulusHi = upper 128 bits
@@ -1518,78 +1436,6 @@ impl ExplicitWitness {
             let shifted = b.mul(trunc_val, two_to_8);
             if i == 31 {
                 // Last iteration: use the caller's result ValueId
-                b.push(OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Add,
-                    result,
-                    lhs: shifted,
-                    rhs: elem,
-                });
-            } else {
-                trunc_val = b.add(shifted, elem);
-            }
-        }
-    }
-
-    /// Truncate when the analyzer has proven `value` fits in `m` bytes for
-    /// `m ≤ 31` (so `256^m < p`). The byte decomposition is automatically
-    /// canonical — no modulus comparison needed.
-    fn gen_witness_truncate_short(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        to_bits: usize,
-        flag: ValueId,
-        result: ValueId,
-        m: usize,
-    ) {
-        debug_assert!(m >= 1 && m <= 31);
-        let two_to_8 = b.field_const(Field::from(256u128));
-        let zero = b.field_const(Field::ZERO);
-
-        // Decompose value into m bytes (big-endian).
-        let pure_value = b.value_of(value);
-        let bytes_arr = b.fresh_value();
-        b.push(OpCode::ToRadix {
-            result: bytes_arr,
-            value: pure_value,
-            radix: Radix::Bytes,
-            endianness: Endianness::Big,
-            count: m,
-        });
-
-        // Witness and rangecheck the upper m-1 bytes; derive the LSB byte
-        // from `value − partial * 256` so the reconstruction is implicit.
-        let mut bytes = Vec::with_capacity(m);
-        let mut partial = zero;
-        for i in 0..m - 1 {
-            let idx = b.u_const(32, i as u128);
-            let byte = b.array_get(bytes_arr, idx);
-            let byte_field = b.cast_to_field(byte);
-            let byte_wit = b.write_witness(byte_field);
-            b.lookup_rngchk_8(byte_wit, flag);
-            bytes.push(byte_wit);
-
-            let shifted = b.mul(partial, two_to_8);
-            partial = b.add(shifted, byte_wit);
-        }
-        let partial_shifted = b.mul(partial, two_to_8);
-        let lsb = b.sub(value, partial_shifted);
-        b.lookup_rngchk_8(lsb, flag);
-        bytes.push(lsb);
-
-        // Recover the truncated value from the bottom bytes.
-        let full_bytes = to_bits / 8;
-        let partial_bits = to_bits % 8;
-        let start = m - full_bytes - if partial_bits > 0 { 1 } else { 0 };
-        let mut trunc_val = zero;
-        for i in start..m {
-            let elem = if i == start && partial_bits > 0 {
-                self.split_partial_byte(b, bytes[i], partial_bits, flag)
-            } else {
-                bytes[i]
-            };
-            let shifted = b.mul(trunc_val, two_to_8);
-            if i == m - 1 {
                 b.push(OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Add,
                     result,
@@ -1772,12 +1618,6 @@ impl ExplicitWitness {
         let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
         b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
-        // Width of |lhs - rhs|, byte-rounded. Tight when both operands are
-        // bounded narrowly (e.g. u8 widened to i64): |diff| ≤ 255 → 8-bit
-        // rangecheck instead of 64.
-        let diff_range = l_range.sub(r_range);
-        let diff_bits = abs_max_byte_width(&diff_range, s);
-
         if is_signed {
             let always_flag = b.field_const(Field::ONE);
 
@@ -1795,14 +1635,14 @@ impl ExplicitWitness {
             let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
             let signs_same = b.sub(one, signs_differ);
 
-            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, diff_bits, signs_same);
+            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, signs_same);
 
             let zero = b.field_const(Field::ZERO);
             let diff_r_sa = b.sub(result_field, sign_a);
             b.constrain(signs_differ, diff_r_sa, zero);
         } else {
             let rc_flag = b.field_const(Field::from(1));
-            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, diff_bits, rc_flag);
+            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, rc_flag);
         }
     }
 
@@ -1946,12 +1786,7 @@ impl ExplicitWitness {
                 let carry_shifted = b.mul(carry_wit, two_n);
                 let result_lc = b.sub(raw_sum, carry_shifted);
 
-                // Narrow result rangecheck when the analyzer proves the integer
-                // result fits in fewer bytes. A malicious carry-flip would push
-                // result_lc into a huge value; any narrower-than-bits rangecheck
-                // still catches that.
-                let result_rc_bits = narrow_rangecheck_width(&result_range, bits);
-                self.gen_witness_rangecheck_bits(b, result_lc, result_rc_bits, flag);
+                self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
                 self.gen_witness_rangecheck_bits(b, carry_wit, 1, flag);
 
                 // Extract sign bit of result for overflow check (skipped when
@@ -1991,12 +1826,7 @@ impl ExplicitWitness {
                 let borrow_shifted = b.mul(borrow_wit, two_n);
                 let result_lc = b.sub(lhs_full, borrow_shifted);
 
-                // Narrow only when result_range proves non-negative: the honest
-                // result_lc then equals l - r and fits in result_range.hi bytes.
-                // (When result_range is negative or straddles zero, the honest
-                // result lives near 2^n and we need the full width.)
-                let result_rc_bits = narrow_rangecheck_width(&result_range, bits);
-                self.gen_witness_rangecheck_bits(b, result_lc, result_rc_bits, flag);
+                self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
                 self.gen_witness_rangecheck_bits(b, borrow_wit, 1, flag);
 
                 // Extract sign bit of result for overflow check (skipped when
@@ -2056,42 +1886,12 @@ impl ExplicitWitness {
         let zero = b.field_const(Field::ZERO);
 
         // Extract sign bits of inputs (short-circuited when range proves non-negative).
-        // Integer bound on the product. Interval arithmetic handles both
-        // non-negative and mixed-sign cases.
-        let result_range = l_range.mul(r_range);
-        let result_rc_bits = narrow_rangecheck_width(&result_range, bits);
-
-        // Tier A: when both operands and the product all fit in non-negative
-        // i_n (their integer values are in [0, 2^(n-1))), the modular `q`
-        // witness is always zero, both input sign bits are zero, and the
-        // overflow check is a tautology. Skip everything and emit a single
-        // multiplication constraint plus the result rangecheck.
-        if l_range.is_non_negative_in_signed(bits)
-            && r_range.is_non_negative_in_signed(bits)
-            && result_range.is_non_negative_in_signed(bits)
-        {
-            let result_wit = if l_taint && r_taint {
-                let l_pure = b.value_of(l_field);
-                let r_pure = b.value_of(r_field);
-                let prod_hint = b.mul(l_pure, r_pure);
-                let result_wit = b.write_witness(prod_hint);
-                b.constrain(l_field, r_field, result_wit);
-                result_wit
-            } else {
-                // One operand is pure → product is linear; emit as LC.
-                b.mul(l_field, r_field)
-            };
-            self.gen_witness_rangecheck_bits(b, result_wit, result_rc_bits, flag);
-            b.push(OpCode::Cast {
-                result,
-                value: result_wit,
-                target: CastTarget::I(bits),
-            });
-            return;
-        }
-
         let sign_a = self.extract_sign_bit(b, l_field, bits, flag, l_taint, l_range);
         let sign_b = self.extract_sign_bit(b, r_field, bits, flag, r_taint, r_range);
+
+        // The product's integer bound: interval arithmetic gives the right
+        // result whether the operands are non-negative or possibly mixed-sign.
+        let result_range = l_range.mul(r_range);
 
         let result_wit = if l_taint && r_taint {
             // Non-linear: compute hint from pure values
@@ -2105,7 +1905,7 @@ impl ExplicitWitness {
             let result_wit = b.write_witness(hint_result);
             let q_wit = b.write_witness(hint_q);
 
-            self.gen_witness_rangecheck_bits(b, result_wit, result_rc_bits, flag);
+            self.gen_witness_rangecheck_bits(b, result_wit, bits, flag);
             self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
 
             // Constrain: l * r = result + q * 2^n
@@ -2129,7 +1929,7 @@ impl ExplicitWitness {
             let q_shifted = b.mul(q_wit, two_n);
             let result_lc = b.sub(raw_product, q_shifted);
 
-            self.gen_witness_rangecheck_bits(b, result_lc, result_rc_bits, flag);
+            self.gen_witness_rangecheck_bits(b, result_lc, bits, flag);
             self.gen_witness_rangecheck_bits(b, q_wit, bits, flag);
 
             result_lc
