@@ -465,6 +465,7 @@ fn lower_function(
         let block = function.get_block(block_id);
         let ll_block_id = block_map[&block_id];
 
+        // Create a BlockEmitter for this block
         let mut emitter = LLBlockEmitter::new(&mut ll_func, ll_block_id);
 
         // Lower instructions
@@ -1175,6 +1176,12 @@ fn integer_width(ty: &Type) -> u32 {
     }
 }
 
+/// Lower an integer shift with Noir's defined wrap-by-width semantics:
+/// `lhs << rhs` is `lhs << (rhs % width)`. HLSSA passes the un-wrapped RHS,
+/// and the LLSSA `Shl`/`UShr` ops are undefined when `rhs >= width`, so the
+/// modulo must be inserted here. Without it, programs that shift by a
+/// dynamic amount `>= width` (which Noir defines and which Spread/Unspread
+/// rotation patterns can produce) silently miscompile.
 fn lower_wrapping_shift(
     e: &mut LLBlockEmitter<'_>,
     op: IntArithOp,
@@ -1226,6 +1233,12 @@ fn truncate_to_width(
     }
 }
 
+/// Lower a Spread bit-interleave inline as SSA bit ops. Used both for
+/// `OpCode::Spread` (where any input width up to 64 is valid) and inside
+/// the `__spread_N_lookup` / `emit_spread_ad_init_body` helpers (where the
+/// caller separately enforces `bits <= 16` as required by the LogUp table).
+/// The 64-bit ceiling here is just the largest input that doubles within a
+/// representable integer type; it is not the lookup-helper limit.
 fn lower_spread(
     e: &mut LLBlockEmitter<'_>,
     value: ValueId,
@@ -2521,10 +2534,11 @@ fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunct
         let flag_u64 = flag_l0;
 
         let zero_i64 = e.int_const(64, 0);
-        let table_len_i64 = e.int_const(64, length as u64);
-        let in_range = e.int_ult(key, table_len_i64);
-        assert(&mut e, in_range);
-        for high in [key_l1, key_l2, key_l3, flag_l1, flag_l2, flag_l3] {
+        // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
+        // `key`'s high limbs and `key < length` are validated only when
+        // `flag != 0` (see post-merge tape emission below), matching the VM's
+        // `forward_kv_lookup_emit` shape and `__rngchk_8`.
+        for high in [flag_l1, flag_l2, flag_l3] {
             let ok = e.int_eq(high, zero_i64);
             assert(&mut e, ok);
         }
@@ -2620,18 +2634,47 @@ fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunct
         let mults_base = merge[0];
         let table_idx_i32 = merge[1];
 
-        let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
-        let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
-        let old_low = e.ll_load(low_ptr, LLType::i64());
-        let new_low = e.int_add(old_low, flag_u64);
-        e.ll_store(low_ptr, new_low);
-
         let table_id = e.zext(table_idx_i32, 64);
+
+        // Entry 1 (x-constraint): always (table_id, result_field, 0).
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
         write_tape_entry_field(&mut e, LLStruct::WITGEN_VM_LOOKUPS_B, result_field);
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, zero_i64);
+
+        // Entry 2 (y-constraint): always (table_id, ?, flag_u64).
+        // For lookups_b: flag=0 writes full Field (Montgomery limbs);
+        // flag!=0 writes u64 key. Multiplicities only get bumped (and
+        // key<length validated) for flag!=0. Mirrors VM's
+        // `forward_kv_lookup_emit` so Phase 2 reads consistently for
+        // both backends.
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
-        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
+        let flag_zero = e.int_eq(flag_u64, zero_i64);
+        e.build_if_else(
+            flag_zero,
+            vec![],
+            |e| {
+                write_tape_entry_field(e, LLStruct::WITGEN_VM_LOOKUPS_B, key_field);
+                vec![]
+            },
+            |e| {
+                // Validate key < length, all key high limbs zero.
+                let table_len_i64 = e.int_const(64, length as u64);
+                let in_range = e.int_ult(key, table_len_i64);
+                assert(e, in_range);
+                for high in [key_l1, key_l2, key_l3] {
+                    let ok = e.int_eq(high, zero_i64);
+                    assert(e, ok);
+                }
+                // Bump: multiplicities[key].low_u64 += flag_u64.
+                let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
+                let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
+                let old_low = e.ll_load(low_ptr, LLType::i64());
+                let new_low = e.int_add(old_low, flag_u64);
+                e.ll_store(low_ptr, new_low);
+                write_tape_entry_u64(e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
+                vec![]
+            },
+        );
         write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, flag_u64);
 
         e.terminate_return(vec![]);
