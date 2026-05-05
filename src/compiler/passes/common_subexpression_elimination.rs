@@ -199,14 +199,8 @@ impl Expr {
         Self::SExt(Box::new(self.clone()), from_bits, to_bits)
     }
 
-    /// `ValueOf(ValueOf(x)) → ValueOf(x)`.
-    /// `ValueOf(Witness(h)) → h`.
     pub fn value_of(&self) -> Self {
-        match self {
-            Self::ValueOf(_) => self.clone(),
-            Self::Witness(hint) => (**hint).clone(),
-            _ => Self::ValueOf(Box::new(self.clone())),
-        }
+        Self::ValueOf(Box::new(self.clone()))
     }
 
     pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
@@ -217,14 +211,7 @@ impl Expr {
         Self::BitsOf(Box::new(self.clone()), endianness, count)
     }
 
-    /// `Witness(ValueOf(x)) → x`. Requires hint chains in `explicit_witness`
-    /// gadgets to use `value_of` only at gadget-input boundaries, so the
-    /// collapsed expression contains no witness-typed compute that R1CS gen
-    /// can't evaluate.
     pub fn witness(&self) -> Self {
-        if let Self::ValueOf(inner) = self {
-            return (**inner).clone();
-        }
         Self::Witness(Box::new(self.clone()))
     }
 }
