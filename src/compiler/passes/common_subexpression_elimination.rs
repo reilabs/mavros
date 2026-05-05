@@ -42,27 +42,14 @@ enum Expr {
     Truncate(Box<Expr>, usize /* to_bits */, usize /* from_bits */),
     SExt(Box<Expr>, usize /* from_bits */, usize /* to_bits */),
     ValueOf(Box<Expr>),
-    /// Byte decomposition of a Field-typed expression. The whole array result;
-    /// element accesses are represented via `ArrayGet`. Endianness and count
-    /// are part of the key, so two decompositions only merge when they agree.
     BytesOf(Box<Expr>, Endianness, usize /* count */),
     BitsOf(Box<Expr>, Endianness, usize /* count */),
-    /// Witness slot whose hint is `expr`. Two non-pinned `write_witness` ops
-    /// with the same hint expression resolve to the same slot under CSE.
-    /// (Pinned writes and `FreshWitness` aren't given an `Expr` at all — they
-    /// fall back to the default `Expr::Variable(value_id)` keyed by their
-    /// unique result ValueId, which never collides.)
     Witness(Box<Expr>),
 }
 
-/// Side-effect keys for opcodes that don't produce values but do emit
-/// constraints — duplicates of these are redundant and can be dropped.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Effect {
-    /// `Rangecheck { value, max_bits }` — high-level rangecheck.
     Rangecheck(Expr, usize),
-    /// `Lookup { target: Rangecheck(8), keys: [k], flag }` — the byte-lookup
-    /// constraint. Duplicates with the same key + flag are redundant.
     ByteLookup(Expr, Expr),
 }
 
@@ -92,9 +79,7 @@ impl Expr {
         }
     }
 
-    /// Pure normalization: flatten nested Adds and sort for a canonical form.
-    /// Algebraic folds (`x + 0 → x`) live in the simplifier pass — by the time
-    /// we hash for CSE, those have already fired.
+    /// Flatten nested Adds and sort for a canonical form.
     pub fn add(&self, other: &Self) -> Self {
         let mut adds: Vec<Self> = self
             .get_adds()
@@ -214,13 +199,8 @@ impl Expr {
         Self::SExt(Box::new(self.clone()), from_bits, to_bits)
     }
 
-    /// `ValueOf(ValueOf(x)) → ValueOf(x)` (idempotent).
-    /// `ValueOf(Witness(h)) → h` (witgen identity).
-    ///
-    /// Lives in CSE rather than the simplifier because it doesn't introduce
-    /// new opcodes — the fold replaces the Expr key for the ValueOf result
-    /// with the inner expression's key, letting CSE dedup it against any
-    /// existing definition of that expression.
+    /// `ValueOf(ValueOf(x)) → ValueOf(x)`.
+    /// `ValueOf(Witness(h)) → h`.
     pub fn value_of(&self) -> Self {
         match self {
             Self::ValueOf(_) => self.clone(),
@@ -237,12 +217,10 @@ impl Expr {
         Self::BitsOf(Box::new(self.clone()), endianness, count)
     }
 
-    /// `Witness(ValueOf(x)) → x`. Dual to `ValueOf(Witness(h)) → h`. Sound by
-    /// witgen semantics — the new slot's hint computes x's value, so honest
-    /// prover fills both identically. Requires hint chains in
-    /// `explicit_witness` gadgets to use `value_of` only at gadget-input
-    /// boundaries (so the collapsed expression contains no witness-typed
-    /// compute that R1CS gen can't evaluate).
+    /// `Witness(ValueOf(x)) → x`. Requires hint chains in `explicit_witness`
+    /// gadgets to use `value_of` only at gadget-input boundaries, so the
+    /// collapsed expression contains no witness-typed compute that R1CS gen
+    /// can't evaluate.
     pub fn witness(&self) -> Self {
         if let Self::ValueOf(inner) = self {
             return (**inner).clone();
@@ -416,11 +394,8 @@ impl CSE {
                 }
             }
 
-            // Side-effect dedup: for each Effect with multiple occurrences,
-            // keep the dominator-most canonical and mark the others for
-            // removal. Same dominance grouping logic as the value-replacement
-            // loop above; we just discard duplicates instead of redirecting
-            // their results.
+            // Side-effect dedup: same dominance grouping as the value loop,
+            // but duplicates are dropped rather than redirected.
             let mut to_remove: HashSet<(BlockId, usize)> = HashSet::new();
             for (_, occurrences) in effects {
                 if occurrences.len() <= 1 {
@@ -742,9 +717,7 @@ impl CSE {
                         const_val,
                         var,
                     } => {
-                        // Semantically equivalent to a regular `Mul` on the same
-                        // operands; folding into Expr::Mul lets it CSE with both
-                        // BinaryArithOp::Mul and other MulConst occurrences.
+                        // Fold into Expr::Mul so MulConst dedups with BinaryArithOp::Mul.
                         let lhs_expr = get_expr(&exprs, const_val);
                         let rhs_expr = get_expr(&exprs, var);
                         let result_expr = lhs_expr.mul(&rhs_expr);
@@ -775,8 +748,8 @@ impl CSE {
                         endianness,
                         count,
                     } => {
-                        // We only fold the `Bytes` case; `Dyn(_)` references
-                        // a runtime ValueId we don't currently encode in Expr.
+                        // `Dyn(_)` carries a runtime ValueId we don't encode in Expr,
+                        // so only the static `Bytes` case is keyed.
                         match radix {
                             Radix::Bytes => {
                                 let value_expr = get_expr(&exprs, value);
@@ -796,10 +769,7 @@ impl CSE {
                         value,
                         pinned: false,
                     } => {
-                        // Non-pinned: two writes with the same hint expression
-                        // can share a slot. The constraint system is unchanged
-                        // because every constraint that referenced either now
-                        // references the survivor.
+                        // Two non-pinned writes with the same hint can share a slot.
                         let hint_expr = get_expr(&exprs, value);
                         let result_expr = hint_expr.witness();
                         exprs.insert(*r, result_expr.clone());
@@ -808,11 +778,9 @@ impl CSE {
                             .or_default()
                             .push((block_id, instruction_idx, *r));
                     }
-                    // Pinned `WriteWitness` and `FreshWitness` produce slots
-                    // that must NOT be merged with anything. We deliberately
-                    // skip inserting an Expr — downstream `get_expr` lookups
-                    // fall back to `Expr::Variable(value_id)`, which is unique
-                    // per ValueId by construction.
+                    // Pinned WriteWitness and FreshWitness must not merge with anything;
+                    // skipping the Expr insert leaves `get_expr` to fall back to a
+                    // unique-per-ValueId `Expr::Variable`.
                     OpCode::WriteWitness { result: Some(_), pinned: true, .. } => {}
                     OpCode::FreshWitness { .. } => {}
                     OpCode::Rangecheck { value, max_bits } => {
