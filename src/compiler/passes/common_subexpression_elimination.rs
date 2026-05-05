@@ -1,11 +1,14 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Debug, Display},
 };
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, ValueId},
+    ssa::{
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
+        OpCode, Radix, ValueId,
+    },
 };
 use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -35,6 +38,34 @@ enum Expr {
     TupleGet(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     ReadGlobal(u64),
+    Cast(Box<Expr>, CastTarget),
+    Truncate(Box<Expr>, usize /* to_bits */, usize /* from_bits */),
+    SExt(Box<Expr>, usize /* from_bits */, usize /* to_bits */),
+    ValueOf(Box<Expr>),
+    /// Big-endian byte decomposition of a Field-typed expression. The whole
+    /// array result; element accesses are represented via `ArrayGet`.
+    ToRadixBytes(Box<Expr>, Endianness, usize /* count */),
+    ToBits(Box<Expr>, Endianness, usize /* count */),
+    /// Witness slot whose hint is `expr`. Two non-pinned `write_witness` ops
+    /// with the same hint expression resolve to the same slot under CSE.
+    Witness(Box<Expr>),
+    /// Pinned witness (input commitments, tape-positional slots). Each gets a
+    /// unique tag so they never compare equal to anything.
+    PinnedWitness(u64),
+    /// FreshWitness slots are unconstrained at the SSA level; same trick as
+    /// pinned — never compares equal.
+    Fresh(u64),
+}
+
+/// Side-effect keys for opcodes that don't produce values but do emit
+/// constraints — duplicates of these are redundant and can be dropped.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Effect {
+    /// `Rangecheck { value, max_bits }` — high-level rangecheck.
+    Rangecheck(Expr, usize),
+    /// `Lookup { target: Rangecheck(8), keys: [k], flag }` — the byte-lookup
+    /// constraint. Duplicates with the same key + flag are redundant.
+    ByteLookup(Expr, Expr),
 }
 
 impl Expr {
@@ -161,6 +192,34 @@ impl Expr {
     pub fn not(&self) -> Self {
         Self::Not(Box::new(self.clone()))
     }
+
+    pub fn cast(&self, target: CastTarget) -> Self {
+        Self::Cast(Box::new(self.clone()), target)
+    }
+
+    pub fn truncate(&self, to_bits: usize, from_bits: usize) -> Self {
+        Self::Truncate(Box::new(self.clone()), to_bits, from_bits)
+    }
+
+    pub fn sext(&self, from_bits: usize, to_bits: usize) -> Self {
+        Self::SExt(Box::new(self.clone()), from_bits, to_bits)
+    }
+
+    pub fn value_of(&self) -> Self {
+        Self::ValueOf(Box::new(self.clone()))
+    }
+
+    pub fn to_radix_bytes(&self, endianness: Endianness, count: usize) -> Self {
+        Self::ToRadixBytes(Box::new(self.clone()), endianness, count)
+    }
+
+    pub fn to_bits(&self, endianness: Endianness, count: usize) -> Self {
+        Self::ToBits(Box::new(self.clone()), endianness, count)
+    }
+
+    pub fn witness(&self) -> Self {
+        Self::Witness(Box::new(self.clone()))
+    }
 }
 
 impl Display for Expr {
@@ -229,6 +288,21 @@ impl Display for Expr {
             Self::TupleGet(tuple, index) => write!(f, "{}.{}", tuple, index),
             Self::Not(value) => write!(f, "(~{})", value),
             Self::ReadGlobal(index) => write!(f, "g{}", index),
+            Self::Cast(value, target) => write!(f, "cast({}, {})", value, target),
+            Self::Truncate(value, to, from) => {
+                write!(f, "trunc({}, {}, {})", value, to, from)
+            }
+            Self::SExt(value, from, to) => write!(f, "sext({}, {}, {})", value, from, to),
+            Self::ValueOf(value) => write!(f, "value_of({})", value),
+            Self::ToRadixBytes(value, end, count) => {
+                write!(f, "to_radix({}, bytes, {:?}, {})", value, end, count)
+            }
+            Self::ToBits(value, end, count) => {
+                write!(f, "to_bits({}, {:?}, {})", value, end, count)
+            }
+            Self::Witness(hint) => write!(f, "witness({})", hint),
+            Self::PinnedWitness(tag) => write!(f, "pinned_witness#{}", tag),
+            Self::Fresh(tag) => write!(f, "fresh#{}", tag),
         }
     }
 }
@@ -267,7 +341,7 @@ impl CSE {
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let exprs = self.gather_expressions(function, cfg);
+            let (exprs, effects) = self.gather_expressions(function, cfg);
             let mut value_replacements = ValueReplacements::new();
             for (_, occurrences) in exprs {
                 if occurrences.len() <= 1 {
@@ -315,10 +389,67 @@ impl CSE {
                 }
             }
 
-            for (_, block) in function.get_blocks_mut() {
-                for instruction in block.get_instructions_mut() {
-                    value_replacements.replace_inputs(instruction);
+            // Side-effect dedup: for each Effect with multiple occurrences,
+            // keep the dominator-most canonical and mark the others for
+            // removal. Same dominance grouping logic as the value-replacement
+            // loop above; we just discard duplicates instead of redirecting
+            // their results.
+            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::new();
+            for (_, occurrences) in effects {
+                if occurrences.len() <= 1 {
+                    continue;
                 }
+                let mut groups: Vec<(BlockId, usize, Vec<(BlockId, usize)>)> = vec![];
+                for (block_id, instruction_idx) in occurrences {
+                    let mut found = false;
+                    for (candidate_block, candidate_instruction, others) in groups.iter_mut() {
+                        if self.can_replace(
+                            cfg,
+                            *candidate_block,
+                            *candidate_instruction,
+                            block_id,
+                            instruction_idx,
+                        ) {
+                            found = true;
+                            others.push((block_id, instruction_idx));
+                            break;
+                        } else if self.can_replace(
+                            cfg,
+                            block_id,
+                            instruction_idx,
+                            *candidate_block,
+                            *candidate_instruction,
+                        ) {
+                            found = true;
+                            others.push((*candidate_block, *candidate_instruction));
+                            *candidate_block = block_id;
+                            *candidate_instruction = instruction_idx;
+                            break;
+                        }
+                    }
+                    if !found {
+                        groups.push((block_id, instruction_idx, vec![]));
+                    }
+                }
+                for (_, _, others) in groups {
+                    for pos in others {
+                        to_remove.insert(pos);
+                    }
+                }
+            }
+
+            for (block_id, block) in function.get_blocks_mut() {
+                let bid = *block_id;
+                let old_instructions = block.take_instructions();
+                let mut new_instructions = Vec::with_capacity(old_instructions.len());
+                for (idx, mut instruction) in old_instructions.into_iter().enumerate() {
+                    if to_remove.contains(&(bid, idx)) {
+                        continue;
+                    }
+                    value_replacements.replace_inputs(&mut instruction);
+                    new_instructions.push(instruction);
+                }
+                block.put_instructions(new_instructions);
                 value_replacements.replace_terminator(block.get_terminator_mut());
             }
         }
@@ -345,9 +476,20 @@ impl CSE {
         &self,
         ssa: &HLFunction,
         cfg: &CFG,
-    ) -> HashMap<Expr, Vec<(BlockId, usize, ValueId)>> {
+    ) -> (
+        HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
+        HashMap<Effect, Vec<(BlockId, usize)>>,
+    ) {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
+        let mut effects: HashMap<Effect, Vec<(BlockId, usize)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
+        // Counter for opaque (never-equal) Expr leaves: pinned witnesses and
+        // fresh witnesses. Each occurrence gets its own tag so they never CSE.
+        let mut opaque_counter: u64 = 0;
+        let mut fresh_tag = || {
+            opaque_counter += 1;
+            opaque_counter
+        };
 
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
             exprs
@@ -525,8 +667,168 @@ impl CSE {
                             *r,
                         ));
                     }
-                    OpCode::WriteWitness { .. } // TODO: is witness store a subexpression to be optimized?
-                    | OpCode::FreshWitness { result: _, result_type: _ }
+                    OpCode::Cast {
+                        result: r,
+                        value,
+                        target,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.cast(*target);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::Truncate {
+                        result: r,
+                        value,
+                        to_bits,
+                        from_bits,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.truncate(*to_bits, *from_bits);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::SExt {
+                        result: r,
+                        value,
+                        from_bits,
+                        to_bits,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.sext(*from_bits, *to_bits);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::ValueOf { result: r, value } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.value_of();
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::MulConst {
+                        result: r,
+                        const_val,
+                        var,
+                    } => {
+                        // Semantically equivalent to a regular `Mul` on the same
+                        // operands; folding into Expr::Mul lets it CSE with both
+                        // BinaryArithOp::Mul and other MulConst occurrences.
+                        let lhs_expr = get_expr(&exprs, const_val);
+                        let rhs_expr = get_expr(&exprs, var);
+                        let result_expr = lhs_expr.mul(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::ToBits {
+                        result: r,
+                        value,
+                        endianness,
+                        count,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.to_bits(*endianness, *count);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::ToRadix {
+                        result: r,
+                        value,
+                        radix,
+                        endianness,
+                        count,
+                    } => {
+                        // We only fold the `Bytes` case; `Dyn(_)` references
+                        // a runtime ValueId we don't currently encode in Expr.
+                        match radix {
+                            Radix::Bytes => {
+                                let value_expr = get_expr(&exprs, value);
+                                let result_expr =
+                                    value_expr.to_radix_bytes(*endianness, *count);
+                                exprs.insert(*r, result_expr.clone());
+                                result
+                                    .entry(result_expr)
+                                    .or_default()
+                                    .push((block_id, instruction_idx, *r));
+                            }
+                            Radix::Dyn(_) => {}
+                        }
+                    }
+                    OpCode::WriteWitness {
+                        result: Some(r),
+                        value,
+                        pinned,
+                    } => {
+                        let result_expr = if *pinned {
+                            // Pinned slots have side effects beyond their
+                            // hint — the slot's position in the witness vector
+                            // matters. Tag uniquely so they never merge.
+                            Expr::PinnedWitness(fresh_tag())
+                        } else {
+                            // Non-pinned: two writes with the same hint expr
+                            // can share a slot. The constraint system is
+                            // unchanged because every constraint that
+                            // referenced either now references the survivor.
+                            let hint_expr = get_expr(&exprs, value);
+                            hint_expr.witness()
+                        };
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::FreshWitness {
+                        result: r,
+                        result_type: _,
+                    } => {
+                        // Fresh witnesses are unconstrained at the SSA level —
+                        // every occurrence is a fresh slot, never merged.
+                        let result_expr = Expr::Fresh(fresh_tag());
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::Rangecheck { value, max_bits } => {
+                        let value_expr = get_expr(&exprs, value);
+                        effects
+                            .entry(Effect::Rangecheck(value_expr, *max_bits))
+                            .or_default()
+                            .push((block_id, instruction_idx));
+                    }
+                    OpCode::Lookup {
+                        target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+                        keys,
+                        results: _,
+                        flag,
+                    } if keys.len() == 1 => {
+                        let key_expr = get_expr(&exprs, &keys[0]);
+                        let flag_expr = get_expr(&exprs, flag);
+                        effects
+                            .entry(Effect::ByteLookup(key_expr, flag_expr))
+                            .or_default()
+                            .push((block_id, instruction_idx));
+                    }
+                    OpCode::WriteWitness { result: None, .. }
                     | OpCode::Constrain { .. }
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::BumpD { matrix: _, variable: _, sensitivity: _ }
@@ -542,20 +844,12 @@ impl CSE {
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }
-                    | OpCode::Cast { .. }
-                    | OpCode::Truncate { .. }
-                    | OpCode::SExt { .. }
                     | OpCode::MemOp { kind: _, value: _ }
-                    | OpCode::Rangecheck { value: _, max_bits: _ }
-                    | OpCode::ToBits { .. }
-                    | OpCode::ToRadix { .. }
-                    | OpCode::Lookup { target: _, keys: _, results: _, flag: _ }
+                    | OpCode::Lookup { .. }
                     | OpCode::DLookup { target: _, keys: _, results: _, flag: _ }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::ValueOf { .. }
-                    | OpCode::MulConst { .. }
                     | OpCode::Spread { .. }
                     | OpCode::Unspread { .. } => {}
                     OpCode::Not { result: r, value } => {
@@ -619,6 +913,6 @@ impl CSE {
                 }
             }
         }
-        result
+        (result, effects)
     }
 }
