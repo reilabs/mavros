@@ -3,9 +3,6 @@ use std::{
     fmt::{Debug, Display},
 };
 
-use ark_ff::{AdditiveGroup, Field as _};
-use num_traits::{One, Zero};
-
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ssa::{
@@ -74,27 +71,6 @@ impl Expr {
         Self::Variable(value_id.0)
     }
 
-    /// True if this expression is the additive identity in any scalar type
-    /// we care about. Used by smart constructors to fold `x + 0 → x` etc.
-    fn is_zero(&self) -> bool {
-        match self {
-            Self::FConst(v) => v.is_zero(),
-            Self::UConst(_, 0) => true,
-            Self::IConst(_, 0) => true,
-            _ => false,
-        }
-    }
-
-    /// Multiplicative identity.
-    fn is_one(&self) -> bool {
-        match self {
-            Self::FConst(v) => v.is_one(),
-            Self::UConst(_, 1) => true,
-            Self::IConst(_, 1) => true,
-            _ => false,
-        }
-    }
-
     fn get_adds(&self) -> Vec<Self> {
         match self {
             Self::Add(exprs) => exprs.iter().cloned().collect(),
@@ -116,67 +92,30 @@ impl Expr {
         }
     }
 
-    /// Smart constructor: drop literal zeros (`x + 0 → x`); flatten and sort
-    /// for canonical form. Does NOT fold `c1 + c2 → const` because the
-    /// result wouldn't have an SSA opcode of its own to materialise — and CSE
-    /// picking it as a canonical for some unrelated `Const(c1+c2)` opcode
-    /// would let downstream consumers see a non-Const opcode where they
-    /// expect one.
+    /// Pure normalization: flatten nested Adds and sort for a canonical form.
+    /// Algebraic folds (`x + 0 → x`) live in the simplifier pass — by the time
+    /// we hash for CSE, those have already fired.
     pub fn add(&self, other: &Self) -> Self {
-        if self.is_zero() {
-            return other.clone();
-        }
-        if other.is_zero() {
-            return self.clone();
-        }
         let mut adds: Vec<Self> = self
             .get_adds()
             .into_iter()
             .chain(other.get_adds().into_iter())
-            .filter(|e| !e.is_zero())
             .collect();
-        match adds.len() {
-            0 => unreachable!("zero-zero filtered above"),
-            1 => adds.pop().unwrap(),
-            _ => {
-                adds.sort();
-                Self::Add(adds)
-            }
-        }
+        adds.sort();
+        Self::Add(adds)
     }
 
-    /// `x · 1 → x`, `0 · y → 0` (returning the existing zero operand). Same
-    /// no-introduce-constants rule as `add`.
     pub fn mul(&self, other: &Self) -> Self {
-        // Annihilator: return whichever operand is the literal zero so we
-        // preserve its variant and SSA identity.
-        if self.is_zero() {
-            return self.clone();
-        }
-        if other.is_zero() {
-            return other.clone();
-        }
         let mut muls: Vec<Self> = self
             .get_muls()
             .into_iter()
             .chain(other.get_muls().into_iter())
-            .filter(|e| !e.is_one())
             .collect();
-        match muls.len() {
-            0 => unreachable!("one-one filtered above"),
-            1 => muls.pop().unwrap(),
-            _ => {
-                muls.sort();
-                Self::Mul(muls)
-            }
-        }
+        muls.sort();
+        Self::Mul(muls)
     }
 
     pub fn div(&self, other: &Self) -> Self {
-        // x / 1 → x.
-        if other.is_one() {
-            return self.clone();
-        }
         Self::Div(Box::new(self.clone()), Box::new(other.clone()))
     }
 
@@ -184,41 +123,19 @@ impl Expr {
         Self::Mod(Box::new(self.clone()), Box::new(other.clone()))
     }
 
-    /// `x − 0 → x`. Does not fold `x − x → 0` (would introduce an SSA-less
-    /// constant; see `add`).
     pub fn sub(&self, other: &Self) -> Self {
-        if other.is_zero() {
-            return self.clone();
-        }
         Self::Sub(Box::new(self.clone()), Box::new(other.clone()))
     }
 
-    /// Bitwise AND: `x & 0 → 0` (returning the literal zero operand).
     pub fn and(&self, other: &Self) -> Self {
-        if self.is_zero() {
-            return self.clone();
-        }
-        if other.is_zero() {
-            return other.clone();
-        }
         let mut ands = self.get_ands();
         ands.extend(other.get_ands());
         ands.sort();
         ands.dedup();
-        if ands.len() == 1 {
-            return ands.pop().unwrap();
-        }
         Self::And(ands)
     }
 
-    /// Bitwise OR: `x | 0 → x`.
     pub fn or(&self, other: &Self) -> Self {
-        if self.is_zero() {
-            return other.clone();
-        }
-        if other.is_zero() {
-            return self.clone();
-        }
         let mut ors: Vec<Self> = match self {
             Self::Or(exprs) => exprs.iter().cloned().collect(),
             _ => vec![self.clone()],
@@ -229,21 +146,10 @@ impl Expr {
         });
         ors.sort();
         ors.dedup();
-        if ors.len() == 1 {
-            return ors.pop().unwrap();
-        }
         Self::Or(ors)
     }
 
-    /// Bitwise XOR: `x ^ 0 → x`. Does not fold `x ^ x → 0` (constant
-    /// introduction).
     pub fn xor(&self, other: &Self) -> Self {
-        if self.is_zero() {
-            return other.clone();
-        }
-        if other.is_zero() {
-            return self.clone();
-        }
         let mut xors: Vec<Self> = match self {
             Self::Xor(exprs) => exprs.iter().cloned().collect(),
             _ => vec![self.clone()],
@@ -257,16 +163,10 @@ impl Expr {
     }
 
     pub fn shl(&self, other: &Self) -> Self {
-        if other.is_zero() {
-            return self.clone();
-        }
         Self::Shl(Box::new(self.clone()), Box::new(other.clone()))
     }
 
     pub fn shr(&self, other: &Self) -> Self {
-        if other.is_zero() {
-            return self.clone();
-        }
         Self::Shr(Box::new(self.clone()), Box::new(other.clone()))
     }
 
@@ -291,10 +191,6 @@ impl Expr {
     }
 
     pub fn select(&self, then: &Self, otherwise: &Self) -> Self {
-        // select(_, x, x) → x. Same alternatives — condition irrelevant.
-        if then == otherwise {
-            return then.clone();
-        }
         Self::Select(
             Box::new(self.clone()),
             Box::new(then.clone()),
@@ -303,23 +199,10 @@ impl Expr {
     }
 
     pub fn not(&self) -> Self {
-        // ~~x → x.
-        if let Self::Not(inner) = self {
-            return (**inner).clone();
-        }
         Self::Not(Box::new(self.clone()))
     }
 
-    /// `Cast(x, Nop) → x`. Two casts to the same target collapse to one.
     pub fn cast(&self, target: CastTarget) -> Self {
-        if matches!(target, CastTarget::Nop) {
-            return self.clone();
-        }
-        if let Self::Cast(_, t) = self {
-            if *t == target {
-                return self.clone();
-            }
-        }
         Self::Cast(Box::new(self.clone()), target)
     }
 
@@ -331,14 +214,8 @@ impl Expr {
         Self::SExt(Box::new(self.clone()), from_bits, to_bits)
     }
 
-    /// `ValueOf(ValueOf(x)) → ValueOf(x)` (idempotent).
-    /// `ValueOf(Witness(h)) → h` (witgen identity).
     pub fn value_of(&self) -> Self {
-        match self {
-            Self::ValueOf(_) => self.clone(),
-            Self::Witness(hint) => (**hint).clone(),
-            _ => Self::ValueOf(Box::new(self.clone())),
-        }
+        Self::ValueOf(Box::new(self.clone()))
     }
 
     pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
@@ -349,21 +226,7 @@ impl Expr {
         Self::BitsOf(Box::new(self.clone()), endianness, count)
     }
 
-    /// `Witness(ValueOf(x)) → x` — dual to `ValueOf(Witness(h)) → h`. The new
-    /// witness slot's hint is `x`'s value, so an honest prover fills both
-    /// identically; merging is equivalent to adding the always-true
-    /// constraint `new_slot == x`. Sound by construction.
-    ///
-    /// For this rewrite to be safe in our pipeline, hint chains in
-    /// `explicit_witness` gadgets MUST be structured so that `ValueOf` only
-    /// appears at hint-chain boundaries (right after the gadget input
-    /// operands), not in the middle of compute chains. Otherwise the rewrite
-    /// can keep witness-typed `Cmp`/`Div`/etc. opcodes alive past
-    /// `witness_write_to_fresh`'s DCE, and R1CS gen panics on them.
     pub fn witness(&self) -> Self {
-        if let Self::ValueOf(inner) = self {
-            return (**inner).clone();
-        }
         Self::Witness(Box::new(self.clone()))
     }
 }
