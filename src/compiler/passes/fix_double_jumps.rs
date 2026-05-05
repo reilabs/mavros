@@ -57,6 +57,25 @@ impl ValueReplacements {
         let replacement = self.replacements.get(&value).unwrap_or(&value);
         *replacement
     }
+
+    /// Chase chains in the map until every entry points directly to a
+    /// terminal (not-in-map) value. Needed when callers `insert(a, b)` then
+    /// later `insert(b, c)` — the older `a → b` entry is left stale by
+    /// `insert`, so without flattening, `get_replacement(a)` returns `b`
+    /// while the SSA actually wants `c`.
+    pub fn flatten(&mut self) {
+        let keys: Vec<ValueId> = self.replacements.keys().copied().collect();
+        for k in keys {
+            let mut current = self.replacements[&k];
+            while let Some(&next) = self.replacements.get(&current) {
+                if next == current {
+                    break;
+                }
+                current = next;
+            }
+            self.replacements.insert(k, current);
+        }
+    }
 }
 
 pub struct FixDoubleJumps {}

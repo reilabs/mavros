@@ -130,12 +130,15 @@ impl Simplifier {
         }
         function.put_blocks(new_blocks);
 
+        // Flatten any alias chains: rewrites can produce r1→r2 then later
+        // r2→r3, leaving r1's entry pointing at the now-dropped r2.
+        aliases.flatten();
         // Apply aliases globally. Block iteration order in the walk above is
         // non-deterministic (HashMap), so a block processed before its
         // predecessor sees stale operands; we sweep all instructions and
-        // terminators here to fix any that the walk missed. Without this,
-        // dropping an Alias-rewrite's instruction leaves dangling references
-        // and the next pass's TypeInfo recomputation crashes.
+        // terminators here to fix any that the walk missed. Without this
+        // sweep + flatten, dropped instructions leave dangling references and
+        // the next pass's `from_ssa` builds incomplete value definitions.
         for (_, block) in function.get_blocks_mut() {
             for instr in block.get_instructions_mut() {
                 aliases.replace_inputs(instr);
@@ -263,7 +266,7 @@ impl Simplifier {
                         value: _,
                         target: inner_target,
                     },
-                ) = defs.try_get_definition(*value)?
+                ) = defs.get_definition(*value)
                 {
                     if inner_target == target {
                         return Some(Rewrite::Alias { result: *result, target: *value });
@@ -280,7 +283,7 @@ impl Simplifier {
                         result: _,
                         value: inner,
                     },
-                ) = defs.try_get_definition(*value)?
+                ) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias { result: *result, target: *inner });
                 }
@@ -304,7 +307,7 @@ impl Simplifier {
                     _,
                     _,
                     OpCode::ValueOf { .. },
-                ) = defs.try_get_definition(*value)?
+                ) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias { result: *result, target: *value });
                 }
@@ -319,7 +322,7 @@ impl Simplifier {
                         value: hint,
                         pinned: _,
                     },
-                ) = defs.try_get_definition(*value)?
+                ) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias { result: *result, target: *hint });
                 }
@@ -343,7 +346,7 @@ impl Simplifier {
                         result: _,
                         value: inner,
                     },
-                ) = defs.try_get_definition(*value)?
+                ) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias { result: *result, target: *inner });
                 }
@@ -367,7 +370,7 @@ impl Simplifier {
         let OpCode::Rangecheck { value: v, max_bits: bits } = instruction else {
             return None;
         };
-        let v_def = defs.try_get_definition(*v)?;
+        let v_def = defs.get_definition(*v);
         let ValueDefinition::Instruction(
             _,
             _,
@@ -447,9 +450,7 @@ fn is_witness(types: &FunctionTypeInfo, v: ValueId) -> bool {
 }
 
 fn is_zero(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
-    let Some(def) = defs.try_get_definition(v) else {
-        return false;
-    };
+    let def = defs.get_definition(v);
     if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
         match value {
             ConstValue::U(_, 0) | ConstValue::I(_, 0) => true,
@@ -462,9 +463,7 @@ fn is_zero(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
 }
 
 fn is_one(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
-    let Some(def) = defs.try_get_definition(v) else {
-        return false;
-    };
+    let def = defs.get_definition(v);
     if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
         match value {
             ConstValue::U(_, 1) | ConstValue::I(_, 1) => true,
