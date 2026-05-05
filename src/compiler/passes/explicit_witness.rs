@@ -225,11 +225,6 @@ impl ExplicitWitness {
                             };
                             let lr_diff = b.sub(l_field, r_field);
 
-                            // Hint chain on PURE values (see lower_witness_lt
-                            // comment). Both `b.div` and `b.eq` would panic
-                            // at R1CS gen if their operands were non-Const,
-                            // so they must operate on pure inputs that DCE
-                            // will sweep away after WitnessWriteToFresh.
                             let lr_diff_pure = b.value_of(lr_diff);
                             let field_one_for_div = b.field_const(Field::ONE);
                             let div_hint = b.div(field_one_for_div, lr_diff_pure);
@@ -400,10 +395,6 @@ impl ExplicitWitness {
                             BinaryArithOpKind::And => {
                                 // a AND b = a * b
                                 if l_taint && r_taint {
-                                    // Hint chain on PURE values: l/r might be
-                                    // WitnessOf(u1), so `b.and(l, r)` would
-                                    // emit a witness-typed bitwise AND that
-                                    // R1CS gen can't evaluate. value_of first.
                                     let l_pure = b.value_of(l);
                                     let r_pure = b.value_of(r);
                                     let res_hint = b.and(l_pure, r_pure);
@@ -416,7 +407,6 @@ impl ExplicitWitness {
                                         target: u1,
                                     });
                                 } else {
-                                    // One pure, one witness: a * b is linear
                                     let product = b.mul(l_field, r_field);
                                     b.push(OpCode::Cast {
                                         result,
@@ -587,12 +577,6 @@ impl ExplicitWitness {
                             // Unsigned: assert lhs < rhs by proving rhs - lhs - 1 ∈ [0, 2^n).
                             // Saves 2 R1C constraints vs computing the boolean result.
                             //
-                            // Hint chain runs on PURE values from the start —
-                            // `value_of` only appears at the gadget-input
-                            // boundary, not between compute steps and the
-                            // final `write_witness`. This keeps the hint
-                            // chain DCE-friendly so it doesn't leak past
-                            // `WitnessWriteToFresh` into R1CS gen.
                             let l_pure = if l_taint { b.value_of(l) } else { l };
                             let r_pure = if r_taint { b.value_of(r) } else { r };
                             let l_field_pure = b.cast_to_field(l_pure);
@@ -726,8 +710,6 @@ impl ExplicitWitness {
                     return;
                 }
                 // At least one branch is witness: full lowering with constraint.
-                // Hint chain runs on PURE values: value_of operands at the boundary
-                // so the Select opcode never sees witness operands.
                 let cond_pure = if cond_taint { b.value_of(cond) } else { cond };
                 let l_pure = if l_taint { b.value_of(l) } else { l };
                 let r_pure = if r_taint { b.value_of(r) } else { r };
@@ -1109,8 +1091,6 @@ impl ExplicitWitness {
             } => {
                 let value_taint = function_type_info.get_value_type(value).is_witness_of();
                 if !value_taint {
-                    // Pure input: Truncate has no witness-side constraints to
-                    // gate, just emit it directly.
                     b.push(OpCode::Truncate {
                         result,
                         value,
@@ -1136,7 +1116,6 @@ impl ExplicitWitness {
                 let value_type = function_type_info.get_value_type(value);
                 let value_taint = value_type.is_witness_of();
                 if !value_taint {
-                    // Pure input: SExt is a pure computation, no gating needed.
                     b.push(OpCode::SExt {
                         result,
                         value,
@@ -1646,11 +1625,6 @@ impl ExplicitWitness {
             _ => panic!("ICE: rhs is not an integer type"),
         };
         let u1 = CastTarget::U(1);
-        // Hint chain runs on PURE values: value_of operands first, then any
-        // hint-only ops (Cmp::Lt, etc.) operate on pure inputs, then
-        // write_witness wraps once at the very end. This keeps the hint
-        // chain DCE-friendly and avoids leaving witness-typed Cmp/Div ops
-        // alive past the DCE pass after WitnessWriteToFresh.
         let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
         let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
         let res_hint = b.lt(lhs_pure, rhs_pure);

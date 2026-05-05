@@ -130,15 +130,9 @@ impl Simplifier {
         }
         function.put_blocks(new_blocks);
 
-        // Flatten any alias chains: rewrites can produce r1→r2 then later
-        // r2→r3, leaving r1's entry pointing at the now-dropped r2.
-        aliases.flatten();
-        // Apply aliases globally. Block iteration order in the walk above is
-        // non-deterministic (HashMap), so a block processed before its
-        // predecessor sees stale operands; we sweep all instructions and
-        // terminators here to fix any that the walk missed. Without this
-        // sweep + flatten, dropped instructions leave dangling references and
-        // the next pass's `from_ssa` builds incomplete value definitions.
+        // Apply aliases globally. Block iteration order is non-deterministic,
+        // so a block processed before its predecessor sees stale operands;
+        // sweep here to fix references the in-walk substitution missed.
         for (_, block) in function.get_blocks_mut() {
             for instr in block.get_instructions_mut() {
                 aliases.replace_inputs(instr);

@@ -18,9 +18,7 @@ impl ValueReplacements {
     }
 
     pub fn insert(&mut self, replaced: ValueId, replacement: ValueId) {
-        let replacements_replacement = self.replacements.get(&replacement).unwrap_or(&replacement);
-        self.replacements
-            .insert(replaced, *replacements_replacement);
+        self.replacements.insert(replaced, replacement);
     }
 
     pub fn replace_instruction(&self, instruction: &mut OpCode) {
@@ -54,27 +52,14 @@ impl ValueReplacements {
     }
 
     pub fn get_replacement(&self, value: ValueId) -> ValueId {
-        let replacement = self.replacements.get(&value).unwrap_or(&value);
-        *replacement
-    }
-
-    /// Chase chains in the map until every entry points directly to a
-    /// terminal (not-in-map) value. Needed when callers `insert(a, b)` then
-    /// later `insert(b, c)` — the older `a → b` entry is left stale by
-    /// `insert`, so without flattening, `get_replacement(a)` returns `b`
-    /// while the SSA actually wants `c`.
-    pub fn flatten(&mut self) {
-        let keys: Vec<ValueId> = self.replacements.keys().copied().collect();
-        for k in keys {
-            let mut current = self.replacements[&k];
-            while let Some(&next) = self.replacements.get(&current) {
-                if next == current {
-                    break;
-                }
-                current = next;
+        let mut current = value;
+        for _ in 0..=self.replacements.len() {
+            match self.replacements.get(&current) {
+                Some(&next) if next != current => current = next,
+                _ => return current,
             }
-            self.replacements.insert(k, current);
         }
+        panic!("ValueReplacements: cycle starting at {:?}", value)
     }
 }
 
