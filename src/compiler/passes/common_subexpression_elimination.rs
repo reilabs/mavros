@@ -3,6 +3,9 @@ use std::{
     fmt::{Debug, Display},
 };
 
+use ark_ff::{AdditiveGroup, Field as _};
+use num_traits::{One, Zero};
+
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
     ssa::{
@@ -42,19 +45,17 @@ enum Expr {
     Truncate(Box<Expr>, usize /* to_bits */, usize /* from_bits */),
     SExt(Box<Expr>, usize /* from_bits */, usize /* to_bits */),
     ValueOf(Box<Expr>),
-    /// Big-endian byte decomposition of a Field-typed expression. The whole
-    /// array result; element accesses are represented via `ArrayGet`.
-    ToRadixBytes(Box<Expr>, Endianness, usize /* count */),
-    ToBits(Box<Expr>, Endianness, usize /* count */),
+    /// Byte decomposition of a Field-typed expression. The whole array result;
+    /// element accesses are represented via `ArrayGet`. Endianness and count
+    /// are part of the key, so two decompositions only merge when they agree.
+    BytesOf(Box<Expr>, Endianness, usize /* count */),
+    BitsOf(Box<Expr>, Endianness, usize /* count */),
     /// Witness slot whose hint is `expr`. Two non-pinned `write_witness` ops
     /// with the same hint expression resolve to the same slot under CSE.
+    /// (Pinned writes and `FreshWitness` aren't given an `Expr` at all — they
+    /// fall back to the default `Expr::Variable(value_id)` keyed by their
+    /// unique result ValueId, which never collides.)
     Witness(Box<Expr>),
-    /// Pinned witness (input commitments, tape-positional slots). Each gets a
-    /// unique tag so they never compare equal to anything.
-    PinnedWitness(u64),
-    /// FreshWitness slots are unconstrained at the SSA level; same trick as
-    /// pinned — never compares equal.
-    Fresh(u64),
 }
 
 /// Side-effect keys for opcodes that don't produce values but do emit
@@ -71,6 +72,27 @@ enum Effect {
 impl Expr {
     pub fn variable(value_id: ValueId) -> Self {
         Self::Variable(value_id.0)
+    }
+
+    /// True if this expression is the additive identity in any scalar type
+    /// we care about. Used by smart constructors to fold `x + 0 → x` etc.
+    fn is_zero(&self) -> bool {
+        match self {
+            Self::FConst(v) => v.is_zero(),
+            Self::UConst(_, 0) => true,
+            Self::IConst(_, 0) => true,
+            _ => false,
+        }
+    }
+
+    /// Multiplicative identity.
+    fn is_one(&self) -> bool {
+        match self {
+            Self::FConst(v) => v.is_one(),
+            Self::UConst(_, 1) => true,
+            Self::IConst(_, 1) => true,
+            _ => false,
+        }
     }
 
     fn get_adds(&self) -> Vec<Self> {
@@ -94,21 +116,67 @@ impl Expr {
         }
     }
 
+    /// Smart constructor: drop literal zeros (`x + 0 → x`); flatten and sort
+    /// for canonical form. Does NOT fold `c1 + c2 → const` because the
+    /// result wouldn't have an SSA opcode of its own to materialise — and CSE
+    /// picking it as a canonical for some unrelated `Const(c1+c2)` opcode
+    /// would let downstream consumers see a non-Const opcode where they
+    /// expect one.
     pub fn add(&self, other: &Self) -> Self {
-        let mut adds = self.get_adds();
-        adds.extend(other.get_adds());
-        adds.sort();
-        Self::Add(adds)
+        if self.is_zero() {
+            return other.clone();
+        }
+        if other.is_zero() {
+            return self.clone();
+        }
+        let mut adds: Vec<Self> = self
+            .get_adds()
+            .into_iter()
+            .chain(other.get_adds().into_iter())
+            .filter(|e| !e.is_zero())
+            .collect();
+        match adds.len() {
+            0 => unreachable!("zero-zero filtered above"),
+            1 => adds.pop().unwrap(),
+            _ => {
+                adds.sort();
+                Self::Add(adds)
+            }
+        }
     }
 
+    /// `x · 1 → x`, `0 · y → 0` (returning the existing zero operand). Same
+    /// no-introduce-constants rule as `add`.
     pub fn mul(&self, other: &Self) -> Self {
-        let mut muls = self.get_muls();
-        muls.extend(other.get_muls());
-        muls.sort();
-        Self::Mul(muls)
+        // Annihilator: return whichever operand is the literal zero so we
+        // preserve its variant and SSA identity.
+        if self.is_zero() {
+            return self.clone();
+        }
+        if other.is_zero() {
+            return other.clone();
+        }
+        let mut muls: Vec<Self> = self
+            .get_muls()
+            .into_iter()
+            .chain(other.get_muls().into_iter())
+            .filter(|e| !e.is_one())
+            .collect();
+        match muls.len() {
+            0 => unreachable!("one-one filtered above"),
+            1 => muls.pop().unwrap(),
+            _ => {
+                muls.sort();
+                Self::Mul(muls)
+            }
+        }
     }
 
     pub fn div(&self, other: &Self) -> Self {
+        // x / 1 → x.
+        if other.is_one() {
+            return self.clone();
+        }
         Self::Div(Box::new(self.clone()), Box::new(other.clone()))
     }
 
@@ -116,19 +184,42 @@ impl Expr {
         Self::Mod(Box::new(self.clone()), Box::new(other.clone()))
     }
 
+    /// `x − 0 → x`. Does not fold `x − x → 0` (would introduce an SSA-less
+    /// constant; see `add`).
     pub fn sub(&self, other: &Self) -> Self {
+        if other.is_zero() {
+            return self.clone();
+        }
         Self::Sub(Box::new(self.clone()), Box::new(other.clone()))
     }
 
+    /// Bitwise AND: `x & 0 → 0` (returning the literal zero operand).
     pub fn and(&self, other: &Self) -> Self {
+        if self.is_zero() {
+            return self.clone();
+        }
+        if other.is_zero() {
+            return other.clone();
+        }
         let mut ands = self.get_ands();
         ands.extend(other.get_ands());
         ands.sort();
+        ands.dedup();
+        if ands.len() == 1 {
+            return ands.pop().unwrap();
+        }
         Self::And(ands)
     }
 
+    /// Bitwise OR: `x | 0 → x`.
     pub fn or(&self, other: &Self) -> Self {
-        let mut ors = match self {
+        if self.is_zero() {
+            return other.clone();
+        }
+        if other.is_zero() {
+            return self.clone();
+        }
+        let mut ors: Vec<Self> = match self {
             Self::Or(exprs) => exprs.iter().cloned().collect(),
             _ => vec![self.clone()],
         };
@@ -137,11 +228,23 @@ impl Expr {
             _ => vec![other.clone()],
         });
         ors.sort();
+        ors.dedup();
+        if ors.len() == 1 {
+            return ors.pop().unwrap();
+        }
         Self::Or(ors)
     }
 
+    /// Bitwise XOR: `x ^ 0 → x`. Does not fold `x ^ x → 0` (constant
+    /// introduction).
     pub fn xor(&self, other: &Self) -> Self {
-        let mut xors = match self {
+        if self.is_zero() {
+            return other.clone();
+        }
+        if other.is_zero() {
+            return self.clone();
+        }
+        let mut xors: Vec<Self> = match self {
             Self::Xor(exprs) => exprs.iter().cloned().collect(),
             _ => vec![self.clone()],
         };
@@ -154,10 +257,16 @@ impl Expr {
     }
 
     pub fn shl(&self, other: &Self) -> Self {
+        if other.is_zero() {
+            return self.clone();
+        }
         Self::Shl(Box::new(self.clone()), Box::new(other.clone()))
     }
 
     pub fn shr(&self, other: &Self) -> Self {
+        if other.is_zero() {
+            return self.clone();
+        }
         Self::Shr(Box::new(self.clone()), Box::new(other.clone()))
     }
 
@@ -182,6 +291,10 @@ impl Expr {
     }
 
     pub fn select(&self, then: &Self, otherwise: &Self) -> Self {
+        // select(_, x, x) → x. Same alternatives — condition irrelevant.
+        if then == otherwise {
+            return then.clone();
+        }
         Self::Select(
             Box::new(self.clone()),
             Box::new(then.clone()),
@@ -190,10 +303,23 @@ impl Expr {
     }
 
     pub fn not(&self) -> Self {
+        // ~~x → x.
+        if let Self::Not(inner) = self {
+            return (**inner).clone();
+        }
         Self::Not(Box::new(self.clone()))
     }
 
+    /// `Cast(x, Nop) → x`. Two casts to the same target collapse to one.
     pub fn cast(&self, target: CastTarget) -> Self {
+        if matches!(target, CastTarget::Nop) {
+            return self.clone();
+        }
+        if let Self::Cast(_, t) = self {
+            if *t == target {
+                return self.clone();
+            }
+        }
         Self::Cast(Box::new(self.clone()), target)
     }
 
@@ -205,19 +331,39 @@ impl Expr {
         Self::SExt(Box::new(self.clone()), from_bits, to_bits)
     }
 
+    /// `ValueOf(ValueOf(x)) → ValueOf(x)` (idempotent).
+    /// `ValueOf(Witness(h)) → h` (witgen identity).
     pub fn value_of(&self) -> Self {
-        Self::ValueOf(Box::new(self.clone()))
+        match self {
+            Self::ValueOf(_) => self.clone(),
+            Self::Witness(hint) => (**hint).clone(),
+            _ => Self::ValueOf(Box::new(self.clone())),
+        }
     }
 
-    pub fn to_radix_bytes(&self, endianness: Endianness, count: usize) -> Self {
-        Self::ToRadixBytes(Box::new(self.clone()), endianness, count)
+    pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
+        Self::BytesOf(Box::new(self.clone()), endianness, count)
     }
 
-    pub fn to_bits(&self, endianness: Endianness, count: usize) -> Self {
-        Self::ToBits(Box::new(self.clone()), endianness, count)
+    pub fn bits_of(&self, endianness: Endianness, count: usize) -> Self {
+        Self::BitsOf(Box::new(self.clone()), endianness, count)
     }
 
+    /// `Witness(ValueOf(x)) → x` — dual to `ValueOf(Witness(h)) → h`. The new
+    /// witness slot's hint is `x`'s value, so an honest prover fills both
+    /// identically; merging is equivalent to adding the always-true
+    /// constraint `new_slot == x`. Sound by construction.
+    ///
+    /// For this rewrite to be safe in our pipeline, hint chains in
+    /// `explicit_witness` gadgets MUST be structured so that `ValueOf` only
+    /// appears at hint-chain boundaries (right after the gadget input
+    /// operands), not in the middle of compute chains. Otherwise the rewrite
+    /// can keep witness-typed `Cmp`/`Div`/etc. opcodes alive past
+    /// `witness_write_to_fresh`'s DCE, and R1CS gen panics on them.
     pub fn witness(&self) -> Self {
+        if let Self::ValueOf(inner) = self {
+            return (**inner).clone();
+        }
         Self::Witness(Box::new(self.clone()))
     }
 }
@@ -294,15 +440,13 @@ impl Display for Expr {
             }
             Self::SExt(value, from, to) => write!(f, "sext({}, {}, {})", value, from, to),
             Self::ValueOf(value) => write!(f, "value_of({})", value),
-            Self::ToRadixBytes(value, end, count) => {
-                write!(f, "to_radix({}, bytes, {:?}, {})", value, end, count)
+            Self::BytesOf(value, end, count) => {
+                write!(f, "bytes_of({}, {:?}, {})", value, end, count)
             }
-            Self::ToBits(value, end, count) => {
-                write!(f, "to_bits({}, {:?}, {})", value, end, count)
+            Self::BitsOf(value, end, count) => {
+                write!(f, "bits_of({}, {:?}, {})", value, end, count)
             }
             Self::Witness(hint) => write!(f, "witness({})", hint),
-            Self::PinnedWitness(tag) => write!(f, "pinned_witness#{}", tag),
-            Self::Fresh(tag) => write!(f, "fresh#{}", tag),
         }
     }
 }
@@ -483,13 +627,6 @@ impl CSE {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut effects: HashMap<Effect, Vec<(BlockId, usize)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
-        // Counter for opaque (never-equal) Expr leaves: pinned witnesses and
-        // fresh witnesses. Each occurrence gets its own tag so they never CSE.
-        let mut opaque_counter: u64 = 0;
-        let mut fresh_tag = || {
-            opaque_counter += 1;
-            opaque_counter
-        };
 
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
             exprs
@@ -741,7 +878,7 @@ impl CSE {
                         count,
                     } => {
                         let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.to_bits(*endianness, *count);
+                        let result_expr = value_expr.bits_of(*endianness, *count);
                         exprs.insert(*r, result_expr.clone());
                         result
                             .entry(result_expr)
@@ -761,7 +898,7 @@ impl CSE {
                             Radix::Bytes => {
                                 let value_expr = get_expr(&exprs, value);
                                 let result_expr =
-                                    value_expr.to_radix_bytes(*endianness, *count);
+                                    value_expr.bytes_of(*endianness, *count);
                                 exprs.insert(*r, result_expr.clone());
                                 result
                                     .entry(result_expr)
@@ -774,40 +911,27 @@ impl CSE {
                     OpCode::WriteWitness {
                         result: Some(r),
                         value,
-                        pinned,
+                        pinned: false,
                     } => {
-                        let result_expr = if *pinned {
-                            // Pinned slots have side effects beyond their
-                            // hint — the slot's position in the witness vector
-                            // matters. Tag uniquely so they never merge.
-                            Expr::PinnedWitness(fresh_tag())
-                        } else {
-                            // Non-pinned: two writes with the same hint expr
-                            // can share a slot. The constraint system is
-                            // unchanged because every constraint that
-                            // referenced either now references the survivor.
-                            let hint_expr = get_expr(&exprs, value);
-                            hint_expr.witness()
-                        };
+                        // Non-pinned: two writes with the same hint expression
+                        // can share a slot. The constraint system is unchanged
+                        // because every constraint that referenced either now
+                        // references the survivor.
+                        let hint_expr = get_expr(&exprs, value);
+                        let result_expr = hint_expr.witness();
                         exprs.insert(*r, result_expr.clone());
                         result
                             .entry(result_expr)
                             .or_default()
                             .push((block_id, instruction_idx, *r));
                     }
-                    OpCode::FreshWitness {
-                        result: r,
-                        result_type: _,
-                    } => {
-                        // Fresh witnesses are unconstrained at the SSA level —
-                        // every occurrence is a fresh slot, never merged.
-                        let result_expr = Expr::Fresh(fresh_tag());
-                        exprs.insert(*r, result_expr.clone());
-                        result
-                            .entry(result_expr)
-                            .or_default()
-                            .push((block_id, instruction_idx, *r));
-                    }
+                    // Pinned `WriteWitness` and `FreshWitness` produce slots
+                    // that must NOT be merged with anything. We deliberately
+                    // skip inserting an Expr — downstream `get_expr` lookups
+                    // fall back to `Expr::Variable(value_id)`, which is unique
+                    // per ValueId by construction.
+                    OpCode::WriteWitness { result: Some(_), pinned: true, .. } => {}
+                    OpCode::FreshWitness { .. } => {}
                     OpCode::Rangecheck { value, max_bits } => {
                         let value_expr = get_expr(&exprs, value);
                         effects
