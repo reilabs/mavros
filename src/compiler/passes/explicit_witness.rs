@@ -814,7 +814,7 @@ impl ExplicitWitness {
                     } else {
                         b.cast_to_field(value)
                     };
-                    self.gen_witness_truncate(b, value_field, to_bits, one, result);
+                    self.gen_witness_truncate(b, value_field, to_bits, one, true, result);
                 }
             }
             OpCode::SExt {
@@ -1113,7 +1113,8 @@ impl ExplicitWitness {
                 } else {
                     b.cast_to_field(condition)
                 };
-                self.gen_witness_truncate(b, value, to_bits, cond_field, result);
+                let value_taint = function_type_info.get_value_type(value).is_witness_of();
+                self.gen_witness_truncate(b, value, to_bits, cond_field, value_taint, result);
             }
             OpCode::SExt {
                 result,
@@ -1128,6 +1129,7 @@ impl ExplicitWitness {
                     b.cast_to_field(condition)
                 };
                 let value_type = function_type_info.get_value_type(value);
+                let value_taint = value_type.is_witness_of();
                 let value_field = if value_type.strip_witness().is_field() {
                     value
                 } else {
@@ -1135,7 +1137,14 @@ impl ExplicitWitness {
                 };
                 let value_range = function_value_ranges.get(value);
                 self.gen_sext(
-                    b, value_field, from_bits, to_bits, cond_field, true, result, &value_range,
+                    b,
+                    value_field,
+                    from_bits,
+                    to_bits,
+                    cond_field,
+                    value_taint,
+                    result,
+                    &value_range,
                 );
             }
             OpCode::BinaryArithOp {
@@ -1341,6 +1350,7 @@ impl ExplicitWitness {
         value: ValueId,
         to_bits: usize,
         flag: ValueId,
+        is_witness: bool,
         result: ValueId,
     ) {
         assert!(to_bits <= 256);
@@ -1356,8 +1366,10 @@ impl ExplicitWitness {
         let zero = b.field_const(Field::ZERO);
         let one = b.field_const(Field::ONE);
 
-        // Step 1: Decompose value into 32 bytes (big-endian)
-        let pure_value = b.value_of(value);
+        // Step 1: Decompose value into 32 bytes (big-endian).
+        // value_of only when value is witness-typed; otherwise we already have
+        // a pure value and ValueOf would be ill-typed.
+        let pure_value = if is_witness { b.value_of(value) } else { value };
         let bytes_arr = b.fresh_value();
         b.push(OpCode::ToRadix {
             result: bytes_arr,

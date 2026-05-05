@@ -214,8 +214,19 @@ impl Expr {
         Self::SExt(Box::new(self.clone()), from_bits, to_bits)
     }
 
+    /// `ValueOf(ValueOf(x)) → ValueOf(x)` (idempotent).
+    /// `ValueOf(Witness(h)) → h` (witgen identity).
+    ///
+    /// Lives in CSE rather than the simplifier because it doesn't introduce
+    /// new opcodes — the fold replaces the Expr key for the ValueOf result
+    /// with the inner expression's key, letting CSE dedup it against any
+    /// existing definition of that expression.
     pub fn value_of(&self) -> Self {
-        Self::ValueOf(Box::new(self.clone()))
+        match self {
+            Self::ValueOf(_) => self.clone(),
+            Self::Witness(hint) => (**hint).clone(),
+            _ => Self::ValueOf(Box::new(self.clone())),
+        }
     }
 
     pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
@@ -226,7 +237,16 @@ impl Expr {
         Self::BitsOf(Box::new(self.clone()), endianness, count)
     }
 
+    /// `Witness(ValueOf(x)) → x`. Dual to `ValueOf(Witness(h)) → h`. Sound by
+    /// witgen semantics — the new slot's hint computes x's value, so honest
+    /// prover fills both identically. Requires hint chains in
+    /// `explicit_witness` gadgets to use `value_of` only at gadget-input
+    /// boundaries (so the collapsed expression contains no witness-typed
+    /// compute that R1CS gen can't evaluate).
     pub fn witness(&self) -> Self {
+        if let Self::ValueOf(inner) = self {
+            return (**inner).clone();
+        }
         Self::Witness(Box::new(self.clone()))
     }
 }

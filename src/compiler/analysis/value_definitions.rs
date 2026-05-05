@@ -25,6 +25,10 @@ impl FunctionValueDefinitions {
         self.definitions.get(&value_id).unwrap()
     }
 
+    pub fn try_get_definition(&self, value_id: ValueId) -> Option<&ValueDefinition> {
+        self.definitions.get(&value_id)
+    }
+
     pub fn insert(&mut self, value_id: ValueId, definition: ValueDefinition) {
         self.definitions.insert(value_id, definition);
     }

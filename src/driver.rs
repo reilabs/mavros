@@ -263,6 +263,10 @@ impl Driver {
             vec![
                 Box::new(LowerPureGuards::new()),
                 Box::new(FixDoubleJumps::new()),
+                // Simplify → CSE → DCE, twice. The doubled rounds let
+                // CSE-dedup expose new fold operands and folds expose new CSE
+                // matches. Each Simplifier internally iterates to fixed point
+                // for purely-algebraic folds.
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
