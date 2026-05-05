@@ -814,7 +814,7 @@ impl ExplicitWitness {
                     } else {
                         b.cast_to_field(value)
                     };
-                    self.gen_witness_truncate(b, value_field, to_bits, one, true, result);
+                    self.gen_witness_truncate(b, value_field, to_bits, one, result);
                 }
             }
             OpCode::SExt {
@@ -1105,16 +1105,27 @@ impl ExplicitWitness {
                 result,
                 value,
                 to_bits,
-                from_bits: _,
+                from_bits,
             } => {
-                let cond_type = function_type_info.get_value_type(condition);
-                let cond_field = if cond_type.strip_witness().is_field() {
-                    condition
-                } else {
-                    b.cast_to_field(condition)
-                };
                 let value_taint = function_type_info.get_value_type(value).is_witness_of();
-                self.gen_witness_truncate(b, value, to_bits, cond_field, value_taint, result);
+                if !value_taint {
+                    // Pure input: Truncate has no witness-side constraints to
+                    // gate, just emit it directly.
+                    b.push(OpCode::Truncate {
+                        result,
+                        value,
+                        to_bits,
+                        from_bits,
+                    });
+                } else {
+                    let cond_type = function_type_info.get_value_type(condition);
+                    let cond_field = if cond_type.strip_witness().is_field() {
+                        condition
+                    } else {
+                        b.cast_to_field(condition)
+                    };
+                    self.gen_witness_truncate(b, value, to_bits, cond_field, result);
+                }
             }
             OpCode::SExt {
                 result,
@@ -1122,30 +1133,40 @@ impl ExplicitWitness {
                 from_bits,
                 to_bits,
             } => {
-                let cond_type = function_type_info.get_value_type(condition);
-                let cond_field = if cond_type.strip_witness().is_field() {
-                    condition
-                } else {
-                    b.cast_to_field(condition)
-                };
                 let value_type = function_type_info.get_value_type(value);
                 let value_taint = value_type.is_witness_of();
-                let value_field = if value_type.strip_witness().is_field() {
-                    value
+                if !value_taint {
+                    // Pure input: SExt is a pure computation, no gating needed.
+                    b.push(OpCode::SExt {
+                        result,
+                        value,
+                        from_bits,
+                        to_bits,
+                    });
                 } else {
-                    b.cast_to_field(value)
-                };
-                let value_range = function_value_ranges.get(value);
-                self.gen_sext(
-                    b,
-                    value_field,
-                    from_bits,
-                    to_bits,
-                    cond_field,
-                    value_taint,
-                    result,
-                    &value_range,
-                );
+                    let cond_type = function_type_info.get_value_type(condition);
+                    let cond_field = if cond_type.strip_witness().is_field() {
+                        condition
+                    } else {
+                        b.cast_to_field(condition)
+                    };
+                    let value_field = if value_type.strip_witness().is_field() {
+                        value
+                    } else {
+                        b.cast_to_field(value)
+                    };
+                    let value_range = function_value_ranges.get(value);
+                    self.gen_sext(
+                        b,
+                        value_field,
+                        from_bits,
+                        to_bits,
+                        cond_field,
+                        true,
+                        result,
+                        &value_range,
+                    );
+                }
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
@@ -1350,7 +1371,6 @@ impl ExplicitWitness {
         value: ValueId,
         to_bits: usize,
         flag: ValueId,
-        is_witness: bool,
         result: ValueId,
     ) {
         assert!(to_bits <= 256);
@@ -1366,10 +1386,8 @@ impl ExplicitWitness {
         let zero = b.field_const(Field::ZERO);
         let one = b.field_const(Field::ONE);
 
-        // Step 1: Decompose value into 32 bytes (big-endian).
-        // value_of only when value is witness-typed; otherwise we already have
-        // a pure value and ValueOf would be ill-typed.
-        let pure_value = if is_witness { b.value_of(value) } else { value };
+        // Step 1: Decompose value into 32 bytes (big-endian)
+        let pure_value = b.value_of(value);
         let bytes_arr = b.fresh_value();
         b.push(OpCode::ToRadix {
             result: bytes_arr,
