@@ -225,15 +225,16 @@ impl ExplicitWitness {
                             };
                             let lr_diff = b.sub(l_field, r_field);
 
+                            let lr_diff_pure = b.value_of(lr_diff);
                             let field_one_for_div = b.field_const(Field::ONE);
-                            let div_hint = b.div(field_one_for_div, lr_diff);
-                            let div_hint_plain = b.value_of(div_hint);
-                            let div_hint_witness = b.write_witness(div_hint_plain);
+                            let div_hint = b.div(field_one_for_div, lr_diff_pure);
+                            let div_hint_witness = b.write_witness(div_hint);
 
-                            let out_hint = b.eq(lhs, rhs);
+                            let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
+                            let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
+                            let out_hint = b.eq(lhs_pure, rhs_pure);
                             let out_hint_field = b.cast_to_field(out_hint);
-                            let out_hint_plain = b.value_of(out_hint_field);
-                            let out_hint_witness = b.write_witness(out_hint_plain);
+                            let out_hint_witness = b.write_witness(out_hint_field);
                             b.push(OpCode::Cast {
                                 result,
                                 value: out_hint_witness,
@@ -394,10 +395,11 @@ impl ExplicitWitness {
                             BinaryArithOpKind::And => {
                                 // a AND b = a * b
                                 if l_taint && r_taint {
-                                    let res_hint = b.and(l, r);
+                                    let l_pure = b.value_of(l);
+                                    let r_pure = b.value_of(r);
+                                    let res_hint = b.and(l_pure, r_pure);
                                     let res_hint_field = b.cast_to_field(res_hint);
-                                    let res_hint_plain = b.value_of(res_hint_field);
-                                    let res_witness = b.write_witness(res_hint_plain);
+                                    let res_witness = b.write_witness(res_hint_field);
                                     b.constrain(l_field, r_field, res_witness);
                                     b.push(OpCode::Cast {
                                         result,
@@ -405,7 +407,6 @@ impl ExplicitWitness {
                                         target: u1,
                                     });
                                 } else {
-                                    // One pure, one witness: a * b is linear
                                     let product = b.mul(l_field, r_field);
                                     b.push(OpCode::Cast {
                                         result,
@@ -575,13 +576,15 @@ impl ExplicitWitness {
                         } else {
                             // Unsigned: assert lhs < rhs by proving rhs - lhs - 1 ∈ [0, 2^n).
                             // Saves 2 R1C constraints vs computing the boolean result.
-                            let l_field = b.cast_to_field(l);
-                            let r_field = b.cast_to_field(r);
-                            let diff = b.sub(r_field, l_field);
+                            //
+                            let l_pure = if l_taint { b.value_of(l) } else { l };
+                            let r_pure = if r_taint { b.value_of(r) } else { r };
+                            let l_field_pure = b.cast_to_field(l_pure);
+                            let r_field_pure = b.cast_to_field(r_pure);
+                            let diff_hint = b.sub(r_field_pure, l_field_pure);
                             let one = b.field_const(Field::ONE);
-                            let diff_minus_one = b.sub(diff, one);
-                            let diff_plain = b.value_of(diff_minus_one);
-                            let diff_wit = b.write_witness(diff_plain);
+                            let diff_minus_one_hint = b.sub(diff_hint, one);
+                            let diff_wit = b.write_witness(diff_minus_one_hint);
                             let flag = b.field_const(Field::ONE);
                             self.gen_witness_rangecheck_bits(b, diff_wit, s, flag);
                         }
@@ -706,14 +709,16 @@ impl ExplicitWitness {
                     });
                     return;
                 }
-                // At least one branch is witness: full lowering with constraint
-                let select_witness = b.select(cond, l, r);
-                let select_plain = b.value_of(select_witness);
+                // At least one branch is witness: full lowering with constraint.
+                let cond_pure = if cond_taint { b.value_of(cond) } else { cond };
+                let l_pure = if l_taint { b.value_of(l) } else { l };
+                let r_pure = if r_taint { b.value_of(r) } else { r };
+                let select_hint_value = b.select(cond_pure, l_pure, r_pure);
                 let is_field = l_type.strip_witness().is_field();
                 let select_hint = if is_field {
-                    select_plain
+                    select_hint_value
                 } else {
-                    b.cast_to_field(select_plain)
+                    b.cast_to_field(select_hint_value)
                 };
                 if is_field {
                     b.push(OpCode::WriteWitness {
@@ -1082,15 +1087,25 @@ impl ExplicitWitness {
                 result,
                 value,
                 to_bits,
-                from_bits: _,
+                from_bits,
             } => {
-                let cond_type = function_type_info.get_value_type(condition);
-                let cond_field = if cond_type.strip_witness().is_field() {
-                    condition
+                let value_taint = function_type_info.get_value_type(value).is_witness_of();
+                if !value_taint {
+                    b.push(OpCode::Truncate {
+                        result,
+                        value,
+                        to_bits,
+                        from_bits,
+                    });
                 } else {
-                    b.cast_to_field(condition)
-                };
-                self.gen_witness_truncate(b, value, to_bits, cond_field, result);
+                    let cond_type = function_type_info.get_value_type(condition);
+                    let cond_field = if cond_type.strip_witness().is_field() {
+                        condition
+                    } else {
+                        b.cast_to_field(condition)
+                    };
+                    self.gen_witness_truncate(b, value, to_bits, cond_field, result);
+                }
             }
             OpCode::SExt {
                 result,
@@ -1098,22 +1113,39 @@ impl ExplicitWitness {
                 from_bits,
                 to_bits,
             } => {
-                let cond_type = function_type_info.get_value_type(condition);
-                let cond_field = if cond_type.strip_witness().is_field() {
-                    condition
-                } else {
-                    b.cast_to_field(condition)
-                };
                 let value_type = function_type_info.get_value_type(value);
-                let value_field = if value_type.strip_witness().is_field() {
-                    value
+                let value_taint = value_type.is_witness_of();
+                if !value_taint {
+                    b.push(OpCode::SExt {
+                        result,
+                        value,
+                        from_bits,
+                        to_bits,
+                    });
                 } else {
-                    b.cast_to_field(value)
-                };
-                let value_range = function_value_ranges.get(value);
-                self.gen_sext(
-                    b, value_field, from_bits, to_bits, cond_field, true, result, &value_range,
-                );
+                    let cond_type = function_type_info.get_value_type(condition);
+                    let cond_field = if cond_type.strip_witness().is_field() {
+                        condition
+                    } else {
+                        b.cast_to_field(condition)
+                    };
+                    let value_field = if value_type.strip_witness().is_field() {
+                        value
+                    } else {
+                        b.cast_to_field(value)
+                    };
+                    let value_range = function_value_ranges.get(value);
+                    self.gen_sext(
+                        b,
+                        value_field,
+                        from_bits,
+                        to_bits,
+                        cond_field,
+                        true,
+                        result,
+                        &value_range,
+                    );
+                }
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
@@ -1593,10 +1625,11 @@ impl ExplicitWitness {
             _ => panic!("ICE: rhs is not an integer type"),
         };
         let u1 = CastTarget::U(1);
-        let res_hint = b.lt(lhs, rhs);
+        let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
+        let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
+        let res_hint = b.lt(lhs_pure, rhs_pure);
         let res_hint_field = b.cast_to_field(res_hint);
-        let res_hint_plain = b.value_of(res_hint_field);
-        let res_witness = b.write_witness(res_hint_plain);
+        let res_witness = b.write_witness(res_hint_field);
         b.push(OpCode::Cast {
             result,
             value: res_witness,
@@ -1613,9 +1646,12 @@ impl ExplicitWitness {
         let one = b.field_const(Field::ONE);
         let adjustment = b.sub(one, two_res);
 
-        let adjusted_diff = b.mul(lr_diff, adjustment);
-        let adjusted_diff_plain = b.value_of(adjusted_diff);
-        let adjusted_diff_wit = b.write_witness(adjusted_diff_plain);
+        // adjusted_diff_wit's hint = |lr_diff| computed from pure values; the
+        // constraint side enforces lr_diff * adjustment = adjusted_diff_wit.
+        let lr_diff_pure = b.value_of(lr_diff);
+        let adjustment_pure = b.value_of(adjustment);
+        let adjusted_diff_hint = b.mul(lr_diff_pure, adjustment_pure);
+        let adjusted_diff_wit = b.write_witness(adjusted_diff_hint);
         b.constrain(lr_diff, adjustment, adjusted_diff_wit);
 
         if is_signed {

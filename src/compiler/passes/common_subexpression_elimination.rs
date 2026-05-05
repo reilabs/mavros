@@ -1,11 +1,14 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Debug, Display},
 };
 
 use crate::compiler::{
     flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, ValueId},
+    ssa::{
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
+        OpCode, Radix, ValueId,
+    },
 };
 use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -35,6 +38,19 @@ enum Expr {
     TupleGet(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     ReadGlobal(u64),
+    Cast(Box<Expr>, CastTarget),
+    Truncate(Box<Expr>, usize /* to_bits */, usize /* from_bits */),
+    SExt(Box<Expr>, usize /* from_bits */, usize /* to_bits */),
+    ValueOf(Box<Expr>),
+    BytesOf(Box<Expr>, Endianness, usize /* count */),
+    BitsOf(Box<Expr>, Endianness, usize /* count */),
+    Witness(Box<Expr>),
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Effect {
+    Rangecheck(Expr, usize),
+    ByteLookup(Expr, Expr),
 }
 
 impl Expr {
@@ -63,16 +79,23 @@ impl Expr {
         }
     }
 
+    /// Flatten nested Adds and sort for a canonical form.
     pub fn add(&self, other: &Self) -> Self {
-        let mut adds = self.get_adds();
-        adds.extend(other.get_adds());
+        let mut adds: Vec<Self> = self
+            .get_adds()
+            .into_iter()
+            .chain(other.get_adds().into_iter())
+            .collect();
         adds.sort();
         Self::Add(adds)
     }
 
     pub fn mul(&self, other: &Self) -> Self {
-        let mut muls = self.get_muls();
-        muls.extend(other.get_muls());
+        let mut muls: Vec<Self> = self
+            .get_muls()
+            .into_iter()
+            .chain(other.get_muls().into_iter())
+            .collect();
         muls.sort();
         Self::Mul(muls)
     }
@@ -93,11 +116,12 @@ impl Expr {
         let mut ands = self.get_ands();
         ands.extend(other.get_ands());
         ands.sort();
+        ands.dedup();
         Self::And(ands)
     }
 
     pub fn or(&self, other: &Self) -> Self {
-        let mut ors = match self {
+        let mut ors: Vec<Self> = match self {
             Self::Or(exprs) => exprs.iter().cloned().collect(),
             _ => vec![self.clone()],
         };
@@ -106,11 +130,12 @@ impl Expr {
             _ => vec![other.clone()],
         });
         ors.sort();
+        ors.dedup();
         Self::Or(ors)
     }
 
     pub fn xor(&self, other: &Self) -> Self {
-        let mut xors = match self {
+        let mut xors: Vec<Self> = match self {
             Self::Xor(exprs) => exprs.iter().cloned().collect(),
             _ => vec![self.clone()],
         };
@@ -160,6 +185,34 @@ impl Expr {
 
     pub fn not(&self) -> Self {
         Self::Not(Box::new(self.clone()))
+    }
+
+    pub fn cast(&self, target: CastTarget) -> Self {
+        Self::Cast(Box::new(self.clone()), target)
+    }
+
+    pub fn truncate(&self, to_bits: usize, from_bits: usize) -> Self {
+        Self::Truncate(Box::new(self.clone()), to_bits, from_bits)
+    }
+
+    pub fn sext(&self, from_bits: usize, to_bits: usize) -> Self {
+        Self::SExt(Box::new(self.clone()), from_bits, to_bits)
+    }
+
+    pub fn value_of(&self) -> Self {
+        Self::ValueOf(Box::new(self.clone()))
+    }
+
+    pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
+        Self::BytesOf(Box::new(self.clone()), endianness, count)
+    }
+
+    pub fn bits_of(&self, endianness: Endianness, count: usize) -> Self {
+        Self::BitsOf(Box::new(self.clone()), endianness, count)
+    }
+
+    pub fn witness(&self) -> Self {
+        Self::Witness(Box::new(self.clone()))
     }
 }
 
@@ -229,6 +282,19 @@ impl Display for Expr {
             Self::TupleGet(tuple, index) => write!(f, "{}.{}", tuple, index),
             Self::Not(value) => write!(f, "(~{})", value),
             Self::ReadGlobal(index) => write!(f, "g{}", index),
+            Self::Cast(value, target) => write!(f, "cast({}, {})", value, target),
+            Self::Truncate(value, to, from) => {
+                write!(f, "trunc({}, {}, {})", value, to, from)
+            }
+            Self::SExt(value, from, to) => write!(f, "sext({}, {}, {})", value, from, to),
+            Self::ValueOf(value) => write!(f, "value_of({})", value),
+            Self::BytesOf(value, end, count) => {
+                write!(f, "bytes_of({}, {:?}, {})", value, end, count)
+            }
+            Self::BitsOf(value, end, count) => {
+                write!(f, "bits_of({}, {:?}, {})", value, end, count)
+            }
+            Self::Witness(hint) => write!(f, "witness({})", hint),
         }
     }
 }
@@ -267,7 +333,7 @@ impl CSE {
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let exprs = self.gather_expressions(function, cfg);
+            let (exprs, effects) = self.gather_expressions(function, cfg);
             let mut value_replacements = ValueReplacements::new();
             for (_, occurrences) in exprs {
                 if occurrences.len() <= 1 {
@@ -315,10 +381,64 @@ impl CSE {
                 }
             }
 
-            for (_, block) in function.get_blocks_mut() {
-                for instruction in block.get_instructions_mut() {
-                    value_replacements.replace_inputs(instruction);
+            // Side-effect dedup: same dominance grouping as the value loop,
+            // but duplicates are dropped rather than redirected.
+            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::new();
+            for (_, occurrences) in effects {
+                if occurrences.len() <= 1 {
+                    continue;
                 }
+                let mut groups: Vec<(BlockId, usize, Vec<(BlockId, usize)>)> = vec![];
+                for (block_id, instruction_idx) in occurrences {
+                    let mut found = false;
+                    for (candidate_block, candidate_instruction, others) in groups.iter_mut() {
+                        if self.can_replace(
+                            cfg,
+                            *candidate_block,
+                            *candidate_instruction,
+                            block_id,
+                            instruction_idx,
+                        ) {
+                            found = true;
+                            others.push((block_id, instruction_idx));
+                            break;
+                        } else if self.can_replace(
+                            cfg,
+                            block_id,
+                            instruction_idx,
+                            *candidate_block,
+                            *candidate_instruction,
+                        ) {
+                            found = true;
+                            others.push((*candidate_block, *candidate_instruction));
+                            *candidate_block = block_id;
+                            *candidate_instruction = instruction_idx;
+                            break;
+                        }
+                    }
+                    if !found {
+                        groups.push((block_id, instruction_idx, vec![]));
+                    }
+                }
+                for (_, _, others) in groups {
+                    for pos in others {
+                        to_remove.insert(pos);
+                    }
+                }
+            }
+
+            for (block_id, block) in function.get_blocks_mut() {
+                let bid = *block_id;
+                let old_instructions = block.take_instructions();
+                let mut new_instructions = Vec::with_capacity(old_instructions.len());
+                for (idx, mut instruction) in old_instructions.into_iter().enumerate() {
+                    if to_remove.contains(&(bid, idx)) {
+                        continue;
+                    }
+                    value_replacements.replace_inputs(&mut instruction);
+                    new_instructions.push(instruction);
+                }
+                block.put_instructions(new_instructions);
                 value_replacements.replace_terminator(block.get_terminator_mut());
             }
         }
@@ -345,8 +465,12 @@ impl CSE {
         &self,
         ssa: &HLFunction,
         cfg: &CFG,
-    ) -> HashMap<Expr, Vec<(BlockId, usize, ValueId)>> {
+    ) -> (
+        HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
+        HashMap<Effect, Vec<(BlockId, usize)>>,
+    ) {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
+        let mut effects: HashMap<Effect, Vec<(BlockId, usize)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
 
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
@@ -525,8 +649,148 @@ impl CSE {
                             *r,
                         ));
                     }
-                    OpCode::WriteWitness { .. } // TODO: is witness store a subexpression to be optimized?
-                    | OpCode::FreshWitness { result: _, result_type: _ }
+                    OpCode::Cast {
+                        result: r,
+                        value,
+                        target,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.cast(*target);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::Truncate {
+                        result: r,
+                        value,
+                        to_bits,
+                        from_bits,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.truncate(*to_bits, *from_bits);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::SExt {
+                        result: r,
+                        value,
+                        from_bits,
+                        to_bits,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.sext(*from_bits, *to_bits);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::ValueOf { result: r, value } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.value_of();
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::MulConst {
+                        result: r,
+                        const_val,
+                        var,
+                    } => {
+                        // Fold into Expr::Mul so MulConst dedups with BinaryArithOp::Mul.
+                        let lhs_expr = get_expr(&exprs, const_val);
+                        let rhs_expr = get_expr(&exprs, var);
+                        let result_expr = lhs_expr.mul(&rhs_expr);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::ToBits {
+                        result: r,
+                        value,
+                        endianness,
+                        count,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.bits_of(*endianness, *count);
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    OpCode::ToRadix {
+                        result: r,
+                        value,
+                        radix,
+                        endianness,
+                        count,
+                    } => {
+                        // `Dyn(_)` carries a runtime ValueId we don't encode in Expr,
+                        // so only the static `Bytes` case is keyed.
+                        match radix {
+                            Radix::Bytes => {
+                                let value_expr = get_expr(&exprs, value);
+                                let result_expr =
+                                    value_expr.bytes_of(*endianness, *count);
+                                exprs.insert(*r, result_expr.clone());
+                                result
+                                    .entry(result_expr)
+                                    .or_default()
+                                    .push((block_id, instruction_idx, *r));
+                            }
+                            Radix::Dyn(_) => {}
+                        }
+                    }
+                    OpCode::WriteWitness {
+                        result: Some(r),
+                        value,
+                        pinned: false,
+                    } => {
+                        // Two non-pinned writes with the same hint can share a slot.
+                        let hint_expr = get_expr(&exprs, value);
+                        let result_expr = hint_expr.witness();
+                        exprs.insert(*r, result_expr.clone());
+                        result
+                            .entry(result_expr)
+                            .or_default()
+                            .push((block_id, instruction_idx, *r));
+                    }
+                    // Pinned WriteWitness and FreshWitness must not merge with anything;
+                    // skipping the Expr insert leaves `get_expr` to fall back to a
+                    // unique-per-ValueId `Expr::Variable`.
+                    OpCode::WriteWitness { result: Some(_), pinned: true, .. } => {}
+                    OpCode::FreshWitness { .. } => {}
+                    OpCode::Rangecheck { value, max_bits } => {
+                        let value_expr = get_expr(&exprs, value);
+                        effects
+                            .entry(Effect::Rangecheck(value_expr, *max_bits))
+                            .or_default()
+                            .push((block_id, instruction_idx));
+                    }
+                    OpCode::Lookup {
+                        target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+                        keys,
+                        results: _,
+                        flag,
+                    } if keys.len() == 1 => {
+                        let key_expr = get_expr(&exprs, &keys[0]);
+                        let flag_expr = get_expr(&exprs, flag);
+                        effects
+                            .entry(Effect::ByteLookup(key_expr, flag_expr))
+                            .or_default()
+                            .push((block_id, instruction_idx));
+                    }
+                    OpCode::WriteWitness { result: None, .. }
                     | OpCode::Constrain { .. }
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::BumpD { matrix: _, variable: _, sensitivity: _ }
@@ -542,20 +806,12 @@ impl CSE {
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }
-                    | OpCode::Cast { .. }
-                    | OpCode::Truncate { .. }
-                    | OpCode::SExt { .. }
                     | OpCode::MemOp { kind: _, value: _ }
-                    | OpCode::Rangecheck { value: _, max_bits: _ }
-                    | OpCode::ToBits { .. }
-                    | OpCode::ToRadix { .. }
-                    | OpCode::Lookup { target: _, keys: _, results: _, flag: _ }
+                    | OpCode::Lookup { .. }
                     | OpCode::DLookup { target: _, keys: _, results: _, flag: _ }
                     | OpCode::Todo { .. }
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
-                    | OpCode::ValueOf { .. }
-                    | OpCode::MulConst { .. }
                     | OpCode::Spread { .. }
                     | OpCode::Unspread { .. } => {}
                     OpCode::Not { result: r, value } => {
@@ -619,6 +875,6 @@ impl CSE {
                 }
             }
         }
-        result
+        (result, effects)
     }
 }

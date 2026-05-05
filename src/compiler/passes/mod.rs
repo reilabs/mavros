@@ -1,4 +1,4 @@
-pub mod arithmetic_simplifier;
+pub mod simplifier;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;
 pub mod dead_code_elimination;
