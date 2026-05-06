@@ -1347,7 +1347,7 @@ impl<'a> ExpressionConverter<'a> {
             LowLevelReplacement::Single(func_id) => func_id,
             LowLevelReplacement::ByArraySize(size_map) => {
                 let array_size = match &call.return_type {
-                    noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n as u32,
+                    noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n,
                     _ => panic!("{} expected array return type", name),
                 };
                 size_map

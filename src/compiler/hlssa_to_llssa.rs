@@ -310,7 +310,7 @@ fn lower_inner(
 
     // Transfer global types from HLSSA to LLSSA
     let hlssa_global_types: Vec<Type> = hlssa.get_global_types().to_vec();
-    let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(|ty| lower_type(ty)).collect();
+    let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(lower_type).collect();
     llssa.set_global_types(ll_global_types);
 
     // First pass: create all functions (so we can map FunctionIds)
@@ -2113,9 +2113,9 @@ fn generate_all_lookup_functions(
 /// Extract the four raw limbs of a Field value.
 fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> (ValueId, ValueId, ValueId, ValueId) {
     let limbs = e.field_to_limbs(val);
-    let l0 = e.extract_field(limbs.clone(), LLStruct::limbs(), 0);
-    let l1 = e.extract_field(limbs.clone(), LLStruct::limbs(), 1);
-    let l2 = e.extract_field(limbs.clone(), LLStruct::limbs(), 2);
+    let l0 = e.extract_field(limbs, LLStruct::limbs(), 0);
+    let l1 = e.extract_field(limbs, LLStruct::limbs(), 1);
+    let l2 = e.extract_field(limbs, LLStruct::limbs(), 2);
     let l3 = e.extract_field(limbs, LLStruct::limbs(), 3);
     (l0, l1, l2, l3)
 }

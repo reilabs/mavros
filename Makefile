@@ -47,7 +47,7 @@ install: ## Builds the Mavros CLI and installs it to your cargo binary path
 
 .PHONY: clippy
 clippy: ## Lint the codebase with clippy
-	$(SHELL_WRAPPER) cargo clippy --all-targets --all-features
+	$(SHELL_WRAPPER) cargo clippy --all-targets --all-features -- -Dwarnings
 
 .PHONY: format-check-rust
 format-check-rust: ## Check rust formatting without changing files (reformat with `make format-rust`)

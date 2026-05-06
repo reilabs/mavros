@@ -238,9 +238,9 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
     pub fn run(&mut self, ssa: &mut SSA<Op, Ty>) {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
-                fs::remove_dir_all(&debug_output_dir).unwrap();
+                fs::remove_dir_all(debug_output_dir).unwrap();
             }
-            fs::create_dir(&debug_output_dir).unwrap();
+            fs::create_dir(debug_output_dir).unwrap();
         }
 
         let passes = std::mem::take(&mut self.passes);
