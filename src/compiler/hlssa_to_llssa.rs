@@ -560,12 +560,8 @@ fn lower_instruction(
                     BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Shl => {
-                        lower_wrapping_shift(e, IntArithOp::Shl, ll_lhs, ll_rhs, &result_type)
-                    }
-                    BinaryArithOpKind::Shr => {
-                        lower_wrapping_shift(e, IntArithOp::UShr, ll_lhs, ll_rhs, &result_type)
-                    }
+                    BinaryArithOpKind::Shl => e.int_arith(IntArithOp::Shl, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shr => e.int_arith(IntArithOp::UShr, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Div => e.int_arith(IntArithOp::UDiv, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Mod => e.int_arith(IntArithOp::URem, ll_lhs, ll_rhs),
                 },
@@ -576,12 +572,8 @@ fn lower_instruction(
                     BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Shl => {
-                        lower_wrapping_shift(e, IntArithOp::Shl, ll_lhs, ll_rhs, &result_type)
-                    }
-                    BinaryArithOpKind::Shr => {
-                        lower_wrapping_shift(e, IntArithOp::UShr, ll_lhs, ll_rhs, &result_type)
-                    }
+                    BinaryArithOpKind::Shl => e.int_arith(IntArithOp::Shl, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shr => e.int_arith(IntArithOp::UShr, ll_lhs, ll_rhs),
                     BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
                     BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
                 },
@@ -1183,63 +1175,9 @@ fn integer_width(ty: &Type) -> u32 {
     }
 }
 
-/// Lower an integer shift with Noir's defined wrap-by-width semantics:
-/// `lhs << rhs` is `lhs << (rhs % width)`. HLSSA passes the un-wrapped RHS,
-/// and the LLSSA `Shl`/`UShr` ops are undefined when `rhs >= width`, so the
-/// modulo must be inserted here. Without it, programs that shift by a
-/// dynamic amount `>= width` (which Noir defines and which Spread/Unspread
-/// rotation patterns can produce) silently miscompile.
-fn lower_wrapping_shift(
-    e: &mut LLBlockEmitter<'_>,
-    op: IntArithOp,
-    lhs: ValueId,
-    rhs: ValueId,
-    result_type: &Type,
-) -> ValueId {
-    let bits = integer_width(result_type);
-    let bits_value = e.int_const(bits, bits as u64);
-    let wrapped_rhs = e.int_arith(IntArithOp::URem, rhs, bits_value);
-    e.int_arith(op, lhs, wrapped_rhs)
-}
-
-fn zext_to_width(
-    e: &mut LLBlockEmitter<'_>,
-    value: ValueId,
-    from_bits: u32,
-    to_bits: u32,
-) -> ValueId {
-    assert!(
-        from_bits <= to_bits,
-        "Cannot zero-extend i{} to narrower i{}",
-        from_bits,
-        to_bits
-    );
-    if from_bits == to_bits {
-        value
-    } else {
-        e.zext(value, to_bits)
-    }
-}
-
-fn resize_to_width(
-    e: &mut LLBlockEmitter<'_>,
-    value: ValueId,
-    from_bits: u32,
-    to_bits: u32,
-) -> ValueId {
-    if from_bits < to_bits {
-        e.zext(value, to_bits)
-    } else if from_bits > to_bits {
-        e.truncate(value, to_bits)
-    } else {
-        value
-    }
-}
-
-/// Lower a Spread bit-interleave inline as SSA bit ops. Used both for
-/// `OpCode::Spread` and inside the spread lookup helpers. `bits` is the
-/// active low-bit width from `spread::<N>`, while the SSA value type may be a
-/// wider container such as `u32`.
+/// Emit a Spread LLSSA opcode. `bits` is the active low-bit width from
+/// `spread::<N>`, while the SSA value type may be a wider container such as
+/// `u32`.
 fn lower_spread(
     e: &mut LLBlockEmitter<'_>,
     value: ValueId,
@@ -1268,28 +1206,7 @@ fn lower_spread(
         bits
     );
 
-    let value = resize_to_width(e, value, input_bits, result_bits);
-    let mut acc = e.int_const(result_bits, 0);
-    let one = e.int_const(result_bits, 1);
-
-    for i in 0..active_bits {
-        let src_shift = e.int_const(result_bits, i as u64);
-        let shifted_down = if i == 0 {
-            value
-        } else {
-            e.int_arith(IntArithOp::UShr, value, src_shift)
-        };
-        let bit = e.int_arith(IntArithOp::And, shifted_down, one);
-        let dst_shift = e.int_const(result_bits, (i * 2) as u64);
-        let spread_bit = if i == 0 {
-            bit
-        } else {
-            e.int_arith(IntArithOp::Shl, bit, dst_shift)
-        };
-        acc = e.int_arith(IntArithOp::Or, acc, spread_bit);
-    }
-
-    acc
+    e.spread(value, bits, result_bits)
 }
 
 fn lower_unspread(
@@ -1333,43 +1250,7 @@ fn lower_unspread(
         bits
     );
 
-    let acc_bits = input_bits.max(odd_bits).max(even_bits);
-    let value = zext_to_width(e, value, input_bits, acc_bits);
-    let mut odd_acc = e.int_const(acc_bits, 0);
-    let mut even_acc = e.int_const(acc_bits, 0);
-    let one = e.int_const(acc_bits, 1);
-
-    for i in 0..active_bits {
-        let even_src_shift = e.int_const(acc_bits, (i * 2) as u64);
-        let even_shifted_down = if i == 0 {
-            value
-        } else {
-            e.int_arith(IntArithOp::UShr, value, even_src_shift)
-        };
-        let even_bit = e.int_arith(IntArithOp::And, even_shifted_down, one);
-        let dst_shift = e.int_const(acc_bits, i as u64);
-        let even_compact_bit = if i == 0 {
-            even_bit
-        } else {
-            e.int_arith(IntArithOp::Shl, even_bit, dst_shift)
-        };
-        even_acc = e.int_arith(IntArithOp::Or, even_acc, even_compact_bit);
-
-        let odd_src_shift = e.int_const(acc_bits, (i * 2 + 1) as u64);
-        let odd_shifted_down = e.int_arith(IntArithOp::UShr, value, odd_src_shift);
-        let odd_bit = e.int_arith(IntArithOp::And, odd_shifted_down, one);
-        let odd_compact_bit = if i == 0 {
-            odd_bit
-        } else {
-            e.int_arith(IntArithOp::Shl, odd_bit, dst_shift)
-        };
-        odd_acc = e.int_arith(IntArithOp::Or, odd_acc, odd_compact_bit);
-    }
-
-    (
-        resize_to_width(e, odd_acc, acc_bits, odd_bits),
-        resize_to_width(e, even_acc, acc_bits, even_bits),
-    )
+    e.unspread(value, bits, odd_bits, even_bits)
 }
 
 // =============================================================================
@@ -2373,18 +2254,24 @@ fn lower_terminator(
             e.terminate_jmp_if(ll_cond, ll_then, ll_else);
         }
         Terminator::Return(values) => {
+            assert_eq!(
+                values.len(),
+                return_types.len(),
+                "Return terminator has {} values but function declares {} returns",
+                values.len(),
+                return_types.len()
+            );
             let ll_values: Vec<ValueId> = values
                 .iter()
                 .zip(return_types.iter())
                 .map(|(v, expected_type)| {
                     let actual_type = fn_type_info.get_value_type(*v);
-                    let ll_value = val_map[v];
-                    match (lower_type(actual_type), lower_type(expected_type)) {
-                        (LLType::Int(from_bits), LLType::Int(to_bits)) => {
-                            resize_to_width(e, ll_value, from_bits, to_bits)
-                        }
-                        _ => ll_value,
-                    }
+                    assert_eq!(
+                        actual_type, expected_type,
+                        "Return type mismatch: value {:?} has type {}, but function declares {}",
+                        v, actual_type, expected_type
+                    );
+                    val_map[v]
                 })
                 .collect();
             e.terminate_return(ll_values);

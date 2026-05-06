@@ -17,7 +17,9 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+};
 
 use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
@@ -116,6 +118,140 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLType::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
             LLType::Struct(s) => self.convert_struct_type(s),
         }
+    }
+
+    fn int_mask(&self, bits: u32, value: u128) -> IntValue<'ctx> {
+        let words = [value as u64, (value >> 64) as u64];
+        self.context
+            .custom_width_int_type(NonZeroU32::new(bits).expect("Cannot have zero-width integer"))
+            .expect("A basic integer type can be created")
+            .const_int_arbitrary_precision(&words)
+    }
+
+    fn low_bits_mask(bits: u32) -> u128 {
+        if bits == 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
+    fn widen_or_trunc_int(
+        &self,
+        value: IntValue<'ctx>,
+        to_bits: u32,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        let from_bits = value.get_type().get_bit_width();
+        if from_bits == to_bits {
+            value
+        } else if from_bits < to_bits {
+            let ty = self
+                .context
+                .custom_width_int_type(
+                    NonZeroU32::new(to_bits).expect("Cannot have zero-width integer"),
+                )
+                .expect("A basic integer type can be created");
+            self.builder.build_int_z_extend(value, ty, name).unwrap()
+        } else {
+            let ty = self
+                .context
+                .custom_width_int_type(
+                    NonZeroU32::new(to_bits).expect("Cannot have zero-width integer"),
+                )
+                .expect("A basic integer type can be created");
+            self.builder.build_int_truncate(value, ty, name).unwrap()
+        }
+    }
+
+    fn compile_spread_bits(
+        &self,
+        value: IntValue<'ctx>,
+        active_bits: u8,
+        result_bits: u32,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        assert!(
+            active_bits <= 64,
+            "Spread only supports widths up to 64, got {}",
+            active_bits
+        );
+        let mut x = self.widen_or_trunc_int(value, result_bits, "spread_wide");
+        x = self
+            .builder
+            .build_and(
+                x,
+                self.int_mask(result_bits, Self::low_bits_mask(active_bits as u32)),
+                "spread_active",
+            )
+            .unwrap();
+        for (shift, mask) in [
+            (32, 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128),
+            (16, 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128),
+            (8, 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128),
+            (4, 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128),
+            (2, 0x3333_3333_3333_3333_3333_3333_3333_3333u128),
+            (1, 0x5555_5555_5555_5555_5555_5555_5555_5555u128),
+        ] {
+            if result_bits > shift {
+                let shamt = x.get_type().const_int(shift as u64, false);
+                let shifted = self
+                    .builder
+                    .build_left_shift(x, shamt, "spread_shl")
+                    .unwrap();
+                let or = self.builder.build_or(x, shifted, "spread_or").unwrap();
+                x = self
+                    .builder
+                    .build_and(or, self.int_mask(result_bits, mask), "spread_mask")
+                    .unwrap();
+            }
+        }
+        self.widen_or_trunc_int(x, result_bits, name)
+    }
+
+    fn compact_spread_bits(
+        &self,
+        value: IntValue<'ctx>,
+        active_bits: u8,
+        result_bits: u32,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        assert!(
+            active_bits <= 64,
+            "Unspread only supports active widths up to 64, got {}",
+            active_bits
+        );
+        let work_bits = value.get_type().get_bit_width();
+        let mut x = self
+            .builder
+            .build_and(
+                value,
+                self.int_mask(work_bits, 0x5555_5555_5555_5555_5555_5555_5555_5555u128),
+                "unspread_mask0",
+            )
+            .unwrap();
+        for (shift, mask) in [
+            (1, 0x3333_3333_3333_3333_3333_3333_3333_3333u128),
+            (2, 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128),
+            (4, 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128),
+            (8, 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128),
+            (16, 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128),
+            (32, 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFFu128),
+        ] {
+            if work_bits > shift {
+                let shamt = x.get_type().const_int(shift as u64, false);
+                let shifted = self
+                    .builder
+                    .build_right_shift(x, shamt, false, "unspread_shr")
+                    .unwrap();
+                let or = self.builder.build_or(x, shifted, "unspread_or").unwrap();
+                x = self
+                    .builder
+                    .build_and(or, self.int_mask(work_bits, mask), "unspread_mask")
+                    .unwrap();
+            }
+        }
+        self.widen_or_trunc_int(x, result_bits, name)
     }
 
     /// Convert an LLStruct to an LLVM struct type.
@@ -495,32 +631,72 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
-                    IntArithOp::Shl => {
-                        // LLVM treats shifts by >= bit_width as poison. Wrap by
-                        // the actual bit width so custom widths like i6 behave
-                        // correctly too.
-                        let bw = lhs.get_type().get_bit_width();
-                        let width = lhs.get_type().const_int(bw as u64, false);
-                        let wrapped_rhs = self
-                            .builder
-                            .build_int_unsigned_rem(rhs, width, "shamt")
-                            .unwrap();
-                        self.builder.build_left_shift(lhs, wrapped_rhs, name).unwrap()
-                    }
-                    IntArithOp::UShr => {
-                        let bw = lhs.get_type().get_bit_width();
-                        let width = lhs.get_type().const_int(bw as u64, false);
-                        let wrapped_rhs = self
-                            .builder
-                            .build_int_unsigned_rem(rhs, width, "shamt")
-                            .unwrap();
-                        self.builder
-                            .build_right_shift(lhs, wrapped_rhs, false, name)
-                            .unwrap()
-                    }
+                    IntArithOp::Shl => self.builder.build_left_shift(lhs, rhs, name).unwrap(),
+                    IntArithOp::UShr => self
+                        .builder
+                        .build_right_shift(lhs, rhs, false, name)
+                        .unwrap(),
                     _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val.into());
+            }
+
+            LLOp::Spread {
+                result,
+                value,
+                bits,
+                result_bits,
+            } => {
+                let input = self.value_map[value].into_int_value();
+                let val =
+                    self.compile_spread_bits(input, *bits, *result_bits, &format!("v{}", result.0));
+                self.value_map.insert(*result, val.into());
+            }
+
+            LLOp::Unspread {
+                result_odd,
+                result_even,
+                value,
+                bits,
+                odd_bits,
+                even_bits,
+            } => {
+                let input = self.value_map[value].into_int_value();
+                let active_input_bits = (*bits as u32) * 2;
+                let input = self
+                    .builder
+                    .build_and(
+                        input,
+                        self.int_mask(
+                            input.get_type().get_bit_width(),
+                            Self::low_bits_mask(active_input_bits),
+                        ),
+                        "unspread_active",
+                    )
+                    .unwrap();
+                let odd_source = self
+                    .builder
+                    .build_right_shift(
+                        input,
+                        input.get_type().const_int(1, false),
+                        false,
+                        "unspread_odd_src",
+                    )
+                    .unwrap();
+                let odd = self.compact_spread_bits(
+                    odd_source,
+                    *bits,
+                    *odd_bits,
+                    &format!("v{}", result_odd.0),
+                );
+                let even = self.compact_spread_bits(
+                    input,
+                    *bits,
+                    *even_bits,
+                    &format!("v{}", result_even.0),
+                );
+                self.value_map.insert(*result_odd, odd.into());
+                self.value_map.insert(*result_even, even.into());
             }
 
             LLOp::IntCmp { kind, result, a, b } => {
