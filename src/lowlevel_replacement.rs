@@ -50,7 +50,7 @@ impl ReplacementCrate {
 /// Scan the monomorphizer's finished functions to find which LowLevel intrinsics are actually used.
 pub fn find_needed_lowlevels(monomorphizer: &Monomorphizer) -> HashSet<String> {
     let mut needed = HashSet::new();
-    for (_, func) in monomorphizer.finished_functions() {
+    for func in monomorphizer.finished_functions().values() {
         visit_expr(&func.body, &mut |expr| {
             if let Expression::Ident(ident) = expr {
                 if let Definition::LowLevel(name) = &ident.definition {

@@ -141,7 +141,7 @@ impl Types {
 
             for instruction in block.get_instructions() {
                 self.run_opcode(instruction, &mut function_info, function_types)
-                    .expect(&format!("Error running opcode {:?}", instruction));
+                    .unwrap_or_else(|_| panic!("Error running opcode {:?}", instruction));
             }
         }
 

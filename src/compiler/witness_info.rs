@@ -1,7 +1,7 @@
 use itertools::Itertools;
 
 use crate::compiler::ssa::{BlockId, FunctionId, SsaAnnotator, ValueId};
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub enum ConstantWitness {
@@ -53,26 +53,28 @@ pub enum WitnessType {
     Tuple(WitnessInfo, Vec<WitnessType>),
 }
 
-impl WitnessType {
-    pub fn to_string(&self) -> String {
+impl Display for WitnessType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WitnessType::Scalar(info) => format!("{}", info),
+            WitnessType::Scalar(info) => write!(f, "{info}"),
             WitnessType::Array(info, inner) => {
-                format!("[{} of {}]", info, inner.to_string())
+                write!(f, "[{info} of {inner}]")
             }
             WitnessType::Ref(info, inner) => {
-                format!("[*{} of {}]", info, inner.to_string())
+                write!(f, "[*{info} of {inner}]")
             }
             WitnessType::Tuple(info, children) => {
-                format!(
-                    "({} of <{}>)",
-                    info,
+                write!(
+                    f,
+                    "({info} of <{}>)",
                     children.iter().map(|child| child.to_string()).join(", ")
                 )
             }
         }
     }
+}
 
+impl WitnessType {
     /// Join two witness types (least upper bound). Eagerly computes concrete result.
     pub fn join(&self, other: &WitnessType) -> WitnessType {
         match (self, other) {
@@ -160,13 +162,6 @@ pub struct FunctionWitnessType {
 }
 
 impl FunctionWitnessType {
-    pub fn to_string(&self) -> String {
-        format!(
-            "returns: {:?}\nparameters: {:?}\nvalue_witness_types: {:?}\ncfg_witness: {:?}",
-            self.returns_witness, self.parameters, self.value_witness_types, self.cfg_witness
-        )
-    }
-
     pub fn get_value_witness_type(&self, value_id: ValueId) -> &WitnessType {
         self.value_witness_types.get(&value_id).unwrap()
     }
@@ -200,6 +195,16 @@ impl SsaAnnotator for FunctionWitnessType {
         format!(
             "returns: [{}], cfg_witness: {}",
             return_types, self.cfg_witness
+        )
+    }
+}
+
+impl Display for FunctionWitnessType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "returns: {:?}\nparameters: {:?}\nvalue_witness_types: {:?}\ncfg_witness: {:?}",
+            self.returns_witness, self.parameters, self.value_witness_types, self.cfg_witness
         )
     }
 }

@@ -286,7 +286,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     }
 
     pub fn get_var_num_bound(&self) -> usize {
-        return self.next_value as usize;
+        self.next_value as usize
     }
 
     pub fn get_entry_mut(&mut self) -> &mut Block<Op, Ty> {
@@ -477,9 +477,9 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
                 let annotation = if annotation.is_empty() {
                     "".to_string()
                 } else {
-                    format!(" [{}]", annotation)
+                    format!(" [{annotation}]")
                 };
-                format!("v{} : {}{}", v.0.0, v.1.to_string(), annotation)
+                format!("v{} : {}{annotation}", v.0.0, v.1)
             })
             .join(", ");
         let annotate_value = |value: ValueId| -> String {
@@ -487,7 +487,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
             if annotation.is_empty() {
                 "".to_string()
             } else {
-                format!("[{}]", annotation)
+                format!("[{annotation}]")
             }
         };
         let instructions = self
@@ -1678,173 +1678,55 @@ impl Instruction for OpCode {
 
     fn get_results(&self) -> impl Iterator<Item = &ValueId> {
         match self {
-            Self::Alloc {
-                result: r,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
-                result: r,
-                result_type: _,
-            }
+            Self::Alloc { result: r, .. }
+            | Self::FreshWitness { result: r, .. }
             | Self::Const { result: r, .. }
-            | Self::Cmp {
-                kind: _,
-                result: r,
-                lhs: _,
-                rhs: _,
-            }
-            | Self::BinaryArithOp {
-                kind: _,
-                result: r,
-                lhs: _,
-                rhs: _,
-            }
-            | Self::ArrayGet {
-                result: r,
-                array: _,
-                index: _,
-            }
-            | Self::ArraySet {
-                result: r,
-                array: _,
-                index: _,
-                value: _,
-            }
-            | Self::SlicePush {
-                dir: _,
-                result: r,
-                slice: _,
-                values: _,
-            }
-            | Self::SliceLen {
-                result: r,
-                slice: _,
-            }
+            | Self::Cmp { result: r, .. }
+            | Self::BinaryArithOp { result: r, .. }
+            | Self::ArrayGet { result: r, .. }
+            | Self::ArraySet { result: r, .. }
+            | Self::SlicePush { result: r, .. }
+            | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
-            | Self::MkSeq {
-                result: r,
-                elems: _,
-                seq_type: _,
-                elem_type: _,
-            }
-            | Self::Select {
-                result: r,
-                cond: _,
-                if_t: _,
-                if_f: _,
-            }
-            | Self::Cast {
-                result: r,
-                value: _,
-                target: _,
-            }
-            | Self::Truncate {
-                result: r,
-                value: _,
-                to_bits: _,
-                from_bits: _,
-            }
-            | Self::SExt {
-                result: r,
-                value: _,
-                from_bits: _,
-                to_bits: _,
-            }
-            | Self::MulConst {
-                result: r,
-                const_val: _,
-                var: _,
-            }
+            | Self::MkSeq { result: r, .. }
+            | Self::Select { result: r, .. }
+            | Self::Cast { result: r, .. }
+            | Self::Truncate { result: r, .. }
+            | Self::SExt { result: r, .. }
+            | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
-            | Self::TupleProj {
-                result: r,
-                tuple: _,
-                idx: _,
-            }
-            | Self::MkTuple {
-                result: r,
-                elems: _,
-                element_types: _,
-            } => vec![r].into_iter(),
-            Self::WriteWitness {
-                result: r,
-                value: _,
-                pinned: _,
-            } => {
+            | Self::TupleProj { result: r, .. }
+            | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
+            Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
                 ret_vec.into_iter()
             }
-            Self::Call {
-                results: r,
-                function: _,
-                args: _,
-                unconstrained: _,
-            } => r.iter().collect::<Vec<_>>().into_iter(),
+            Self::Call { results: r, .. } => r.iter().collect::<Vec<_>>().into_iter(),
             Self::Constrain { .. }
-            | Self::BumpD {
-                matrix: _,
-                variable: _,
-                sensitivity: _,
-            }
-            | Self::MemOp { kind: _, value: _ }
-            | Self::Store { ptr: _, value: _ }
-            | Self::Assert { value: _ }
-            | Self::AssertCmp {
-                kind: _,
-                lhs: _,
-                rhs: _,
-            }
+            | Self::BumpD { .. }
+            | Self::MemOp { .. }
+            | Self::Store { .. }
+            | Self::Assert { .. }
+            | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
-            | Self::Rangecheck {
-                value: _,
-                max_bits: _,
-            } => vec![].into_iter(),
-            Self::Not {
-                result: r,
-                value: _,
-            }
-            | Self::ValueOf {
-                result: r,
-                value: _,
-            }
-            | Self::Spread {
-                result: r,
-                value: _,
-                ..
-            } => vec![r].into_iter(),
+            | Self::Rangecheck { .. } => vec![].into_iter(),
+            Self::Not { result: r, .. }
+            | Self::ValueOf { result: r, .. }
+            | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
-                value: _,
                 ..
             } => vec![result_odd, result_even].into_iter(),
-            Self::ToBits {
-                result: r,
-                value: _,
-                endianness: _,
-                count: _,
-            } => vec![r].into_iter(),
-            Self::ToRadix {
-                result: r,
-                value: _,
-                radix: _,
-                endianness: _,
-                count: _,
-            } => vec![r].into_iter(),
-            Self::ReadGlobal {
-                result: r,
-                offset: _,
-                result_type: _,
-            } => vec![r].into_iter(),
+            Self::ToBits { result: r, .. } => vec![r].into_iter(),
+            Self::ToRadix { result: r, .. } => vec![r].into_iter(),
+            Self::ReadGlobal { result: r, .. } => vec![r].into_iter(),
             Self::Lookup { .. } | Self::DLookup { .. } => vec![].into_iter(),
             Self::Todo { results, .. } => {
                 let ret_vec: Vec<&ValueId> = results.iter().collect();
                 ret_vec.into_iter()
             }
-            Self::InitGlobal {
-                global: _,
-                value: _,
-            } => vec![].into_iter(),
+            Self::InitGlobal { .. } => vec![].into_iter(),
             Self::DropGlobal { global: _ } => vec![].into_iter(),
             Self::Guard { inner, .. } => inner.get_results().collect::<Vec<_>>().into_iter(),
         }

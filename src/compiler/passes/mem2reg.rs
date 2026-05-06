@@ -128,10 +128,9 @@ impl Mem2Reg {
                     let tmp = vec![];
                     let additional_params = phi_map.get(tgt).unwrap_or(&tmp);
                     for (_, val) in additional_params {
-                        let param_val = values.get(val).expect(&format!(
-                            "ICE: block {} has no value for v{}",
-                            block_id.0, val.0
-                        ));
+                        let param_val = values.get(val).unwrap_or_else(|| {
+                            panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
+                        });
                         params.push(value_replacements.get_replacement(*param_val));
                     }
                 }
@@ -143,10 +142,9 @@ impl Mem2Reg {
                             .unwrap()
                             .iter()
                             .map(|(_, val)| {
-                                let v = *values.get(val).expect(&format!(
-                                    "ICE: block {} has no value for v{}",
-                                    block_id.0, val.0
-                                ));
+                                let v = *values.get(val).unwrap_or_else(|| {
+                                    panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
+                                });
                                 value_replacements.get_replacement(v)
                             })
                             .collect::<Vec<_>>();
@@ -160,10 +158,9 @@ impl Mem2Reg {
                             .unwrap()
                             .iter()
                             .map(|(_, val)| {
-                                let v = *values.get(val).expect(&format!(
-                                    "ICE: block {} has no value for v{}",
-                                    block_id.0, val.0
-                                ));
+                                let v = *values.get(val).unwrap_or_else(|| {
+                                    panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
+                                });
                                 value_replacements.get_replacement(v)
                             })
                             .collect::<Vec<_>>();
@@ -347,16 +344,13 @@ impl Mem2Reg {
                 }
             }
 
-            match block.get_terminator() {
-                Some(Terminator::Return(vals)) => {
-                    for v in vals {
-                        let vtyp = type_info.get_value_type(*v);
-                        if self.type_contains_ptr(vtyp) {
-                            return false;
-                        }
+            if let Some(Terminator::Return(vals)) = block.get_terminator() {
+                for v in vals {
+                    let vtyp = type_info.get_value_type(*v);
+                    if self.type_contains_ptr(vtyp) {
+                        return false;
                     }
                 }
-                _ => {}
             }
         }
 

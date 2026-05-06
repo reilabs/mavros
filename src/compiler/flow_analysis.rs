@@ -424,7 +424,7 @@ impl CFG {
         );
 
         // Add nodes with block content
-        for (_, block_id) in &self.node_to_block {
+        for block_id in self.node_to_block.values() {
             let block = function.get_block(*block_id);
             let block_content = block.to_string(
                 &func_name,
@@ -499,7 +499,7 @@ impl CFG {
 
         // Use system dot command to generate PNG
         let output = Command::new("dot")
-            .args(&["-Tpng", &temp_dot_path, "-o", output_path.to_str().unwrap()])
+            .args(["-Tpng", &temp_dot_path, "-o", output_path.to_str().unwrap()])
             .output()?;
 
         // Clean up temporary file
@@ -579,7 +579,7 @@ impl CallGraph {
         dot_content.push_str("  node [shape=box];\n\n");
 
         // Add nodes with function_name@function_id labels
-        for (_, func_id) in &self.node_to_func {
+        for func_id in self.node_to_func.values() {
             let function = ssa.get_function(*func_id);
             let function_name = function.get_name();
             dot_content.push_str(&format!(
@@ -609,7 +609,7 @@ impl CallGraph {
 
         // Use system dot command to generate PNG
         let output = Command::new("dot")
-            .args(&["-Tpng", temp_dot_path, "-o", output_path.to_str().unwrap()])
+            .args(["-Tpng", temp_dot_path, "-o", output_path.to_str().unwrap()])
             .output()?;
 
         // Clean up temporary file
@@ -699,7 +699,7 @@ impl FlowAnalysis {
         self.call_graph
             .generate_image(debug_output_dir.join("call_graph.png"), ssa)
             .unwrap();
-        for (func_id, _cfg) in &self.function_cfgs {
+        for func_id in self.function_cfgs.keys() {
             self.function_cfgs[func_id]
                 .generate_image(
                     debug_output_dir.join(format!(

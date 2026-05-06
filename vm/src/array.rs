@@ -156,8 +156,7 @@ impl BoxedLayout {
             DataType::Struct => 8 * self.struct_size(),
             DataType::RefCell => 8 * self.ref_cell_elem_size(),
         };
-        let arr_size = ((base_byte_size + 7) / 8) + 3;
-        arr_size
+        base_byte_size.div_ceil(8) + 3
     }
 }
 
@@ -357,7 +356,7 @@ impl BoxedValue {
         for i in 0..idx {
             offset += child_sizes[i];
         }
-        unsafe { self.data().offset(offset as isize) }
+        unsafe { self.data().add(offset) }
     }
 
     pub fn inc_rc(&self, by: u64) {

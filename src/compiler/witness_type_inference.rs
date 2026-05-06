@@ -175,7 +175,7 @@ impl WitnessTypeInference {
                     let callee_return_types: Vec<WitnessType> = callee_func
                         .get_returns()
                         .iter()
-                        .map(|tp| Self::construct_pure_witness_for_type(tp))
+                        .map(Self::construct_pure_witness_for_type)
                         .collect();
 
                     let specialized_clone = callee_func.clone();
@@ -410,7 +410,7 @@ impl WitnessTypeInference {
             return_types = func
                 .get_returns()
                 .iter()
-                .map(|tp| Self::construct_pure_witness_for_type(tp))
+                .map(Self::construct_pure_witness_for_type)
                 .collect();
         }
 
@@ -745,11 +745,7 @@ impl WitnessTypeInference {
                             }
                         }
                     }
-                    OpCode::MkTuple {
-                        result,
-                        elems,
-                        element_types: _,
-                    } => {
+                    OpCode::MkTuple { result, elems, .. } => {
                         let children: Vec<WitnessType> = elems
                             .iter()
                             .map(|v| value_wt.get(v).unwrap().clone())
@@ -757,9 +753,7 @@ impl WitnessTypeInference {
                         value_wt
                             .insert(*result, WitnessType::Tuple(ConstantWitness::Pure, children));
                     }
-                    OpCode::WriteWitness {
-                        result, value: _, ..
-                    } => {
+                    OpCode::WriteWitness { result, .. } => {
                         // WriteWitness records a value on the witness tape.
                         // Its output is always Witness-typed.
                         if let Some(result) = result {
@@ -906,7 +900,7 @@ impl WitnessTypeInference {
                 ConstantWitness::Pure,
                 elements
                     .iter()
-                    .map(|e| Self::construct_pure_witness_for_type(e))
+                    .map(Self::construct_pure_witness_for_type)
                     .collect(),
             ),
             TypeExpr::Function => WitnessType::Scalar(ConstantWitness::Pure),

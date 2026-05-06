@@ -31,16 +31,13 @@ impl DeduplicatePhis {
         for (_, function) in ssa.iter_functions_mut() {
             let mut unifications: HashMap<(BlockId, Vec<ValueId>), Vec<BlockId>> = HashMap::new();
             for (block_id, block) in function.get_blocks() {
-                match block.get_terminator() {
-                    Some(Terminator::Jmp(target, inputs)) => {
-                        if inputs.len() > 0 {
-                            unifications
-                                .entry((*target, inputs.clone()))
-                                .or_insert(vec![])
-                                .push(*block_id);
-                        }
+                if let Some(Terminator::Jmp(target, inputs)) = block.get_terminator() {
+                    if inputs.len() > 0 {
+                        unifications
+                            .entry((*target, inputs.clone()))
+                            .or_insert(vec![])
+                            .push(*block_id);
                     }
-                    _ => {}
                 }
             }
 
