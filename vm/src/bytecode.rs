@@ -24,16 +24,16 @@ pub const ELEM_WITNESS: usize = 2;
 #[inline(always)]
 unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm: &mut VM) {
     match elem_kind {
-        ELEM_WORD => {
+        ELEM_WORD => unsafe {
             let v = Field::from(*(ptr as *const u64));
             *vm.data.as_ad.out_db += coeff * v;
-        }
-        ELEM_FIELD => {
+        },
+        ELEM_FIELD => unsafe {
             let v = *(ptr as *const Field);
             *vm.data.as_ad.out_db += coeff * v;
-        }
+        },
         ELEM_WITNESS => {
-            let elem = BoxedValue(*(ptr as *const *mut u64));
+            let elem = BoxedValue(unsafe { *(ptr as *const *mut u64) });
             elem.bump_db(coeff, vm);
         }
         _ => unreachable!(),
@@ -44,8 +44,8 @@ unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm:
 #[inline(always)]
 unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
     match elem_kind {
-        ELEM_WORD => Field::from(*(ptr as *const u64)),
-        ELEM_FIELD => *(ptr as *const Field),
+        ELEM_WORD => Field::from(unsafe { *(ptr as *const u64) }),
+        ELEM_FIELD => unsafe { *(ptr as *const Field) },
         _ => unreachable!(),
     }
 }
@@ -294,27 +294,31 @@ unsafe fn forward_kv_lookup_emit(
     let table_info = &vm.tables[table_idx];
 
     // Entry 1 (x-constraint): table_id, result_value, 0
-    *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-    *vm.data.as_forward.lookups_b = result;
-    *(vm.data.as_forward.lookups_c as *mut u64) = 0;
-    vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-    vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-    vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+    unsafe {
+        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+        *vm.data.as_forward.lookups_b = result;
+        *(vm.data.as_forward.lookups_c as *mut u64) = 0;
+        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+    }
 
     // Entry 2 (y-constraint): table_id, key, flag
-    *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-    if flag_u64 != 0 {
-        let key_u64 = ark_ff::PrimeField::into_bigint(key).0[0];
-        let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
-        *(ptr as *mut u64) += flag_u64;
-        *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
-    } else {
-        *(vm.data.as_forward.lookups_b as *mut Field) = key;
+    unsafe {
+        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+        if flag_u64 != 0 {
+            let key_u64 = ark_ff::PrimeField::into_bigint(key).0[0];
+            let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
+            *(ptr as *mut u64) += flag_u64;
+            *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
+        } else {
+            *(vm.data.as_forward.lookups_b as *mut Field) = key;
+        }
+        *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
+        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
     }
-    *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
-    vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-    vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-    vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
 }
 
 /// Emit AD bumps for a key-value lookup (x-constraint + y-constraint + sum).
@@ -329,7 +333,7 @@ unsafe fn ad_kv_lookup_emit(
     let cnst_off = table_info.elem_inverses_constraint_section_offset;
     let length = table_info.length;
 
-    let x_coeff = {
+    let x_coeff = unsafe {
         let r = *vm
             .data
             .as_ad
@@ -338,12 +342,12 @@ unsafe fn ad_kv_lookup_emit(
         vm.data.as_ad.current_cnst_lookups_off += 1;
         r
     };
-    let x_wit_off = {
+    let x_wit_off = unsafe {
         let r = vm.data.as_ad.current_wit_lookups_off;
         vm.data.as_ad.current_wit_lookups_off += 1;
         r
     };
-    let y_coeff = {
+    let y_coeff = unsafe {
         let r = *vm
             .data
             .as_ad
@@ -352,37 +356,46 @@ unsafe fn ad_kv_lookup_emit(
         vm.data.as_ad.current_cnst_lookups_off += 1;
         r
     };
-    let y_wit_off = {
+    let y_wit_off = unsafe {
         let r = vm.data.as_ad.current_wit_lookups_off;
         vm.data.as_ad.current_wit_lookups_off += 1;
         r
     };
-    let inv_sum_coeff = *vm
-        .data
-        .as_ad
-        .ad_coeffs
-        .offset(cnst_off as isize + 2 * length as isize);
+    let inv_sum_coeff = unsafe {
+        *vm.data
+            .as_ad
+            .ad_coeffs
+            .offset(cnst_off as isize + 2 * length as isize)
+    };
 
     // x-constraint: beta * result - x_lookup = 0
-    *vm.data
-        .as_ad
-        .out_da
-        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
+    unsafe {
+        *vm.data
+            .as_ad
+            .out_da
+            .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
+    }
     result.bump_db(x_coeff, vm);
-    *vm.data.as_ad.out_dc.offset(x_wit_off as isize) -= x_coeff;
+    unsafe {
+        *vm.data.as_ad.out_dc.offset(x_wit_off as isize) -= x_coeff;
+    }
 
     // y-constraint: y * (alpha - x_lookup - key) = flag
-    *vm.data.as_ad.out_da.offset(y_wit_off as isize) += y_coeff;
-    *vm.data
-        .as_ad
-        .out_db
-        .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += y_coeff;
-    *vm.data.as_ad.out_db.offset(x_wit_off as isize) -= y_coeff;
+    unsafe {
+        *vm.data.as_ad.out_da.offset(y_wit_off as isize) += y_coeff;
+        *vm.data
+            .as_ad
+            .out_db
+            .offset(vm.data.as_ad.logup_wit_challenge_off as isize) += y_coeff;
+        *vm.data.as_ad.out_db.offset(x_wit_off as isize) -= y_coeff;
+    }
     key.bump_db(-y_coeff, vm);
     flag.bump_dc(y_coeff, vm);
 
     // Sum constraint
-    *vm.data.as_ad.out_dc.offset(y_wit_off as isize) += inv_sum_coeff;
+    unsafe {
+        *vm.data.as_ad.out_dc.offset(y_wit_off as isize) += inv_sum_coeff;
+    }
 }
 
 #[interpreter]

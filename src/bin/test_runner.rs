@@ -249,7 +249,7 @@ fn run_single(root: PathBuf) {
     let wasm_path = r1cs.as_ref().and_then(|r1cs| {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.into_path().join("witgen.wasm");
+        let wasm_path = tmpdir.keep().join("witgen.wasm");
         match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
@@ -321,7 +321,7 @@ fn run_single(root: PathBuf) {
     let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
         emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.into_path().join("ad.wasm");
+        let wasm_path = tmpdir.keep().join("ad.wasm");
         match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:AD_WASM_COMPILE:ok");

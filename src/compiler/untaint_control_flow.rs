@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use tracing::{Level, instrument};
 
 use crate::compiler::{
-    analysis::types::{FunctionTypeInfo, TypeInfo, Types},
+    analysis::types::{FunctionTypeInfo, Types},
     block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, CastTarget, FunctionId, HLBlock, HLFunction, HLSSA,
-        OpCode, SeqType, Terminator, ValueId,
+        BinaryArithOpKind, BlockId, CallTarget, FunctionId, HLBlock, HLFunction, HLSSA, OpCode,
+        SeqType, Terminator, ValueId,
     },
     witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo, WitnessType},
     witness_type_inference::WitnessTypeInference,
