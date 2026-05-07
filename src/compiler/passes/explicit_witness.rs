@@ -3,16 +3,16 @@ use std::collections::HashMap;
 use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
-    Field,
     analysis::types::TypeInfo,
     block_builder::{HLEmitter, HLInstrBuilder},
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
-        OpCode, Radix, SeqType, ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, LookupTarget, OpCode,
+        Radix, SeqType, ValueId, HLSSA,
     },
+    Field,
 };
 
 pub struct ExplicitWitness {}
@@ -32,6 +32,15 @@ impl Pass for ExplicitWitness {
 
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
+    }
+}
+
+fn cast_target_for_type(ty: &Type) -> CastTarget {
+    match ty.strip_all_witness().expr {
+        TypeExpr::U(bits) => CastTarget::U(bits),
+        TypeExpr::I(bits) => CastTarget::I(bits),
+        TypeExpr::Field => CastTarget::Field,
+        other => panic!("Expected scalar type for witness cast, got {:?}", other),
     }
 }
 
@@ -440,7 +449,11 @@ impl ExplicitWitness {
                 };
                 b.constrain(v_field, one_field, one_field);
             }
-            OpCode::AssertCmp { kind, lhs: l, rhs: r } => {
+            OpCode::AssertCmp {
+                kind,
+                lhs: l,
+                rhs: r,
+            } => {
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
                 let l_taint = l_type.is_witness_of();
@@ -873,10 +886,12 @@ impl ExplicitWitness {
                     // Constrain via lookup table
                     b.lookup_spread(bits, input_field, spread_wit, one);
                     // Bind the original result to the spread witness
+                    let result_target =
+                        cast_target_for_type(&function_type_info.get_value_type(result));
                     b.push(OpCode::Cast {
                         result,
                         value: spread_wit,
-                        target: CastTarget::U(bits as usize * 2),
+                        target: result_target,
                     });
                 }
             }
@@ -910,15 +925,19 @@ impl ExplicitWitness {
                     let even_spread = b.sub(value_field, two_odd_spread);
                     b.lookup_spread(bits, even_wit, even_spread, one);
                     // Bind results
+                    let odd_target =
+                        cast_target_for_type(&function_type_info.get_value_type(result_odd));
+                    let even_target =
+                        cast_target_for_type(&function_type_info.get_value_type(result_even));
                     b.push(OpCode::Cast {
                         result: result_odd,
                         value: odd_wit,
-                        target: CastTarget::U(bits as usize),
+                        target: odd_target,
                     });
                     b.push(OpCode::Cast {
                         result: result_even,
                         value: even_wit,
-                        target: CastTarget::U(bits as usize),
+                        target: even_target,
                     });
                 }
             }
