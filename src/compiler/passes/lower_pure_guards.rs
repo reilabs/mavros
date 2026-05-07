@@ -4,8 +4,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLFunction, HLSSA, Instruction, OpCode,
-        ValueId,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLFunction, Instruction, OpCode, ValueId,
+        HLSSA,
     },
 };
 
@@ -17,14 +17,16 @@ use crate::compiler::{
 ///
 /// Classification:
 /// - **Always unwrap** (no constraints, no side effects, can't fail):
-///   Const, Cmp, Not, And, Or, Xor, Shr, Cast, Truncate, ExtractTupleField,
+///   Const, Cmp, Not, And, Or, Xor, Cast, Truncate, ExtractTupleField,
 ///   MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 /// - **Lower with OOB check** (can fail on out-of-bounds index):
 ///   ArrayGet — if OOB, assert !cond and produce default; else array_get.
 /// - **Lower with OOB check + passthrough** (RC-tracked allocation):
 ///   ArraySet — if OOB, assert !cond and pass through array; else array_set.
 /// - **Lower with overflow check** (pure inputs only, can fail):
-///   Integer Add/Sub/Mul/Shl — widen, compute, if overflow assert !cond and produce 0; else narrow.
+///   Integer Add/Sub/Mul — widen, compute, if overflow assert !cond and produce 0; else narrow.
+/// - **Lower with shift check** (pure inputs only, can fail):
+///   Integer Shl/Shr — validate shift amount before shifting; Shl also checks overflow.
 /// - **Lower with div-zero check** (pure inputs only, can fail):
 ///   Div/Mod — if divisor==0 assert !cond and produce 0; else compute.
 /// - **Keep as Guard** (side-effectful or generates constraints):
@@ -150,10 +152,7 @@ impl LowerPureGuards {
             // -- Integer arith that can overflow: lower only if all inputs pure --
             OpCode::BinaryArithOp {
                 kind:
-                    kind @ (BinaryArithOpKind::Add
-                    | BinaryArithOpKind::Sub
-                    | BinaryArithOpKind::Mul
-                    | BinaryArithOpKind::Shl),
+                    kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub | BinaryArithOpKind::Mul),
                 result,
                 lhs,
                 rhs,
@@ -180,6 +179,41 @@ impl LowerPureGuards {
                         });
                     }
                     // Witness inputs on integer arith: keep as Guard for ExplicitWitness
+                    _ => {
+                        emitter.emit(OpCode::Guard {
+                            condition,
+                            inner: Box::new(OpCode::BinaryArithOp {
+                                kind,
+                                result,
+                                lhs,
+                                rhs,
+                            }),
+                        });
+                    }
+                }
+            }
+
+            // -- Shifts can fail when the shift amount is out of range.  In guarded
+            // code, check that before emitting the shift so inactive bad shifts do
+            // not become LLVM poison.
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                result,
+                lhs,
+                rhs,
+            } => {
+                let lhs_type = type_info.get_value_type(lhs);
+                match &lhs_type.strip_witness().expr {
+                    TypeExpr::U(bits) if self.all_inputs_pure(&inner, type_info) => {
+                        self.lower_shift_guard(
+                            emitter, condition, kind, result, lhs, rhs, *bits, false,
+                        );
+                    }
+                    TypeExpr::I(bits) if self.all_inputs_pure(&inner, type_info) => {
+                        self.lower_shift_guard(
+                            emitter, condition, kind, result, lhs, rhs, *bits, true,
+                        );
+                    }
                     _ => {
                         emitter.emit(OpCode::Guard {
                             condition,
@@ -272,11 +306,7 @@ impl LowerPureGuards {
             | OpCode::Cmp { .. }
             | OpCode::Not { .. }
             | OpCode::BinaryArithOp {
-                kind:
-                    BinaryArithOpKind::And
-                    | BinaryArithOpKind::Or
-                    | BinaryArithOpKind::Xor
-                    | BinaryArithOpKind::Shr,
+                kind: BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor,
                 ..
             }
             | OpCode::Cast { .. }
@@ -388,6 +418,162 @@ impl LowerPureGuards {
             signed,
             bits,
         );
+    }
+
+    /// Lower `Guard(cond, shift(lhs, rhs) -> result)`.
+    ///
+    /// Shifts are only valid for amounts in `[0, bits)`.  The range check must
+    /// dominate the shift itself; otherwise LLVM can treat an out-of-range shift
+    /// in an inactive guarded branch as poison.
+    fn lower_shift_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        kind: BinaryArithOpKind,
+        original_result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        signed: bool,
+    ) {
+        let result_type = if signed {
+            Type {
+                expr: TypeExpr::I(bits),
+            }
+        } else {
+            Type {
+                expr: TypeExpr::U(bits),
+            }
+        };
+        let invalid_shift = self.emit_invalid_shift_cond(emitter, rhs, bits, signed);
+
+        emitter.build_if_else_into(
+            invalid_shift,
+            vec![(original_result, result_type.clone())],
+            |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
+            |e| match kind {
+                BinaryArithOpKind::Shr => {
+                    let result = e.fresh_value();
+                    e.emit(OpCode::BinaryArithOp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs,
+                    });
+                    vec![result]
+                }
+                BinaryArithOpKind::Shl => {
+                    vec![self.emit_checked_shl_ok_path(e, condition, lhs, rhs, bits, signed)]
+                }
+                _ => unreachable!("lower_shift_guard called for non-shift op"),
+            },
+        );
+    }
+
+    fn emit_invalid_shift_cond(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        rhs: ValueId,
+        bits: usize,
+        signed: bool,
+    ) -> ValueId {
+        let cmp_bits = bits.max(64);
+        let cmp_target = if signed {
+            CastTarget::I(cmp_bits)
+        } else {
+            CastTarget::U(cmp_bits)
+        };
+        let rhs_cmp = emitter.cast_to(cmp_target, rhs);
+        let rhs_bound = if signed {
+            emitter.i_const(cmp_bits, bits as u128)
+        } else {
+            emitter.u_const(cmp_bits, bits as u128)
+        };
+        let rhs_lt_bits = emitter.lt(rhs_cmp, rhs_bound);
+        let rhs_too_large = emitter.not(rhs_lt_bits);
+
+        if signed {
+            let zero = emitter.i_const(cmp_bits, 0);
+            let rhs_negative = emitter.lt(rhs_cmp, zero);
+            emitter.or(rhs_negative, rhs_too_large)
+        } else {
+            rhs_too_large
+        }
+    }
+
+    fn emit_checked_shl_ok_path(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        signed: bool,
+    ) -> ValueId {
+        let wide_bits = wider_bits(bits);
+        let wide_target = if signed {
+            CastTarget::I(wide_bits)
+        } else {
+            CastTarget::U(wide_bits)
+        };
+        let lhs_wide = emitter.cast_to(wide_target, lhs);
+        let rhs_wide = emitter.cast_to(wide_target, rhs);
+        let wide_result = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shl,
+            result: wide_result,
+            lhs: lhs_wide,
+            rhs: rhs_wide,
+        });
+
+        let overflow = self.emit_overflow_cond(emitter, wide_result, bits, signed, wide_bits);
+        let result_type = if signed {
+            Type {
+                expr: TypeExpr::I(bits),
+            }
+        } else {
+            Type {
+                expr: TypeExpr::U(bits),
+            }
+        };
+
+        let result = emitter.build_if_else(
+            overflow,
+            vec![result_type],
+            |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
+            |e| {
+                let narrow_target = if signed {
+                    CastTarget::I(bits)
+                } else {
+                    CastTarget::U(bits)
+                };
+                vec![e.cast_to(narrow_target, wide_result)]
+            },
+        );
+        result[0]
+    }
+
+    fn emit_overflow_cond(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        wide_result: ValueId,
+        bits: usize,
+        signed: bool,
+        wide_bits: usize,
+    ) -> ValueId {
+        if signed {
+            // Signed: check result < -(2^(bits-1)) || result >= 2^(bits-1)
+            let min_val = emitter.i_const(wide_bits, (-(1i128 << (bits - 1))) as u128);
+            let max_val = emitter.i_const(wide_bits, 1u128 << (bits - 1));
+            let too_low = emitter.lt(wide_result, min_val);
+            let too_high = emitter.cmp(max_val, wide_result, CmpKind::Lt);
+            emitter.or(too_low, too_high)
+        } else {
+            // Unsigned: check result >= 2^bits
+            let max_val = emitter.u_const(wide_bits, 1u128 << bits);
+            let fits = emitter.lt(wide_result, max_val);
+            emitter.not(fits)
+        }
     }
 
     /// Lower `Guard(cond, div/mod(lhs, rhs) -> result)` for division by zero.
@@ -577,22 +763,30 @@ impl LowerPureGuards {
             failure,
             vec![(original_result, result_type.clone())],
             // Failure: assert condition is false, produce default value
-            |e| {
-                let zero = e.u_const(1, 0);
-                e.emit(OpCode::AssertCmp {
-                    kind: CmpKind::Eq,
-                    lhs: condition,
-                    rhs: zero,
-                });
-                vec![if signed {
-                    e.i_const(bits, 0)
-                } else {
-                    e.u_const(bits, 0)
-                }]
-            },
+            |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
             // Ok: compute the result
             |e| vec![ok_path(e)],
         );
+    }
+
+    fn emit_guard_failure_default(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        signed: bool,
+        bits: usize,
+    ) -> ValueId {
+        let zero = emitter.u_const(1, 0);
+        emitter.emit(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: condition,
+            rhs: zero,
+        });
+        if signed {
+            emitter.i_const(bits, 0)
+        } else {
+            emitter.u_const(bits, 0)
+        }
     }
 }
 
