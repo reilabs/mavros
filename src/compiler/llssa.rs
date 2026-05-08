@@ -182,48 +182,51 @@ impl LLStruct {
         Self::new(vec![
             LLFieldType::Ptr,     // 0  witness
             LLFieldType::Ptr,     // 1  a
-            LLFieldType::Ptr,     // 2  b
-            LLFieldType::Ptr,     // 3  c
-            LLFieldType::Ptr,     // 4  mults_cursor
-            LLFieldType::Ptr,     // 5  lookups_a
-            LLFieldType::Ptr,     // 6  lookups_b
-            LLFieldType::Ptr,     // 7  lookups_c
-            LLFieldType::Ptr,     // 8  inputs
-            LLFieldType::Int(32), // 9  tables_len
-            LLFieldType::Int(32), // 10 tables_cap
-            LLFieldType::Ptr,     // 11 tables_ptr
-            LLFieldType::Int(32), // 12 current_cnst_tables_off
-            LLFieldType::Int(32), // 13 current_wit_tables_off
+            LLFieldType::Ptr,     // 2  a_base
+            LLFieldType::Ptr,     // 3  b
+            LLFieldType::Ptr,     // 4  c
+            LLFieldType::Ptr,     // 5  mults_cursor
+            LLFieldType::Ptr,     // 6  lookups_a
+            LLFieldType::Ptr,     // 7  lookups_b
+            LLFieldType::Ptr,     // 8  lookups_c
+            LLFieldType::Ptr,     // 9  inputs
+            LLFieldType::Int(32), // 10 tables_len
+            LLFieldType::Int(32), // 11 tables_cap
+            LLFieldType::Ptr,     // 12 tables_ptr
+            LLFieldType::Int(32), // 13 current_cnst_tables_off
+            LLFieldType::Int(32), // 14 current_wit_tables_off
+            LLFieldType::Int(32), // 15 reserved padding
         ])
     }
 
     pub const WITGEN_VM_WITNESS: usize = 0;
     pub const WITGEN_VM_A: usize = 1;
-    pub const WITGEN_VM_B: usize = 2;
-    pub const WITGEN_VM_C: usize = 3;
+    pub const WITGEN_VM_A_BASE: usize = 2;
+    pub const WITGEN_VM_B: usize = 3;
+    pub const WITGEN_VM_C: usize = 4;
     /// Cursor into the witness multiplicities section. Mirrors VM
     /// `multiplicities_witness`: each first-use lookup snapshots this into
     /// its slot, then bumps it by the table's length.
-    pub const WITGEN_VM_MULTS_CURSOR: usize = 4;
-    pub const WITGEN_VM_LOOKUPS_A: usize = 5;
-    pub const WITGEN_VM_LOOKUPS_B: usize = 6;
-    pub const WITGEN_VM_LOOKUPS_C: usize = 7;
-    pub const WITGEN_VM_INPUTS: usize = 8;
+    pub const WITGEN_VM_MULTS_CURSOR: usize = 5;
+    pub const WITGEN_VM_LOOKUPS_A: usize = 6;
+    pub const WITGEN_VM_LOOKUPS_B: usize = 7;
+    pub const WITGEN_VM_LOOKUPS_C: usize = 8;
+    pub const WITGEN_VM_INPUTS: usize = 9;
     /// Cursor counting allocated tables. Each first-use claim assigns the
     /// current `tables_len` as the new table id, then bumps it.
     /// Mirrors `vm.tables.len()`.
-    pub const WITGEN_VM_TABLES_LEN: usize = 9;
+    pub const WITGEN_VM_TABLES_LEN: usize = 10;
     /// Capacity of the host-allocated table-info buffer.
-    pub const WITGEN_VM_TABLES_CAP: usize = 10;
+    pub const WITGEN_VM_TABLES_CAP: usize = 11;
     /// Base pointer to the host-allocated table-info buffer.
-    pub const WITGEN_VM_TABLES_PTR: usize = 11;
+    pub const WITGEN_VM_TABLES_PTR: usize = 12;
     /// Cursor into the constraints-region tables section (advances on
     /// first-use claims by each table's footprint). Forward-side, written-
     /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
-    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 12;
+    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 13;
     /// Cursor into the post-commitment witness tables section (relative to
     /// `challenges_start`).
-    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 13;
+    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 14;
 
     /// VM struct used by the reverse AD entrypoint.
     ///
@@ -426,6 +429,20 @@ pub enum LLOp {
         result: ValueId,
         value: ValueId,
     },
+    Spread {
+        result: ValueId,
+        value: ValueId,
+        bits: u8,
+        result_bits: u32,
+    },
+    Unspread {
+        result_odd: ValueId,
+        result_even: ValueId,
+        value: ValueId,
+        bits: u8,
+        odd_bits: u32,
+        even_bits: u32,
+    },
 
     // ── Integer Comparison ──────────────────────────────────────────────
     IntCmp {
@@ -562,7 +579,9 @@ impl Instruction for LLOp {
             LLOp::Not { value, .. }
             | LLOp::FieldNeg { src: value, .. }
             | LLOp::FieldToLimbs { src: value, .. }
-            | LLOp::FieldFromLimbs { limbs: value, .. } => vec![value].into_iter(),
+            | LLOp::FieldFromLimbs { limbs: value, .. }
+            | LLOp::Spread { value, .. }
+            | LLOp::Unspread { value, .. } => vec![value].into_iter(),
 
             LLOp::Truncate { value, .. } | LLOp::ZExt { value, .. } => vec![value].into_iter(),
 
@@ -610,6 +629,7 @@ impl Instruction for LLOp {
             | LLOp::NullPtr { result }
             | LLOp::IntArith { result, .. }
             | LLOp::Not { result, .. }
+            | LLOp::Spread { result, .. }
             | LLOp::IntCmp { result, .. }
             | LLOp::Truncate { result, .. }
             | LLOp::ZExt { result, .. }
@@ -629,6 +649,11 @@ impl Instruction for LLOp {
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
+            LLOp::Unspread {
+                result_odd,
+                result_even,
+                ..
+            } => vec![result_odd, result_even].into_iter(),
 
             // No result
             LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
@@ -648,7 +673,9 @@ impl Instruction for LLOp {
             LLOp::Not { value, .. }
             | LLOp::FieldNeg { src: value, .. }
             | LLOp::FieldToLimbs { src: value, .. }
-            | LLOp::FieldFromLimbs { limbs: value, .. } => vec![value].into_iter(),
+            | LLOp::FieldFromLimbs { limbs: value, .. }
+            | LLOp::Spread { value, .. }
+            | LLOp::Unspread { value, .. } => vec![value].into_iter(),
 
             LLOp::Truncate { value, .. } | LLOp::ZExt { value, .. } => vec![value].into_iter(),
 
@@ -700,6 +727,7 @@ impl Instruction for LLOp {
             LLOp::Trap => vec![].into_iter(),
 
             LLOp::Not { result, value }
+            | LLOp::Spread { result, value, .. }
             | LLOp::FieldNeg { result, src: value }
             | LLOp::FieldToLimbs { result, src: value }
             | LLOp::FieldFromLimbs {
@@ -722,6 +750,13 @@ impl Instruction for LLOp {
                 if_t,
                 if_f,
             } => vec![result, cond, if_t, if_f].into_iter(),
+
+            LLOp::Unspread {
+                result_odd,
+                result_even,
+                value,
+                ..
+            } => vec![result_odd, result_even, value].into_iter(),
 
             LLOp::Free { ptr } => vec![ptr].into_iter(),
             LLOp::Store { ptr, value } => vec![ptr, value].into_iter(),
@@ -791,6 +826,38 @@ impl Instruction for LLOp {
             }
             LLOp::Not { result, value } => {
                 format!("{} = not {}", v(*result), vr(*value))
+            }
+            LLOp::Spread {
+                result,
+                value,
+                bits,
+                result_bits,
+            } => {
+                format!(
+                    "{} = spread({}) {} to i{}",
+                    v(*result),
+                    bits,
+                    vr(*value),
+                    result_bits
+                )
+            }
+            LLOp::Unspread {
+                result_odd,
+                result_even,
+                value,
+                bits,
+                odd_bits,
+                even_bits,
+            } => {
+                format!(
+                    "{}, {} = unspread({}) {} to i{}, i{}",
+                    v(*result_odd),
+                    v(*result_even),
+                    bits,
+                    vr(*value),
+                    odd_bits,
+                    even_bits
+                )
             }
             LLOp::IntCmp { kind, result, a, b } => {
                 format!("{} = icmp.{} {}, {}", v(*result), kind, vr(*a), vr(*b))

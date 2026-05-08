@@ -23,7 +23,7 @@ use mavros_wasm_layout::{
     AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
     TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET, TABLE_INFO_MULTS_BASE_PTR_OFFSET,
     TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_SLOT_SIZE,
-    WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
     WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
     WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
     WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_CAP_OFFSET,
@@ -582,6 +582,7 @@ fn run_wasm(
         let off = vm_struct_ptr as usize;
         let w = WITGEN_WITNESS_PTR_OFFSET as usize;
         let a = WITGEN_A_PTR_OFFSET as usize;
+        let a_base = WITGEN_A_BASE_PTR_OFFSET as usize;
         let b = WITGEN_B_PTR_OFFSET as usize;
         let c = WITGEN_C_PTR_OFFSET as usize;
         let mc = WITGEN_MULTS_CURSOR_PTR_OFFSET as usize;
@@ -595,6 +596,7 @@ fn run_wasm(
         let cwt = WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET as usize;
         data[off + w..off + w + 4].copy_from_slice(&witness_ptr.to_le_bytes());
         data[off + a..off + a + 4].copy_from_slice(&a_ptr.to_le_bytes());
+        data[off + a_base..off + a_base + 4].copy_from_slice(&a_ptr.to_le_bytes());
         data[off + b..off + b + 4].copy_from_slice(&b_ptr.to_le_bytes());
         data[off + c..off + c + 4].copy_from_slice(&c_ptr.to_le_bytes());
         data[off + mc..off + mc + 4].copy_from_slice(&mults_cursor_ptr.to_le_bytes());

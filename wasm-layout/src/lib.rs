@@ -55,7 +55,8 @@ const _: () = assert!(TABLE_INFO_SLOT_SIZE == TABLE_INFO_LENGTH_OFFSET + 4);
 // ── Forward-pass (witgen) VM struct ─────────────────────────────────────
 //
 // Cursors (kind-agnostic):
-//   - witness, a, b, c (writing cursors into the witness/constraint vectors)
+//   - witness, a, a_base, b, c (writing cursors into the witness/constraint
+//     vectors, plus the immutable base of the A constraints vector)
 //   - mults_cursor (cursor into the witness multiplicities section; first-
 //     use lookups snapshot it, then bump by their table's length)
 //   - lookups_a, lookups_b, lookups_c (lookup-tape write cursors)
@@ -71,21 +72,24 @@ const _: () = assert!(TABLE_INFO_SLOT_SIZE == TABLE_INFO_LENGTH_OFFSET + 4);
 //
 pub const WITGEN_WITNESS_PTR_OFFSET: u32 = 0;
 pub const WITGEN_A_PTR_OFFSET: u32 = 4;
-pub const WITGEN_B_PTR_OFFSET: u32 = 8;
-pub const WITGEN_C_PTR_OFFSET: u32 = 12;
-pub const WITGEN_MULTS_CURSOR_PTR_OFFSET: u32 = 16;
-pub const WITGEN_LOOKUPS_A_PTR_OFFSET: u32 = 20;
-pub const WITGEN_LOOKUPS_B_PTR_OFFSET: u32 = 24;
-pub const WITGEN_LOOKUPS_C_PTR_OFFSET: u32 = 28;
-pub const WITGEN_INPUTS_PTR_OFFSET: u32 = 32;
-pub const WITGEN_TABLES_LEN_OFFSET: u32 = 36;
-pub const WITGEN_TABLES_CAP_OFFSET: u32 = 40;
+pub const WITGEN_A_BASE_PTR_OFFSET: u32 = 8;
+pub const WITGEN_B_PTR_OFFSET: u32 = 12;
+pub const WITGEN_C_PTR_OFFSET: u32 = 16;
+pub const WITGEN_MULTS_CURSOR_PTR_OFFSET: u32 = 20;
+pub const WITGEN_LOOKUPS_A_PTR_OFFSET: u32 = 24;
+pub const WITGEN_LOOKUPS_B_PTR_OFFSET: u32 = 28;
+pub const WITGEN_LOOKUPS_C_PTR_OFFSET: u32 = 32;
+pub const WITGEN_INPUTS_PTR_OFFSET: u32 = 36;
+pub const WITGEN_TABLES_LEN_OFFSET: u32 = 40;
+pub const WITGEN_TABLES_CAP_OFFSET: u32 = 44;
 /// Base pointer to the table-info buffer. Runtime table id `i` lives at
 /// `tables_ptr + i * TABLE_INFO_SLOT_SIZE`.
-pub const WITGEN_TABLES_PTR_OFFSET: u32 = 44;
-pub const WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET: u32 = 48;
-pub const WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET: u32 = 52;
-pub const WITGEN_VM_STRUCT_SIZE: u32 = 56;
+pub const WITGEN_TABLES_PTR_OFFSET: u32 = 48;
+pub const WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET: u32 = 52;
+pub const WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET: u32 = 56;
+/// Reserved padding to keep the following Field buffers 8-byte aligned.
+pub const WITGEN_RESERVED_OFFSET: u32 = 60;
+pub const WITGEN_VM_STRUCT_SIZE: u32 = 64;
 
 // ── AD VM struct ────────────────────────────────────────────────────────
 //
@@ -114,7 +118,8 @@ pub const AD_VM_STRUCT_SIZE: u32 = 40;
 // Static shape checks — if someone renumbers a field, the build breaks here
 // rather than at runtime in WASM.
 const _: () = assert!(WITGEN_A_PTR_OFFSET == WITGEN_WITNESS_PTR_OFFSET + WASM_PTR_SIZE);
-const _: () = assert!(WITGEN_B_PTR_OFFSET == WITGEN_A_PTR_OFFSET + WASM_PTR_SIZE);
+const _: () = assert!(WITGEN_A_BASE_PTR_OFFSET == WITGEN_A_PTR_OFFSET + WASM_PTR_SIZE);
+const _: () = assert!(WITGEN_B_PTR_OFFSET == WITGEN_A_BASE_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(WITGEN_C_PTR_OFFSET == WITGEN_B_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(WITGEN_MULTS_CURSOR_PTR_OFFSET == WITGEN_C_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () =
@@ -129,7 +134,8 @@ const _: () =
     assert!(WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET == WITGEN_TABLES_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () =
     assert!(WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET == WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET + 4);
-const _: () = assert!(WITGEN_VM_STRUCT_SIZE == WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET + 4);
+const _: () = assert!(WITGEN_RESERVED_OFFSET == WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET + 4);
+const _: () = assert!(WITGEN_VM_STRUCT_SIZE == WITGEN_RESERVED_OFFSET + 4);
 const _: () = assert!(AD_OUT_DB_PTR_OFFSET == AD_OUT_DA_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(AD_OUT_DC_PTR_OFFSET == AD_OUT_DB_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(AD_COEFFS_PTR_OFFSET == AD_OUT_DC_PTR_OFFSET + WASM_PTR_SIZE);

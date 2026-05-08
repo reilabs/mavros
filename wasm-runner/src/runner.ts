@@ -81,8 +81,9 @@ export async function run(
   // Initialize VM struct with buffer pointers (these get advanced by write functions)
   view.setUint32(vmPtr, witnessPtr, true);
   view.setUint32(vmPtr + 4, aPtr, true);
-  view.setUint32(vmPtr + 8, bPtr, true);
-  view.setUint32(vmPtr + 12, cPtr, true);
+  view.setUint32(vmPtr + 8, aPtr, true);
+  view.setUint32(vmPtr + 12, bPtr, true);
+  view.setUint32(vmPtr + 16, cPtr, true);
 
   // Load the WASM runtime module (provides __field_mul)
   const runtimeMod = await loadRuntimeModule();
