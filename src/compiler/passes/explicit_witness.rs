@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
+    Field,
     analysis::{
         types::{FunctionTypeInfo, TypeInfo},
         value_range::{FunctionValueRanges, IntInterval, ValueRanges},
@@ -12,10 +13,9 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, LookupTarget, OpCode,
-        Radix, SeqType, ValueId, HLSSA,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
+        OpCode, Radix, SeqType, ValueId,
     },
-    Field,
 };
 
 use num_bigint::BigInt;

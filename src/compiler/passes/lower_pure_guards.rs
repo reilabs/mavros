@@ -4,8 +4,8 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLFunction, Instruction, OpCode, ValueId,
-        HLSSA,
+        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLFunction, HLSSA, Instruction, OpCode,
+        ValueId,
     },
 };
 
