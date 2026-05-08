@@ -19,7 +19,7 @@ use crate::{
 pub type Handler = fn(*const u64, Frame, &mut VM);
 
 #[inline(always)]
-pub fn dispatch(pc: *const u64, frame: Frame, vm: &mut VM) {
+pub unsafe fn dispatch(pc: *const u64, frame: Frame, vm: &mut VM) {
     let opcode: Handler = unsafe { mem::transmute(*pc) };
     opcode(pc, frame, vm);
 }
@@ -133,7 +133,7 @@ impl Frame {
     }
 
     #[inline(always)]
-    pub fn write_to(&self, dst: *mut u64, src: isize, size: usize) {
+    pub unsafe fn write_to(&self, dst: *mut u64, src: isize, size: usize) {
         unsafe {
             std::ptr::copy_nonoverlapping(self.data.offset(src), dst, size);
         }
@@ -181,6 +181,7 @@ pub struct Phase1Result {
 }
 
 fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) {
+    #[allow(clippy::needless_range_loop)]
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
         wit[i] = Field::from(wit[i].0.0[0]);
@@ -214,22 +215,22 @@ pub fn run_phase1(
         unsafe {
             out_wit_pre_comm
                 .as_mut_ptr()
-                .offset(witness_layout.multiplicities_start() as isize)
+                .add(witness_layout.multiplicities_start())
         },
         unsafe {
             out_a
                 .as_mut_ptr()
-                .offset(constraints_layout.lookups_data_start() as isize)
+                .add(constraints_layout.lookups_data_start())
         },
         unsafe {
             out_b
                 .as_mut_ptr()
-                .offset(constraints_layout.lookups_data_start() as isize)
+                .add(constraints_layout.lookups_data_start())
         },
         unsafe {
             out_c
                 .as_mut_ptr()
-                .offset(constraints_layout.lookups_data_start() as isize)
+                .add(constraints_layout.lookups_data_start())
         },
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
@@ -246,7 +247,7 @@ pub fn run_phase1(
 
     for (input_index, el) in flat_inputs.iter().enumerate() {
         unsafe {
-            *(frame.data.offset(2 + (4 * (input_index as isize))) as *mut Field) = el.clone();
+            *(frame.data.add(2 + (4 * input_index)) as *mut Field) = *el;
         }
     }
 
@@ -255,7 +256,7 @@ pub fn run_phase1(
 
     let pc = unsafe { program.as_mut_ptr().offset(3) };
 
-    dispatch(pc, frame, &mut vm);
+    unsafe { dispatch(pc, frame, &mut vm) };
 
     fix_multiplicities_section(&mut out_wit_pre_comm, witness_layout);
 
@@ -292,7 +293,7 @@ pub fn run_phase2(
         if tbl.num_values == 0 {
             // Width-1 table (rangecheck): denom_i = α - i
             for i in 0..tbl.length {
-                let multiplicity = unsafe { *tbl.multiplicities_wit.offset(i as isize) };
+                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
                 let denom = alpha - Field::from(i as u64);
                 phase1.out_b[base + i] = denom;
                 phase1.out_c[base + i] = multiplicity;
@@ -310,7 +311,7 @@ pub fn run_phase2(
             // Width-2 table (array): x_i = -β*v_i, denom_i = α - i - x_i
             let beta = phase1.out_wit_post_comm[1];
             for i in 0..tbl.length {
-                let multiplicity = unsafe { *tbl.multiplicities_wit.offset(i as isize) };
+                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
 
                 // Read v_i from the x-slot where the VM dumped it
                 let v_i = phase1.out_a[base + 2 * i];
@@ -578,7 +579,7 @@ pub fn run_ad(
 
     let pc = unsafe { program.as_mut_ptr().offset(3) };
 
-    dispatch(pc, frame, &mut vm);
+    unsafe { dispatch(pc, frame, &mut vm) };
 
     (out_da, out_db, out_dc, vm.allocation_instrumenter)
 }

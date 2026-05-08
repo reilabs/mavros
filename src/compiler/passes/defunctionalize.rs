@@ -166,9 +166,11 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         args,
                         unconstrained,
                     } => {
-                        let dispatch_fn = *call_site_dispatch.get(&(fid, fn_ptr_val)).expect(
-                            &format!("No dispatch function for v{} in {:?}", fn_ptr_val.0, fid),
-                        );
+                        let dispatch_fn = *call_site_dispatch
+                            .get(&(fid, fn_ptr_val))
+                            .unwrap_or_else(|| {
+                                panic!("No dispatch function for v{} in {:?}", fn_ptr_val.0, fid)
+                            });
                         let mut new_args = Vec::with_capacity(args.len() + 1);
                         new_args.push(fn_ptr_val);
                         new_args.extend(args);

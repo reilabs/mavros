@@ -116,8 +116,8 @@ fn draw_chart(path: &Path, stack_usage: &[usize], heap_usage: &[usize]) {
 
     chart1
         .configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
         .draw()
         .unwrap();
 
@@ -150,8 +150,8 @@ fn draw_chart(path: &Path, stack_usage: &[usize], heap_usage: &[usize]) {
 
     chart2
         .configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
         .draw()
         .unwrap();
 
@@ -184,8 +184,8 @@ fn draw_chart(path: &Path, stack_usage: &[usize], heap_usage: &[usize]) {
 
     chart3
         .configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
         .draw()
         .unwrap();
 

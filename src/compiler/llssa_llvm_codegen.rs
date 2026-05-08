@@ -896,7 +896,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                                 &format!("v{}", result_id.0),
                             )
                             .unwrap();
-                        self.value_map.insert(*result_id, val.into());
+                        self.value_map.insert(*result_id, val);
                     }
                 }
             }

@@ -442,7 +442,6 @@ impl ValueRangeAnalysis {
                 if block_id != entry_block_id {
                     let pred_args: Vec<Vec<ValueId>> = cfg
                         .get_predecessors(block_id)
-                        .into_iter()
                         .filter_map(|p| {
                             let term = function.get_block(p).get_terminator().unwrap();
                             match term {
