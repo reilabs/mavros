@@ -15,7 +15,7 @@ pub type LC = Vec<(usize, Field)>;
 mod lc_serde {
     use super::*;
 
-    pub fn serialize<S>(lc: &Vec<(usize, ark_bn254::Fr)>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(lc: &[(usize, ark_bn254::Fr)], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -294,7 +294,7 @@ impl R1CS {
                 return false;
             }
         }
-        return true;
+        true
     }
 
     pub fn check_ad_output(&self, coeffs: &[Field], a: &[Field], b: &[Field], c: &[Field]) -> bool {
@@ -337,7 +337,7 @@ impl R1CS {
             error!("{} out of {} wrong derivatives", wrongs, 3 * a.len());
             return false;
         }
-        return true;
+        true
     }
 }
 

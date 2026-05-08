@@ -478,9 +478,9 @@ fn parse_pat_type(pat: &syn::PatType) -> Input {
     }
 
     if pat.attrs[0].path().is_ident("out") {
-        return parse_out(expect_ident(&pat.pat), pat.ty.as_ref());
+        parse_out(expect_ident(&pat.pat), pat.ty.as_ref())
     } else if pat.attrs[0].path().is_ident("frame") {
-        return parse_frame(expect_ident(&pat.pat), pat.ty.as_ref());
+        parse_frame(expect_ident(&pat.pat), pat.ty.as_ref())
     } else {
         panic!("unknown attribute");
     }
@@ -493,36 +493,32 @@ fn parse_unannotated(ident: Ident, ty: &syn::Type) -> Input {
             if ty_ident == "Frame" {
                 return Input::Frame;
             }
-            return Input::Struct(StructInput {
+            Input::Struct(StructInput {
                 name: ident.to_string(),
                 val: StructInputType::Host(parse_host_type(ty)),
-            });
+            })
         }
         syn::Type::Reference(intype) => match intype.elem.as_ref() {
             syn::Type::Path(typath) => {
                 let ty_ident = typath.path.require_ident().unwrap();
                 if ty_ident == "VM" {
-                    return Input::VM;
+                    Input::VM
                 } else {
-                    return Input::Struct(StructInput {
+                    Input::Struct(StructInput {
                         name: ident.to_string(),
                         val: StructInputType::Host(parse_host_type(ty)),
-                    });
+                    })
                 }
             }
-            _ => {
-                return Input::Struct(StructInput {
-                    name: ident.to_string(),
-                    val: StructInputType::Host(parse_host_type(ty)),
-                });
-            }
-        },
-        _ => {
-            return Input::Struct(StructInput {
+            _ => Input::Struct(StructInput {
                 name: ident.to_string(),
                 val: StructInputType::Host(parse_host_type(ty)),
-            });
-        }
+            }),
+        },
+        _ => Input::Struct(StructInput {
+            name: ident.to_string(),
+            val: StructInputType::Host(parse_host_type(ty)),
+        }),
     }
 }
 
@@ -532,10 +528,10 @@ fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
             if ty.mutability.is_none() {
                 panic!("out ref must be mutable");
             }
-            return Input::Struct(StructInput {
+            Input::Struct(StructInput {
                 name: ident.to_string(),
                 val: StructInputType::Out(parse_guest_type(&ty.elem)),
-            });
+            })
         }
         _ => {
             panic!("out must be a ptr");
@@ -544,22 +540,22 @@ fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
 }
 
 fn parse_frame(ident: Ident, ty: &syn::Type) -> Input {
-    return Input::Struct(StructInput {
+    Input::Struct(StructInput {
         name: ident.to_string(),
         val: StructInputType::Frame(parse_guest_type(ty)),
-    });
+    })
 }
 
 fn parse_guest_type(ty: &syn::Type) -> GuestType {
     match ty {
         syn::Type::Path(ty) => {
             let ident = ty.path.require_ident().unwrap();
-            return match ident.to_string().as_str() {
+            match ident.to_string().as_str() {
                 "Field" => GuestType::Field,
                 "u64" => GuestType::U64,
                 "BoxedValue" => GuestType::BoxedValue,
                 _ => panic!("unsupported guest path type {:?}", ty),
-            };
+            }
         }
         syn::Type::Ptr(ty) => {
             if ty.mutability.is_none() {
@@ -577,7 +573,7 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
     match ty {
         syn::Type::Path(ty) => {
             let ident = ty.path.require_ident().unwrap();
-            return match ident.to_string().as_str() {
+            match ident.to_string().as_str() {
                 "u64" => HostType::U64,
                 "usize" => HostType::USize,
                 "isize" => HostType::ISize,
@@ -586,7 +582,7 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
                 "BoxedLayout" => HostType::BoxedLayout,
                 "Field" => HostType::Field,
                 _ => panic!("unsupported type {:?}", ty),
-            };
+            }
         }
         syn::Type::Reference(ty) => {
             assert!(
@@ -598,9 +594,7 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
                 _ => panic!("References not supported here"),
             }
         }
-        syn::Type::Tuple(ty) => {
-            HostType::Tuple(ty.elems.iter().map(|elem| parse_host_type(elem)).collect())
-        }
+        syn::Type::Tuple(ty) => HostType::Tuple(ty.elems.iter().map(parse_host_type).collect()),
         _ => {
             panic!("unsupported host type {:?}", ty);
         }
@@ -710,12 +704,13 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
     } else {
         quote! {
             let pc = unsafe { pc.offset(current_field_offset) };
-            dispatch(pc, frame, vm)
+            unsafe { dispatch(pc, frame, vm) }
         }
     };
 
     let handler_name = format_ident!("{}_handler", def.name);
     quote! {
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
         pub fn #handler_name(
             pc: *const u64,
             frame: Frame,

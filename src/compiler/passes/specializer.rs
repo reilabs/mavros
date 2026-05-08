@@ -326,7 +326,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         let a_const = ctx.const_vals.get(&self.0);
         match a_const {
             Some(ConstVal::Tuple(a)) => {
-                let res = a[index as usize];
+                let res = a[index];
                 Self(res)
             }
             _ => panic!("Not yet implemented {:?}", a_const),
@@ -421,7 +421,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
-                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => self.clone(),
+                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => *self,
             },
             Some(ConstVal::Field(f)) => match cast_target {
                 CastTarget::U(s) | CastTarget::I(s) => {
@@ -434,7 +434,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 CastTarget::Field
                 | CastTarget::Nop
                 | CastTarget::ArrayToSlice
-                | CastTarget::WitnessOf => self.clone(),
+                | CastTarget::WitnessOf => *self,
             },
             None => {
                 let res = ctx.cast_to(*cast_target, self.0);

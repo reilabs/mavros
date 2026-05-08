@@ -8,3 +8,38 @@ ark-ff = { version = "0.5.0" }
 mavros-artifacts = { path = "../mavros-artifacts" }
 opcode-gen = { path = "../opcode-gen" }
 tracing = "0.1.41"
+
+[lints.clippy]
+# Allow all except performance and correctness by default.
+all = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+restriction = { level = "allow", priority = -1 }
+style = { level = "allow", priority = -1 }
+suspicious = { level = "allow", priority = -1 }
+
+# Then we turn on the ones we care about, focusing on reducing needlessly silly code.
+cast_slice_from_raw_parts = "deny"
+clone_on_copy = "deny"
+crosspointer_transmute = "deny"
+drop_non_drop = "deny"
+expect_fun_call = "deny"
+for_kv_map = "deny"
+from_raw_with_void_ptr = "deny"
+let_and_return = "deny"
+let_underscore_future = "deny"
+multi_assignments = "deny"
+needless_borrows_for_generic_args = "deny"
+needless_return = "deny"
+octal_escapes = "deny"
+only_used_in_recursion = "deny"
+ptr_offset_with_cast = "deny"
+redundant_closure = "deny"
+single_match = "deny"
+size_of_ref = "deny"
+to_string_in_format_args = "deny"
+unconditional_recursion = "deny"
+unnecessary_cast = "deny"
+useless_conversion = "deny"

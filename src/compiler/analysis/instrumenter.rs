@@ -53,7 +53,7 @@ impl ValueSignature {
         match self {
             ValueSignature::U(size, val) => Value::U(*size, *val),
             ValueSignature::I(size, val) => Value::I(*size, *val),
-            ValueSignature::Field(field) => Value::Field(field.clone()),
+            ValueSignature::Field(field) => Value::Field(*field),
             ValueSignature::Array(vals) => {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
             }
@@ -514,7 +514,7 @@ impl Value {
             }
             Value::U(s, v) => ValueSignature::U(*s, *v),
             Value::I(s, v) => ValueSignature::I(*s, *v),
-            Value::Field(f) => ValueSignature::Field(f.clone()),
+            Value::Field(f) => ValueSignature::Field(*f),
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
             }
@@ -587,11 +587,11 @@ impl Value {
         }
     }
 
-    fn tuple_get(&self, index: usize, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn tuple_get(&self, index: usize) -> Value {
         match self {
             Value::Unknown(_) => Value::Unknown(ScalarKind::Field),
-            Value::WitnessOf(inner) => inner.tuple_get(index, tp, instrumenter),
-            Value::Tuple(vals) => vals[index as usize].clone(),
+            Value::WitnessOf(inner) => inner.tuple_get(index),
+            Value::Tuple(vals) => vals[index].clone(),
             _ => panic!(
                 "Cannot get tuple element from {:?} with index {:?}",
                 self, index
@@ -814,7 +814,7 @@ impl Value {
             (Value::I(s, v), CastTarget::Field) => {
                 Value::Field(Field::from(Self::to_signed(*v, *s) as u64))
             }
-            (Value::Field(f), CastTarget::Field) => Value::Field(f.clone()),
+            (Value::Field(f), CastTarget::Field) => Value::Field(*f),
             (Value::Field(f), CastTarget::U(s)) => {
                 let bigint = f.into_bigint();
                 Value::U(
@@ -840,16 +840,11 @@ impl Value {
         }
     }
 
-    fn to_bits(
-        &self,
-        endianness: &crate::compiler::ssa::Endianness,
-        size: usize,
-        instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
+    fn to_bits(&self, endianness: &crate::compiler::ssa::Endianness, size: usize) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {
-                let result = inner.to_bits(endianness, size, instrumenter);
+                let result = inner.to_bits(endianness, size);
                 match result {
                     Value::Array(bits) => Value::Array(
                         bits.into_iter()
@@ -911,7 +906,7 @@ impl Value {
             }
             Value::Field(f) => {
                 let radix_val = match radix {
-                    Radix::Dyn(Value::U(_, r)) => *r as u128,
+                    Radix::Dyn(Value::U(_, r)) => *r,
                     Radix::Bytes => 256,
                     _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
                 };
@@ -1234,18 +1229,12 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn tuple_get(
         &self,
         index: usize,
-        tp: &Type,
-        instrumenter: &mut CostAnalysis,
+        _tp: &Type,
+        _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized: self.unspecialized.tuple_get(
-                index,
-                tp,
-                instrumenter.get_unspecialized(),
-            ),
-            specialized: self
-                .specialized
-                .tuple_get(index, tp, instrumenter.get_specialized()),
+            unspecialized: self.unspecialized.tuple_get(index),
+            specialized: self.specialized.tuple_get(index),
         }
     }
 
@@ -1354,19 +1343,11 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         endianness: Endianness,
         size: usize,
         _tp: &Type,
-        instrumenter: &mut CostAnalysis,
+        _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized: self.unspecialized.to_bits(
-                &endianness,
-                size,
-                instrumenter.get_unspecialized(),
-            ),
-            specialized: self.specialized.to_bits(
-                &endianness,
-                size,
-                instrumenter.get_specialized(),
-            ),
+            unspecialized: self.unspecialized.to_bits(&endianness, size),
+            specialized: self.specialized.to_bits(&endianness, size),
         }
     }
 

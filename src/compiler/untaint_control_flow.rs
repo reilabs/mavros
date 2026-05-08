@@ -259,12 +259,12 @@ impl UntaintControlFlow {
 
         let mut block_taint_vars = HashMap::new();
         for (block_id, _) in function.get_blocks() {
-            block_taint_vars.insert(*block_id, cfg_witness_param.clone());
+            block_taint_vars.insert(*block_id, cfg_witness_param);
         }
 
         for block_id in cfg.get_blocks_bfs() {
             let mut block = function.take_block(block_id);
-            let block_taint = block_taint_vars.get(&block_id).unwrap().clone();
+            let block_taint = *block_taint_vars.get(&block_id).unwrap();
 
             let old_instructions = block.take_instructions();
             let mut new_instructions = Vec::new();
@@ -373,7 +373,7 @@ impl UntaintControlFlow {
                                     .get_block_mut(merger_block)
                                     .set_terminator(Terminator::Jmp(merge, vec![]));
 
-                                if args_passed_from_lhs.len() > 0 {
+                                if !args_passed_from_lhs.is_empty() {
                                     let mut instrs = Vec::new();
                                     {
                                         let mut builder =
@@ -580,7 +580,7 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
                     let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
-                    let ca = convert_if_needed(array, &result_type, ti, &mut builder);
+                    let ca = convert_if_needed(array, result_type, ti, &mut builder);
                     let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
                     (ca, cv)
                 };
