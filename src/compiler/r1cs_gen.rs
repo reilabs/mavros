@@ -592,7 +592,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn assert_bool(&self, _ctx: &mut R1CGen) {
         let v = self.expect_constant();
-        assert!(v != ark_bn254::Fr::from(0u64), "assert failed: value is zero");
+        assert!(
+            v != ark_bn254::Fr::from(0u64),
+            "assert failed: value is zero"
+        );
     }
 
     fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, _ctx: &mut R1CGen) {
@@ -612,14 +615,23 @@ impl symbolic_executor::Value<R1CGen> for Value {
                         let a_neg = a_int >= half;
                         let b_neg = b_int >= half;
                         let result = match (a_neg, b_neg) {
-                            (true, false) => true,   // negative < positive
-                            (false, true) => false,  // positive >= negative
-                            _ => a_int < b_int,      // same sign: compare directly
+                            (true, false) => true,  // negative < positive
+                            (false, true) => false, // positive >= negative
+                            _ => a_int < b_int,     // same sign: compare directly
                         };
-                        assert!(result, "assert_cmp lt (signed) failed: {:?} >= {:?}", a_val, b_val);
+                        assert!(
+                            result,
+                            "assert_cmp lt (signed) failed: {:?} >= {:?}",
+                            a_val, b_val
+                        );
                     }
                     _ => {
-                        assert!(a_val < b_val, "assert_cmp lt failed: {:?} >= {:?}", a_val, b_val);
+                        assert!(
+                            a_val < b_val,
+                            "assert_cmp lt failed: {:?} >= {:?}",
+                            a_val,
+                            b_val
+                        );
                     }
                 }
             }

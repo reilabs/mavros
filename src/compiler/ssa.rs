@@ -1534,7 +1534,8 @@ impl Instruction for OpCode {
                 const_val: b,
                 var: c,
             } => vec![b, c].into_iter(),
-            Self::Assert { value: c } | Self::Load { result: _, ptr: c }
+            Self::Assert { value: c }
+            | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
                 value: c,
@@ -1926,7 +1927,8 @@ impl Instruction for OpCode {
                 variable: b,
                 sensitivity: c,
             } => vec![b, c].into_iter(),
-            Self::Assert { value: c } | Self::Load { result: _, ptr: c }
+            Self::Assert { value: c }
+            | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
                 value: c,

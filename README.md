@@ -1,83 +1,43 @@
 # Mavros
 
-Noir to R1CS compiler with witness generation and automatic differentiation binaries, built for use with Spartan.
+Mavros is a toolchain for compiling [Noir](https://noir-lang.org) to R1CS with additional
+functionality for use with [Spartan](https://github.com/microsoft/Spartan). It provides a complete
+pipeline from Noir source to the output of the eventual circuit, and is designed with mobile proving
+workflows in mind.
 
-## Workspace Crates
+## Building
 
-| Crate | Description |
-|---|---|
-| `mavros` (root) | Main compiler crate. Contains the CLI binary, compiler pipeline (SSA → R1CS), driver, and public API. |
-| `mavros-artifacts` | Shared data types: `R1CS`, `R1C`, `WitnessLayout`, `ConstraintsLayout`, `Field`. Used by both the compiler and VM. |
-| `mavros-vm` | Bytecode interpreter that runs witness generation and automatic differentiation programs. |
-| `opcode-gen` | Proc-macro crate that generates VM opcode definitions. |
-| `ssa-builder` | Proc-macro crate with helpers for constructing SSA IR. |
-| `mavros-wasm-runtime` | Minimal runtime compiled to WebAssembly, used when emitting `.wasm` witness generation targets. |
+This project uses [Nix](https://lix.system) [flakes](https://nixos.wiki/wiki/Flakes) to provide a
+pinned build environment with all the tools you need to build the project. Assuming you have nix
+installed, simply `make shell` to drop into your user shell inside the build environment, or run
+`nix develop --command <your-command-here>` to run a specific command in the build environment.
 
-## Prerequisites
+You can use one of the two following methods to experiment with Mavros.
 
-- **Rust** (latest stable, via [rustup](https://rustup.rs))
-- **LLVM 18** — required by the `inkwell` LLVM bindings:
-  ```bash
-  # macOS
-  brew install llvm@18
-  ```
-- **Graphviz** *(optional)* — only needed for `--draw-graphs` debug output:
-  ```bash
-  brew install graphviz
-  ```
+- Running `make install` will build and install Mavros to your cargo binary directory.
+- Running `make release` will build Mavros to `./target/release/mavros`.
 
-## Building the Binary
-
-This project provides a pinned dev environment via Nix flakes (Rust nightly + LLVM 18 + libclang, etc.).
-
-### Using Nix (recommended)
-
-1. Install Nix and enable flakes:
-   - Install: https://install.determinate.systems/nix
-   - Enable flakes: add `experimental-features = nix-command flakes` to `~/.config/nix/nix.conf`
-   ```bash
-   mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
-   ```
-
-2. Enter the dev shell and build:
-
-```bash
-nix develop
-cargo build --bin mavros --release
-```
-
-The compiled binary will be at `target/release/mavros`.
+Run `make` to get an overview of the available utilities and targets. For complete guidance please
+see our [contributing guidelines](./docs/CONTRIBUTING.md). See [usage](#usage) below for more
+information on how to use Mavros.
 
 ## Usage
 
-Run `mavros compile` from the **root of a Noir project** (the directory containing `Nargo.toml`):
+To use Mavros, navigate to the **root of a Noir project** (the directory containing `Nargo.toml`) in
+your shell. Then run `mavros compile`.
 
-```bash
-mavros compile
-```
+This will produce the following two files inside the project's `target/` directory:
 
-This produces two files inside the project's `target/` directory:
-
-| File | Contents |
-|---|---|
+| File                | Contents                                                                      |
+| ------------------- | ----------------------------------------------------------------------------- |
 | `target/basic.json` | ABI, witness-generation binary (`witgen_binary`), and AD binary (`ad_binary`) |
-| `target/r1cs.bin` | Serialised R1CS constraint system (bincode) |
+| `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                   |
 
-### Options
+For advanced usage and the CLI options, run `mavros --help`. To output the witness generation binary
+for WASM-capable platforms, please see the [WASM output](./docs/CONTRIBUTING.md#WASM%20Output)
+section in our contributing docs.
 
-```
-mavros compile [PATH] [OPTIONS]
-
-Arguments:
-  [PATH]  Path to the Noir project root [default: current directory]
-
-Options:
-  --r1cs-output <PATH>    Output path for R1CS constraints  [default: target/r1cs.bin]
-  --binary-output <PATH>  Output path for binaries and ABI  [default: target/basic.json]
-  --draw-graphs           Generate SSA/CFG debug graphs into mavros_debug/
-```
-
-### Example
+### Usage Example
 
 ```bash
 cd my-noir-project
@@ -86,28 +46,8 @@ mavros compile
 # → target/r1cs.bin
 ```
 
-## WebAssembly Output
+## Noir Feature Support and Completeness
 
-Mavros can emit the witness generation binary as a `.wasm` file in addition to (or instead of) running it natively. This is useful when the host environment — e.g. a browser or a WASM-capable verifier — prefers WebAssembly.
-
-### How it works
-
-1. The compiler lowers the witgen SSA to LLVM IR (via `inkwell`/LLVM 18), then compiles it to a `wasm32` target.
-2. The generated WASM calls a small set of external functions (`__field_mul`, `__write_witness`, `__write_a/b/c`) that are implemented in the `mavros-wasm-runtime` crate. This runtime handles BN254 field arithmetic and writes outputs into memory.
-3. A `.wasm.meta.json` sidecar file is written alongside the `.wasm` with ABI and R1CS layout info, so the host knows how to set up inputs and interpret outputs.
-
-### Triggering WASM output
-
-```bash
-mavros --emit-wasm
-```
-
-This runs the full pipeline (compile + VM execution) and additionally emits `mavros_debug/witgen.wasm` and `mavros_debug/witgen.wasm.meta.json`.
-
-`--emit-llvm` can be used alongside it to also save the intermediate LLVM IR (`.ll`) file.
-
-> **Note:** WASM output is only available via the default command (no subcommand), not via `mavros compile`.
-
-## Debugging
-
-Passing `--draw-graphs` generates a `mavros_debug/` folder in the project root with SSA diagrams and CFG graphs at each compiler pass. Requires Graphviz.
+For the current status of Mavros' support for various Noir constructs, see the [status](./STATUS.md)
+doc that is generated by CI on every update. This provides information on how far the Mavros
+pipeline gets for each Noir test.
