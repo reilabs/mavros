@@ -1709,7 +1709,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         None
     }
 
-    fn on_return(&mut self, returns: &mut [SpecSplitValue], return_types: &[Type]) {
+    fn on_return(&mut self, returns: &mut [SpecSplitValue], _return_types: &[Type]) {
         for rval in returns.iter_mut() {
             rval.blind();
         }
@@ -1729,7 +1729,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         &mut self,
         _target: crate::compiler::ssa::BlockId,
         params: &mut [SpecSplitValue],
-        param_types: &[&Type],
+        _param_types: &[&Type],
     ) {
         for pval in params.iter_mut() {
             pval.blind_unspecialized();

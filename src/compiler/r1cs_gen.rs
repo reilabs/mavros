@@ -25,14 +25,13 @@ pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 // }
 
 #[derive(Clone, Debug)]
-struct ArrayData {
+pub struct ArrayData {
     table_id: Option<usize>,
     data: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
-struct TupleData {
-    table_id: Option<usize>,
+pub struct TupleData {
     data: Vec<Value>,
 }
 
@@ -281,10 +280,7 @@ impl Value {
     }
 
     pub fn mk_tuple(fields: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(RefCell::new(TupleData {
-            table_id: None,
-            data: fields,
-        })))
+        Value::Tuple(Rc::new(RefCell::new(TupleData { data: fields })))
     }
 }
 

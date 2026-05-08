@@ -6,13 +6,13 @@ use std::{
 };
 
 use ark_ff::{AdditiveGroup, BigInt, Field as _, Fp, PrimeField as _};
-use tracing::{field, instrument};
+use tracing::instrument;
 
 pub use crate::InputValueOrdered;
 
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
-    array::{BoxedLayout, BoxedValue},
+    array::BoxedValue,
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
 
@@ -204,7 +204,7 @@ pub fn run_phase1(
     let mut out_wit_pre_comm = vec![Field::ZERO; witness_layout.pre_commitment_size()];
     let flat_inputs = flatten_param_vec(ordered_inputs);
     // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
-    let mut out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
+    let out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
         out_a.as_mut_ptr(),

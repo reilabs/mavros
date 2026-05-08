@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::compiler::ir::r#type::SSAType;
-use crate::compiler::ssa::{BlockId, CallTarget, FunctionId, Instruction, OpCode, SSA, Terminator};
+use crate::compiler::ssa::{BlockId, FunctionId, Instruction, SSA, Terminator};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JumpType {
