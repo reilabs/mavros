@@ -18,6 +18,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
 
       - name: Install Nix
@@ -40,7 +42,12 @@ jobs:
     name: Check for Unused Dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
       - name: machete
         uses: bnjbvr/cargo-machete@main
 
@@ -51,6 +58,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
 
       - name: Install Nix
@@ -66,7 +75,7 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
-      - name: Cache Cargo dependencies
+      - name: Cache Cargo Dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -75,22 +84,33 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build test-runner
+      - name: Build Test Runner
         run: make build-test-runner
 
-      - name: Run tests
+      - name: Run Tests
         run: make func-test
 
-      - name: Commit STATUS.md
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Check STATUS.md is Up-to-Date (PRs from Forks)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork
+        run: |
+          if ! git diff --quiet HEAD -- STATUS.md; then
+            echo "::error::The STATUS.md file is out of date in this PR. Please run 'make func-test' locally and commit the updated STATUS.md."
+            git diff --stat HEAD -- STATUS.md
+            exit 1
+          fi
+
+      - name: Commit STATUS.md (PRs from Repo)
+        if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add STATUS.md
-          git diff --cached --quiet || git commit -m "Update STATUS.md [skip ci]"
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "Update STATUS.md [skip ci]"
+            git push origin HEAD:${{ github.head_ref }}
+          fi
 
-      - name: Fetch baseline
+      - name: Fetch Baseline
         if: github.event_name == 'pull_request'
         id: baseline
         run: |
@@ -101,14 +121,18 @@ jobs:
             echo "No baseline found, skipping checks"
           fi
 
-      - name: Check for regressions
+      - name: Check for Regressions
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
         run: nix develop --command cargo run --release --bin test-runner -- --check-regression baseline-STATUS.md STATUS.md
 
-      - name: Comment on constraint/witness growth
+      - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
           COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
-          gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
+          if ! gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"; then
+            echo "::error::Could not post PR comment (likely fork-PR permissions). Surfacing the comment content via CI failure:"
+            echo "$COMMENT"
+            exit 1
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
