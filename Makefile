@@ -16,7 +16,7 @@ help:
 
 .PHONY: build
 build: ## Build Mavros for testing
-	$(SHELL_WRAPPER) cargo build --all-features
+	$(SHELL_WRAPPER) cargo build --all-targets --all-features
 
 .PHONY: build-test-runner
 build-test-runner: ## Builds the test runner in release mode
@@ -24,7 +24,7 @@ build-test-runner: ## Builds the test runner in release mode
 
 .PHONY: release
 release: ## Build Mavros in release mode
-	$(SHELL_WRAPPER) cargo build --release --all-features
+	$(SHELL_WRAPPER) cargo build --release --all-targets --all-features
 
 # -- Testing --------------------------------------------------------------------------------------
 
@@ -41,7 +41,7 @@ test: unit-test func-test ## Run all the tests
 
 .PHONY: install
 install: ## Builds the Mavros CLI and installs it to your cargo binary path
-	cargo install --locked --bin mavros --path .
+	$(SHELL_WRAPPER) cargo install --locked --bin mavros --path .
 
 # -- Linting --------------------------------------------------------------------------------------
 
@@ -58,7 +58,7 @@ format-check-docs: ## Check docs and config formatting without changing files (r
 	$(SHELL_WRAPPER) dprint check
 
 .PHONY: format-check
-format-check: format-check-rust format-check-docs ## Check code, docs, and config formatting without changing files (reformat with `make format`)
+format-check: format-check-docs format-check-rust ## Check code, docs, and config formatting without changing files (reformat with `make format`)
 
 .PHONY: lint
 lint: format-check clippy ## Run all the linting tasks
@@ -87,4 +87,3 @@ shell: ## Launch the user's `$SHELL` inside the devshell
 .PHONY: editor
 editor: ## Launch the user's `$EDITOR` inside the devshell
 	nix develop --command $(EDITOR)
-

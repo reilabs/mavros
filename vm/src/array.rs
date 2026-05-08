@@ -4,10 +4,8 @@ use std::{
     ptr,
 };
 
-use tracing::field;
-
 use crate::{
-    Field, InputValueOrdered,
+    Field,
     bytecode::{AllocationType, VM},
 };
 

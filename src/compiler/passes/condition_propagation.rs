@@ -1,6 +1,6 @@
 use crate::compiler::{
     flow_analysis::FlowAnalysis,
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{BlockId, ConstValue, HLSSA, OpCode, Terminator, ValueId},
 };
@@ -63,7 +63,7 @@ impl ConditionPropagation {
                 }
 
                 let block = function.get_block_mut(block_id);
-                let mut instructions = block.take_instructions();
+                let instructions = block.take_instructions();
                 let mut new_instructions = const_opcodes;
                 new_instructions.extend(instructions.iter().cloned());
                 for instruction in new_instructions.iter_mut() {
