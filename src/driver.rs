@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use ark_ff::AdditiveGroup as _;
@@ -105,8 +105,7 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        let dir = self.project.get_only_crate().root_dir.join("mavros_debug");
-        dir
+        self.project.get_only_crate().root_dir.join("mavros_debug")
     }
 
     #[tracing::instrument(skip_all)]
@@ -352,7 +351,7 @@ impl Driver {
         let type_info = Types::new().run(ssa, &flow_analysis);
 
         let codegen = CodeGen::new();
-        let program = codegen.run(&ssa, &flow_analysis, &type_info);
+        let program = codegen.run(ssa, &flow_analysis, &type_info);
         fs::write(
             self.get_debug_output_dir().join("witgen_bytecode.txt"),
             format!("{}", program),
@@ -565,11 +564,7 @@ impl Driver {
     }
 
     /// Write AD WASM metadata JSON file
-    fn write_ad_wasm_metadata(
-        &self,
-        wasm_path: &std::path::PathBuf,
-        r1cs: &R1CS,
-    ) -> Result<(), Error> {
+    fn write_ad_wasm_metadata(&self, wasm_path: &Path, r1cs: &R1CS) -> Result<(), Error> {
         let metadata = serde_json::json!({
             "witnessCount": r1cs.witness_layout.size(),
             "constraintCount": r1cs.constraints.len(),
@@ -588,11 +583,7 @@ impl Driver {
     }
 
     /// Write WASM metadata JSON file
-    fn write_wasm_metadata(
-        &self,
-        wasm_path: &std::path::PathBuf,
-        r1cs: &R1CS,
-    ) -> Result<(), Error> {
+    fn write_wasm_metadata(&self, wasm_path: &Path, r1cs: &R1CS) -> Result<(), Error> {
         let abi = self.abi.as_ref().unwrap();
 
         // Build parameter info

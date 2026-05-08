@@ -650,7 +650,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .build_right_shift(lhs, masked_rhs, false, name)
                             .unwrap()
                     }
-                    _ => panic!("Unsupported IntArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val.into());
             }
@@ -782,7 +781,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .try_as_basic_value()
                             .expect_basic("field_div should return a value")
                     }
-                    _ => panic!("Unsupported FieldArithOp in LLSSA codegen: {:?}", kind),
                 };
                 self.value_map.insert(*result, val);
             }
@@ -990,11 +988,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             } => {
                 let p = self.value_map[ptr].into_pointer_value();
                 let llvm_struct_ty = self.convert_struct_type(struct_type).into_struct_type();
-                let gep = unsafe {
-                    self.builder
-                        .build_struct_gep(llvm_struct_ty, p, *field as u32, "sfp")
-                        .unwrap()
-                };
+                let gep = self
+                    .builder
+                    .build_struct_gep(llvm_struct_ty, p, *field as u32, "sfp")
+                    .unwrap();
                 self.value_map.insert(*result, gep.into());
             }
 
@@ -1093,7 +1090,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                                 &format!("v{}", result_id.0),
                             )
                             .unwrap();
-                        self.value_map.insert(*result_id, val.into());
+                        self.value_map.insert(*result_id, val);
                     }
                 }
             }

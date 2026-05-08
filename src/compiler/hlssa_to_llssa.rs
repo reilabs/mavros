@@ -354,7 +354,7 @@ fn lower_inner(
 
     // Transfer global types from HLSSA to LLSSA
     let hlssa_global_types: Vec<Type> = hlssa.get_global_types().to_vec();
-    let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(|ty| lower_type(ty)).collect();
+    let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(lower_type).collect();
     llssa.set_global_types(ll_global_types);
 
     // First pass: create all functions (so we can map FunctionIds)
@@ -553,30 +553,36 @@ fn lower_instruction(
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::U(_) => match kind {
-                    BinaryArithOpKind::Add => e.int_arith(IntArithOp::Add, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Sub => e.int_arith(IntArithOp::Sub, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Mul => e.int_arith(IntArithOp::Mul, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Shl => e.int_arith(IntArithOp::Shl, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Shr => e.int_arith(IntArithOp::UShr, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Div => e.int_arith(IntArithOp::UDiv, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Mod => e.int_arith(IntArithOp::URem, ll_lhs, ll_rhs),
-                },
-                TypeExpr::I(_) => match kind {
-                    BinaryArithOpKind::Add => e.int_arith(IntArithOp::Add, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Sub => e.int_arith(IntArithOp::Sub, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Mul => e.int_arith(IntArithOp::Mul, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Shl => e.int_arith(IntArithOp::Shl, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Shr => e.int_arith(IntArithOp::UShr, ll_lhs, ll_rhs),
-                    BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
-                    BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
-                },
+                TypeExpr::U(_) => {
+                    let op = match kind {
+                        BinaryArithOpKind::Add => IntArithOp::Add,
+                        BinaryArithOpKind::Sub => IntArithOp::Sub,
+                        BinaryArithOpKind::Mul => IntArithOp::Mul,
+                        BinaryArithOpKind::And => IntArithOp::And,
+                        BinaryArithOpKind::Or => IntArithOp::Or,
+                        BinaryArithOpKind::Xor => IntArithOp::Xor,
+                        BinaryArithOpKind::Shl => IntArithOp::Shl,
+                        BinaryArithOpKind::Shr => IntArithOp::UShr,
+                        BinaryArithOpKind::Div => IntArithOp::UDiv,
+                        BinaryArithOpKind::Mod => IntArithOp::URem,
+                    };
+                    e.int_arith(op, ll_lhs, ll_rhs)
+                }
+                TypeExpr::I(_) => {
+                    let op = match kind {
+                        BinaryArithOpKind::Add => IntArithOp::Add,
+                        BinaryArithOpKind::Sub => IntArithOp::Sub,
+                        BinaryArithOpKind::Mul => IntArithOp::Mul,
+                        BinaryArithOpKind::And => IntArithOp::And,
+                        BinaryArithOpKind::Or => IntArithOp::Or,
+                        BinaryArithOpKind::Xor => IntArithOp::Xor,
+                        BinaryArithOpKind::Shl => IntArithOp::Shl,
+                        BinaryArithOpKind::Shr => IntArithOp::UShr,
+                        BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
+                        BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
+                    };
+                    e.int_arith(op, ll_lhs, ll_rhs)
+                }
                 TypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind {
@@ -1700,7 +1706,6 @@ fn lower_ad_fresh_witness(
 /// Allocate an ADSumNode for two AD values.
 fn lower_ad_sum(e: &mut LLBlockEmitter<'_>, ll_a: ValueId, ll_b: ValueId) -> ValueId {
     let node_struct = LLStruct::ad_sum_node();
-    let field_elem = LLStruct::field_elem();
     let node = e.heap_alloc(node_struct.clone(), None);
 
     // RC = 1
@@ -2358,9 +2363,9 @@ fn generate_all_lookup_functions(
 /// Extract the four raw limbs of a Field value.
 fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> (ValueId, ValueId, ValueId, ValueId) {
     let limbs = e.field_to_limbs(val);
-    let l0 = e.extract_field(limbs.clone(), LLStruct::limbs(), 0);
-    let l1 = e.extract_field(limbs.clone(), LLStruct::limbs(), 1);
-    let l2 = e.extract_field(limbs.clone(), LLStruct::limbs(), 2);
+    let l0 = e.extract_field(limbs, LLStruct::limbs(), 0);
+    let l1 = e.extract_field(limbs, LLStruct::limbs(), 1);
+    let l2 = e.extract_field(limbs, LLStruct::limbs(), 2);
     let l3 = e.extract_field(limbs, LLStruct::limbs(), 3);
     (l0, l1, l2, l3)
 }
@@ -2762,17 +2767,6 @@ fn generate_rngchk_8_function(table_idx_global: usize) -> LLFunction {
     }
 
     func
-}
-
-/// Read `ad_coeffs_base[offset]` via random access (does not advance the
-/// AdCoeffs cursor). Used by AD helpers that need to peek at a coefficient at
-/// a layout-determined absolute index.
-fn ad_read_coeff_at(e: &mut LLBlockEmitter<'_>, offset: usize) -> ValueId {
-    let base_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS_BASE);
-    let base = e.ll_load(base_slot, LLType::Ptr);
-    let idx = e.int_const(32, offset as u64);
-    let slot = e.array_elem_ptr(base, LLStruct::field_elem(), idx);
-    e.ll_load(slot, LLType::Struct(LLStruct::field_elem()))
 }
 
 /// Post-increment `AdCurrentLookupWitOff` by one, returning the old i32 value.

@@ -8,7 +8,7 @@ use crate::compiler::{
     ssa::{BinaryArithOpKind, BlockId, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, ValueId},
 };
 use crate::compiler::{
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
 };
 

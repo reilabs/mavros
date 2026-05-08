@@ -11,8 +11,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  format:
-    name: Lint Codebase
+  formatting:
+    name: Check Formatting
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -35,6 +35,31 @@ jobs:
 
       - name: Check Formatting
         run: make format-check
+
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Cache Nix Store
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Download Nix Dependencies
+        run: nix develop
+
+      - name: Lint with Clippy
+        run: make clippy
 
   unused_deps:
     name: Check for Unused Dependencies

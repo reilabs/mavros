@@ -25,14 +25,13 @@ pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 // }
 
 #[derive(Clone, Debug)]
-struct ArrayData {
+pub struct ArrayData {
     table_id: Option<usize>,
     data: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
-struct TupleData {
-    table_id: Option<usize>,
+pub struct TupleData {
     data: Vec<Value>,
 }
 
@@ -281,10 +280,7 @@ impl Value {
     }
 
     pub fn mk_tuple(fields: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(RefCell::new(TupleData {
-            table_id: None,
-            data: fields,
-        })))
+        Value::Tuple(Rc::new(RefCell::new(TupleData { data: fields })))
     }
 }
 
@@ -352,7 +348,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 }
                 let els = keys
                     .into_iter()
-                    .chain(results.into_iter())
+                    .chain(results)
                     .map(|e| e.expect_linear_combination())
                     .collect();
                 self.lookups.push(LookupConstraint {
@@ -376,7 +372,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 }
                 let els = keys
                     .into_iter()
-                    .chain(results.into_iter())
+                    .chain(results)
                     .map(|e| e.expect_linear_combination())
                     .collect();
                 self.lookups.push(LookupConstraint {
@@ -400,7 +396,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 };
                 let els = keys
                     .into_iter()
-                    .chain(results.into_iter())
+                    .chain(results)
                     .map(|e| e.expect_linear_combination())
                     .collect();
                 self.lookups.push(LookupConstraint {
@@ -427,7 +423,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 };
                 let els = keys
                     .into_iter()
-                    .chain(results.into_iter())
+                    .chain(results)
                     .map(|e| e.expect_linear_combination())
                     .collect();
                 self.lookups.push(LookupConstraint {
@@ -647,13 +643,11 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn array_get(&self, index: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let index = index.expect_u32();
-        let value = self.expect_array().borrow().data[index as usize].clone();
-        value
+        self.expect_array().borrow().data[index as usize].clone()
     }
 
     fn tuple_get(&self, index: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        let value = self.expect_tuple().borrow().data[index as usize].clone();
-        value
+        self.expect_tuple().borrow().data[index].clone()
     }
 
     fn array_set(&self, index: &Self, value: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
@@ -796,8 +790,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn ptr_read(&self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let ptr = self.expect_ptr();
-        let value = ptr.borrow().clone();
-        value
+        ptr.borrow().clone()
     }
 
     fn expect_constant_bool(&self, _ctx: &mut R1CGen) -> bool {
@@ -897,7 +890,7 @@ impl R1CGen {
                 return false;
             }
         }
-        return true;
+        true
     }
 
     #[instrument(skip_all, name = "R1CGen::run")]
@@ -1163,10 +1156,10 @@ impl R1CGen {
         constraints_layout.lookups_data_size =
             result.len() - constraints_layout.algebraic_size - constraints_layout.tables_data_size;
 
-        return R1CS {
+        R1CS {
             witness_layout,
             constraints_layout,
             constraints: result,
-        };
+        }
     }
 }
