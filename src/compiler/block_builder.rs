@@ -640,6 +640,37 @@ pub trait LLEmitter {
         r
     }
 
+    fn spread(&mut self, value: ValueId, bits: u8, result_bits: u32) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::Spread {
+            result: r,
+            value,
+            bits,
+            result_bits,
+        });
+        r
+    }
+
+    fn unspread(
+        &mut self,
+        value: ValueId,
+        bits: u8,
+        odd_bits: u32,
+        even_bits: u32,
+    ) -> (ValueId, ValueId) {
+        let result_odd = self.fresh_value();
+        let result_even = self.fresh_value();
+        self.emit_ll(LLOp::Unspread {
+            result_odd,
+            result_even,
+            value,
+            bits,
+            odd_bits,
+            even_bits,
+        });
+        (result_odd, result_even)
+    }
+
     // -- Integer Comparison --
 
     fn int_cmp(&mut self, kind: IntCmpOp, a: ValueId, b: ValueId) -> ValueId {

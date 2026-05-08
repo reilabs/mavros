@@ -8,7 +8,7 @@
 //! the layout in `docs/llssa.md`. MkSeq, ArrayGet, ArraySet, and MemOp
 //! (Bump/Drop) are lowered to explicit memory operations.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::block_builder::{LLBlockEmitter, LLEmitter};
@@ -215,9 +215,19 @@ struct LookupFunctions {
     /// rangecheck-8 sentinel: first call allocates the table region and runs
     /// the init body; subsequent calls reuse the snapshot.
     drngchk_8_call: Option<FunctionId>,
+    /// Forward-pass spread lookup helpers, keyed by spread input bit-width.
+    spread: BTreeMap<u8, FunctionId>,
+    /// AD-path spread lookup helpers, keyed by spread input bit-width.
+    dspread_call: BTreeMap<u8, FunctionId>,
     /// Internal zero-initialized global storing `table_idx + 1` for the
     /// forward helper. Zero means unallocated.
     rngchk_8_table_idx_global: Option<usize>,
+    /// Internal zero-initialized globals storing `table_idx + 1` for forward
+    /// spread helpers. Zero means unallocated.
+    spread_table_idx_globals: BTreeMap<u8, usize>,
+    /// Internal zero-initialized globals storing `inv_cnst_off + 1` for AD
+    /// spread helpers. Zero means unallocated.
+    dspread_inv_cnst_off_globals: BTreeMap<u8, usize>,
     /// Internal zero-initialized global storing `inv_cnst_off + 1` for the
     /// AD helper. Zero means unallocated.
     drngchk_8_inv_cnst_off_global: Option<usize>,
@@ -228,7 +238,11 @@ impl LookupFunctions {
         Self {
             rngchk_8: None,
             drngchk_8_call: None,
+            spread: BTreeMap::new(),
+            dspread_call: BTreeMap::new(),
             rngchk_8_table_idx_global: None,
+            spread_table_idx_globals: BTreeMap::new(),
+            dspread_inv_cnst_off_globals: BTreeMap::new(),
             drngchk_8_inv_cnst_off_global: None,
         }
     }
@@ -239,6 +253,24 @@ impl LookupFunctions {
         }
         let id = llssa.add_function("__rngchk_8".to_string());
         self.rngchk_8 = Some(id);
+        id
+    }
+
+    fn get_spread_fn(&mut self, bits: u8, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.spread.get(&bits) {
+            return *id;
+        }
+        let id = llssa.add_function(format!("__spread_{}_lookup", bits));
+        self.spread.insert(bits, id);
+        id
+    }
+
+    fn get_dspread_call_fn(&mut self, bits: u8, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.dspread_call.get(&bits) {
+            return *id;
+        }
+        let id = llssa.add_function(format!("__dspread_{}_ad_call", bits));
+        self.dspread_call.insert(bits, id);
         id
     }
 
@@ -257,6 +289,18 @@ impl LookupFunctions {
     fn allocate_internal_globals(&mut self, llssa: &mut LLSSA) {
         if self.rngchk_8.is_some() && self.rngchk_8_table_idx_global.is_none() {
             self.rngchk_8_table_idx_global = Some(add_ll_global(llssa, LLType::i32()));
+        }
+        for bits in self.spread.keys() {
+            if !self.spread_table_idx_globals.contains_key(bits) {
+                let global = add_ll_global(llssa, LLType::i32());
+                self.spread_table_idx_globals.insert(*bits, global);
+            }
+        }
+        for bits in self.dspread_call.keys() {
+            if !self.dspread_inv_cnst_off_globals.contains_key(bits) {
+                let global = add_ll_global(llssa, LLType::i32());
+                self.dspread_inv_cnst_off_globals.insert(*bits, global);
+            }
         }
         if self.drngchk_8_call.is_some() && self.drngchk_8_inv_cnst_off_global.is_none() {
             self.drngchk_8_inv_cnst_off_global = Some(add_ll_global(llssa, LLType::i32()));
@@ -353,7 +397,7 @@ fn lower_inner(
     // generator. If we let that happen *after* `generate_all_ad_functions`
     // runs, the bumps would get FunctionIds but never bodies. Pre-allocate
     // now.
-    if lookup_fns.drngchk_8_call.is_some() {
+    if lookup_fns.drngchk_8_call.is_some() || !lookup_fns.dspread_call.is_empty() {
         ad_fns.ensure_bumps(&mut llssa);
     }
     lookup_fns.allocate_internal_globals(&mut llssa);
@@ -442,7 +486,14 @@ fn lower_function(
 
         // Lower terminator (into current block, which may have changed due to block splits)
         if let Some(terminator) = block.get_terminator() {
-            lower_terminator(terminator, &mut emitter, &val_map, &block_map);
+            lower_terminator(
+                terminator,
+                &mut emitter,
+                &val_map,
+                &block_map,
+                fn_type_info,
+                function.get_returns(),
+            );
         }
     }
 
@@ -502,38 +553,30 @@ fn lower_instruction(
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::U(_) => {
-                    let op = match kind {
-                        BinaryArithOpKind::Add => IntArithOp::Add,
-                        BinaryArithOpKind::Sub => IntArithOp::Sub,
-                        BinaryArithOpKind::Mul => IntArithOp::Mul,
-                        BinaryArithOpKind::And => IntArithOp::And,
-                        BinaryArithOpKind::Or => IntArithOp::Or,
-                        BinaryArithOpKind::Xor => IntArithOp::Xor,
-                        BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        BinaryArithOpKind::Shr => IntArithOp::UShr,
-                        BinaryArithOpKind::Div => IntArithOp::UDiv,
-                        BinaryArithOpKind::Mod => IntArithOp::URem,
-                        _ => panic!("Unsupported int arith op: {:?}", kind),
-                    };
-                    e.int_arith(op, ll_lhs, ll_rhs)
-                }
-                TypeExpr::I(_) => {
-                    let op = match kind {
-                        BinaryArithOpKind::Add => IntArithOp::Add,
-                        BinaryArithOpKind::Sub => IntArithOp::Sub,
-                        BinaryArithOpKind::Mul => IntArithOp::Mul,
-                        BinaryArithOpKind::And => IntArithOp::And,
-                        BinaryArithOpKind::Or => IntArithOp::Or,
-                        BinaryArithOpKind::Xor => IntArithOp::Xor,
-                        BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        BinaryArithOpKind::Shr => IntArithOp::UShr,
-                        BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
-                        BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
-                        _ => panic!("Unsupported signed int arith op: {:?}", kind),
-                    };
-                    e.int_arith(op, ll_lhs, ll_rhs)
-                }
+                TypeExpr::U(_) => match kind {
+                    BinaryArithOpKind::Add => e.int_arith(IntArithOp::Add, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Sub => e.int_arith(IntArithOp::Sub, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Mul => e.int_arith(IntArithOp::Mul, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shl => e.int_arith(IntArithOp::Shl, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shr => e.int_arith(IntArithOp::UShr, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Div => e.int_arith(IntArithOp::UDiv, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Mod => e.int_arith(IntArithOp::URem, ll_lhs, ll_rhs),
+                },
+                TypeExpr::I(_) => match kind {
+                    BinaryArithOpKind::Add => e.int_arith(IntArithOp::Add, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Sub => e.int_arith(IntArithOp::Sub, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Mul => e.int_arith(IntArithOp::Mul, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::And => e.int_arith(IntArithOp::And, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Or => e.int_arith(IntArithOp::Or, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Xor => e.int_arith(IntArithOp::Xor, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shl => e.int_arith(IntArithOp::Shl, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Shr => e.int_arith(IntArithOp::UShr, ll_lhs, ll_rhs),
+                    BinaryArithOpKind::Div => panic!("Signed div not yet implemented in LLSSA"),
+                    BinaryArithOpKind::Mod => panic!("Signed mod not yet implemented in LLSSA"),
+                },
                 TypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind {
@@ -868,16 +911,32 @@ fn lower_instruction(
             val_map.insert(*result, ll_result);
         }
 
-        OpCode::Spread { result, value, .. }
-        | OpCode::Unspread {
-            result_odd: result,
+        OpCode::Spread {
+            result,
             value,
-            ..
+            bits,
         } => {
-            todo!(
-                "Spread/Unspread opcodes are not handled yet in HLSSA->LLSSA lowering: {:?}",
-                instruction
-            )
+            let value_type = fn_type_info.get_value_type(*value);
+            let result_type = fn_type_info.get_value_type(*result);
+            let ll_value = val_map[value];
+            let ll_result = lower_spread(e, ll_value, &value_type, &result_type, *bits);
+            val_map.insert(*result, ll_result);
+        }
+
+        OpCode::Unspread {
+            result_odd,
+            result_even,
+            value,
+            bits,
+        } => {
+            let value_type = fn_type_info.get_value_type(*value);
+            let odd_type = fn_type_info.get_value_type(*result_odd);
+            let even_type = fn_type_info.get_value_type(*result_even);
+            let ll_value = val_map[value];
+            let (ll_odd, ll_even) =
+                lower_unspread(e, ll_value, &value_type, &odd_type, &even_type, *bits);
+            val_map.insert(*result_odd, ll_odd);
+            val_map.insert(*result_even, ll_even);
         }
 
         OpCode::MkTuple {
@@ -1031,6 +1090,24 @@ fn lower_instruction(
             let fn_id = lookup_fns.get_rngchk_8_fn(llssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
+        OpCode::Lookup {
+            target: crate::compiler::ssa::LookupTarget::Spread(bits),
+            keys,
+            results,
+            flag,
+        } => {
+            assert_eq!(keys.len(), 1, "Spread lookup must have exactly one key");
+            assert_eq!(
+                results.len(),
+                1,
+                "Spread lookup must have exactly one result"
+            );
+            let key = val_map[&keys[0]];
+            let result = val_map[&results[0]];
+            let flag_val = val_map[flag];
+            let fn_id = lookup_fns.get_spread_fn(*bits, llssa);
+            e.call(fn_id, vec![key, result, flag_val], 0);
+        }
         OpCode::Lookup { .. } => {
             panic!(
                 "Unsupported Lookup variant in HLSSA->LLSSA lowering: {:?}",
@@ -1058,6 +1135,24 @@ fn lower_instruction(
             let fn_id = lookup_fns.get_drngchk_8_call_fn(llssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
+        OpCode::DLookup {
+            target: crate::compiler::ssa::LookupTarget::Spread(bits),
+            keys,
+            results,
+            flag,
+        } => {
+            assert_eq!(keys.len(), 1, "Spread dlookup must have exactly one key");
+            assert_eq!(
+                results.len(),
+                1,
+                "Spread dlookup must have exactly one result"
+            );
+            let key = val_map[&keys[0]];
+            let result = val_map[&results[0]];
+            let flag_val = val_map[flag];
+            let fn_id = lookup_fns.get_dspread_call_fn(*bits, llssa);
+            e.call(fn_id, vec![key, result, flag_val], 0);
+        }
         OpCode::DLookup { .. } => {
             panic!(
                 "Unsupported DLookup variant in HLSSA->LLSSA lowering: {:?}",
@@ -1070,6 +1165,92 @@ fn lower_instruction(
             instruction
         ),
     }
+}
+
+fn integer_width(ty: &Type) -> u32 {
+    let scalar_ty = ty.strip_witness();
+    match scalar_ty.expr {
+        TypeExpr::U(bits) | TypeExpr::I(bits) => bits as u32,
+        _ => panic!("Expected integer type, got {}", ty),
+    }
+}
+
+/// Emit a Spread LLSSA opcode. `bits` is the active low-bit width from
+/// `spread::<N>`, while the SSA value type may be a wider container such as
+/// `u32`.
+fn lower_spread(
+    e: &mut LLBlockEmitter<'_>,
+    value: ValueId,
+    value_type: &Type,
+    result_type: &Type,
+    bits: u8,
+) -> ValueId {
+    let input_bits = integer_width(value_type);
+    let result_bits = integer_width(result_type);
+    let active_bits = bits as u32;
+    assert!(
+        (1..=64).contains(&active_bits),
+        "Spread active bit-width must be in 1..=64, got {}",
+        bits
+    );
+    assert!(
+        active_bits <= input_bits,
+        "Spread active bit-width {} exceeds input type width {}",
+        bits,
+        value_type
+    );
+    assert!(
+        result_bits >= active_bits * 2,
+        "Spread result type {} is too narrow for {} active bits",
+        result_type,
+        bits
+    );
+
+    e.spread(value, bits, result_bits)
+}
+
+fn lower_unspread(
+    e: &mut LLBlockEmitter<'_>,
+    value: ValueId,
+    value_type: &Type,
+    odd_type: &Type,
+    even_type: &Type,
+    bits: u8,
+) -> (ValueId, ValueId) {
+    let input_bits = integer_width(value_type);
+    let odd_bits = integer_width(odd_type);
+    let even_bits = integer_width(even_type);
+    let active_bits = bits as u32;
+    assert!(
+        input_bits <= 128 && input_bits % 2 == 0,
+        "Unspread expects an even integer width up to 128 bits, got {}",
+        value_type
+    );
+    assert!(
+        active_bits >= 1,
+        "Unspread active bit-width must be at least 1, got {}",
+        bits
+    );
+    assert!(
+        active_bits * 2 <= input_bits,
+        "Unspread active bit-width {} exceeds input type width {}",
+        bits,
+        value_type
+    );
+    assert!(
+        odd_bits >= active_bits,
+        "Unspread odd result type {} is too narrow for {} active bits",
+        odd_type,
+        bits
+    );
+    assert!(
+        even_bits >= active_bits,
+        "Unspread even result type {} is too narrow for {} active bits",
+        even_type,
+        bits
+    );
+
+    e.unspread(value, bits, odd_bits, even_bits)
 }
 
 // =============================================================================
@@ -2057,6 +2238,8 @@ fn lower_terminator(
     e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     block_map: &HashMap<BlockId, BlockId>,
+    fn_type_info: &FunctionTypeInfo,
+    return_types: &[Type],
 ) {
     match terminator {
         Terminator::Jmp(target, args) => {
@@ -2071,7 +2254,26 @@ fn lower_terminator(
             e.terminate_jmp_if(ll_cond, ll_then, ll_else);
         }
         Terminator::Return(values) => {
-            let ll_values: Vec<ValueId> = values.iter().map(|v| val_map[v]).collect();
+            assert_eq!(
+                values.len(),
+                return_types.len(),
+                "Return terminator has {} values but function declares {} returns",
+                values.len(),
+                return_types.len()
+            );
+            let ll_values: Vec<ValueId> = values
+                .iter()
+                .zip(return_types.iter())
+                .map(|(v, expected_type)| {
+                    let actual_type = fn_type_info.get_value_type(*v);
+                    assert_eq!(
+                        actual_type, expected_type,
+                        "Return type mismatch: value {:?} has type {}, but function declares {}",
+                        v, actual_type, expected_type
+                    );
+                    val_map[v]
+                })
+                .collect();
             e.terminate_return(ll_values);
         }
     }
@@ -2098,6 +2300,17 @@ fn generate_all_lookup_functions(
         llssa.put_function(id, func);
     }
 
+    for (bits, id) in &lookup_fns.spread {
+        let table_idx_global = lookup_fns
+            .spread_table_idx_globals
+            .get(bits)
+            .copied()
+            .expect("spread helper registered without internal table-id global");
+        let func = generate_spread_lookup_function(*bits, table_idx_global);
+        let _old = llssa.take_function(*id);
+        llssa.put_function(*id, func);
+    }
+
     if let Some(call_id) = lookup_fns.drngchk_8_call {
         let inv_cnst_off_global = lookup_fns
             .drngchk_8_inv_cnst_off_global
@@ -2115,6 +2328,30 @@ fn generate_all_lookup_functions(
         );
         let _old = llssa.take_function(call_id);
         llssa.put_function(call_id, call_fn);
+    }
+
+    for (bits, call_id) in &lookup_fns.dspread_call {
+        let inv_cnst_off_global = lookup_fns
+            .dspread_inv_cnst_off_globals
+            .get(bits)
+            .copied()
+            .expect("AD spread helper registered without internal offset global");
+        let (witness_layout, constraints_layout) =
+            layout.expect("R1CS layout required to generate AD spread helper");
+        let bump_da_id = ad_fns.get_bump_fn(DMatrix::A, llssa);
+        let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
+        let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
+        let call_fn = generate_dspread_ad_call(
+            *bits,
+            inv_cnst_off_global,
+            witness_layout,
+            constraints_layout,
+            bump_da_id,
+            bump_db_id,
+            bump_dc_id,
+        );
+        let _old = llssa.take_function(*call_id);
+        llssa.put_function(*call_id, call_fn);
     }
 }
 
@@ -2146,6 +2383,12 @@ fn u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
     let zero = e.int_const(64, 0);
     let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, zero, zero, zero]);
     e.field_from_limbs(limbs)
+}
+
+fn field_neg_via_sub(e: &mut LLBlockEmitter<'_>, value: ValueId) -> ValueId {
+    let zero_i64 = e.int_const(64, 0);
+    let zero_field = u64_as_field(e, zero_i64);
+    e.field_arith(FieldArithOp::Sub, zero_field, value)
 }
 
 /// Emit: `bump_u64_at(cursor, delta)` — advance the cursor stored at
@@ -2187,6 +2430,177 @@ fn witgen_table_info_ptr(e: &mut LLBlockEmitter<'_>, table_idx: ValueId) -> Valu
 /// `table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_MULTS_BASE)`.
 fn table_info_field_ptr(e: &mut LLBlockEmitter<'_>, slot_ptr: ValueId, field: usize) -> ValueId {
     e.struct_field_ptr(slot_ptr, LLStruct::table_info_slot(), field)
+}
+
+fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunction {
+    assert!(
+        bits <= 16,
+        "Spread lookup helper currently supports bit-widths up to 16, got {}",
+        bits
+    );
+    let length = 1usize << bits;
+    let mut func = new_ll_function(format!("__spread_{}_lookup", bits));
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let key_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+        let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+        let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+        let (key_l0, key_l1, key_l2, key_l3) = field_limbs(&mut e, key_field);
+        let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag_field);
+        let key = key_l0;
+        let flag_u64 = flag_l0;
+
+        let zero_i64 = e.int_const(64, 0);
+        // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
+        // `key`'s high limbs and `key < length` are validated only when
+        // `flag != 0` (see post-merge tape emission below), matching the VM's
+        // `forward_kv_lookup_emit` shape and `__rngchk_8`.
+        for high in [flag_l1, flag_l2, flag_l3] {
+            let ok = e.int_eq(high, zero_i64);
+            assert(&mut e, ok);
+        }
+
+        let snap_idx_slot = e.global_addr(table_idx_global);
+        let snap_idx_plus_one = e.ll_load(snap_idx_slot, LLType::i32());
+        let zero_i32 = e.int_const(32, 0);
+        let is_unalloc = e.int_eq(snap_idx_plus_one, zero_i32);
+        let merge = e.build_if_else(
+            is_unalloc,
+            vec![LLType::Ptr, LLType::Int(32)],
+            |e| {
+                let mults_cursor_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_MULTS_CURSOR);
+                let mults_base = e.ll_load(mults_cursor_slot, LLType::Ptr);
+                let len_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_TABLES_LEN);
+                let table_idx = e.ll_load(len_slot, LLType::i32());
+                let cap_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_TABLES_CAP);
+                let tables_cap = e.ll_load(cap_slot, LLType::i32());
+                let has_capacity = e.int_ult(table_idx, tables_cap);
+                assert(e, has_capacity);
+                let cnst_cursor_slot =
+                    e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_CURRENT_CNST_TABLES_OFF);
+                let inv_cnst_off = e.ll_load(cnst_cursor_slot, LLType::i32());
+                let wit_cursor_slot =
+                    e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_CURRENT_WIT_TABLES_OFF);
+                let inv_wit_off = e.ll_load(wit_cursor_slot, LLType::i32());
+
+                let slot_ptr = witgen_table_info_ptr(e, table_idx);
+                let one_i32 = e.int_const(32, 1);
+                let table_len_i32 = e.int_const(32, length as u64);
+                let table_wit_bump = e.int_const(32, (2 * length) as u64);
+                let table_cnst_bump = e.int_const(32, (2 * length + 1) as u64);
+                let table_info_writes = [
+                    (LLStruct::TABLE_INFO_MULTS_BASE, mults_base),
+                    (LLStruct::TABLE_INFO_INV_CNST_OFF, inv_cnst_off),
+                    (LLStruct::TABLE_INFO_INV_WIT_OFF, inv_wit_off),
+                    (LLStruct::TABLE_INFO_NUM_INDICES, one_i32),
+                    (LLStruct::TABLE_INFO_NUM_VALUES, one_i32),
+                    (LLStruct::TABLE_INFO_LENGTH, table_len_i32),
+                ];
+                for (field, value) in table_info_writes {
+                    let p = table_info_field_ptr(e, slot_ptr, field);
+                    e.ll_store(p, value);
+                }
+
+                let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
+                let a_base = e.ll_load(a_base_slot, LLType::Ptr);
+                let input_ty = Type::u(bits as usize);
+                let result_ty = Type::u(bits as usize * 2);
+                e.build_counted_loop(length, vec![], |e, i_i64, _| {
+                    let i_key = e.truncate(i_i64, bits as u32);
+                    let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
+                    let spread_u64 = if bits as u32 * 2 == 64 {
+                        spread
+                    } else {
+                        e.zext(spread, 64)
+                    };
+                    let spread_field = u64_as_field(e, spread_u64);
+                    let i_i32 = e.truncate(i_i64, 32);
+                    let two_i32 = e.int_const(32, 2);
+                    let doubled_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
+                    let table_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, doubled_i);
+                    let table_slot = e.array_elem_ptr(a_base, LLStruct::field_elem(), table_idx);
+                    e.ll_store(table_slot, spread_field);
+                    vec![]
+                });
+
+                let table_idx_plus_one = e.int_arith(IntArithOp::Add, table_idx, one_i32);
+                e.ll_store(snap_idx_slot, table_idx_plus_one);
+
+                let next_mults =
+                    e.array_elem_ptr(mults_base, LLStruct::field_elem(), table_len_i32);
+                e.ll_store(mults_cursor_slot, next_mults);
+                e.ll_store(len_slot, table_idx_plus_one);
+                let next_cnst = e.int_arith(IntArithOp::Add, inv_cnst_off, table_cnst_bump);
+                e.ll_store(cnst_cursor_slot, next_cnst);
+                let next_wit = e.int_arith(IntArithOp::Add, inv_wit_off, table_wit_bump);
+                e.ll_store(wit_cursor_slot, next_wit);
+
+                vec![mults_base, table_idx]
+            },
+            |e| {
+                let snap_idx_slot = e.global_addr(table_idx_global);
+                let snap_idx_plus_one = e.ll_load(snap_idx_slot, LLType::i32());
+                let one_i32 = e.int_const(32, 1);
+                let table_idx = e.int_arith(IntArithOp::Sub, snap_idx_plus_one, one_i32);
+                let slot_ptr = witgen_table_info_ptr(e, table_idx);
+                let mults_p = table_info_field_ptr(e, slot_ptr, LLStruct::TABLE_INFO_MULTS_BASE);
+                let mults_base = e.ll_load(mults_p, LLType::Ptr);
+                vec![mults_base, table_idx]
+            },
+        );
+        let mults_base = merge[0];
+        let table_idx_i32 = merge[1];
+
+        let table_id = e.zext(table_idx_i32, 64);
+
+        // Entry 1 (x-constraint): always (table_id, result_field, 0).
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
+        write_tape_entry_field(&mut e, LLStruct::WITGEN_VM_LOOKUPS_B, result_field);
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, zero_i64);
+
+        // Entry 2 (y-constraint): always (table_id, ?, flag_u64).
+        // For lookups_b: flag=0 writes full Field (Montgomery limbs);
+        // flag!=0 writes u64 key. Multiplicities only get bumped (and
+        // key<length validated) for flag!=0. Mirrors VM's
+        // `forward_kv_lookup_emit` so Phase 2 reads consistently for
+        // both backends.
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_A, table_id);
+        let flag_zero = e.int_eq(flag_u64, zero_i64);
+        e.build_if_else(
+            flag_zero,
+            vec![],
+            |e| {
+                write_tape_entry_field(e, LLStruct::WITGEN_VM_LOOKUPS_B, key_field);
+                vec![]
+            },
+            |e| {
+                // Validate key < length, all key high limbs zero.
+                let table_len_i64 = e.int_const(64, length as u64);
+                let in_range = e.int_ult(key, table_len_i64);
+                assert(e, in_range);
+                for high in [key_l1, key_l2, key_l3] {
+                    let ok = e.int_eq(high, zero_i64);
+                    assert(e, ok);
+                }
+                // Bump: multiplicities[key].low_u64 += flag_u64.
+                let slot_ptr = e.array_elem_ptr(mults_base, LLStruct::field_elem(), key);
+                let low_ptr = e.struct_field_ptr(slot_ptr, LLStruct::field_elem(), 0);
+                let old_low = e.ll_load(low_ptr, LLType::i64());
+                let new_low = e.int_add(old_low, flag_u64);
+                e.ll_store(low_ptr, new_low);
+                write_tape_entry_u64(e, LLStruct::WITGEN_VM_LOOKUPS_B, key);
+                vec![]
+            },
+        );
+        write_tape_entry_u64(&mut e, LLStruct::WITGEN_VM_LOOKUPS_C, flag_u64);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
 }
 
 /// Generate __rngchk_8(val: FieldElem, flag: FieldElem):
@@ -2478,6 +2892,177 @@ fn emit_rngchk_8_ad_init_body(
     e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
 
     inv_cnst_off
+}
+
+fn emit_spread_ad_init_body(
+    e: &mut LLBlockEmitter<'_>,
+    bits: u8,
+    inv_cnst_off_global: usize,
+    witness_layout: WitnessLayout,
+) -> ValueId {
+    assert!(
+        bits <= 16,
+        "AD spread lookup helper currently supports bit-widths up to 16, got {}",
+        bits
+    );
+    let length = 1usize << bits;
+
+    let cnst_tables_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_CNST_TABLES_OFF);
+    let inv_cnst_off = e.ll_load(cnst_tables_slot, LLType::i32());
+    let wit_tables_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_WIT_TABLES_OFF);
+    let inv_wit_off = e.ll_load(wit_tables_slot, LLType::i32());
+    let wit_mults_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF);
+    let mults_wit_off = e.ll_load(wit_mults_slot, LLType::i32());
+
+    let cnst_bump = e.int_const(32, (2 * length + 1) as u64);
+    let next_cnst = e.int_arith(IntArithOp::Add, inv_cnst_off, cnst_bump);
+    e.ll_store(cnst_tables_slot, next_cnst);
+    let wit_bump = e.int_const(32, (2 * length) as u64);
+    let next_wit = e.int_arith(IntArithOp::Add, inv_wit_off, wit_bump);
+    e.ll_store(wit_tables_slot, next_wit);
+    let mults_bump = e.int_const(32, length as u64);
+    let next_mults = e.int_arith(IntArithOp::Add, mults_wit_off, mults_bump);
+    e.ll_store(wit_mults_slot, next_mults);
+
+    let snap_slot = e.global_addr(inv_cnst_off_global);
+    let one_i32 = e.int_const(32, 1);
+    let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
+    e.ll_store(snap_slot, snap);
+
+    let two_length_i32 = e.int_const(32, (2 * length) as u64);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, two_length_i32);
+    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
+    let logup_alpha_i32 = e.int_const(32, witness_layout.challenges_start() as u64);
+    let logup_beta_i32 = e.int_const(32, witness_layout.challenges_start() as u64 + 1);
+    let input_ty = Type::u(bits as usize);
+    let result_ty = Type::u(bits as usize * 2);
+
+    e.build_counted_loop(length, vec![], |e, i_i64, _| {
+        let i_i32 = e.truncate(i_i64, 32);
+        let two_i32 = e.int_const(32, 2);
+        let twice_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
+        let x_cnst_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, twice_i);
+        let one_i32 = e.int_const(32, 1);
+        let y_cnst_idx = e.int_arith(IntArithOp::Add, x_cnst_idx, one_i32);
+        let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
+        let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
+
+        let x_wit_idx = e.int_arith(IntArithOp::Add, inv_wit_off, twice_i);
+        let y_wit_idx = e.int_arith(IntArithOp::Add, x_wit_idx, one_i32);
+
+        let i_key = e.truncate(i_i64, bits as u32);
+        let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
+        let spread_u64 = if bits as u32 * 2 == 64 {
+            spread
+        } else {
+            e.zext(spread, 64)
+        };
+        let spread_field = u64_as_field(e, spread_u64);
+
+        e.ad_write_witness(DMatrix::A, logup_beta_i32, x_coeff);
+        e.ad_write_const(DMatrix::B, spread_field, x_coeff);
+        let neg_x_coeff = field_neg_via_sub(e, x_coeff);
+        e.ad_write_witness(DMatrix::C, x_wit_idx, neg_x_coeff);
+
+        e.ad_write_witness(DMatrix::A, y_wit_idx, y_coeff);
+        e.ad_write_witness(DMatrix::B, logup_alpha_i32, y_coeff);
+        let i_field = u64_as_field(e, i_i64);
+        let neg_i_field = field_neg_via_sub(e, i_field);
+        e.ad_write_const(DMatrix::B, neg_i_field, y_coeff);
+        let neg_y_coeff = field_neg_via_sub(e, y_coeff);
+        e.ad_write_witness(DMatrix::B, x_wit_idx, neg_y_coeff);
+
+        let mults_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::C, mults_idx, y_coeff);
+        e.ad_write_witness(DMatrix::A, y_wit_idx, inv_sum_coeff);
+
+        vec![]
+    });
+
+    let one_i64 = e.int_const(64, 1);
+    let one_field = u64_as_field(e, one_i64);
+    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
+
+    inv_cnst_off
+}
+
+fn generate_dspread_ad_call(
+    bits: u8,
+    inv_cnst_off_global: usize,
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    _bump_da_fn: FunctionId,
+    bump_db_fn: FunctionId,
+    bump_dc_fn: FunctionId,
+) -> LLFunction {
+    let length = 1usize << bits;
+    let mut func = new_ll_function(format!("__dspread_{}_ad_call", bits));
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let key_ptr = e.add_parameter(LLType::Ptr);
+        let result_ptr = e.add_parameter(LLType::Ptr);
+        let flag_ptr = e.add_parameter(LLType::Ptr);
+
+        let snap_slot = e.global_addr(inv_cnst_off_global);
+        let snap = e.ll_load(snap_slot, LLType::i32());
+        let zero_i32 = e.int_const(32, 0);
+        let is_unalloc = e.int_eq(snap, zero_i32);
+        let merge = e.build_if_else(
+            is_unalloc,
+            vec![LLType::Int(32)],
+            |e| {
+                let inv_cnst_off =
+                    emit_spread_ad_init_body(e, bits, inv_cnst_off_global, witness_layout);
+                vec![inv_cnst_off]
+            },
+            |e| {
+                let snap_slot = e.global_addr(inv_cnst_off_global);
+                let snap = e.ll_load(snap_slot, LLType::i32());
+                let one_i32 = e.int_const(32, 1);
+                let inv_cnst_off = e.int_arith(IntArithOp::Sub, snap, one_i32);
+                vec![inv_cnst_off]
+            },
+        );
+        let inv_cnst_off = merge[0];
+
+        let two_length_i32 = e.int_const(32, (2 * length) as u64);
+        let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, two_length_i32);
+        let inv_sum_coeff = ad_read_coeff_at_dyn(&mut e, sum_idx);
+
+        let x_wit_off = ad_next_lookup_wit_off(&mut e);
+        let y_wit_off = ad_next_lookup_wit_off(&mut e);
+        let lookups_wit_start_i32 = e.int_const(32, witness_layout.lookups_data_start() as u64);
+        let lookups_cnst_start_i32 =
+            e.int_const(32, constraints_layout.lookups_data_start() as u64);
+        let x_n = e.int_arith(IntArithOp::Sub, x_wit_off, lookups_wit_start_i32);
+        let x_cnst_idx = e.int_arith(IntArithOp::Add, lookups_cnst_start_i32, x_n);
+        let y_n = e.int_arith(IntArithOp::Sub, y_wit_off, lookups_wit_start_i32);
+        let y_cnst_idx = e.int_arith(IntArithOp::Add, lookups_cnst_start_i32, y_n);
+        let x_coeff = ad_read_coeff_at_dyn(&mut e, x_cnst_idx);
+        let y_coeff = ad_read_coeff_at_dyn(&mut e, y_cnst_idx);
+
+        let logup_alpha_i32 = e.int_const(32, witness_layout.challenges_start() as u64);
+        let logup_beta_i32 = e.int_const(32, witness_layout.challenges_start() as u64 + 1);
+
+        e.ad_write_witness(DMatrix::A, logup_beta_i32, x_coeff);
+        e.call(bump_db_fn, vec![result_ptr, x_coeff], 0);
+        let neg_x_coeff = field_neg_via_sub(&mut e, x_coeff);
+        e.ad_write_witness(DMatrix::C, x_wit_off, neg_x_coeff);
+
+        e.ad_write_witness(DMatrix::A, y_wit_off, y_coeff);
+        e.ad_write_witness(DMatrix::B, logup_alpha_i32, y_coeff);
+        let neg_y_coeff = field_neg_via_sub(&mut e, y_coeff);
+        e.ad_write_witness(DMatrix::B, x_wit_off, neg_y_coeff);
+        e.call(bump_db_fn, vec![key_ptr, neg_y_coeff], 0);
+        e.call(bump_dc_fn, vec![flag_ptr, y_coeff], 0);
+        e.ad_write_witness(DMatrix::C, y_wit_off, inv_sum_coeff);
+
+        e.terminate_return(vec![]);
+    }
+
+    func
 }
 
 /// Generate __drngchk_8_ad_call(val: AdNode*, flag: AdNode*):
