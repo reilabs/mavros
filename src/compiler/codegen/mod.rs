@@ -967,65 +967,57 @@ impl CodeGen {
                         amount: *size as u64,
                     });
                 }
-                ssa::OpCode::AssertCmp { kind, lhs, rhs } => {
-                    match kind {
-                        ssa::CmpKind::Eq => {
-                            let lhs_type = type_info.get_value_type(*lhs);
-                            match &lhs_type.expr {
-                                TypeExpr::Field => {
-                                    emitter.push_op(bytecode::OpCode::AssertEqField {
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                    });
-                                }
-                                TypeExpr::U(_) | TypeExpr::I(_) => {
-                                    emitter.push_op(bytecode::OpCode::AssertEqU64 {
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                    });
-                                }
-                                t => panic!("Unsupported type for AssertCmp Eq in vm: {:?}", t),
+                ssa::OpCode::AssertCmp { kind, lhs, rhs } => match kind {
+                    ssa::CmpKind::Eq => {
+                        let lhs_type = type_info.get_value_type(*lhs);
+                        match &lhs_type.expr {
+                            TypeExpr::Field => {
+                                emitter.push_op(bytecode::OpCode::AssertEqField {
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
                             }
-                        }
-                        ssa::CmpKind::Lt => {
-                            let lhs_type = type_info.get_value_type(*lhs);
-                            let cmp_result = layouter.alloc_scratch(1);
-                            match &lhs_type.expr {
-                                TypeExpr::I(bits) => {
-                                    emitter.push_op(bytecode::OpCode::LtS64 {
-                                        res: cmp_result,
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                        bits: *bits as u64,
-                                    });
-                                }
-                                TypeExpr::U(_) => {
-                                    emitter.push_op(bytecode::OpCode::LtU64 {
-                                        res: cmp_result,
-                                        a: layouter.get_value(*lhs),
-                                        b: layouter.get_value(*rhs),
-                                    });
-                                }
-                                t => panic!("Unsupported type for AssertCmp Lt in vm: {:?}", t),
+                            TypeExpr::U(_) | TypeExpr::I(_) => {
+                                emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
                             }
-                            let one = layouter.alloc_scratch(1);
-                            emitter.push_op(bytecode::OpCode::MovConst {
-                                res: one,
-                                val: 1,
-                            });
-                            emitter.push_op(bytecode::OpCode::AssertEqU64 {
-                                a: cmp_result,
-                                b: one,
-                            });
+                            t => panic!("Unsupported type for AssertCmp Eq in vm: {:?}", t),
                         }
                     }
-                }
+                    ssa::CmpKind::Lt => {
+                        let lhs_type = type_info.get_value_type(*lhs);
+                        let cmp_result = layouter.alloc_scratch(1);
+                        match &lhs_type.expr {
+                            TypeExpr::I(bits) => {
+                                emitter.push_op(bytecode::OpCode::LtS64 {
+                                    res: cmp_result,
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            TypeExpr::U(_) => {
+                                emitter.push_op(bytecode::OpCode::LtU64 {
+                                    res: cmp_result,
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
+                            }
+                            t => panic!("Unsupported type for AssertCmp Lt in vm: {:?}", t),
+                        }
+                        let one = layouter.alloc_scratch(1);
+                        emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
+                        emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                            a: cmp_result,
+                            b: one,
+                        });
+                    }
+                },
                 ssa::OpCode::Assert { value } => {
                     let one = layouter.alloc_scratch(1);
-                    emitter.push_op(bytecode::OpCode::MovConst {
-                        res: one,
-                        val: 1,
-                    });
+                    emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
                     emitter.push_op(bytecode::OpCode::AssertEqU64 {
                         a: layouter.get_value(*value),
                         b: one,

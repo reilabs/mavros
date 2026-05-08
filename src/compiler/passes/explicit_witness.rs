@@ -84,11 +84,7 @@ impl Pass for ExplicitWitness {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(
-            ssa,
-            store.get::<TypeInfo>(),
-            store.get::<ValueRanges>(),
-        );
+        self.do_run(ssa, store.get::<TypeInfo>(), store.get::<ValueRanges>());
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -312,8 +308,8 @@ impl ExplicitWitness {
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_mul(
-                            b, l_field, r_field, bits, one, res, l_taint, r_taint,
-                            &l_range, &r_range,
+                            b, l_field, r_field, bits, one, res, l_taint, r_taint, &l_range,
+                            &r_range,
                         );
                     }
                     _ => {
@@ -522,7 +518,11 @@ impl ExplicitWitness {
                 };
                 b.constrain(v_field, one_field, one_field);
             }
-            OpCode::AssertCmp { kind, lhs: l, rhs: r } => {
+            OpCode::AssertCmp {
+                kind,
+                lhs: l,
+                rhs: r,
+            } => {
                 let l_type = function_type_info.get_value_type(l);
                 let r_type = function_type_info.get_value_type(r);
                 let l_taint = l_type.is_witness_of();
@@ -810,7 +810,14 @@ impl ExplicitWitness {
                 };
                 let value_range = function_value_ranges.get(value);
                 self.gen_sext(
-                    b, value_field, from_bits, to_bits, one, i_taint, result, &value_range,
+                    b,
+                    value_field,
+                    from_bits,
+                    to_bits,
+                    one,
+                    i_taint,
+                    result,
+                    &value_range,
                 );
             }
             OpCode::Not { result, value } => {
@@ -1012,7 +1019,13 @@ impl ExplicitWitness {
                 }
             }
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(b, function_type_info, function_value_ranges, condition, *inner);
+                self.lower_guard(
+                    b,
+                    function_type_info,
+                    function_value_ranges,
+                    condition,
+                    *inner,
+                );
             }
         }
     }
@@ -1112,7 +1125,14 @@ impl ExplicitWitness {
                 };
                 let value_range = function_value_ranges.get(value);
                 self.gen_sext(
-                    b, value_field, from_bits, to_bits, cond_field, true, result, &value_range,
+                    b,
+                    value_field,
+                    from_bits,
+                    to_bits,
+                    cond_field,
+                    true,
+                    result,
+                    &value_range,
                 );
             }
             OpCode::BinaryArithOp {
@@ -1196,8 +1216,8 @@ impl ExplicitWitness {
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_signed_mul(
-                            b, l_field, r_field, bits, cond_field, res, l_taint, r_taint,
-                            &l_range, &r_range,
+                            b, l_field, r_field, bits, cond_field, res, l_taint, r_taint, &l_range,
+                            &r_range,
                         );
                     }
                     _ if l_taint && r_taint => {
@@ -1234,8 +1254,8 @@ impl ExplicitWitness {
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_divmod(
-                            b, l, r, bits, kind, cond_field, res, l_taint, r_taint,
-                            &l_range, &r_range,
+                            b, l, r, bits, kind, cond_field, res, l_taint, r_taint, &l_range,
+                            &r_range,
                         );
                     }
                     TypeExpr::U(_) => {
@@ -1791,8 +1811,7 @@ impl ExplicitWitness {
 
                 // Extract sign bit of result for overflow check (skipped when
                 // range proves result is non-negative).
-                let sign_r =
-                    self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
+                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
 
                 // Signed overflow iff carry_into_MSB != carry_out_of_MSB.
                 // The MSB full-adder gives: s_a + s_b + carry_in = s_r + 2*carry_out.
@@ -1831,8 +1850,7 @@ impl ExplicitWitness {
 
                 // Extract sign bit of result for overflow check (skipped when
                 // range proves result is non-negative).
-                let sign_r =
-                    self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
+                let sign_r = self.extract_sign_bit(b, result_lc, bits, flag, true, &result_range);
 
                 // Subtraction a - b is computed as a + ~b + 1 (two's complement).
                 // At the MSB column the full-adder sees:

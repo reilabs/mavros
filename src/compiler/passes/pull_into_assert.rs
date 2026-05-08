@@ -49,8 +49,7 @@ impl PullIntoAssert {
                 for instruction in block.take_instructions().into_iter() {
                     match instruction {
                         OpCode::Assert { value } => {
-                            new_instructions
-                                .extend(emit_assert(value, &defs, function_type_info));
+                            new_instructions.extend(emit_assert(value, &defs, function_type_info));
                         }
                         OpCode::AssertCmp {
                             kind: CmpKind::Eq,

@@ -502,7 +502,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         let bw = lhs.get_type().get_bit_width();
                         let mask = lhs.get_type().const_int((bw - 1) as u64, false);
                         let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
-                        self.builder.build_left_shift(lhs, masked_rhs, name).unwrap()
+                        self.builder
+                            .build_left_shift(lhs, masked_rhs, name)
+                            .unwrap()
                     }
                     IntArithOp::UShr => {
                         let bw = lhs.get_type().get_bit_width();

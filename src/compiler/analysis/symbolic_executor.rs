@@ -446,7 +446,11 @@ impl SymbolicExecutor {
                         let v = scope[value.0 as usize].as_ref().unwrap();
                         V::assert_bool(v, ctx);
                     }
-                    crate::compiler::ssa::OpCode::AssertCmp { kind, lhs: a, rhs: b } => {
+                    crate::compiler::ssa::OpCode::AssertCmp {
+                        kind,
+                        lhs: a,
+                        rhs: b,
+                    } => {
                         let lhs_type = fn_type_info.get_value_type(*a);
                         let a = scope[a.0 as usize].as_ref().unwrap();
                         let b = scope[b.0 as usize].as_ref().unwrap();

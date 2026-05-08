@@ -77,7 +77,7 @@ fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> Fr {
 
 #[inline]
 unsafe fn write_field(ptr: *mut u64, fr: Fr) {
-    let limbs = fr.0 .0;
+    let limbs = fr.0.0;
     *ptr = limbs[0];
     *ptr.add(1) = limbs[1];
     *ptr.add(2) = limbs[2];
