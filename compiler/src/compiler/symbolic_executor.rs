@@ -1,3 +1,7 @@
+//! Implements a generic symbolic execution engine over the HL SSA that different clients can plug
+//! into by providing their own `Value` and `Context` implementations that specialize it for their
+//! use-case.
+
 use tracing::{Level, instrument};
 
 use crate::compiler::{

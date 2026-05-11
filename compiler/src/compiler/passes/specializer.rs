@@ -1,3 +1,10 @@
+//! Creates specialized copies of functions for specific call-site argument values using symbolic
+//! execution where beneficial.
+//!
+//! These specialized functions are wired in using a dispatch function mechanism similar to the one
+//! in defunctionalization wherever needed. In some cases, we can call the specialized version
+//! directly instead.
+
 use std::collections::HashMap;
 
 use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
@@ -7,7 +14,6 @@ use crate::compiler::{
     Field,
     analysis::{
         instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
-        symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
     block_builder::{HLEmitter, HLFunctionBuilder},
@@ -17,6 +23,7 @@ use crate::compiler::{
         self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId,
         HLFunction, HLSSA, MemOp, OpCode, Radix, SeqType, ValueId,
     },
+    symbolic_executor::{self, SymbolicExecutor},
 };
 
 pub struct Specializer {
@@ -856,15 +863,19 @@ impl Specializer {
                     call_params.push(Val(val));
                     state.const_vals.insert(val, ConstVal::Field(*f));
                 }
-                ValueSignature::U(size, v) => {
-                    let val = state.u_const(*size, *v);
+                ValueSignature::U { bits_size, value } => {
+                    let val = state.u_const(*bits_size, *value);
                     call_params.push(Val(val));
-                    state.const_vals.insert(val, ConstVal::U(*size, *v));
+                    state
+                        .const_vals
+                        .insert(val, ConstVal::U(*bits_size, *value));
                 }
-                ValueSignature::I(size, v) => {
-                    let val = state.i_const(*size, *v);
+                ValueSignature::I { bits_size, value } => {
+                    let val = state.i_const(*bits_size, *value);
                     call_params.push(Val(val));
-                    state.const_vals.insert(val, ConstVal::I(*size, *v));
+                    state
+                        .const_vals
+                        .insert(val, ConstVal::I(*bits_size, *value));
                 }
                 ValueSignature::Tuple(_) => {
                     info!("TODO: Aborting specialization on a tuple value");
@@ -962,13 +973,13 @@ impl Specializer {
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
                     }
-                    ValueSignature::U(s, v) => {
-                        let cst = entry.u_const(*s, *v);
+                    ValueSignature::U { bits_size, value } => {
+                        let cst = entry.u_const(*bits_size, *value);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
                     }
-                    ValueSignature::I(s, v) => {
-                        let cst = entry.i_const(*s, *v);
+                    ValueSignature::I { bits_size, value } => {
+                        let cst = entry.i_const(*bits_size, *value);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
                     }

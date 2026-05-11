@@ -1,6 +1,10 @@
+//! This pass is intended to be the first step of the R1CS generation phase, and converts every
+//! `WriteWitness` opcode into a `FreshWitness` opcode as the actual computed value cannot be known
+//! in this portion of the pipeline.
+
 use crate::compiler::{
+    analysis::flow_analysis::FlowAnalysis,
     analysis::types::TypeInfo,
-    flow_analysis::FlowAnalysis,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{HLSSA, OpCode},
 };

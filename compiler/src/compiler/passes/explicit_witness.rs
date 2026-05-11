@@ -1,15 +1,21 @@
+//! Lowers high-level operations on witness-tainted values into the explicit primitives that can be
+//! used by the R1CS backend for constraints.
+//!
+//! It runs late in the pipeline right before R1CS generation, and is the main tool that makes the
+//! subsequent R1CS lowering possible.
+
 use std::collections::HashMap;
 
 use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
+    analysis::flow_analysis::FlowAnalysis,
     analysis::{
         types::{FunctionTypeInfo, TypeInfo},
-        value_range::{FunctionValueRanges, IntInterval, ValueRanges},
+        value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
     },
     block_builder::{HLEmitter, HLInstrBuilder},
-    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
@@ -25,8 +31,8 @@ use num_traits::{One, Signed};
 /// non-negative integer. Returns `None` if the interval may contain a negative
 /// value or has no upper bound.
 fn value_range_unsigned_bit_width(r: &IntInterval) -> Option<usize> {
-    let lo = r.lo.as_ref()?;
-    let hi = r.hi.as_ref()?;
+    let lo = r.lo()?;
+    let hi = r.hi()?;
     if lo.is_negative() {
         return None;
     }
@@ -51,7 +57,7 @@ fn narrow_rangecheck_width(value_range: &IntInterval, default_bits: usize) -> us
 /// Bound on `q` for `a / b` with `b` strictly positive. Returns TOP if we
 /// can't say anything (e.g. divisor's lower bound is 0).
 fn quotient_bound(a_range: &IntInterval, b_range: &IntInterval) -> IntInterval {
-    let (Some(a_hi), Some(b_lo)) = (a_range.hi.as_ref(), b_range.lo.as_ref()) else {
+    let (Some(a_hi), Some(b_lo)) = (a_range.hi(), b_range.lo()) else {
         return IntInterval::top();
     };
     if !a_range.is_non_negative() || !b_lo.is_positive() {
@@ -63,7 +69,7 @@ fn quotient_bound(a_range: &IntInterval, b_range: &IntInterval) -> IntInterval {
 /// Bound on `r` for `a % b` (and on `b − r − 1`). With `b ∈ [b.lo, b.hi]`,
 /// `r ∈ [0, b.hi − 1]`.
 fn remainder_bound(b_range: &IntInterval) -> IntInterval {
-    let Some(b_hi) = b_range.hi.as_ref() else {
+    let Some(b_hi) = b_range.hi() else {
         return IntInterval::top();
     };
     if !b_hi.is_positive() {

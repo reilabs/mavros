@@ -12,7 +12,8 @@ use crate::array::DataType;
 use std::fmt::Display;
 use std::ptr;
 
-pub const LIMBS: usize = 4;
+/// The number of u64 limbs making up a field element.
+pub const FELT_LIMBS: usize = 4;
 
 /// Element storage kind for array lookup opcodes.
 /// Encoded as usize for compatibility with the opcode proc macro.
@@ -417,7 +418,6 @@ mod def {
     ) {
         let target = if cond != 0 { if_t } else { if_f };
         let pc = unsafe { pc.offset(target.0) };
-        // println!("jmp_if: cond={} target={:?}", cond, pc);
         unsafe { dispatch(pc, frame, vm) };
     }
 

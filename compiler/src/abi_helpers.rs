@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use mavros_artifacts::InputValueOrdered;
 
 /// Converts a BTreeMap of input values (keyed by parameter name) into a Vec of
-/// InputValueOrdered, ordered according to the ABI parameter order.
+/// InputValueOrdered, ordered according to the Noir ABI parameter order.
+///
 /// Return values (keyed by "return") are appended after the regular parameters.
 pub fn ordered_params_from_btreemap(
     abi: &noirc_abi::Abi,
@@ -31,7 +32,6 @@ pub fn ordered_params_from_btreemap(
 fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
     match (value, abi_type) {
         (InputValue::Field(elem), _) => InputValueOrdered::Field(elem.into_repr()),
-
         (InputValue::Vec(vec_elements), AbiType::Array { typ, .. }) => InputValueOrdered::Vec(
             vec_elements
                 .iter()
@@ -64,7 +64,6 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
         (InputValue::String(_string), _) => {
             panic!("String input did not match ABI string type");
         }
-
         (InputValue::Vec(vec_elements), AbiType::Tuple { fields }) => {
             assert_eq!(
                 vec_elements.len(),

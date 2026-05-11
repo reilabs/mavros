@@ -1,9 +1,12 @@
+//! Lowers witness operations such that there are no more implicit mixed pure / witness operations
+//! and so that every value entering an R1CS cosntraint has been explicitly cast to `WitnessOf`.
+
 use std::collections::HashMap;
 
 use crate::compiler::{
+    analysis::flow_analysis::FlowAnalysis,
     analysis::types::TypeInfo,
     block_builder::{HLBlockEmitter, HLEmitter},
-    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,

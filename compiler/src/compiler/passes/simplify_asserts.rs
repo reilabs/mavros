@@ -1,18 +1,25 @@
+//! Splits complex expressions used as inputs to asserts into more-specialized chains of smaller
+//! asserts that are far cheaper to encode in R1CS.
+//!
+//! Bare operations are specialized to `AssertCmp` (for `x < y` and `x == y`) and `AssertR1C` (for
+//! `x == y`) wherever possible. Field equalities `assert(a * b == c)` also become native R1CS
+//! constraints wherever possible.
+
 use std::collections::HashMap;
 
 use crate::compiler::{
+    analysis::flow_analysis::FlowAnalysis,
     analysis::types::{FunctionTypeInfo, TypeInfo},
-    flow_analysis::FlowAnalysis,
     ir::r#type::TypeExpr,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BinaryArithOpKind, CmpKind, HLSSA, Instruction, OpCode, ValueId},
 };
 
-pub struct PullIntoAssert {}
+pub struct SimplifyAsserts {}
 
-impl Pass for PullIntoAssert {
+impl Pass for SimplifyAsserts {
     fn name(&self) -> &'static str {
-        "pull_into_assert"
+        "simplify_asserts"
     }
     fn needs(&self) -> Vec<AnalysisId> {
         vec![TypeInfo::id()]
@@ -25,7 +32,7 @@ impl Pass for PullIntoAssert {
     }
 }
 
-impl PullIntoAssert {
+impl SimplifyAsserts {
     pub fn new() -> Self {
         Self {}
     }

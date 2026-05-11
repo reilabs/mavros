@@ -1,13 +1,16 @@
+//! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
+//! reaches an iteration limit or a fixed point.
+
 use std::collections::HashMap;
 
 use num_traits::{One, Zero};
 
 use crate::compiler::{
+    analysis::flow_analysis::FlowAnalysis,
     analysis::{
         types::{FunctionTypeInfo, Types},
         value_definitions::{FunctionValueDefinitions, ValueDefinition},
     },
-    flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
@@ -43,8 +46,9 @@ impl Pass for Simplifier {
 enum Rewrite {
     /// Drop the instruction; its result becomes an alias of `target`.
     Alias { result: ValueId, target: ValueId },
-    /// Replace the instruction with the given sequence (the last opcode
-    /// produces the original `result` ValueId).
+
+    /// Replace the instruction with the given sequence (the last opcode produces the original
+    /// `result` ValueId).
     Replace(Vec<OpCode>),
 }
 

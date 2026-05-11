@@ -1,3 +1,21 @@
+//! Transforms the SSA so that the program entry point speaks the circuit ABI for the witness rather
+//! than Noir-style typed arguments.
+//!
+//! It does the following four things:
+//!
+//! 1. **Synthesises a Wrapper for `main`:** The wrapper takes parameters for the original main's
+//!    arguments, and params for each of its return values, performs global initialization, invokes
+//!    the original `main` and then uses a deep assert to constrain the return value against the
+//!    declared counterpart in the witness. It then deinitializes the globals.
+//! 2. **Flattens the Synthetic Parameters:** Parameters to the synthetic `main` are flattened into
+//!    `Field`s which are then used to rebuild the original aggregate values.
+//! 3. **Pinned Witness Writes:** Witness values are written for every parameter, pinned, so that
+//!    DCE cannot remove them downstream.
+//! 4. **Handling of Unconstrained Calls:** Any calls that are unconstrained are modified to write
+//!    the unconstrained result to the witness. It also handles range-checking of integers, and
+//!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
+//!    results into the constraint system.
+
 use std::collections::HashMap;
 
 use crate::compiler::{

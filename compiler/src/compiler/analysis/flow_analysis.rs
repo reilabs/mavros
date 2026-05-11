@@ -1,3 +1,6 @@
+//! Computes a robust graph analysis of the program, including a CFG, dominator tree, and general
+//! tools for recovery of structured control flow.
+
 use petgraph::Direction;
 use petgraph::algo::dominators::{self, Dominators};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
@@ -473,16 +476,16 @@ impl CFG {
             };
 
             let edge_style = match edge_weight {
-                crate::compiler::flow_analysis::JumpType::Jmp => {
+                JumpType::Jmp => {
                     if self.is_loop_backedge(edge) {
                         "[color=blue, constraint=false]"
                     } else {
                         "[color=black]"
                     }
                 }
-                crate::compiler::flow_analysis::JumpType::JmpIf => "[color=red]",
-                crate::compiler::flow_analysis::JumpType::Entry => "[color=green, style=dashed]",
-                crate::compiler::flow_analysis::JumpType::Return => "[color=orange, style=dashed]",
+                JumpType::JmpIf => "[color=red]",
+                JumpType::Entry => "[color=green, style=dashed]",
+                JumpType::Return => "[color=orange, style=dashed]",
             };
 
             dot_content.push_str(&format!(
