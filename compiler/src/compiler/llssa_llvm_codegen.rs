@@ -29,6 +29,8 @@ use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
 use mavros_wasm_layout::WASM_PTR_SIZE;
 
+const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
+
 fn ll_type_size_bytes(ty: &LLType) -> u32 {
     match ty {
         LLType::Int(bits) => bits.div_ceil(8),
@@ -1204,7 +1206,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "--allow-undefined",
                 "--stack-first",
                 "-z",
-                "stack-size=65536",
+                &format!("stack-size={WASM_STACK_SIZE_BYTES}"),
                 "--export=__data_end",
                 "--export=__live_bytes",
                 "-o",
