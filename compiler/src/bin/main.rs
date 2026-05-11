@@ -1,12 +1,12 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use mavros::Project;
-use mavros::api;
-use mavros::compiler::Field;
-use mavros::compiler::r1cs_gen::R1CS;
-use mavros::driver::Driver;
-use mavros::plotting;
+use mavros_compiler::Project;
+use mavros_compiler::api;
+use mavros_compiler::compiler::Field;
+use mavros_compiler::compiler::r1cs_gen::R1CS;
+use mavros_compiler::driver::Driver;
+use mavros_compiler::plotting;
 
 type Error = Box<dyn std::error::Error>;
 use tracing::{error, info, warn};

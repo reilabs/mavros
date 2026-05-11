@@ -2183,7 +2183,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "mavros"
+name = "mavros-artifacts"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "mavros-compiler"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2220,13 +2230,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mavros-artifacts"
+name = "mavros-opcode-gen"
 version = "0.1.0"
 dependencies = [
- "ark-bn254",
- "ark-ff",
- "serde",
- "tracing",
+ "proc-macro2",
+ "quote",
+ "stringcase",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2235,7 +2245,7 @@ version = "0.1.0"
 dependencies = [
  "ark-ff",
  "mavros-artifacts",
- "opcode-gen",
+ "mavros-opcode-gen",
  "tracing",
 ]
 
@@ -2594,16 +2604,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "opcode-gen"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "stringcase",
- "syn 2.0.117",
-]
 
 [[package]]
 name = "option-ext"

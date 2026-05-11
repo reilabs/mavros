@@ -108,14 +108,15 @@ for R1CS compilation, with values split into two categories:
   vector.
 
 **Witness type inference**
-([`witness_type_inference.rs`](../src/compiler/witness_type_inference.rs)) propagates this
+([`witness_type_inference.rs`](../compiler/src/compiler/witness_type_inference.rs)) propagates this
 information through the program. Starting from main function parameters (which are marked as
 `Witness`), we compute the taint of every value in the program.
 
-**Untainting control flow** ([`untaint_control_flow.rs`](../src/compiler/untaint_control_flow.rs))
-ensures that all branch conditions depend only on `Pure` values. This is required because the R1CS
-matrix _shape_ is fixed at compile time - different execution paths would require different numbers
-of constraints, which is impossible.
+**Untainting control flow**
+([`untaint_control_flow.rs`](../compiler/src/compiler/untaint_control_flow.rs)) ensures that all
+branch conditions depend only on `Pure` values. This is required because the R1CS matrix _shape_ is
+fixed at compile time - different execution paths would require different numbers of constraints,
+which is impossible.
 
 It does this by first specializing generic functions based on the taints of their arguments
 (monomorphization). When a branch condition depends on `Witness` values, this pass transforms the
@@ -136,9 +137,10 @@ but are not limited to:
 | **Specializer**           | Inline and specialize functions based on cost analysis |
 
 The **Specializer** pass uses a **symbolic instrumentation engine**
-([`instrumenter.rs`](../src/compiler/analysis/instrumenter.rs)) to drive optimization decisions.
-This engine symbolically executes functions, tracking which values would become pure if a loop were
-unrolled and estimating the constraint cost for a variety of speculative specialization decisions.
+([`instrumenter.rs`](../compiler/src/compiler/analysis/instrumenter.rs)) to drive optimization
+decisions. This engine symbolically executes functions, tracking which values would become pure if a
+loop were unrolled and estimating the constraint cost for a variety of speculative specialization
+decisions.
 
 > [!NOTE]
 >
@@ -153,11 +155,12 @@ unrolled and estimating the constraint cost for a variety of speculative special
 
 ### Stage 4: Explicit Witness Lowering
 
-The **Explicit Witness** pass ([`explicit_witness.rs`](../src/compiler/passes/explicit_witness.rs))
-lowers operations in a witness-taint-dependent manner. The same high-level operation can be compiled
-differently depending on whether its operands are `Pure` or `Witness`. This pass inserts
-`WriteWitness` and `Constrain` instructions where needed to bridge the gap between the high-level
-Noir operations and R1CS constraints.
+The **Explicit Witness** pass
+([`explicit_witness.rs`](../compiler/src/compiler/passes/explicit_witness.rs)) lowers operations in
+a witness-taint-dependent manner. The same high-level operation can be compiled differently
+depending on whether its operands are `Pure` or `Witness`. This pass inserts `WriteWitness` and
+`Constrain` instructions where needed to bridge the gap between the high-level Noir operations and
+R1CS constraints.
 
 > [!NOTE]
 >
@@ -191,8 +194,8 @@ witness vector as output, now marked as `Witness`.
   witness vector.
 
 This is driven by selectively calling the
-[`WitnessWriteToFresh`](../src/compiler/passes/witness_write_to_fresh.rs) and
-[`WitnessWriteToVoid`](../src/compiler/passes/witness_write_to_void.rs) passes.
+[`WitnessWriteToFresh`](../compiler/src/compiler/passes/witness_write_to_fresh.rs) and
+[`WitnessWriteToVoid`](../compiler/src/compiler/passes/witness_write_to_void.rs) passes.
 
 This design allows DCE (dead code elimination) to automatically remove operations that are only
 needed on one side of the pipeline. For example, the hint computation logic is removed from the
@@ -207,8 +210,8 @@ described previously.
 
 ### Stage 7: Compilation and VM Execution
 
-Finally, we compile the optimized SSA to bytecode ([`codegen/`](../src/compiler/codegen/)) and
-execute it in the specialized Mavros Virtual Machine ([`vm/`](../vm/)). (`vm/`).
+Finally, we compile the optimized SSA to bytecode ([`codegen/`](../compiler/src/compiler/codegen/))
+and execute it in the specialized Mavros Virtual Machine ([`vm/`](../vm/)). (`vm/`).
 
 Executing the witness generator program produces:
 
@@ -222,5 +225,5 @@ Executing the AD program produces, for $c_r$ some random coefficients:
 - $c_r \cdot C$, a random linear combination of $C$'s rows
 
 At the same stage, the bytecode is used to generate LLVM IR for subsequent compilation
-([`llssa_llvm_codegen`](../src/compiler/llssa_llvm_codegen.rs)). The LLVM pipeline can then be run
-to produce either an optimized native binary, or a compiled `.wasm` blob.
+([`llssa_llvm_codegen`](../compiler/src/compiler/llssa_llvm_codegen.rs)). The LLVM pipeline can then
+be run to produce either an optimized native binary, or a compiled `.wasm` blob.
