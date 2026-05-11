@@ -7,7 +7,7 @@ on:
     types: [opened, reopened, synchronize]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -44,6 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -61,11 +63,13 @@ jobs:
       - name: Lint with Clippy
         run: make clippy
 
-  unused_deps:
+  unused-deps:
     name: Check for Unused Dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: machete
         uses: bnjbvr/cargo-machete@main
 
@@ -73,10 +77,19 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     steps:
+      - name: Generate MavrosBot token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.STATUS_UPDATE_APP_ID }}
+          private-key: ${{ secrets.STATUS_UPDATE_APP_PRIVATE_KEY }}
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -100,22 +113,22 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build test-runner
+      - name: Build Test Runner
         run: make build-test-runner
 
-      - name: Run tests
+      - name: Run Tests
         run: make func-test
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "MavrosBot[bot]"
+          git config user.email "282911374+MavrosBot[bot]@users.noreply.github.com"
           git add STATUS.md
           git diff --cached --quiet || git commit -m "Update STATUS.md [skip ci]"
           git push
 
-      - name: Fetch baseline
+      - name: Fetch Baseline
         if: github.event_name == 'pull_request'
         id: baseline
         run: |
@@ -126,11 +139,11 @@ jobs:
             echo "No baseline found, skipping checks"
           fi
 
-      - name: Check for regressions
+      - name: Check for Regressions
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
         run: nix develop --command cargo run --release --bin test-runner -- --check-regression baseline-STATUS.md STATUS.md
 
-      - name: Comment on constraint/witness growth
+      - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
           COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
