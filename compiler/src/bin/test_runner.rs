@@ -9,7 +9,7 @@ use std::{
 use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
-use mavros::{
+use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
     compiler::r1cs_gen::R1CS,
@@ -739,7 +739,7 @@ fn witgen_phase2(
     out_c: Vec<Field>,
     runtime_tables: Vec<(usize, TableInfo)>,
 ) -> interpreter::WitgenResult {
-    use mavros::vm::bytecode::AllocationInstrumenter;
+    use mavros_compiler::vm::bytecode::AllocationInstrumenter;
 
     // Re-encode raw-u64 multiplicity slots as Montgomery field elements.
     // Walk the runtime-claimed table list rather than scanning the entire

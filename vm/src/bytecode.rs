@@ -3,7 +3,7 @@
 use crate::interpreter::dispatch;
 use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
-use opcode_gen::interpreter;
+use mavros_opcode_gen::interpreter;
 
 use crate::array::{BoxedLayout, BoxedValue};
 use crate::interpreter::{Frame, Handler};
