@@ -1,0 +1,3 @@
+warning: Git tree '/home/developer/workspace' is dirty
+   Compiling mavros v0.1.0 (/home/developer/workspace)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.67s
