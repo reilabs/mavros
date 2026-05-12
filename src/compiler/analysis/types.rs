@@ -122,7 +122,7 @@ impl Types {
     }
 
     #[instrument(skip_all, level = Level::DEBUG, name = "Types::run_function", fields(function = function.get_name()))]
-    fn run_function(
+    pub fn run_function(
         &self,
         function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,

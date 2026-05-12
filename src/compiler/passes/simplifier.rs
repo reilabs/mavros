@@ -5,19 +5,22 @@ use num_traits::{One, Zero};
 
 use crate::compiler::{
     analysis::{
-        types::{FunctionTypeInfo, TypeInfo},
-        value_definitions::{FunctionValueDefinitions, ValueDefinition, ValueDefinitions},
+        types::{FunctionTypeInfo, Types},
+        value_definitions::{FunctionValueDefinitions, ValueDefinition},
     },
     flow_analysis::FlowAnalysis,
-    ir::r#type::TypeExpr,
+    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, CastTarget, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, ValueId,
+        BinaryArithOpKind, CastTarget, CmpKind, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
+        ValueId,
     },
 };
 
-pub struct Simplifier {}
+pub struct Simplifier {
+    max_iterations: usize,
+}
 
 impl Pass for Simplifier {
     fn name(&self) -> &'static str {
@@ -25,15 +28,11 @@ impl Pass for Simplifier {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id(), ValueDefinitions::id()]
+        vec![FlowAnalysis::id()]
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(
-            ssa,
-            store.get::<TypeInfo>(),
-            store.get::<ValueDefinitions>(),
-        );
+        self.do_run(ssa, store.get::<FlowAnalysis>());
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -45,30 +44,44 @@ impl Pass for Simplifier {
 enum Rewrite {
     /// Drop the instruction; its result becomes an alias of `target`.
     Alias { result: ValueId, target: ValueId },
-    /// Replace the instruction with the given opcode (same `result` ValueId).
-    Replace(OpCode),
-    /// Replace the instruction with a sequence of opcodes (used for the
-    /// Rangecheck → Lt+AssertEq lowering, which needs fresh result IDs).
-    ReplaceMany(Vec<OpCode>),
+    /// Replace the instruction with the given sequence (the last opcode
+    /// produces the original `result` ValueId).
+    Replace(Vec<OpCode>),
 }
 
 impl Simplifier {
     pub fn new() -> Self {
-        Self {}
+        Self::with_max_iterations(16)
     }
 
-    pub fn do_run(
-        &self,
-        ssa: &mut HLSSA,
-        type_info: &TypeInfo,
-        _value_definitions: &ValueDefinitions,
-    ) {
+    pub fn with_max_iterations(max_iterations: usize) -> Self {
+        Self { max_iterations }
+    }
+
+    pub fn do_run(&self, ssa: &mut HLSSA, flow: &FlowAnalysis) {
+        // Function signatures don't change here; build the global signature
+        // map once and reuse it for per-function type inference. Owned so
+        // we can mutate functions afterwards without borrow conflicts.
+        let owned_sigs: HashMap<FunctionId, (Vec<Type>, Vec<Type>)> = ssa
+            .iter_functions()
+            .map(|(id, func)| {
+                (
+                    *id,
+                    (func.get_param_types(), func.get_returns().to_vec()),
+                )
+            })
+            .collect();
+        let function_types: HashMap<FunctionId, (Vec<Type>, &[Type])> = owned_sigs
+            .iter()
+            .map(|(id, (params, returns))| (*id, (params.clone(), returns.as_slice())))
+            .collect();
         for (function_id, function) in ssa.iter_functions_mut() {
-            let function_type_info = type_info.get_function(*function_id);
-            // Iterate to fixed point. Each round may expose new opportunities
-            // because the alias substitution rebinds operands.
-            for _ in 0..16 {
-                if !self.run_function(function, function_type_info) {
+            let cfg = flow.get_function_cfg(*function_id);
+            for _ in 0..self.max_iterations {
+                // Recompute locally so newly emitted opcodes (the Const+Cast
+                // pair from `materialize_const`) appear with the right types.
+                let fti = Types::new().run_function(function, &function_types, cfg);
+                if !self.run_function(function, &fti) {
                     break;
                 }
             }
@@ -94,29 +107,14 @@ impl Simplifier {
                 let mut instruction = instruction;
                 aliases.replace_inputs(&mut instruction);
 
-                // Rangecheck rewrite needs fresh ValueIds. We took the blocks
-                // out of `function` above, so it isn't borrowed here and we
-                // can pass it through to allocate.
-                let rangecheck_rewrite = self.try_rangecheck(
-                    &instruction,
-                    &definitions,
-                    function_type_info,
-                    function,
-                );
-                let rewrite = rangecheck_rewrite.or_else(|| {
-                    self.try_algebraic(&instruction, &definitions, function_type_info)
-                });
+                let rewrite = self.try_algebraic(&instruction, &definitions, function_type_info, function);
 
                 match rewrite {
                     Some(Rewrite::Alias { result, target }) => {
                         aliases.insert(result, target);
                         changed = true;
                     }
-                    Some(Rewrite::Replace(new_op)) => {
-                        new_instructions.push(new_op);
-                        changed = true;
-                    }
-                    Some(Rewrite::ReplaceMany(new_ops)) => {
+                    Some(Rewrite::Replace(new_ops)) => {
                         new_instructions.extend(new_ops);
                         changed = true;
                     }
@@ -143,20 +141,16 @@ impl Simplifier {
         changed
     }
 
-    /// Algebraic identities: x+0 → x, x*1 → x, x*0 → 0, etc. Conservative —
-    /// only fires when the result type is pure (not WitnessOf), so we never
-    /// accidentally collapse a witness slot.
+    /// Algebraic identities: x+0 → x, x*1 → x, x*0 → 0, etc.
     fn try_algebraic(
         &self,
         instruction: &OpCode,
         defs: &FunctionValueDefinitions,
         types: &FunctionTypeInfo,
+        function: &mut HLFunction,
     ) -> Option<Rewrite> {
         match instruction {
             OpCode::BinaryArithOp { kind, result, lhs, rhs } => {
-                if is_witness(types, *result) {
-                    return None;
-                }
                 match kind {
                     BinaryArithOpKind::Add => {
                         if is_zero(defs, *lhs) {
@@ -171,7 +165,7 @@ impl Simplifier {
                             return Some(Rewrite::Alias { result: *result, target: *lhs });
                         }
                         if *lhs == *rhs {
-                            return materialize_zero(types, *result);
+                            return materialize_zero(types, *result, function);
                         }
                     }
                     BinaryArithOpKind::Mul => {
@@ -223,7 +217,7 @@ impl Simplifier {
                             return Some(Rewrite::Alias { result: *result, target: *lhs });
                         }
                         if *lhs == *rhs {
-                            return materialize_zero(types, *result);
+                            return materialize_zero(types, *result, function);
                         }
                     }
                     BinaryArithOpKind::Shl | BinaryArithOpKind::Shr => {
@@ -236,9 +230,6 @@ impl Simplifier {
                 None
             }
             OpCode::MulConst { result, const_val, var } => {
-                if is_witness(types, *result) {
-                    return None;
-                }
                 if is_zero(defs, *const_val) {
                     return Some(Rewrite::Alias { result: *result, target: *const_val });
                 }
@@ -290,10 +281,7 @@ impl Simplifier {
                 None
             }
             OpCode::Cmp { kind: CmpKind::Eq, result, lhs, rhs } if *lhs == *rhs => {
-                if is_witness(types, *result) {
-                    return None;
-                }
-                materialize_one(types, *result)
+                materialize_one(types, *result, function)
             }
             OpCode::ValueOf { result, value } => {
                 // ValueOf(ValueOf(x)) → ValueOf(x)
@@ -350,97 +338,56 @@ impl Simplifier {
         }
     }
 
-    /// The original peephole: `Rangecheck(Cast<v: U(s) | I(s), Field>, bits)` →
-    /// `AssertCmp::Eq(Cmp::Lt(v, 2^bits), 1)`. Replaces the rangecheck with a
-    /// bounded comparison on the original integer, avoiding a fresh range
-    /// decomposition.
-    fn try_rangecheck(
-        &self,
-        instruction: &OpCode,
-        defs: &FunctionValueDefinitions,
-        types: &FunctionTypeInfo,
-        function: &mut HLFunction,
-    ) -> Option<Rewrite> {
-        let OpCode::Rangecheck { value: v, max_bits: bits } = instruction else {
-            return None;
-        };
-        let v_def = defs.get_definition(*v);
-        let ValueDefinition::Instruction(
-            _,
-            _,
-            OpCode::Cast { result: _, value: inner, target: CastTarget::Field },
-        ) = v_def
-        else {
-            return None;
-        };
-        let inner = *inner;
-        let v_type = types.get_value_type(inner);
-        if v_type.is_witness_of() {
-            panic!("Rangecheck on impure value");
-        }
-        let s = match &v_type.expr {
-            TypeExpr::U(s) | TypeExpr::I(s) => *s,
-            _ => panic!("Rangecheck on a cast of a non-u value {}", v_type),
-        };
-        let cst = function.fresh_value();
-        let t = function.fresh_value();
-        let r = function.fresh_value();
-        Some(Rewrite::ReplaceMany(vec![
-            OpCode::Const {
-                result: cst,
-                value: ConstValue::U(s, 1u128 << bits),
-            },
-            OpCode::Const {
-                result: t,
-                value: ConstValue::U(1, 1),
-            },
-            OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: r,
-                lhs: inner,
-                rhs: cst,
-            },
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r,
-                rhs: t,
+}
+
+fn materialize_const(
+    types: &FunctionTypeInfo,
+    result: ValueId,
+    function: &mut HLFunction,
+    pure_value: impl Fn(&TypeExpr) -> Option<ConstValue>,
+) -> Option<Rewrite> {
+    let ty = types.get_value_type(result).clone();
+    let inner = ty.strip_witness();
+    let value = pure_value(&inner.expr)?;
+    if ty.is_witness_of() {
+        let tmp = function.fresh_value();
+        Some(Rewrite::Replace(vec![
+            OpCode::Const { result: tmp, value },
+            OpCode::Cast {
+                result,
+                value: tmp,
+                target: CastTarget::WitnessOf,
             },
         ]))
+    } else {
+        Some(Rewrite::Replace(vec![OpCode::Const { result, value }]))
     }
 }
 
-/// Type-aware materialization of the additive identity for `result`'s type.
-fn materialize_zero(types: &FunctionTypeInfo, result: ValueId) -> Option<Rewrite> {
-    let ty = types.get_value_type(result);
-    if ty.is_witness_of() {
-        return None;
-    }
-    let value = match &ty.expr {
-        TypeExpr::U(s) => ConstValue::U(*s, 0),
-        TypeExpr::I(s) => ConstValue::I(*s, 0),
-        TypeExpr::Field => ConstValue::Field(ark_bn254::Fr::zero()),
-        _ => return None,
-    };
-    Some(Rewrite::Replace(OpCode::Const { result, value }))
+fn materialize_zero(
+    types: &FunctionTypeInfo,
+    result: ValueId,
+    function: &mut HLFunction,
+) -> Option<Rewrite> {
+    materialize_const(types, result, function, |t| match t {
+        TypeExpr::U(s) => Some(ConstValue::U(*s, 0)),
+        TypeExpr::I(s) => Some(ConstValue::I(*s, 0)),
+        TypeExpr::Field => Some(ConstValue::Field(ark_bn254::Fr::zero())),
+        _ => None,
+    })
 }
 
-/// Type-aware materialization of the multiplicative identity for `result`'s type.
-fn materialize_one(types: &FunctionTypeInfo, result: ValueId) -> Option<Rewrite> {
-    let ty = types.get_value_type(result);
-    if ty.is_witness_of() {
-        return None;
-    }
-    let value = match &ty.expr {
-        TypeExpr::U(s) => ConstValue::U(*s, 1),
-        TypeExpr::I(s) => ConstValue::I(*s, 1),
-        TypeExpr::Field => ConstValue::Field(ark_bn254::Fr::one()),
-        _ => return None,
-    };
-    Some(Rewrite::Replace(OpCode::Const { result, value }))
-}
-
-fn is_witness(types: &FunctionTypeInfo, v: ValueId) -> bool {
-    types.get_value_type(v).is_witness_of()
+fn materialize_one(
+    types: &FunctionTypeInfo,
+    result: ValueId,
+    function: &mut HLFunction,
+) -> Option<Rewrite> {
+    materialize_const(types, result, function, |t| match t {
+        TypeExpr::U(s) => Some(ConstValue::U(*s, 1)),
+        TypeExpr::I(s) => Some(ConstValue::I(*s, 1)),
+        TypeExpr::Field => Some(ConstValue::Field(ark_bn254::Fr::one())),
+        _ => None,
+    })
 }
 
 fn is_zero(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
