@@ -152,7 +152,7 @@ impl EmitterState {
 /// into the resulting descriptor table.
 struct StructLayoutInterner {
     table: Vec<vm::array::StructDescriptor>,
-    index: HashMap<(Vec<u32>, Vec<bool>), usize>,
+    index: HashMap<Vec<(u32, bool)>, usize>,
 }
 
 impl StructLayoutInterner {
@@ -163,15 +163,14 @@ impl StructLayoutInterner {
         }
     }
 
-    fn intern(&mut self, field_sizes: Vec<u32>, refcounted: Vec<bool>) -> usize {
-        let key = (field_sizes.clone(), refcounted.clone());
-        if let Some(&idx) = self.index.get(&key) {
+    fn intern(&mut self, fields: Vec<(u32, bool)>) -> usize {
+        if let Some(&idx) = self.index.get(&fields) {
             return idx;
         }
         let idx = self.table.len();
         self.table
-            .push(vm::array::StructDescriptor::new(field_sizes, refcounted));
-        self.index.insert(key, idx);
+            .push(vm::array::StructDescriptor::new(fields.clone()));
+        self.index.insert(fields, idx);
         idx
     }
 
@@ -930,15 +929,16 @@ impl CodeGen {
                         .iter()
                         .map(|a| layouter.get_value(*a))
                         .collect::<Vec<_>>();
-                    let field_sizes: Vec<u32> = element_types
+                    let field_layout: Vec<(u32, bool)> = element_types
                         .iter()
-                        .map(|elem_type| layouter.type_size(elem_type) as u32)
+                        .map(|elem_type| {
+                            (
+                                layouter.type_size(elem_type) as u32,
+                                elem_type.is_heap_allocated(),
+                            )
+                        })
                         .collect();
-                    let reference_counting: Vec<bool> = element_types
-                        .iter()
-                        .map(|elem_type| elem_type.is_heap_allocated())
-                        .collect();
-                    let idx = struct_interner.intern(field_sizes, reference_counting);
+                    let idx = struct_interner.intern(field_layout);
                     emitter.push_op(bytecode::OpCode::TupleAlloc {
                         res,
                         meta: vm::array::BoxedLayout::new_struct(idx),

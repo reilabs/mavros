@@ -29,32 +29,45 @@ pub enum DataType {
 /// `BoxedLayout` whose `DataType` is `Struct`.
 #[derive(Debug, Clone)]
 pub struct StructDescriptor {
-    /// Size in u64 words of each field.
-    pub field_sizes: Vec<u32>,
-    /// Whether each field is a refcounted (heap-allocated) value. Same length as `field_sizes`.
-    pub refcounted: Vec<bool>,
-    /// Total size in u64 words of the struct payload (sum of `field_sizes`).
-    pub total_size: u32,
+    /// Per-field `(size_in_u64_words, is_refcounted)`.
+    fields: Vec<(u32, bool)>,
+    /// Total size in u64 words of the struct payload (sum of field sizes).
+    total_size: u32,
 }
 
 impl StructDescriptor {
-    pub fn new(field_sizes: Vec<u32>, refcounted: Vec<bool>) -> Self {
-        assert_eq!(field_sizes.len(), refcounted.len());
+    pub fn new(fields: Vec<(u32, bool)>) -> Self {
         let mut total_size: u32 = 0;
-        for &sz in &field_sizes {
+        for &(sz, _) in &fields {
             assert!(sz > 0, "struct field size must be > 0");
             total_size = total_size.checked_add(sz).expect("struct payload overflow");
         }
-        Self {
-            field_sizes,
-            refcounted,
-            total_size,
-        }
+        Self { fields, total_size }
     }
 
     #[inline(always)]
     pub fn field_count(&self) -> usize {
-        self.field_sizes.len()
+        self.fields.len()
+    }
+
+    #[inline(always)]
+    pub fn fields(&self) -> &[(u32, bool)] {
+        &self.fields
+    }
+
+    #[inline(always)]
+    pub fn field_size(&self, i: usize) -> u32 {
+        self.fields[i].0
+    }
+
+    #[inline(always)]
+    pub fn is_refcounted(&self, i: usize) -> bool {
+        self.fields[i].1
+    }
+
+    #[inline(always)]
+    pub fn total_size(&self) -> u32 {
+        self.total_size
     }
 }
 
@@ -72,17 +85,17 @@ impl<'a> StructView<'a> {
 
     #[inline(always)]
     pub fn field_size(&self, i: usize) -> usize {
-        self.desc.field_sizes[i] as usize
+        self.desc.field_size(i) as usize
     }
 
     #[inline(always)]
     pub fn is_refcounted(&self, i: usize) -> bool {
-        self.desc.refcounted[i]
+        self.desc.is_refcounted(i)
     }
 
     #[inline(always)]
     pub fn total_size(&self) -> usize {
-        self.desc.total_size as usize
+        self.desc.total_size() as usize
     }
 }
 

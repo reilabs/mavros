@@ -1684,10 +1684,10 @@ impl Program {
         // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
         binary.push(self.struct_layouts.len() as u64);
         for desc in &self.struct_layouts {
-            let n = desc.field_sizes.len();
-            binary.push(n as u64);
-            for i in 0..n {
-                binary.push(encode_struct_field(desc.field_sizes[i], desc.refcounted[i]));
+            let fields = desc.fields();
+            binary.push(fields.len() as u64);
+            for &(size, refcounted) in fields {
+                binary.push(encode_struct_field(size, refcounted));
             }
         }
 
@@ -1725,15 +1725,12 @@ pub fn parse_struct_layouts(program: &[u64]) -> (Vec<StructDescriptor>, usize) {
     for _ in 0..num_descriptors {
         let n = program[off] as usize;
         off += 1;
-        let mut field_sizes = Vec::with_capacity(n);
-        let mut refcounted = Vec::with_capacity(n);
+        let mut fields = Vec::with_capacity(n);
         for _ in 0..n {
-            let (sz, rc) = decode_struct_field(program[off]);
+            fields.push(decode_struct_field(program[off]));
             off += 1;
-            field_sizes.push(sz);
-            refcounted.push(rc);
         }
-        layouts.push(StructDescriptor::new(field_sizes, refcounted));
+        layouts.push(StructDescriptor::new(fields));
     }
     (layouts, off)
 }
