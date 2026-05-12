@@ -19,7 +19,6 @@ use crate::{
         flow_analysis::FlowAnalysis,
         pass_manager::PassManager,
         passes::{
-            simplifier::Simplifier,
             common_subexpression_elimination::CSE,
             condition_propagation::ConditionPropagation,
             dead_code_elimination::{self, DCE},
@@ -35,6 +34,7 @@ use crate::{
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
+            simplifier::Simplifier,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             witness_lowering::WitnessLowering,

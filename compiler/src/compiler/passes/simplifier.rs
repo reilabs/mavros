@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use ark_ff::Field as _;
 use num_traits::{One, Zero};
 
 use crate::compiler::{
@@ -10,7 +9,7 @@ use crate::compiler::{
     },
     flow_analysis::FlowAnalysis,
     ir::r#type::{Type, TypeExpr},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BinaryArithOpKind, CastTarget, CmpKind, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
@@ -64,12 +63,7 @@ impl Simplifier {
         // we can mutate functions afterwards without borrow conflicts.
         let owned_sigs: HashMap<FunctionId, (Vec<Type>, Vec<Type>)> = ssa
             .iter_functions()
-            .map(|(id, func)| {
-                (
-                    *id,
-                    (func.get_param_types(), func.get_returns().to_vec()),
-                )
-            })
+            .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns().to_vec())))
             .collect();
         let function_types: HashMap<FunctionId, (Vec<Type>, &[Type])> = owned_sigs
             .iter()
@@ -107,7 +101,8 @@ impl Simplifier {
                 let mut instruction = instruction;
                 aliases.replace_inputs(&mut instruction);
 
-                let rewrite = self.try_algebraic(&instruction, &definitions, function_type_info, function);
+                let rewrite =
+                    self.try_algebraic(&instruction, &definitions, function_type_info, function);
 
                 match rewrite {
                     Some(Rewrite::Alias { result, target }) => {
@@ -150,19 +145,33 @@ impl Simplifier {
         function: &mut HLFunction,
     ) -> Option<Rewrite> {
         match instruction {
-            OpCode::BinaryArithOp { kind, result, lhs, rhs } => {
+            OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } => {
                 match kind {
                     BinaryArithOpKind::Add => {
                         if is_zero(defs, *lhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *rhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
                         }
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                     }
                     BinaryArithOpKind::Sub => {
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                         if *lhs == *rhs {
                             return materialize_zero(types, *result, function);
@@ -170,51 +179,90 @@ impl Simplifier {
                     }
                     BinaryArithOpKind::Mul => {
                         if is_zero(defs, *lhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *rhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
                         }
                         if is_one(defs, *lhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *rhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
                         }
                         if is_one(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                     }
                     BinaryArithOpKind::Div => {
                         if is_one(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                     }
                     BinaryArithOpKind::And => {
                         if is_zero(defs, *lhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *rhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
                         }
                         if *lhs == *rhs {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                     }
                     BinaryArithOpKind::Or => {
                         if is_zero(defs, *lhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *rhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
                         }
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                         if *lhs == *rhs {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                     }
                     BinaryArithOpKind::Xor => {
                         if is_zero(defs, *lhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *rhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
                         }
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                         if *lhs == *rhs {
                             return materialize_zero(types, *result, function);
@@ -222,25 +270,45 @@ impl Simplifier {
                     }
                     BinaryArithOpKind::Shl | BinaryArithOpKind::Shr => {
                         if is_zero(defs, *rhs) {
-                            return Some(Rewrite::Alias { result: *result, target: *lhs });
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
                         }
                     }
                     BinaryArithOpKind::Mod => {}
                 }
                 None
             }
-            OpCode::MulConst { result, const_val, var } => {
+            OpCode::MulConst {
+                result,
+                const_val,
+                var,
+            } => {
                 if is_zero(defs, *const_val) {
-                    return Some(Rewrite::Alias { result: *result, target: *const_val });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *const_val,
+                    });
                 }
                 if is_one(defs, *const_val) {
-                    return Some(Rewrite::Alias { result: *result, target: *var });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *var,
+                    });
                 }
                 None
             }
-            OpCode::Cast { result, value, target } => {
+            OpCode::Cast {
+                result,
+                value,
+                target,
+            } => {
                 if matches!(target, CastTarget::Nop) {
-                    return Some(Rewrite::Alias { result: *result, target: *value });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *value,
+                    });
                 }
                 // cast(cast(x, T), T) → cast(x, T)
                 if let ValueDefinition::Instruction(
@@ -254,7 +322,10 @@ impl Simplifier {
                 ) = defs.get_definition(*value)
                 {
                     if inner_target == target {
-                        return Some(Rewrite::Alias { result: *result, target: *value });
+                        return Some(Rewrite::Alias {
+                            result: *result,
+                            target: *value,
+                        });
                     }
                 }
                 None
@@ -270,28 +341,42 @@ impl Simplifier {
                     },
                 ) = defs.get_definition(*value)
                 {
-                    return Some(Rewrite::Alias { result: *result, target: *inner });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *inner,
+                    });
                 }
                 None
             }
-            OpCode::Select { result, cond: _, if_t, if_f } => {
+            OpCode::Select {
+                result,
+                cond: _,
+                if_t,
+                if_f,
+            } => {
                 if *if_t == *if_f {
-                    return Some(Rewrite::Alias { result: *result, target: *if_t });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *if_t,
+                    });
                 }
                 None
             }
-            OpCode::Cmp { kind: CmpKind::Eq, result, lhs, rhs } if *lhs == *rhs => {
-                materialize_one(types, *result, function)
-            }
+            OpCode::Cmp {
+                kind: CmpKind::Eq,
+                result,
+                lhs,
+                rhs,
+            } if *lhs == *rhs => materialize_one(types, *result, function),
             OpCode::ValueOf { result, value } => {
                 // ValueOf(ValueOf(x)) → ValueOf(x)
-                if let ValueDefinition::Instruction(
-                    _,
-                    _,
-                    OpCode::ValueOf { .. },
-                ) = defs.get_definition(*value)
+                if let ValueDefinition::Instruction(_, _, OpCode::ValueOf { .. }) =
+                    defs.get_definition(*value)
                 {
-                    return Some(Rewrite::Alias { result: *result, target: *value });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *value,
+                    });
                 }
                 // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
                 // value IS what ValueOf strips back to). Sound by witgen
@@ -306,7 +391,10 @@ impl Simplifier {
                     },
                 ) = defs.get_definition(*value)
                 {
-                    return Some(Rewrite::Alias { result: *result, target: *hint });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *hint,
+                    });
                 }
                 None
             }
@@ -330,14 +418,16 @@ impl Simplifier {
                     },
                 ) = defs.get_definition(*value)
                 {
-                    return Some(Rewrite::Alias { result: *result, target: *inner });
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *inner,
+                    });
                 }
                 None
             }
             _ => None,
         }
     }
-
 }
 
 fn materialize_const(

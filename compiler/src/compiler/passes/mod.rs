@@ -1,4 +1,3 @@
-pub mod simplifier;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;
 pub mod dead_code_elimination;
@@ -14,6 +13,7 @@ pub mod pull_into_assert;
 pub mod rc_insertion;
 pub mod remove_unreachable_blocks;
 pub mod remove_unreachable_functions;
+pub mod simplifier;
 pub mod specializer;
 pub mod strip_witness_of;
 pub mod witness_lowering;
