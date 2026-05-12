@@ -2382,6 +2382,7 @@ fn generate_drop_function_for_ref(
     let mut func = new_ll_function(format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
+    // Scope ends e so its Drop commits the block back into func before we return it.
     {
         let mut e = LLBlockEmitter::new(&mut func, entry);
         let ptr = e.add_parameter(LLType::Ptr);
