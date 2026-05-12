@@ -214,7 +214,7 @@
 | noir/test_programs/execution_success/nested_array_dynamic | 💥 | ➖ | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/nested_array_dynamic_simple | 💥 | ➖ | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/nested_array_in_vector | 💥 | ➖ | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/nested_array_with_refs | ✅ | ✅ | 2 | 2 | 1888 | 2320 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/nested_array_with_refs | ✅ | ✅ | 2 | 2 | 1888 | 2320 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/nested_array_with_refs_from_param | ✅ | ✅ | 3 | 3 | 2176 | 2120 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/nested_array_with_refs_return | 💥 | ➖ | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/nested_arrays_from_brillig | ✅ | ✅ | 1 | 19 | 10440 | 7896 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
