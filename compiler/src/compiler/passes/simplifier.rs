@@ -405,10 +405,7 @@ impl Simplifier {
             } => {
                 // WriteWitness(ValueOf(x)) → x. The new slot's hint is x's
                 // value, so honest prover fills both identically; merging is
-                // equivalent to the always-true constraint new == x. This
-                // requires hint chains in explicit_witness gadgets to compute
-                // on PURE values (value_of operands at the boundary), so the
-                // collapsed expression contains no witness-typed compute.
+                // equivalent to the always-true constraint new == x.
                 if let ValueDefinition::Instruction(
                     _,
                     _,

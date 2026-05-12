@@ -719,7 +719,7 @@ impl ExplicitWitness {
                     return;
                 }
                 // At least one branch is witness: full lowering with constraint.
-                let cond_pure = if cond_taint { b.value_of(cond) } else { cond };
+                let cond_pure = b.value_of(cond);
                 let l_pure = if l_taint { b.value_of(l) } else { l };
                 let r_pure = if r_taint { b.value_of(r) } else { r };
                 let select_hint_value = b.select(cond_pure, l_pure, r_pure);
