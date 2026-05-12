@@ -1,0 +1,693 @@
+use core::panic;
+use std::collections::HashMap;
+
+use tracing::{Level, instrument};
+
+use crate::compiler::{
+    flow_analysis::{CFG, FlowAnalysis},
+    ir::r#type::{Type, TypeExpr},
+    ssa::{CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, ValueId},
+};
+
+pub struct TypeInfo {
+    functions: HashMap<FunctionId, FunctionTypeInfo>,
+}
+
+impl TypeInfo {
+    pub fn get_function(&self, function_id: FunctionId) -> &FunctionTypeInfo {
+        self.functions.get(&function_id).unwrap()
+    }
+
+    pub fn has_function(&self, function_id: FunctionId) -> bool {
+        self.functions.contains_key(&function_id)
+    }
+}
+
+pub struct FunctionTypeInfo {
+    values: HashMap<ValueId, Type>,
+}
+
+impl FunctionTypeInfo {
+    pub fn get_value_type(&self, value_id: ValueId) -> &Type {
+        self.values.get(&value_id).unwrap()
+    }
+}
+
+pub struct Types {}
+
+impl Types {
+    pub fn new() -> Self {
+        Types {}
+    }
+
+    pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis) -> TypeInfo {
+        let mut type_info = TypeInfo {
+            functions: HashMap::new(),
+        };
+
+        let function_types = ssa
+            .iter_functions()
+            .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
+            .collect::<HashMap<_, _>>();
+
+        for (function_id, function) in ssa.iter_functions() {
+            let cfg = cfg.get_function_cfg(*function_id);
+            let function_info = self.run_function(function, &function_types, cfg);
+            type_info.functions.insert(*function_id, function_info);
+        }
+        type_info
+    }
+
+    fn spread_result_type(value_type: &Type) -> Result<Type, String> {
+        match &value_type.expr {
+            TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
+            TypeExpr::U(bits) => {
+                if *bits > 64 {
+                    return Err(format!(
+                        "Spread expects u(n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                Ok(Type::u(bits * 2))
+            }
+            TypeExpr::I(bits) => {
+                if *bits > 64 {
+                    return Err(format!(
+                        "Spread expects i(n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                Ok(Type::i(bits * 2))
+            }
+            TypeExpr::Field => Err("Spread does not support field inputs".to_string()),
+            _ => Err(format!(
+                "Spread expects an integer input, got {}",
+                value_type
+            )),
+        }
+    }
+
+    fn unspread_result_types(value_type: &Type) -> Result<(Type, Type), String> {
+        match &value_type.expr {
+            TypeExpr::WitnessOf(inner) => {
+                let (odd, even) = Self::unspread_result_types(inner)?;
+                Ok((Type::witness_of(odd), Type::witness_of(even)))
+            }
+            TypeExpr::U(bits) => {
+                if *bits % 2 != 0 || (*bits / 2) > 64 {
+                    return Err(format!(
+                        "Unspread expects u(2n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                let half_bits = bits / 2;
+                Ok((Type::u(half_bits), Type::u(half_bits)))
+            }
+            TypeExpr::I(bits) => {
+                if *bits % 2 != 0 || (*bits / 2) > 64 {
+                    return Err(format!(
+                        "Unspread expects i(2n) with n <= 64, got {}",
+                        value_type
+                    ));
+                }
+                let half_bits = bits / 2;
+                Ok((Type::i(half_bits), Type::i(half_bits)))
+            }
+            TypeExpr::Field => Err("Unspread does not support field inputs".to_string()),
+            _ => Err(format!(
+                "Unspread expects an integer input, got {}",
+                value_type
+            )),
+        }
+    }
+
+    #[instrument(skip_all, level = Level::DEBUG, name = "Types::run_function", fields(function = function.get_name()))]
+    pub fn run_function(
+        &self,
+        function: &HLFunction,
+        function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+        cfg: &CFG,
+    ) -> FunctionTypeInfo {
+        let mut function_info = FunctionTypeInfo {
+            values: HashMap::new(),
+        };
+
+        for block_id in cfg.get_domination_pre_order() {
+            let block = function.get_block(block_id);
+
+            for param in block.get_parameters() {
+                function_info.values.insert(param.0, param.1.clone());
+            }
+
+            for instruction in block.get_instructions() {
+                self.run_opcode(instruction, &mut function_info, function_types)
+                    .unwrap_or_else(|_| panic!("Error running opcode {:?}", instruction));
+            }
+        }
+
+        function_info
+    }
+
+    fn run_opcode(
+        &self,
+        opcode: &OpCode,
+        function_info: &mut FunctionTypeInfo,
+        function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+    ) -> Result<(), String> {
+        match opcode {
+            OpCode::Cmp {
+                kind: _kind,
+                result,
+                lhs,
+                rhs,
+            } => {
+                let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
+                    format!(
+                        "Left-hand side value {:?} not found in type assignments",
+                        lhs
+                    )
+                })?;
+                let rhs_type = function_info.values.get(rhs).ok_or_else(|| {
+                    format!(
+                        "Right-hand side value {:?} not found in type assignments",
+                        rhs
+                    )
+                })?;
+                let result_type = if lhs_type.is_witness_of() || rhs_type.is_witness_of() {
+                    Type::witness_of(Type::u(1))
+                } else {
+                    Type::u(1)
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::BinaryArithOp {
+                kind: _kind,
+                result,
+                lhs,
+                rhs,
+            } => {
+                let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
+                    format!(
+                        "Left-hand side value {:?} not found in type assignments",
+                        lhs
+                    )
+                })?;
+                let rhs_type = function_info.values.get(rhs).ok_or_else(|| {
+                    format!(
+                        "Right-hand side value {:?} not found in type assignments",
+                        rhs
+                    )
+                })?;
+                function_info
+                    .values
+                    .insert(*result, lhs_type.get_arithmetic_result_type(rhs_type));
+                Ok(())
+            }
+            OpCode::Alloc {
+                result,
+                elem_type: typ,
+            } => {
+                function_info.values.insert(*result, typ.clone().ref_of());
+                Ok(())
+            }
+            OpCode::Store { ptr: _, value: _ } => Ok(()),
+            OpCode::Load { result, ptr } => {
+                let ptr_type = function_info.values.get(ptr).ok_or_else(|| {
+                    format!("Pointer value {:?} not found in type assignments", ptr)
+                })?;
+                if !ptr_type.is_ref() {
+                    return Err(format!(
+                        "Load operation expects a reference type, got {}",
+                        ptr_type
+                    ));
+                }
+                function_info
+                    .values
+                    .insert(*result, ptr_type.get_refered().clone());
+                Ok(())
+            }
+            OpCode::MemOp { kind: _, value: _ } => Ok(()),
+            OpCode::Assert { value: _ } => Ok(()),
+            OpCode::AssertCmp {
+                kind: _,
+                lhs: _,
+                rhs: _,
+            } => Ok(()),
+            OpCode::AssertR1C { a: _, b: _, c: _ } => Ok(()),
+            OpCode::Call {
+                results: result,
+                function,
+                args,
+                unconstrained: _,
+            } => match function {
+                CallTarget::Static(fn_id) => {
+                    let (param_types, return_types) = function_types
+                        .get(fn_id)
+                        .ok_or_else(|| format!("Function {:?} not found", fn_id))?;
+
+                    if args.len() != param_types.len() {
+                        return Err(format!(
+                            "Function {:?} expects {} arguments, got {}",
+                            fn_id,
+                            param_types.len(),
+                            args.len()
+                        ));
+                    }
+
+                    if result.len() != return_types.len() {
+                        return Err(format!(
+                            "Function {:?} expects {} return values, got {}",
+                            fn_id,
+                            return_types.len(),
+                            result.len()
+                        ));
+                    }
+
+                    for (ret, ret_type) in result.iter().zip(return_types.iter()) {
+                        function_info.values.insert(*ret, ret_type.clone());
+                    }
+                    Ok(())
+                }
+                CallTarget::Dynamic(_) => {
+                    panic!(
+                        "Dynamic calls should be eliminated by defunctionalization before type analysis"
+                    );
+                }
+            },
+            OpCode::ArrayGet {
+                result,
+                array,
+                index,
+            } => {
+                let array_type = function_info.values.get(array).ok_or_else(|| {
+                    format!("Array value {:?} not found in type assignments", array)
+                })?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
+
+                let element_type = array_type.get_array_element();
+                let result_type = if index_type.is_witness_of() && !element_type.is_witness_of() {
+                    Type::witness_of(element_type)
+                } else {
+                    element_type
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::ArraySet {
+                result,
+                array,
+                index: _,
+                value,
+            } => {
+                let array_type = function_info.values.get(array).ok_or_else(|| {
+                    format!("Array value {:?} not found in type assignments", array)
+                })?;
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+
+                // If the value is witness-typed but the array element is not,
+                // promote the result array's element type to match.
+                let elem_type = array_type.get_array_element();
+                let result_type = if value_type.is_witness_of() && !elem_type.is_witness_of() {
+                    match &array_type.expr {
+                        TypeExpr::Array(_, size) => value_type.clone().array_of(*size),
+                        TypeExpr::Slice(_) => value_type.clone().slice_of(),
+                        _ => array_type.clone(),
+                    }
+                } else {
+                    array_type.clone()
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::SlicePush {
+                result,
+                slice,
+                values: _,
+                dir: _,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+
+                function_info.values.insert(*result, slice_type.clone());
+                Ok(())
+            }
+            OpCode::SliceLen { result, slice: _ } => {
+                // Result is always u32
+                function_info.values.insert(*result, Type::u(32));
+                Ok(())
+            }
+            OpCode::Select {
+                result,
+                cond,
+                if_t: then,
+                if_f: otherwise,
+            } => {
+                let cond_type = function_info.values.get(cond).ok_or_else(|| {
+                    format!("Cond value {:?} not found in type assignments", cond)
+                })?;
+                let then_type = function_info.values.get(then).ok_or_else(|| {
+                    format!("Then value {:?} not found in type assignments", then)
+                })?;
+                let otherwise_type = function_info.values.get(otherwise).ok_or_else(|| {
+                    format!(
+                        "Otherwise value {:?} not found in type assignments",
+                        otherwise
+                    )
+                })?;
+                // Alternatives must match (after potential WitnessCastInsertion).
+                // The matched alternative type comes from unifying the two branches.
+                let alt_type = then_type.get_arithmetic_result_type(otherwise_type);
+                // If cond is WitnessOf and alternatives are not already WitnessOf,
+                // the result is WitnessOf(alt_type). Otherwise result = alt_type.
+                let result_type = if cond_type.is_witness_of() && !alt_type.is_witness_of() {
+                    Type::witness_of(alt_type)
+                } else {
+                    alt_type
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::WriteWitness { result, value, .. } => {
+                let Some(result) = result else {
+                    return Ok(());
+                };
+                let witness_type = function_info.values.get(value).ok_or_else(|| {
+                    format!("Witness value {:?} not found in type assignments", value)
+                })?;
+                function_info
+                    .values
+                    .insert(*result, Type::witness_of(witness_type.clone()));
+                Ok(())
+            }
+            OpCode::FreshWitness {
+                result: r,
+                result_type: tp,
+            } => {
+                function_info
+                    .values
+                    .insert(*r, Type::witness_of(tp.clone()));
+                Ok(())
+            }
+            OpCode::Constrain { a: _, b: _, c: _ } => Ok(()),
+            OpCode::NextDCoeff { result: v } => {
+                function_info.values.insert(*v, Type::field());
+                Ok(())
+            }
+            OpCode::BumpD {
+                matrix: _,
+                variable: _,
+                sensitivity: _,
+            } => Ok(()),
+            OpCode::MkSeq {
+                result: r,
+                elems: _,
+                seq_type: top_tp,
+                elem_type: t,
+            } => {
+                function_info.values.insert(*r, top_tp.of(t.clone()));
+                Ok(())
+            }
+            OpCode::Cast {
+                result,
+                value,
+                target,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+
+                let result_type = match target {
+                    CastTarget::Field => {
+                        if value_type.is_witness_of() {
+                            Type::witness_of(Type::field())
+                        } else {
+                            Type::field()
+                        }
+                    }
+                    CastTarget::U(size) => {
+                        if value_type.is_witness_of() {
+                            Type::witness_of(Type::u(*size))
+                        } else {
+                            Type::u(*size)
+                        }
+                    }
+                    CastTarget::I(size) => {
+                        if value_type.is_witness_of() {
+                            Type::witness_of(Type::i(*size))
+                        } else {
+                            Type::i(*size)
+                        }
+                    }
+                    CastTarget::Nop => value_type.clone(),
+                    CastTarget::ArrayToSlice => match &value_type.expr {
+                        crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {
+                            elem.as_ref().clone().slice_of()
+                        }
+                        _ => panic!("ArrayToSlice cast on non-array type"),
+                    },
+                    CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
+                };
+
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::Truncate {
+                result,
+                value,
+                to_bits: _,
+                from_bits: _,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+
+                function_info.values.insert(*result, value_type.clone());
+                Ok(())
+            }
+            OpCode::SExt {
+                result,
+                value,
+                from_bits: _,
+                to_bits,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+
+                // Widen to target bits, preserving signedness and witness wrapper
+                let inner = value_type.strip_witness();
+                let widened = match &inner.expr {
+                    TypeExpr::I(_) => Type::i(*to_bits),
+                    TypeExpr::U(_) => Type::u(*to_bits),
+                    _ => panic!("SExt on non-integer type: {:?}", value_type),
+                };
+                let result_type = if value_type.is_witness_of() {
+                    Type::witness_of(widened)
+                } else {
+                    widened
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::Not { result, value } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                function_info.values.insert(*result, value_type.clone());
+                Ok(())
+            }
+            OpCode::ValueOf { result, value } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let inner = match &value_type.expr {
+                    TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
+                    _ => panic!("ICE: ValueOf applied to non-WitnessOf type: {}", value_type),
+                };
+                function_info.values.insert(*result, inner);
+                Ok(())
+            }
+            OpCode::ToBits {
+                result,
+                value,
+                endianness: _,
+                count: output_size,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let bit_type = if value_type.is_witness_of() {
+                    Type::witness_of(Type::u(1))
+                } else {
+                    Type::u(1)
+                };
+                let result_type = bit_type.array_of(*output_size);
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::ToRadix {
+                result,
+                value,
+                radix: _,
+                endianness: _,
+                count: output_size,
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let digit_type = if value_type.is_witness_of() {
+                    Type::witness_of(Type::u(8))
+                } else {
+                    Type::u(8)
+                };
+                let result_type = digit_type.array_of(*output_size);
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::DLookup {
+                target: _,
+                keys: _,
+                results: _,
+                flag: _,
+            } => Ok(()),
+            OpCode::MulConst {
+                result,
+                const_val: _,
+                var,
+            } => {
+                let var_type = function_info.values.get(var).unwrap();
+                function_info.values.insert(*result, var_type.clone());
+                Ok(())
+            }
+            OpCode::Rangecheck {
+                value: v,
+                max_bits: _,
+            } => {
+                let v_type = function_info.values.get(v).unwrap();
+                if !v_type.strip_witness().is_field() {
+                    return Err(format!(
+                        "only field types are supported for rangecheck, got {}",
+                        v_type
+                    ));
+                }
+                Ok(())
+            }
+            OpCode::ReadGlobal {
+                result: r,
+                offset: _,
+                result_type: tp,
+            } => {
+                function_info.values.insert(*r, tp.clone());
+                Ok(())
+            }
+            OpCode::Lookup {
+                target: _,
+                keys: _,
+                results: _,
+                flag: _,
+            } => Ok(()),
+            OpCode::TupleProj { result, tuple, idx } => {
+                let tuple_type = function_info.values.get(tuple).ok_or_else(|| {
+                    format!("Tuple value {:?} not found in type assignments", tuple)
+                })?;
+                let element_type = tuple_type.get_tuple_element(*idx);
+                function_info.values.insert(*result, element_type);
+                Ok(())
+            }
+            OpCode::MkTuple {
+                result,
+                elems: _,
+                element_types,
+            } => {
+                function_info
+                    .values
+                    .insert(*result, Type::tuple_of(element_types.clone()));
+                Ok(())
+            }
+            OpCode::Todo {
+                results,
+                result_types,
+                ..
+            } => {
+                if results.len() != result_types.len() {
+                    return Err(format!(
+                        "Todo opcode has {} results but {} result types",
+                        results.len(),
+                        result_types.len()
+                    ));
+                }
+                for (result, result_type) in results.iter().zip(result_types.iter()) {
+                    function_info.values.insert(*result, result_type.clone());
+                }
+                Ok(())
+            }
+            OpCode::InitGlobal {
+                global: _,
+                value: _,
+            } => Ok(()),
+            OpCode::DropGlobal { global: _ } => Ok(()),
+            OpCode::Const { result, value } => {
+                let ty = match value {
+                    ConstValue::U(size, _) => Type::u(*size),
+                    ConstValue::I(size, _) => Type::i(*size),
+                    ConstValue::Field(_) => Type::field(),
+                    ConstValue::FnPtr(_) => Type::function(),
+                };
+                function_info.values.insert(*result, ty);
+                Ok(())
+            }
+            OpCode::Spread { result, value, .. } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let result_type = Self::spread_result_type(value_type)?;
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::Unspread {
+                result_odd,
+                result_even,
+                value,
+                ..
+            } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let (odd_type, even_type) = Self::unspread_result_types(value_type)?;
+                function_info.values.insert(*result_odd, odd_type);
+                function_info.values.insert(*result_even, even_type);
+                Ok(())
+            }
+            OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),
+        }
+    }
+}
+
+use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
+
+impl Analysis for TypeInfo {
+    fn dependencies() -> Vec<AnalysisId> {
+        vec![FlowAnalysis::id()]
+    }
+
+    fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
+        let cfg = store.get::<FlowAnalysis>();
+        Types::new().run(ssa, cfg)
+    }
+}

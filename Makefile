@@ -16,7 +16,7 @@ help:
 
 .PHONY: build
 build: ## Build Mavros for testing
-	$(SHELL_WRAPPER) cargo build --all-features
+	$(SHELL_WRAPPER) cargo build --all-targets --all-features
 
 .PHONY: build-test-runner
 build-test-runner: ## Builds the test runner in release mode
@@ -24,7 +24,7 @@ build-test-runner: ## Builds the test runner in release mode
 
 .PHONY: release
 release: ## Build Mavros in release mode
-	$(SHELL_WRAPPER) cargo build --release --all-features
+	$(SHELL_WRAPPER) cargo build --release --all-targets --all-features
 
 # -- Testing --------------------------------------------------------------------------------------
 
@@ -39,34 +39,51 @@ func-test: ## Run the functional test harness
 .PHONY: test
 test: unit-test func-test ## Run all the tests
 
+.PHONY: install
+install: ## Builds the Mavros CLI and installs it to your cargo binary path
+	$(SHELL_WRAPPER) cargo install --locked --bin mavros --path .
+
 # -- Linting --------------------------------------------------------------------------------------
 
 .PHONY: clippy
 clippy: ## Lint the codebase with clippy
-	$(SHELL_WRAPPER) cargo clippy --all-targets --all-features
+	$(SHELL_WRAPPER) cargo clippy --all-targets --all-features -- -Dwarnings
+
+.PHONY: format-check-rust
+format-check-rust: ## Check rust formatting without changing files (reformat with `make format-rust`)
+	$(SHELL_WRAPPER) cargo fmt --all --check
+
+.PHONY: format-check-docs
+format-check-docs: ## Check docs and config formatting without changing files (reformat with `make format-docs`)
+	$(SHELL_WRAPPER) dprint check
 
 .PHONY: format-check
-format-check: ## Check the codebase formatting without changing files
-	cargo fmt --all --check
+format-check: format-check-docs format-check-rust ## Check code, docs, and config formatting without changing files (reformat with `make format`)
 
 .PHONY: lint
 lint: format-check clippy ## Run all the linting tasks
 
 # -- Utility --------------------------------------------------------------------------------------
 
+.PHONY: format-rust
+format-rust: ## Format the codebase with rustfmt
+	$(SHELL_WRAPPER) cargo fmt --all
+
+.PHONY: format-docs
+format-docs: ## Format the docs and configs
+	$(SHELL_WRAPPER) dprint fmt
+
 .PHONY: format
-format: ## Format the codebase with rustfmt
-	cargo fmt --all
+format: format-docs format-rust ## Formats code, documentation, and configuration files.
 
 .PHONY: clean
 clean: ## Clean all build artifacts in the project.
 	cargo clean
 
 .PHONY: shell
-shell: ## Launch the user's $SHELL inside the devshell
+shell: ## Launch the user's `$SHELL` inside the devshell
 	nix develop --command $(shell echo $$SHELL)
 
 .PHONY: editor
-editor: ## Launch the user's $EDITOR inside the devshell
+editor: ## Launch the user's `$EDITOR` inside the devshell
 	nix develop --command $(EDITOR)
-

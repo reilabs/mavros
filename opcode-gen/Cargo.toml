@@ -1,13 +1,16 @@
 [package]
-name = "opcode-gen"
-version = "0.1.0"
-edition = "2024"
+name = "mavros-opcode-gen"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = { version = "2.0", features = ["full", "printing"] }
-quote = "1.0"
 proc-macro2 = "1.0"
+quote = "1.0"
 stringcase = "0.4"
+syn = { version = "2.0", features = ["full", "printing"] }
+
+[lints]
+workspace = true

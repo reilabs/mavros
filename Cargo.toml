@@ -1,61 +1,82 @@
 [workspace]
 resolver = "3"
-members = ["mavros-artifacts", "opcode-gen", "vm", "wasm-layout", "wasm-runtime"]
+members = [
+  "compiler",
+  "mavros-artifacts",
+  "opcode-gen",
+  "vm",
+  "wasm-layout",
+  "wasm-runtime",
+]
 
-[package]
-name = "mavros"
+[workspace.package]
 version = "0.1.0"
+authors = ["Reilabs"]
+categories = ["compilers", "cryptography"]
 edition = "2024"
+keywords = ["cryptography", "spartan", "zero-knowledge"]
+license = "Apache-2.0"
+repository = "https://github.com/reilabs/mavros"
 
-[dependencies]
-fm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "fm" }
-nargo = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "nargo" }
-nargo_toml = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "nargo_toml" }
-noirc_driver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_frontend" }
-noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_abi" }
+[workspace.dependencies]
+# The Mavros crates themselves so we can easily use them as `crate.workspace = true` in the crate
+# dependency lists.
+mavros-artifacts = { path = "./mavros-artifacts/" }
+mavros-compiler = { path = "./compiler" }
+mavros-opcode-gen = { path = "./opcode-gen/" }
+mavros-vm = { path = "./vm/" }
+mavros-wasm-layout = { path = "./wasm-layout/" }
+mavros-wasm-runtime = { path = "./wasm-runtime/" }
 
-clap = { version = "4.5.17", features = ["unstable-v5", "derive"] }
-itertools = "0.14.0"
-thiserror = "2.0.12"
-tempfile = "3.19.1"
-petgraph = "0.6.5" # Cannot bump as it is currently required to be this version by a dependency
-serde_json = "1.0"
+# The rest of the shared dependencies (or ones that are fussy about versions)
+anyhow = { version = "1.0.87" }
 ark-bn254 = { version = "0.5.0" }
 ark-ff = { version = "0.5.0" }
-num-bigint = "0.4"
-num-traits = "0.2"
-bincode = "1.3"
-
-inkwell = { version = "0.9.0", features = ["llvm22-1"] }
-plotters = { version = "0.3.5" }
-wasmtime = { version = "31" }
-
-tracing = "0.1.41"
-tracing-forest = "0.1.6"
+serde = { version = "1.0.204", features = ["derive"] }
+tempfile = { version = "3.19.1" }
+thiserror = { version = "2.0.12" }
+tracing = { version = "0.1.41" }
+tracing-forest = { version = "0.1.6" }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-rand = "0.8"
-
-mavros-artifacts = { path = "mavros-artifacts" }
-mavros-vm = { path = "vm" }
-mavros-wasm-layout = { path = "wasm-layout" }
-cargo_metadata = "0.23.1"
-
-[dev-dependencies]
-anyhow = "1.0.87"
-tempfile = "3.8.1"
-walkdir = "2.5.0"
-
-[[bin]]
-name = "mavros"
-path = "src/bin/main.rs"
-
-[[bin]]
-name = "test-runner"
-path = "src/bin/test_runner.rs"
+walkdir = { version = "2.5.0" }
 
 [profile.release]
 debug = true
 opt-level = "z"
 lto = true
+
+# These should be inherited in workspace packages using `[lints] workspace = true`
+[workspace.lints.clippy]
+# Allow all except performance and correctness by default.
+all = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+restriction = { level = "allow", priority = -1 }
+style = { level = "allow", priority = -1 }
+suspicious = { level = "allow", priority = -1 }
+
+# Then we turn on the ones we care about, focusing on reducing needlessly silly code.
+cast_slice_from_raw_parts = "deny"
+clone_on_copy = "deny"
+crosspointer_transmute = "deny"
+drop_non_drop = "deny"
+expect_fun_call = "deny"
+for_kv_map = "deny"
+from_raw_with_void_ptr = "deny"
+let_and_return = "deny"
+let_underscore_future = "deny"
+multi_assignments = "deny"
+needless_borrows_for_generic_args = "deny"
+needless_return = "deny"
+octal_escapes = "deny"
+only_used_in_recursion = "deny"
+ptr_offset_with_cast = "deny"
+redundant_closure = "deny"
+single_match = "deny"
+size_of_ref = "deny"
+to_string_in_format_args = "deny"
+unconditional_recursion = "deny"
+unnecessary_cast = "deny"
+useless_conversion = "deny"
