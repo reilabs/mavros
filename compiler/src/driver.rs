@@ -19,7 +19,6 @@ use crate::{
         flow_analysis::FlowAnalysis,
         pass_manager::PassManager,
         passes::{
-            arithmetic_simplifier::ArithmeticSimplifier,
             common_subexpression_elimination::CSE,
             condition_propagation::ConditionPropagation,
             dead_code_elimination::{self, DCE},
@@ -35,6 +34,7 @@ use crate::{
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
+            simplifier::Simplifier,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             witness_lowering::WitnessLowering,
@@ -133,7 +133,7 @@ impl Driver {
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer =
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
-        let function_sig = monomorphizer.compile_main(main).unwrap();
+        monomorphizer.compile_main(main).unwrap();
 
         monomorphizer.process_queue().unwrap();
         let needed_lowlevels = find_needed_lowlevels(&monomorphizer);
@@ -155,7 +155,7 @@ impl Driver {
         }
 
         monomorphizer.process_queue().unwrap();
-        let program = monomorphizer.into_program(function_sig);
+        let program = monomorphizer.into_program();
 
         self.abi = Some(noirc_driver::gen_abi(
             &context,
@@ -262,8 +262,16 @@ impl Driver {
             vec![
                 Box::new(LowerPureGuards::new()),
                 Box::new(FixDoubleJumps::new()),
-                Box::new(ArithmeticSimplifier::new()),
+                // Simplify → CSE → DCE, twice. The doubled rounds let
+                // CSE-dedup expose new fold operands and folds expose new CSE
+                // matches. Each Simplifier internally iterates to fixed point
+                // for purely-algebraic folds.
+                Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(ConditionPropagation::new()),
                 Box::new(CSE::new()),
                 Box::new(DeduplicatePhis::new()),
@@ -274,6 +282,10 @@ impl Driver {
                 Box::new(Specializer::new(5.0)),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(ExplicitWitness::new()),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(RemoveUnreachableFunctions::new()),

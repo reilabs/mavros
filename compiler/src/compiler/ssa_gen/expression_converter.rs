@@ -519,15 +519,22 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_for(&mut self, for_expr: &For, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         // Evaluate start and end range in the current block
         let start = self.convert_expression(&for_expr.start_range, b).unwrap();
-        let end = self.convert_expression(&for_expr.end_range, b).unwrap();
+        let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
+
+        let index_type = self.type_converter.convert_type(&for_expr.index_type);
+
+        // if range is inclusive, bump by one
+        let end = if for_expr.inclusive {
+            let one = self.get_or_create_const(b, ConstValue::U(index_type.get_bit_size(), 1));
+            b.block(self.current_block).add(end_raw, one)
+        } else {
+            end_raw
+        };
 
         // Create blocks for the loop structure
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
-
-        // Convert the index type
-        let index_type = self.type_converter.convert_type(&for_expr.index_type);
 
         // Build header: parameter, condition, branch
         let loop_index = {
@@ -970,6 +977,35 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Unit => None,
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
                 self.convert_array_literal(array_lit, b)
+            }
+            Literal::Repeated {
+                element,
+                length,
+                is_vector,
+                typ,
+            } => {
+                use noirc_frontend::monomorphization::ast::Type as AstType;
+                let elem_ast_type = match typ {
+                    AstType::Array(_, elem_type) => elem_type.as_ref(),
+                    AstType::Vector(elem_type) => elem_type.as_ref(),
+                    _ => panic!(
+                        "Expected array/vector type for Repeated literal, got {:?}",
+                        typ
+                    ),
+                };
+                let element_val = self.convert_expression(element, b).unwrap();
+                let len = *length as usize;
+                let elements: Vec<ValueId> = std::iter::repeat(element_val).take(len).collect();
+                let seq_type = if *is_vector {
+                    SeqType::Slice
+                } else {
+                    SeqType::Array(len)
+                };
+                let elem_type = self.type_converter.convert_type(elem_ast_type);
+                let result = b
+                    .block(self.current_block)
+                    .mk_seq(elements, seq_type, elem_type);
+                Some(result)
             }
             Literal::Str(s) => {
                 // str<N>: array of u8 (UTF-8 bytes)

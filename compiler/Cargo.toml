@@ -10,13 +10,13 @@ mavros-vm.workspace = true
 mavros-wasm-layout.workspace = true
 
 # The Noir crates that the compiler depends on
-fm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "fm" }
-nargo = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "nargo" }
-nargo_toml = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "nargo_toml" }
-noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_abi" }
-noirc_driver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.18", package = "noirc_frontend" }
+fm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "fm" }
+nargo = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "nargo" }
+nargo_toml = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "noirc_abi" }
+noirc_driver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.19", package = "noirc_frontend" }
 
 # The rest of the dependencies
 ark-bn254.workspace = true
