@@ -36,6 +36,7 @@ fn lower_type(ty: &Type) -> LLType {
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         TypeExpr::WitnessOf(_) => LLType::Ptr,
         TypeExpr::Tuple(_) => LLType::Ptr,
+        TypeExpr::Ref(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
@@ -51,6 +52,7 @@ fn elem_struct(ty: &Type) -> LLStruct {
         TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
+        TypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
     }
 }
@@ -68,8 +70,17 @@ fn tuple_field_type(ty: &Type) -> LLFieldType {
         TypeExpr::Array(..) => LLFieldType::Ptr,
         TypeExpr::Tuple(_) => LLFieldType::Ptr,
         TypeExpr::WitnessOf(_) => LLFieldType::Ptr,
+        TypeExpr::Ref(_) => LLFieldType::Ptr,
         _ => panic!("Unsupported tuple element type: {}", ty),
     }
+}
+
+/// Build the LLStruct layout for the heap-allocated RC'd cell `Ref<T>`.
+fn rc_ref_cell_struct(inner_type: &Type) -> LLStruct {
+    LLStruct::new(vec![
+        LLFieldType::Inline(LLStruct::rc_header()),
+        tuple_field_type(inner_type),
+    ])
 }
 
 /// Build the LLStruct layout for a heap-allocated RC'd tuple.
@@ -128,6 +139,11 @@ fn get_or_create_drop_fn(
                 }
             }
         }
+        TypeExpr::Ref(inner) => {
+            if needs_drop(&inner.expr) {
+                get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
+            }
+        }
         _ => {}
     }
 
@@ -136,6 +152,7 @@ fn get_or_create_drop_fn(
         TypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
         TypeExpr::Array(_inner, _) => llssa.add_function(format!("drop_{}", ty)),
         TypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
+        TypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
         _ => panic!("{} is not supported yet", ty),
     };
     drop_fns.push(DropFnEntry {
@@ -957,6 +974,31 @@ fn lower_instruction(
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
+        OpCode::Alloc { result, elem_type } => {
+            lower_alloc(e, val_map, *result, elem_type);
+        }
+
+        OpCode::Store { ptr, value } => {
+            let ptr_type = fn_type_info.get_value_type(*ptr);
+            let inner_type = ptr_type.get_pointed();
+            lower_ref_store(
+                e,
+                val_map,
+                *ptr,
+                *value,
+                &inner_type,
+                llssa,
+                drop_fns,
+                ad_fns,
+            );
+        }
+
+        OpCode::Load { result, ptr } => {
+            let ptr_type = fn_type_info.get_value_type(*ptr);
+            let inner_type = ptr_type.get_pointed();
+            lower_ref_load(e, val_map, *result, *ptr, &inner_type);
+        }
+
         OpCode::Assert { value } => {
             let ll_value = val_map[value];
             assert(e, ll_value);
@@ -1423,6 +1465,85 @@ fn lower_tuple_proj(
     val_map.insert(result, val);
 }
 
+/// Lower `Alloc { result, elem_type }` to heap_alloc of an RC'd ref cell.
+fn lower_alloc(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    elem_type: &Type,
+) {
+    let rc_struct = rc_ref_cell_struct(elem_type);
+
+    let ptr = e.heap_alloc(rc_struct.clone(), None);
+
+    let rc_hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    if needs_drop(&elem_type.expr) {
+        let slot = e.struct_field_ptr(ptr, rc_struct, 1);
+        let null = e.null_ptr();
+        e.ll_store(slot, null);
+    }
+
+    val_map.insert(result, ptr);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_ref_store(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &HashMap<ValueId, ValueId>,
+    ptr: ValueId,
+    value: ValueId,
+    inner_type: &Type,
+    llssa: &mut LLSSA,
+    drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
+) {
+    let rc_struct = rc_ref_cell_struct(inner_type);
+    let ll_ptr = val_map[&ptr];
+    let ll_val = val_map[&value];
+
+    let slot = e.struct_field_ptr(ll_ptr, rc_struct, 1);
+
+    if needs_drop(&inner_type.expr) {
+        let drop_fn = get_or_create_drop_fn(inner_type, llssa, drop_fns, ad_fns);
+        let old = e.ll_load(slot, LLType::Ptr);
+        let null = e.null_ptr();
+        let is_null = e.int_eq(old, null);
+        e.build_if_else(
+            is_null,
+            vec![],
+            |_| vec![],
+            |be| {
+                be.call(drop_fn, vec![old], 0);
+                vec![]
+            },
+        );
+    }
+
+    e.ll_store(slot, ll_val);
+}
+
+/// Lower `Load { result, ptr }` to a read from the ref cell's inner slot.
+fn lower_ref_load(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    ptr: ValueId,
+    inner_type: &Type,
+) {
+    let rc_struct = rc_ref_cell_struct(inner_type);
+    let ll_ptr = val_map[&ptr];
+
+    let slot = e.struct_field_ptr(ll_ptr, rc_struct, 1);
+    let inner_ll_type = lower_type(inner_type);
+    let val = e.ll_load(slot, inner_ll_type);
+
+    val_map.insert(result, val);
+}
+
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
 fn lower_array_get(
     e: &mut LLBlockEmitter<'_>,
@@ -1594,6 +1715,7 @@ fn lower_rc_bump(
     let rc_struct = match &val_type.expr {
         TypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
         TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+        TypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
         _ => panic!("lower_rc_bump: unexpected type {}", val_type),
     };
 
@@ -2087,6 +2209,9 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
             TypeExpr::Tuple(elements) => {
                 generate_drop_function_for_tuple(elements, &entry.hlssa_type, drop_fns)
             }
+            TypeExpr::Ref(inner) => {
+                generate_drop_function_for_ref(inner, &entry.hlssa_type, drop_fns)
+            }
             // WitnessOf points to ad_drop, whose body is generated by generate_all_ad_functions
             TypeExpr::WitnessOf(_) => continue,
             other => panic!("No drop function generator for type: {:?}", other),
@@ -2099,7 +2224,7 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
 fn needs_drop(expr: &TypeExpr) -> bool {
     matches!(
         expr,
-        TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::WitnessOf(..)
+        TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::WitnessOf(..) | TypeExpr::Ref(..)
     )
 }
 
@@ -2221,6 +2346,79 @@ fn generate_drop_function_for_tuple(
                         let field_val = e.ll_load(field_ptr, LLType::Ptr);
                         e.call(inner_drop_fn, vec![field_val], 0);
                     }
+                }
+                e.free(ptr);
+                vec![]
+            },
+            |_| vec![],
+        );
+
+        e.terminate_return(vec![]);
+    }
+
+    func
+}
+
+/// Generate a drop function for a Ref<T> cell.
+///
+/// Pseudocode:
+///   fn drop(ptr):
+///     rc = --ptr.header.rc
+///     if rc == 0:
+///       if inner_needs_drop:
+///         inner = ptr.inner
+///         if inner != null:
+///           drop_inner(inner)
+///       free(ptr)
+///     return
+fn generate_drop_function_for_ref(
+    inner_type: &Type,
+    ty: &Type,
+    drop_fns: &[DropFnEntry],
+) -> LLFunction {
+    let rc_struct = rc_ref_cell_struct(inner_type);
+    let inner_is_rc = needs_drop(&inner_type.expr);
+
+    let mut func = new_ll_function(format!("drop_{}", ty));
+    let entry = func.get_entry_id();
+
+    {
+        let mut e = LLBlockEmitter::new(&mut func, entry);
+        let ptr = e.add_parameter(LLType::Ptr);
+
+        let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
+        let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+        let rc = e.ll_load(rc_ptr, LLType::i64());
+        let one = e.int_const(64, 1);
+        let new_rc = e.int_sub(rc, one);
+        e.ll_store(rc_ptr, new_rc);
+
+        let zero = e.int_const(64, 0);
+        let dead = e.int_eq(new_rc, zero);
+        e.build_if_else(
+            dead,
+            vec![],
+            |e| {
+                if inner_is_rc {
+                    let inner_drop_fn = drop_fns
+                        .iter()
+                        .find(|entry| entry.hlssa_type == *inner_type)
+                        .expect("inner drop fn should exist for ref")
+                        .fn_id;
+
+                    let slot = e.struct_field_ptr(ptr, rc_struct.clone(), 1);
+                    let inner_val = e.ll_load(slot, LLType::Ptr);
+                    let null = e.null_ptr();
+                    let is_null = e.int_eq(inner_val, null);
+                    e.build_if_else(
+                        is_null,
+                        vec![],
+                        |_| vec![],
+                        |be| {
+                            be.call(inner_drop_fn, vec![inner_val], 0);
+                            vec![]
+                        },
+                    );
                 }
                 e.free(ptr);
                 vec![]
