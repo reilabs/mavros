@@ -5,7 +5,7 @@ use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 
-use crate::array::{BoxedLayout, BoxedValue};
+use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
 use crate::array::DataType;
@@ -176,6 +176,7 @@ pub struct VM {
     pub rgchk_8: Option<usize>,
     pub spread_tables: [Option<usize>; 17],
     pub globals: *mut u64,
+    pub struct_layouts: Vec<StructDescriptor>,
 }
 
 impl VM {
@@ -191,6 +192,7 @@ impl VM {
         elem_inverses_constraint_section_offset: usize,
         elem_inverses_witness_section_offset: usize,
         globals: *mut u64,
+        struct_layouts: Vec<StructDescriptor>,
     ) -> Self {
         Self {
             data: Arrays {
@@ -213,6 +215,7 @@ impl VM {
             rgchk_8: None,
             spread_tables: [None; 17],
             globals,
+            struct_layouts,
         }
     }
 
@@ -225,6 +228,7 @@ impl VM {
         witness_layout: WitnessLayout,
         constraints_layout: ConstraintsLayout,
         globals: *mut u64,
+        struct_layouts: Vec<StructDescriptor>,
     ) -> Self {
         Self {
             data: Arrays {
@@ -248,6 +252,7 @@ impl VM {
             rgchk_8: None,
             spread_tables: [None; 17],
             globals,
+            struct_layouts,
         }
     }
 
@@ -752,11 +757,15 @@ mod def {
         vm: &mut VM,
     ) {
         let tuple = BoxedValue::alloc(meta, vm);
+        let view = meta.as_struct(&vm.struct_layouts);
+        let mut field_offset = 0;
         for (i, field) in fields.iter().enumerate() {
-            let tgt = tuple.tuple_idx(i, &meta.child_sizes());
+            let size = view.field_size(i);
+            let tgt = unsafe { tuple.data().add(field_offset) };
             unsafe {
-                frame.write_to(tgt, field.0 as isize, meta.child_sizes()[i]);
+                frame.write_to(tgt, field.0 as isize, size);
             }
+            field_offset += size;
         }
         unsafe {
             *res = tuple;
@@ -824,13 +833,13 @@ mod def {
     fn tuple_proj(
         #[out] res: *mut u64,
         #[frame] tuple: BoxedValue,
-        index: u64,
-        child_sizes: &[usize],
+        field_offset: usize,
+        field_size: usize,
         vm: &mut VM,
     ) {
-        let src = tuple.tuple_idx(index as usize, child_sizes);
+        let src = unsafe { tuple.data().add(field_offset) };
         unsafe {
-            ptr::copy_nonoverlapping(src, res, child_sizes[index as usize]);
+            ptr::copy_nonoverlapping(src, res, field_size);
         }
     }
 
@@ -1629,6 +1638,7 @@ impl Display for Function {
 pub struct Program {
     pub functions: Vec<Function>,
     pub global_frame_size: usize,
+    pub struct_layouts: Vec<StructDescriptor>,
 }
 
 impl Display for Program {
@@ -1653,9 +1663,34 @@ impl Display for Program {
     }
 }
 
+/// Encode a single field of a `StructDescriptor` as one `u64`:
+/// high bit = refcounted flag, low 32 bits = field size in u64 words.
+#[inline(always)]
+fn encode_struct_field(size: u32, refcounted: bool) -> u64 {
+    (refcounted as u64) << 63 | (size as u64)
+}
+
+#[inline(always)]
+fn decode_struct_field(word: u64) -> (u32, bool) {
+    let refcounted = (word >> 63) != 0;
+    let size = (word & 0xFFFF_FFFF) as u32;
+    (size, refcounted)
+}
+
 impl Program {
     pub fn to_binary(&self) -> Vec<u64> {
         let mut binary = Vec::new();
+        // Layout-table header: [num_descriptors, ...descriptors...].
+        // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
+        binary.push(self.struct_layouts.len() as u64);
+        for desc in &self.struct_layouts {
+            let fields = desc.fields();
+            binary.push(fields.len() as u64);
+            for &(size, refcounted) in fields {
+                binary.push(encode_struct_field(size, refcounted));
+            }
+        }
+
         binary.push(self.global_frame_size as u64);
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
@@ -1678,4 +1713,24 @@ impl Program {
         }
         binary
     }
+}
+
+/// Read the struct-layout table from the binary header and return both the
+/// descriptors and the offset (in u64 words) at which the rest of the program
+/// (starting with `global_frame_size`) begins.
+pub fn parse_struct_layouts(program: &[u64]) -> (Vec<StructDescriptor>, usize) {
+    let num_descriptors = program[0] as usize;
+    let mut layouts = Vec::with_capacity(num_descriptors);
+    let mut off = 1usize;
+    for _ in 0..num_descriptors {
+        let n = program[off] as usize;
+        off += 1;
+        let mut fields = Vec::with_capacity(n);
+        for _ in 0..n {
+            fields.push(decode_struct_field(program[off]));
+            off += 1;
+        }
+        layouts.push(StructDescriptor::new(fields));
+    }
+    (layouts, off)
 }
