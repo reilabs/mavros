@@ -401,6 +401,7 @@ fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::Inp
 
 const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
+const WASM_STATIC_DATA_BYTES: u32 = 4096;
 
 /// Output from running WASM witgen
 struct WasmResult {
@@ -518,8 +519,8 @@ fn run_wasm(
     let wasm_bytes = fs::read(wasm_path)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
-    // Estimate initial memory: linker-reserved stack + module data + our buffers + heap headroom.
-    let initial_estimate = WASM_STACK_SIZE_BYTES + 4096 + our_data_size;
+    // Estimate initial memory: linker-reserved stack + module static data + our buffers.
+    let initial_estimate = WASM_STACK_SIZE_BYTES + WASM_STATIC_DATA_BYTES + our_data_size;
     let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
     let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
     let memory = Memory::new(&mut store, memory_type)?;
@@ -830,7 +831,7 @@ fn run_ad_wasm(
     let wasm_bytes = fs::read(wasm_path)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
-    let initial_estimate = WASM_STACK_SIZE_BYTES + 4096 + our_data_size;
+    let initial_estimate = WASM_STACK_SIZE_BYTES + WASM_STATIC_DATA_BYTES + our_data_size;
     let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
     let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
     let memory = Memory::new(&mut store, memory_type)?;
