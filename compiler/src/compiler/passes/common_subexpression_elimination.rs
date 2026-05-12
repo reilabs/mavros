@@ -19,46 +19,38 @@ use crate::compiler::{
 enum Expr {
     Add(Vec<Expr>),
     Mul(Vec<Expr>),
-    Div(Box<Expr>, Box<Expr>),
-    Mod(Box<Expr>, Box<Expr>),
-    Sub(Box<Expr>, Box<Expr>),
+    Div { lhs: Box<Expr>, rhs: Box<Expr> },
+    Mod { lhs: Box<Expr>, rhs: Box<Expr> },
+    Sub { lhs: Box<Expr>, rhs: Box<Expr> },
     FConst(ark_bn254::Fr),
-    UConst(usize, u128),
-    IConst(usize, u128),
+    UConst { bits: usize, value: u128 },
+    IConst { bits: usize, value: u128 },
     Variable(u64),
-    Eq(Box<Expr>, Box<Expr>),
-    Lt(Box<Expr>, Box<Expr>),
+    Eq { lhs: Box<Expr>, rhs: Box<Expr> },
+    Lt { lhs: Box<Expr>, rhs: Box<Expr> },
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Xor(Vec<Expr>),
-    Shl(Box<Expr>, Box<Expr>),
-    Shr(Box<Expr>, Box<Expr>),
-    Select(Box<Expr>, Box<Expr>, Box<Expr>),
-    ArrayGet(Box<Expr>, Box<Expr>),
-    TupleGet(Box<Expr>, Box<Expr>),
+    Shl { lhs: Box<Expr>, rhs: Box<Expr> },
+    Shr { lhs: Box<Expr>, rhs: Box<Expr> },
+    Select { condition: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr> },
+    ArrayGet { array: Box<Expr>, index: Box<Expr> },
+    TupleGet { tuple: Box<Expr>, index: Box<Expr> },
     Not(Box<Expr>),
     ReadGlobal(u64),
-    Cast(Box<Expr>, CastTarget),
-    Truncate(
-        Box<Expr>,
-        usize, // to_bits
-        usize, // from_bits
-    ),
-    SExt(
-        Box<Expr>,
-        usize, // from_bits
-        usize, // to_bits
-    ),
+    Cast { value: Box<Expr>, target: CastTarget },
+    Truncate { value: Box<Expr>, to_bits: usize, from_bits: usize },
+    SExt { value: Box<Expr>, from_bits: usize, to_bits: usize },
     ValueOf(Box<Expr>),
-    BytesOf(Box<Expr>, Endianness, usize /* count */),
-    BitsOf(Box<Expr>, Endianness, usize /* count */),
+    BytesOf { value: Box<Expr>, endianness: Endianness, count: usize },
+    BitsOf { value: Box<Expr>, endianness: Endianness, count: usize },
     Witness(Box<Expr>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Effect {
-    Rangecheck(Expr, usize),
-    ByteLookup(Expr, Expr),
+    Rangecheck { value: Expr, max_bits: usize },
+    ByteLookup { key: Expr, flag: Expr },
 }
 
 impl Expr {
@@ -109,15 +101,24 @@ impl Expr {
     }
 
     pub fn div(&self, other: &Self) -> Self {
-        Self::Div(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Div {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn modulo(&self, other: &Self) -> Self {
-        Self::Mod(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Mod {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn sub(&self, other: &Self) -> Self {
-        Self::Sub(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Sub {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn and(&self, other: &Self) -> Self {
@@ -156,11 +157,17 @@ impl Expr {
     }
 
     pub fn shl(&self, other: &Self) -> Self {
-        Self::Shl(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Shl {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn shr(&self, other: &Self) -> Self {
-        Self::Shr(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Shr {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn fconst(value: ark_bn254::Fr) -> Self {
@@ -168,27 +175,39 @@ impl Expr {
     }
 
     pub fn eq(&self, other: &Self) -> Self {
-        Self::Eq(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Eq {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn lt(&self, other: &Self) -> Self {
-        Self::Lt(Box::new(self.clone()), Box::new(other.clone()))
+        Self::Lt {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(other.clone()),
+        }
     }
 
     pub fn array_get(&self, index: &Self) -> Self {
-        Self::ArrayGet(Box::new(self.clone()), Box::new(index.clone()))
+        Self::ArrayGet {
+            array: Box::new(self.clone()),
+            index: Box::new(index.clone()),
+        }
     }
 
     pub fn tuple_get(&self, index: &Self) -> Self {
-        Self::TupleGet(Box::new(self.clone()), Box::new(index.clone()))
+        Self::TupleGet {
+            tuple: Box::new(self.clone()),
+            index: Box::new(index.clone()),
+        }
     }
 
     pub fn select(&self, then: &Self, otherwise: &Self) -> Self {
-        Self::Select(
-            Box::new(self.clone()),
-            Box::new(then.clone()),
-            Box::new(otherwise.clone()),
-        )
+        Self::Select {
+            condition: Box::new(self.clone()),
+            then: Box::new(then.clone()),
+            otherwise: Box::new(otherwise.clone()),
+        }
     }
 
     pub fn not(&self) -> Self {
@@ -196,15 +215,26 @@ impl Expr {
     }
 
     pub fn cast(&self, target: CastTarget) -> Self {
-        Self::Cast(Box::new(self.clone()), target)
+        Self::Cast {
+            value: Box::new(self.clone()),
+            target,
+        }
     }
 
     pub fn truncate(&self, to_bits: usize, from_bits: usize) -> Self {
-        Self::Truncate(Box::new(self.clone()), to_bits, from_bits)
+        Self::Truncate {
+            value: Box::new(self.clone()),
+            to_bits,
+            from_bits,
+        }
     }
 
     pub fn sext(&self, from_bits: usize, to_bits: usize) -> Self {
-        Self::SExt(Box::new(self.clone()), from_bits, to_bits)
+        Self::SExt {
+            value: Box::new(self.clone()),
+            from_bits,
+            to_bits,
+        }
     }
 
     pub fn value_of(&self) -> Self {
@@ -212,11 +242,19 @@ impl Expr {
     }
 
     pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
-        Self::BytesOf(Box::new(self.clone()), endianness, count)
+        Self::BytesOf {
+            value: Box::new(self.clone()),
+            endianness,
+            count,
+        }
     }
 
     pub fn bits_of(&self, endianness: Endianness, count: usize) -> Self {
-        Self::BitsOf(Box::new(self.clone()), endianness, count)
+        Self::BitsOf {
+            value: Box::new(self.clone()),
+            endianness,
+            count,
+        }
     }
 
     pub fn witness(&self) -> Self {
@@ -245,15 +283,15 @@ impl Display for Expr {
                     .collect::<Vec<_>>()
                     .join(" * ")
             ),
-            Self::Div(lhs, rhs) => write!(f, "({} / {})", lhs, rhs),
-            Self::Mod(lhs, rhs) => write!(f, "({} % {})", lhs, rhs),
-            Self::Sub(lhs, rhs) => write!(f, "({} - {})", lhs, rhs),
+            Self::Div { lhs, rhs } => write!(f, "({} / {})", lhs, rhs),
+            Self::Mod { lhs, rhs } => write!(f, "({} % {})", lhs, rhs),
+            Self::Sub { lhs, rhs } => write!(f, "({} - {})", lhs, rhs),
             Self::FConst(value) => write!(f, "{}", value),
-            Self::UConst(size, value) => write!(f, "u{}({})", size, value),
-            Self::IConst(size, value) => write!(f, "i{}({})", size, value),
+            Self::UConst { bits, value } => write!(f, "u{}({})", bits, value),
+            Self::IConst { bits, value } => write!(f, "i{}({})", bits, value),
             Self::Variable(value) => write!(f, "v{}", value),
-            Self::Eq(lhs, rhs) => write!(f, "({} == {})", lhs, rhs),
-            Self::Lt(lhs, rhs) => write!(f, "({} < {})", lhs, rhs),
+            Self::Eq { lhs, rhs } => write!(f, "({} == {})", lhs, rhs),
+            Self::Lt { lhs, rhs } => write!(f, "({} < {})", lhs, rhs),
             Self::And(exprs) => write!(
                 f,
                 "({})",
@@ -281,26 +319,48 @@ impl Display for Expr {
                     .collect::<Vec<_>>()
                     .join(" ^ ")
             ),
-            Self::Shl(lhs, rhs) => write!(f, "({} << {})", lhs, rhs),
-            Self::Shr(lhs, rhs) => write!(f, "({} >> {})", lhs, rhs),
-            Self::Select(cond, then, otherwise) => {
-                write!(f, "({} ? {} : {})", cond, then, otherwise)
+            Self::Shl { lhs, rhs } => write!(f, "({} << {})", lhs, rhs),
+            Self::Shr { lhs, rhs } => write!(f, "({} >> {})", lhs, rhs),
+            Self::Select {
+                condition,
+                then,
+                otherwise,
+            } => {
+                write!(f, "({} ? {} : {})", condition, then, otherwise)
             }
-            Self::ArrayGet(array, index) => write!(f, "{}[{}]", array, index),
-            Self::TupleGet(tuple, index) => write!(f, "{}.{}", tuple, index),
+            Self::ArrayGet { array, index } => write!(f, "{}[{}]", array, index),
+            Self::TupleGet { tuple, index } => write!(f, "{}.{}", tuple, index),
             Self::Not(value) => write!(f, "(~{})", value),
             Self::ReadGlobal(index) => write!(f, "g{}", index),
-            Self::Cast(value, target) => write!(f, "cast({}, {})", value, target),
-            Self::Truncate(value, to, from) => {
-                write!(f, "trunc({}, {}, {})", value, to, from)
+            Self::Cast { value, target } => write!(f, "cast({}, {})", value, target),
+            Self::Truncate {
+                value,
+                to_bits,
+                from_bits,
+            } => {
+                write!(f, "trunc({}, {}, {})", value, to_bits, from_bits)
             }
-            Self::SExt(value, from, to) => write!(f, "sext({}, {}, {})", value, from, to),
+            Self::SExt {
+                value,
+                from_bits,
+                to_bits,
+            } => {
+                write!(f, "sext({}, {}, {})", value, from_bits, to_bits)
+            }
             Self::ValueOf(value) => write!(f, "value_of({})", value),
-            Self::BytesOf(value, end, count) => {
-                write!(f, "bytes_of({}, {:?}, {})", value, end, count)
+            Self::BytesOf {
+                value,
+                endianness,
+                count,
+            } => {
+                write!(f, "bytes_of({}, {:?}, {})", value, endianness, count)
             }
-            Self::BitsOf(value, end, count) => {
-                write!(f, "bits_of({}, {:?}, {})", value, end, count)
+            Self::BitsOf {
+                value,
+                endianness,
+                count,
+            } => {
+                write!(f, "bits_of({}, {:?}, {})", value, endianness, count)
             }
             Self::Witness(hint) => write!(f, "witness({})", hint),
         }
@@ -865,7 +925,10 @@ impl CSE {
                     OpCode::Rangecheck { value, max_bits } => {
                         let value_expr = get_expr(&exprs, value);
                         effects
-                            .entry(Effect::Rangecheck(value_expr, *max_bits))
+                            .entry(Effect::Rangecheck {
+                                value: value_expr,
+                                max_bits: *max_bits,
+                            })
                             .or_default()
                             .push((block_id, instruction_idx));
                     }
@@ -878,7 +941,10 @@ impl CSE {
                         let key_expr = get_expr(&exprs, &keys[0]);
                         let flag_expr = get_expr(&exprs, flag);
                         effects
-                            .entry(Effect::ByteLookup(key_expr, flag_expr))
+                            .entry(Effect::ByteLookup {
+                                key: key_expr,
+                                flag: flag_expr,
+                            })
                             .or_default()
                             .push((block_id, instruction_idx));
                     }
@@ -931,7 +997,10 @@ impl CSE {
                         idx,
                     } => {
                         let tuple_expr = get_expr(&exprs, tuple);
-                        let index_expr = Expr::UConst(64, *idx as u128);
+                        let index_expr = Expr::UConst {
+                            bits: 64,
+                            value: *idx as u128,
+                        };
                         let result_expr = tuple_expr.tuple_get(&index_expr);
                         exprs.insert(*r, result_expr.clone());
                         result.entry(result_expr).or_default().push((
@@ -945,7 +1014,10 @@ impl CSE {
                         value: cv,
                     } => match cv {
                         ConstValue::U(size, val) => {
-                            let expr = Expr::UConst(*size, *val);
+                            let expr = Expr::UConst {
+                                bits: *size,
+                                value: *val,
+                            };
                             exprs.insert(*r, expr.clone());
                             result
                                 .entry(expr)
@@ -953,7 +1025,10 @@ impl CSE {
                                 .push((block_id, instruction_idx, *r));
                         }
                         ConstValue::I(size, val) => {
-                            let expr = Expr::IConst(*size, *val);
+                            let expr = Expr::IConst {
+                                bits: *size,
+                                value: *val,
+                            };
                             exprs.insert(*r, expr.clone());
                             result
                                 .entry(expr)
