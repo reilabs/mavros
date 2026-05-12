@@ -133,7 +133,7 @@ impl Driver {
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer =
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
-        let function_sig = monomorphizer.compile_main(main).unwrap();
+        monomorphizer.compile_main(main).unwrap();
 
         monomorphizer.process_queue().unwrap();
         let needed_lowlevels = find_needed_lowlevels(&monomorphizer);
@@ -155,7 +155,7 @@ impl Driver {
         }
 
         monomorphizer.process_queue().unwrap();
-        let program = monomorphizer.into_program(function_sig);
+        let program = monomorphizer.into_program();
 
         self.abi = Some(noirc_driver::gen_abi(
             &context,
