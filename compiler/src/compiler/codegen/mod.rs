@@ -236,7 +236,7 @@ impl CodeGen {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
-        let mut interner = StructLayoutInterner::new();
+        let mut struct_interner = StructLayoutInterner::new();
 
         let function = ssa.get_main();
         let function = self.run_function(
@@ -244,7 +244,7 @@ impl CodeGen {
             cfg.get_function_cfg(ssa.get_main_id()),
             type_info.get_function(ssa.get_main_id()),
             &global_layouter,
-            &mut interner,
+            &mut struct_interner,
         );
 
         let mut functions = vec![function];
@@ -263,7 +263,7 @@ impl CodeGen {
                 cfg.get_function_cfg(*function_id),
                 type_info.get_function(*function_id),
                 &global_layouter,
-                &mut interner,
+                &mut struct_interner,
             );
             function_ids.insert(*function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
@@ -293,7 +293,7 @@ impl CodeGen {
         bytecode::Program {
             functions,
             global_frame_size: global_layouter.total_size,
-            struct_layouts: interner.into_table(),
+            struct_layouts: struct_interner.into_table(),
         }
     }
 
@@ -303,7 +303,7 @@ impl CodeGen {
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
-        interner: &mut StructLayoutInterner,
+        struct_interner: &mut StructLayoutInterner,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
@@ -323,7 +323,7 @@ impl CodeGen {
             &mut layouter,
             &mut emitter,
             global_layouter,
-            interner,
+            struct_interner,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -343,7 +343,7 @@ impl CodeGen {
                 &mut layouter,
                 &mut emitter,
                 global_layouter,
-                interner,
+                struct_interner,
             );
         }
 
@@ -446,7 +446,7 @@ impl CodeGen {
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
-        interner: &mut StructLayoutInterner,
+        struct_interner: &mut StructLayoutInterner,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -850,11 +850,11 @@ impl CodeGen {
                 } => {
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     let tuple_elems = type_info.get_value_type(*t).get_tuple_elements();
-                    let field_offset: usize = tuple_elems[..*idx as usize]
+                    let field_offset: usize = tuple_elems[..*idx]
                         .iter()
                         .map(|elem_type| layouter.type_size(elem_type))
                         .sum();
-                    let field_size = layouter.type_size(&tuple_elems[*idx as usize]);
+                    let field_size = layouter.type_size(&tuple_elems[*idx]);
                     emitter.push_op(bytecode::OpCode::TupleProj {
                         res,
                         tuple: layouter.get_value(*t),
@@ -938,7 +938,7 @@ impl CodeGen {
                         .iter()
                         .map(|elem_type| elem_type.is_heap_allocated())
                         .collect();
-                    let idx = interner.intern(field_sizes, reference_counting);
+                    let idx = struct_interner.intern(field_sizes, reference_counting);
                     emitter.push_op(bytecode::OpCode::TupleAlloc {
                         res,
                         meta: vm::array::BoxedLayout::new_struct(idx),

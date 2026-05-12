@@ -30,40 +30,31 @@ pub enum DataType {
 #[derive(Debug, Clone)]
 pub struct StructDescriptor {
     /// Size in u64 words of each field.
-    pub field_sizes: Box<[u32]>,
+    pub field_sizes: Vec<u32>,
     /// Whether each field is a refcounted (heap-allocated) value. Same length as `field_sizes`.
-    pub refcounted: Box<[bool]>,
-    /// Prefix sum of `field_sizes`; `field_offsets[i]` is the word offset of field `i`,
-    /// and `field_offsets[len]` is the total size of the struct payload.
-    pub field_offsets: Box<[u32]>,
+    pub refcounted: Vec<bool>,
+    /// Total size in u64 words of the struct payload (sum of `field_sizes`).
+    pub total_size: u32,
 }
 
 impl StructDescriptor {
     pub fn new(field_sizes: Vec<u32>, refcounted: Vec<bool>) -> Self {
         assert_eq!(field_sizes.len(), refcounted.len());
-        let mut field_offsets = Vec::with_capacity(field_sizes.len() + 1);
-        let mut acc: u32 = 0;
-        field_offsets.push(0);
+        let mut total_size: u32 = 0;
         for &sz in &field_sizes {
             assert!(sz > 0, "struct field size must be > 0");
-            acc = acc.checked_add(sz).expect("struct payload overflow");
-            field_offsets.push(acc);
+            total_size = total_size.checked_add(sz).expect("struct payload overflow");
         }
         Self {
-            field_sizes: field_sizes.into_boxed_slice(),
-            refcounted: refcounted.into_boxed_slice(),
-            field_offsets: field_offsets.into_boxed_slice(),
+            field_sizes,
+            refcounted,
+            total_size,
         }
     }
 
     #[inline(always)]
     pub fn field_count(&self) -> usize {
         self.field_sizes.len()
-    }
-
-    #[inline(always)]
-    pub fn total_size(&self) -> usize {
-        *self.field_offsets.last().unwrap() as usize
     }
 }
 
@@ -85,18 +76,13 @@ impl<'a> StructView<'a> {
     }
 
     #[inline(always)]
-    pub fn field_offset(&self, i: usize) -> usize {
-        self.desc.field_offsets[i] as usize
-    }
-
-    #[inline(always)]
     pub fn is_refcounted(&self, i: usize) -> bool {
         self.desc.refcounted[i]
     }
 
     #[inline(always)]
     pub fn total_size(&self) -> usize {
-        self.desc.total_size()
+        self.desc.total_size as usize
     }
 }
 
@@ -394,10 +380,6 @@ impl BoxedValue {
         unsafe { self.data().offset(idx as isize * stride as isize) }
     }
 
-    pub fn tuple_idx(&self, idx: usize, view: StructView<'_>) -> *mut u64 {
-        unsafe { self.data().add(view.field_offset(idx)) }
-    }
-
     pub fn inc_rc(&self, by: u64) {
         let rc = self.rc();
         unsafe {
@@ -436,12 +418,14 @@ impl BoxedValue {
                     }
                     DataType::Struct => {
                         let view = layout.as_struct(&vm.struct_layouts);
+                        let mut field_offset = 0;
                         for i in 0..view.field_count() {
                             if view.is_refcounted(i) {
                                 let elem =
-                                    unsafe { *(item.tuple_idx(i, view) as *mut BoxedValue) };
+                                    unsafe { *(item.data().add(field_offset) as *mut BoxedValue) };
                                 queue.push_back(elem);
                             }
+                            field_offset += view.field_size(i);
                         }
                         item.free(vm);
                     }

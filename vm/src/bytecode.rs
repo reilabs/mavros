@@ -758,11 +758,14 @@ mod def {
     ) {
         let tuple = BoxedValue::alloc(meta, vm);
         let view = meta.as_struct(&vm.struct_layouts);
+        let mut field_offset = 0;
         for (i, field) in fields.iter().enumerate() {
-            let tgt = tuple.tuple_idx(i, view);
+            let size = view.field_size(i);
+            let tgt = unsafe { tuple.data().add(field_offset) };
             unsafe {
-                frame.write_to(tgt, field.0 as isize, view.field_size(i));
+                frame.write_to(tgt, field.0 as isize, size);
             }
+            field_offset += size;
         }
         unsafe {
             *res = tuple;

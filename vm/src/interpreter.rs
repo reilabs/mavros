@@ -10,12 +10,12 @@ use tracing::instrument;
 
 pub use crate::InputValueOrdered;
 
+use crate::bytecode::parse_struct_layouts;
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
     array::BoxedValue,
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
-use crate::bytecode::parse_struct_layouts;
 
 pub type Handler = fn(*const u64, Frame, &mut VM);
 
@@ -258,7 +258,7 @@ pub fn run_phase1(
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, code_start);
 
-    let pc = unsafe { program.as_mut_ptr().offset((code_start + 3) as isize) };
+    let pc = unsafe { program.as_mut_ptr().add(code_start + 3) };
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
@@ -583,7 +583,7 @@ pub fn run_ad(
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, code_start);
 
-    let pc = unsafe { program.as_mut_ptr().offset((code_start + 3) as isize) };
+    let pc = unsafe { program.as_mut_ptr().add(code_start + 3) };
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
