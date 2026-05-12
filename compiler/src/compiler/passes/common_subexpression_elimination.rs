@@ -48,7 +48,7 @@ enum Expr {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Effect {
+enum Assertion {
     Rangecheck { value: Expr, max_bits: usize },
     ByteLookup { key: Expr, flag: Expr },
 }
@@ -373,6 +373,9 @@ impl Debug for Expr {
     }
 }
 
+/// Deduplicates expressions when one occurrence dominates the other.
+/// Does not float expressions across branches or otherwise move them
+/// outside the block in which they appear.
 pub struct CSE {}
 
 impl Pass for CSE {
@@ -401,7 +404,7 @@ impl CSE {
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let (exprs, effects) = self.gather_expressions(function, cfg);
+            let (exprs, assertions) = self.gather_expressions(function, cfg);
             let mut value_replacements = ValueReplacements::new();
             for (_, occurrences) in exprs {
                 if occurrences.len() <= 1 {
@@ -452,7 +455,7 @@ impl CSE {
             // Side-effect dedup: same dominance grouping as the value loop,
             // but duplicates are dropped rather than redirected.
             let mut to_remove: HashSet<(BlockId, usize)> = HashSet::new();
-            for (_, occurrences) in effects {
+            for (_, occurrences) in assertions {
                 if occurrences.len() <= 1 {
                     continue;
                 }
@@ -535,10 +538,10 @@ impl CSE {
         cfg: &CFG,
     ) -> (
         HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
-        HashMap<Effect, Vec<(BlockId, usize)>>,
+        HashMap<Assertion, Vec<(BlockId, usize)>>,
     ) {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
-        let mut effects: HashMap<Effect, Vec<(BlockId, usize)>> = HashMap::new();
+        let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::new();
         let mut exprs = HashMap::<ValueId, Expr>::new();
 
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
@@ -924,8 +927,8 @@ impl CSE {
                     OpCode::FreshWitness { .. } => {}
                     OpCode::Rangecheck { value, max_bits } => {
                         let value_expr = get_expr(&exprs, value);
-                        effects
-                            .entry(Effect::Rangecheck {
+                        assertions
+                            .entry(Assertion::Rangecheck {
                                 value: value_expr,
                                 max_bits: *max_bits,
                             })
@@ -940,8 +943,8 @@ impl CSE {
                     } if keys.len() == 1 => {
                         let key_expr = get_expr(&exprs, &keys[0]);
                         let flag_expr = get_expr(&exprs, flag);
-                        effects
-                            .entry(Effect::ByteLookup {
+                        assertions
+                            .entry(Assertion::ByteLookup {
                                 key: key_expr,
                                 flag: flag_expr,
                             })
@@ -1051,6 +1054,6 @@ impl CSE {
                 }
             }
         }
-        (result, effects)
+        (result, assertions)
     }
 }
