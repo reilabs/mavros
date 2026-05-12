@@ -15,6 +15,7 @@ use crate::{
     array::BoxedValue,
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
+use crate::bytecode::parse_struct_layouts;
 
 pub type Handler = fn(*const u64, Frame, &mut VM);
 
@@ -140,9 +141,10 @@ impl Frame {
     }
 }
 
-fn prepare_dispatch(program: &mut [u64]) {
-    // Skip the global_frame_size header at index 0
-    let mut current_offset = 1;
+fn prepare_dispatch(program: &mut [u64], code_start: usize) {
+    // `code_start` is the index of `global_frame_size`; the actual opcode
+    // stream begins at `code_start + 1`.
+    let mut current_offset = code_start + 1;
     while current_offset < program.len() {
         let opcode = program[current_offset];
         if opcode == u64::MAX {
@@ -198,7 +200,8 @@ pub fn run_phase1(
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
 ) -> Phase1Result {
-    let global_frame_size = program[0] as usize;
+    let (struct_layouts, code_start) = parse_struct_layouts(program);
+    let global_frame_size = program[code_start] as usize;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
     let mut out_b = vec![Field::ZERO; constraints_layout.size()];
     let mut out_c = vec![Field::ZERO; constraints_layout.size()];
@@ -235,10 +238,11 @@ pub fn run_phase1(
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
         global_frame.as_mut_ptr(),
+        struct_layouts,
     );
 
     let frame = Frame::push(
-        program[2],
+        program[code_start + 2],
         Frame {
             data: std::ptr::null_mut(),
         },
@@ -252,9 +256,9 @@ pub fn run_phase1(
     }
 
     let mut program = program.to_vec();
-    prepare_dispatch(&mut program);
+    prepare_dispatch(&mut program, code_start);
 
-    let pc = unsafe { program.as_mut_ptr().offset(3) };
+    let pc = unsafe { program.as_mut_ptr().offset((code_start + 3) as isize) };
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
@@ -551,7 +555,8 @@ pub fn run_ad(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> (Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter) {
-    let global_frame_size = program[0] as usize;
+    let (struct_layouts, code_start) = parse_struct_layouts(program);
+    let global_frame_size = program[code_start] as usize;
     let mut out_da = vec![Field::ZERO; witness_layout.size()];
     let mut out_db = vec![Field::ZERO; witness_layout.size()];
     let mut out_dc = vec![Field::ZERO; witness_layout.size()];
@@ -564,10 +569,11 @@ pub fn run_ad(
         witness_layout,
         constraints_layout,
         global_frame.as_mut_ptr(),
+        struct_layouts,
     );
 
     let frame = Frame::push(
-        program[2],
+        program[code_start + 2],
         Frame {
             data: std::ptr::null_mut(),
         },
@@ -575,9 +581,9 @@ pub fn run_ad(
     );
 
     let mut program = program.to_vec();
-    prepare_dispatch(&mut program);
+    prepare_dispatch(&mut program, code_start);
 
-    let pc = unsafe { program.as_mut_ptr().offset(3) };
+    let pc = unsafe { program.as_mut_ptr().offset((code_start + 3) as isize) };
 
     unsafe { dispatch(pc, frame, &mut vm) };
 

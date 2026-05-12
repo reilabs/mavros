@@ -148,6 +148,38 @@ impl EmitterState {
     }
 }
 
+/// Interns unique struct shapes during codegen and returns a stable index
+/// into the resulting descriptor table.
+struct StructLayoutInterner {
+    table: Vec<vm::array::StructDescriptor>,
+    index: HashMap<(Vec<u32>, Vec<bool>), usize>,
+}
+
+impl StructLayoutInterner {
+    fn new() -> Self {
+        Self {
+            table: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, field_sizes: Vec<u32>, refcounted: Vec<bool>) -> usize {
+        let key = (field_sizes.clone(), refcounted.clone());
+        if let Some(&idx) = self.index.get(&key) {
+            return idx;
+        }
+        let idx = self.table.len();
+        self.table
+            .push(vm::array::StructDescriptor::new(field_sizes, refcounted));
+        self.index.insert(key, idx);
+        idx
+    }
+
+    fn into_table(self) -> Vec<vm::array::StructDescriptor> {
+        self.table
+    }
+}
+
 struct GlobalFrameLayouter {
     offsets: Vec<usize>,
     sizes: Vec<usize>,
@@ -204,6 +236,7 @@ impl CodeGen {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
+        let mut interner = StructLayoutInterner::new();
 
         let function = ssa.get_main();
         let function = self.run_function(
@@ -211,6 +244,7 @@ impl CodeGen {
             cfg.get_function_cfg(ssa.get_main_id()),
             type_info.get_function(ssa.get_main_id()),
             &global_layouter,
+            &mut interner,
         );
 
         let mut functions = vec![function];
@@ -229,6 +263,7 @@ impl CodeGen {
                 cfg.get_function_cfg(*function_id),
                 type_info.get_function(*function_id),
                 &global_layouter,
+                &mut interner,
             );
             function_ids.insert(*function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
@@ -258,6 +293,7 @@ impl CodeGen {
         bytecode::Program {
             functions,
             global_frame_size: global_layouter.total_size,
+            struct_layouts: interner.into_table(),
         }
     }
 
@@ -267,6 +303,7 @@ impl CodeGen {
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
+        interner: &mut StructLayoutInterner,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
@@ -286,6 +323,7 @@ impl CodeGen {
             &mut layouter,
             &mut emitter,
             global_layouter,
+            interner,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -305,6 +343,7 @@ impl CodeGen {
                 &mut layouter,
                 &mut emitter,
                 global_layouter,
+                interner,
             );
         }
 
@@ -407,6 +446,7 @@ impl CodeGen {
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
+        interner: &mut StructLayoutInterner,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -809,16 +849,17 @@ impl CodeGen {
                     idx,
                 } => {
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let tuple_elems = type_info.get_value_type(*t).get_tuple_elements();
+                    let field_offset: usize = tuple_elems[..*idx as usize]
+                        .iter()
+                        .map(|elem_type| layouter.type_size(elem_type))
+                        .sum();
+                    let field_size = layouter.type_size(&tuple_elems[*idx as usize]);
                     emitter.push_op(bytecode::OpCode::TupleProj {
                         res,
                         tuple: layouter.get_value(*t),
-                        index: *idx as u64,
-                        child_sizes: type_info
-                            .get_value_type(*t)
-                            .get_tuple_elements()
-                            .iter()
-                            .map(|elem_type| layouter.type_size(elem_type))
-                            .collect(),
+                        field_offset,
+                        field_size,
                     });
                 }
                 ssa::OpCode::ArraySet {
@@ -884,35 +925,23 @@ impl CodeGen {
                     elems,
                     element_types,
                 } => {
-                    assert!(
-                        element_types.len() <= 14,
-                        "Struct has {} fields, but maximum is 14",
-                        element_types.len()
-                    );
                     let res = layouter.alloc_value(*result, &type_info.get_value_type(*result));
                     let fields = elems
                         .iter()
                         .map(|a| layouter.get_value(*a))
                         .collect::<Vec<_>>();
-                    let field_sizes: Vec<usize> = element_types
+                    let field_sizes: Vec<u32> = element_types
                         .iter()
-                        .map(|elem_type| {
-                            let size = layouter.type_size(elem_type);
-                            assert!(
-                                size <= 8,
-                                "Struct field has {} bits, but maximum is 512",
-                                size * 64
-                            );
-                            size
-                        })
+                        .map(|elem_type| layouter.type_size(elem_type) as u32)
                         .collect();
-                    let reference_counting = element_types
+                    let reference_counting: Vec<bool> = element_types
                         .iter()
                         .map(|elem_type| elem_type.is_heap_allocated())
                         .collect();
+                    let idx = interner.intern(field_sizes, reference_counting);
                     emitter.push_op(bytecode::OpCode::TupleAlloc {
                         res,
-                        meta: vm::array::BoxedLayout::new_struct(field_sizes, reference_counting),
+                        meta: vm::array::BoxedLayout::new_struct(idx),
                         fields,
                     });
                 }
