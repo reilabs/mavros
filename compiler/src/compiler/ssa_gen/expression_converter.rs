@@ -1228,8 +1228,8 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         // Builtins with a Noir replacement (registered via REPLACEMENT_CRATES)
         // dispatch to that replacement instead of the inline handling below.
-        if let Some(result) = self.try_call_replacement(name, call, b) {
-            return result;
+        if self.lowlevel_replacements.contains_key(name) {
+            return self.call_replacement(name, call, b);
         }
 
         match name {
@@ -1380,20 +1380,22 @@ impl<'a> ExpressionConverter<'a> {
             return Some(result);
         }
 
-        self.try_call_replacement(name, call, b)
-            .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name))
+        assert!(
+            self.lowlevel_replacements.contains_key(name),
+            "LowLevel function '{name}' has no replacement"
+        );
+        self.call_replacement(name, call, b)
     }
 
-    /// If a Noir replacement function is registered for `name`, emit a call to
-    /// it and return the result. Returns `None` if no replacement is
-    /// registered.
-    fn try_call_replacement(
+    /// Emit a call to the Noir replacement function registered for `name`.
+    /// The caller must have already verified that a replacement exists.
+    fn call_replacement(
         &mut self,
         name: &str,
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> Option<Option<ValueId>> {
-        let replacement = self.lowlevel_replacements.get(name)?;
+    ) -> Option<ValueId> {
+        let replacement = &self.lowlevel_replacements[name];
 
         let replacement_id = match replacement {
             LowLevelReplacement::Single(func_id) => func_id,
@@ -1435,11 +1437,11 @@ impl<'a> ExpressionConverter<'a> {
                 .call(*ssa_func_id, args, return_size)
         };
 
-        Some(if results.is_empty() {
+        if results.is_empty() {
             None
         } else {
             Some(results[0])
-        })
+        }
     }
 
     /// Handle mavros-specific foreign functions directly in SSA,
