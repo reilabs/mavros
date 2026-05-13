@@ -18,9 +18,7 @@ impl ValueReplacements {
     }
 
     pub fn insert(&mut self, replaced: ValueId, replacement: ValueId) {
-        let replacements_replacement = self.replacements.get(&replacement).unwrap_or(&replacement);
-        self.replacements
-            .insert(replaced, *replacements_replacement);
+        self.replacements.insert(replaced, replacement);
     }
 
     pub fn replace_instruction(&self, instruction: &mut OpCode) {
@@ -54,8 +52,14 @@ impl ValueReplacements {
     }
 
     pub fn get_replacement(&self, value: ValueId) -> ValueId {
-        let replacement = self.replacements.get(&value).unwrap_or(&value);
-        *replacement
+        let mut current = value;
+        for _ in 0..=self.replacements.len() {
+            match self.replacements.get(&current) {
+                Some(&next) if next != current => current = next,
+                _ => return current,
+            }
+        }
+        panic!("ValueReplacements: cycle starting at {:?}", value)
     }
 }
 

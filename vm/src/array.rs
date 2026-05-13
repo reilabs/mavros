@@ -24,9 +24,84 @@ pub enum DataType {
     RefCell = 7,
 }
 
+/// Per-shape struct layout, interned by the compiler and shared across all
+/// instances of a struct type. Indexed by the 56-bit payload of a
+/// `BoxedLayout` whose `DataType` is `Struct`.
+#[derive(Debug, Clone)]
+pub struct StructDescriptor {
+    /// Per-field `(size_in_u64_words, is_refcounted)`.
+    fields: Vec<(u32, bool)>,
+    /// Total size in u64 words of the struct payload (sum of field sizes).
+    total_size: u32,
+}
+
+impl StructDescriptor {
+    pub fn new(fields: Vec<(u32, bool)>) -> Self {
+        let mut total_size: u32 = 0;
+        for &(sz, _) in &fields {
+            assert!(sz > 0, "struct field size must be > 0");
+            total_size = total_size.checked_add(sz).expect("struct payload overflow");
+        }
+        Self { fields, total_size }
+    }
+
+    #[inline(always)]
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    #[inline(always)]
+    pub fn fields(&self) -> &[(u32, bool)] {
+        &self.fields
+    }
+
+    #[inline(always)]
+    pub fn field_size(&self, i: usize) -> u32 {
+        self.fields[i].0
+    }
+
+    #[inline(always)]
+    pub fn is_refcounted(&self, i: usize) -> bool {
+        self.fields[i].1
+    }
+
+    #[inline(always)]
+    pub fn total_size(&self) -> u32 {
+        self.total_size
+    }
+}
+
+/// A view into a struct's descriptor, hiding the `BoxedLayout`-to-table lookup.
+#[derive(Clone, Copy)]
+pub struct StructView<'a> {
+    desc: &'a StructDescriptor,
+}
+
+impl<'a> StructView<'a> {
+    #[inline(always)]
+    pub fn field_count(&self) -> usize {
+        self.desc.field_count()
+    }
+
+    #[inline(always)]
+    pub fn field_size(&self, i: usize) -> usize {
+        self.desc.field_size(i) as usize
+    }
+
+    #[inline(always)]
+    pub fn is_refcounted(&self, i: usize) -> bool {
+        self.desc.is_refcounted(i)
+    }
+
+    #[inline(always)]
+    pub fn total_size(&self) -> usize {
+        self.desc.total_size() as usize
+    }
+}
+
 // BoxedLayout packing scheme:
 // highest byte is type
-// rest is length, for arrays and unused otherwise
+// rest is length for arrays, descriptor table index for structs, or unused otherwise.
 
 impl BoxedLayout {
     fn new_sized(data_type: DataType, size: usize) -> Self {
@@ -47,17 +122,14 @@ impl BoxedLayout {
         }
     }
 
-    pub fn new_struct(field_sizes: Vec<usize>, is_refcounted: Vec<bool>) -> Self {
-        assert!(field_sizes.len() <= 14);
-        let mut size = 0;
-        for (field_size, is_refcounted) in field_sizes.iter().zip(is_refcounted.iter()) {
-            assert!(*field_size < 8);
-            assert!(0 < *field_size);
-            let field_metadata = (*is_refcounted as usize) << 3 | *field_size;
-            size = (size << 4) | field_metadata;
-        }
-        assert!(size < (1 << 56));
-        Self::new_sized(DataType::Struct, size)
+    /// Build a struct layout pointing at descriptor `idx` in the program's struct-layout table.
+    pub fn new_struct(idx: usize) -> Self {
+        Self::new_sized(DataType::Struct, idx)
+    }
+
+    #[inline(always)]
+    pub fn struct_layout_idx(&self) -> usize {
+        (self.0 >> 8) as usize
     }
 
     pub fn ref_cell(elem_size: usize, elem_is_refcounted: bool) -> Self {
@@ -101,41 +173,11 @@ impl BoxedLayout {
         self.0 as usize >> 8
     }
 
-    pub fn struct_field_count(&self) -> usize {
-        self.child_sizes().len()
-    }
-
-    pub fn struct_size(&self) -> usize {
-        self.child_sizes().iter().sum()
-    }
-
-    /// Returns the size of each field in the struct.
-    /// Each field's 4-bit metadata encodes: [1 bit: refcounted][3 bits: size]
-    pub fn child_sizes(&self) -> Vec<usize> {
-        let mut sizes = Vec::new();
-        for field_index in 0..14 {
-            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xF) as usize;
-            let field_size = field_metadata & 0x7;
-            if field_size > 0 {
-                sizes.push(field_size);
-            }
+    #[inline(always)]
+    pub fn as_struct<'a>(&self, table: &'a [StructDescriptor]) -> StructView<'a> {
+        StructView {
+            desc: &table[self.struct_layout_idx()],
         }
-        sizes
-    }
-
-    /// Returns a vector indicating which fields are reference-counted (heap-allocated).
-    /// Each field's 4-bit metadata encodes: [1 bit: refcounted][3 bits: size]
-    pub fn refcounted_flags(&self) -> Vec<bool> {
-        let mut flags = Vec::new();
-        for field_index in 0..14 {
-            let field_metadata = (self.0 >> ((15 - field_index) * 4) & 0xF) as usize;
-            let field_size = field_metadata & 0x7;
-            let is_refcounted = (field_metadata & 0x8) != 0;
-            if field_size > 0 {
-                flags.push(is_refcounted);
-            }
-        }
-        flags
     }
 
     pub fn is_boxed_array(&self) -> bool {
@@ -146,14 +188,14 @@ impl BoxedLayout {
         self.data_type() == DataType::PrimArray
     }
 
-    pub fn underlying_array_size(&self) -> usize {
+    pub fn underlying_array_size(&self, struct_layouts: &[StructDescriptor]) -> usize {
         let base_byte_size = match self.data_type() {
             DataType::ADConst => size_of::<ADConst>(),
             DataType::ADWitness => size_of::<ADWitness>(),
             DataType::ADMulConst => size_of::<ADMulConst>(),
             DataType::ADSum => size_of::<ADSum>(),
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
-            DataType::Struct => 8 * self.struct_size(),
+            DataType::Struct => 8 * self.as_struct(struct_layouts).total_size(),
             DataType::RefCell => 8 * self.ref_cell_elem_size(),
         };
         base_byte_size.div_ceil(8) + 3
@@ -193,7 +235,7 @@ pub struct BoxedValue(pub *mut u64);
 
 impl BoxedValue {
     pub fn alloc(layout: BoxedLayout, vm: &mut VM) -> Self {
-        let arr_size = layout.underlying_array_size();
+        let arr_size = layout.underlying_array_size(&vm.struct_layouts);
         let ptr = unsafe { alloc::alloc(Layout::array::<u64>(arr_size).unwrap()) } as *mut u64;
         vm.allocation_instrumenter
             .alloc(AllocationType::Heap, arr_size);
@@ -351,14 +393,6 @@ impl BoxedValue {
         unsafe { self.data().offset(idx as isize * stride as isize) }
     }
 
-    pub fn tuple_idx(&self, idx: usize, child_sizes: &[usize]) -> *mut u64 {
-        let mut offset = 0;
-        for i in 0..idx {
-            offset += child_sizes[i];
-        }
-        unsafe { self.data().add(offset) }
-    }
-
     pub fn inc_rc(&self, by: u64) {
         let rc = self.rc();
         unsafe {
@@ -367,7 +401,7 @@ impl BoxedValue {
     }
 
     fn free(&self, vm: &mut VM) {
-        let arr_size = self.layout().underlying_array_size();
+        let arr_size = self.layout().underlying_array_size(&vm.struct_layouts);
         unsafe {
             alloc::dealloc(self.0 as *mut u8, Layout::array::<u64>(arr_size).unwrap());
             vm.allocation_instrumenter
@@ -396,15 +430,15 @@ impl BoxedValue {
                         item.free(vm);
                     }
                     DataType::Struct => {
-                        let child_sizes = layout.child_sizes();
-                        let refcounted_flags = layout.refcounted_flags();
-                        for i in 0..layout.struct_field_count() {
-                            if refcounted_flags[i] {
-                                let elem = unsafe {
-                                    *(item.tuple_idx(i, &child_sizes) as *mut BoxedValue)
-                                };
+                        let view = layout.as_struct(&vm.struct_layouts);
+                        let mut field_offset = 0;
+                        for i in 0..view.field_count() {
+                            if view.is_refcounted(i) {
+                                let elem =
+                                    unsafe { *(item.data().add(field_offset) as *mut BoxedValue) };
                                 queue.push_back(elem);
                             }
+                            field_offset += view.field_size(i);
                         }
                         item.free(vm);
                     }

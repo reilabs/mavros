@@ -1,0 +1,6 @@
+[package]
+name = "big_tuple"
+type = "bin"
+authors = [""]
+
+[dependencies]
