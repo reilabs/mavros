@@ -47,14 +47,20 @@ impl ReplacementCrate {
     }
 }
 
-/// Scan the monomorphizer's finished functions to find which LowLevel intrinsics are actually used.
+/// Scan the monomorphizer's finished functions to find which LowLevel and
+/// Builtin intrinsics are actually used. Both share a flat name space here
+/// because the replacement infrastructure is keyed by the attribute argument
+/// (`#[foreign(name)]` for LowLevel, `#[builtin(name)]` for Builtin).
 pub fn find_needed_lowlevels(monomorphizer: &Monomorphizer) -> HashSet<String> {
     let mut needed = HashSet::new();
     for func in monomorphizer.finished_functions().values() {
         visit_expr(&func.body, &mut |expr| {
             if let Expression::Ident(ident) = expr {
-                if let Definition::LowLevel(name) = &ident.definition {
-                    needed.insert(name.clone());
+                match &ident.definition {
+                    Definition::LowLevel(name) | Definition::Builtin(name) => {
+                        needed.insert(name.clone());
+                    }
+                    _ => {}
                 }
             }
             true
@@ -87,6 +93,15 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
         replacements: &[ReplacementSpec {
             lowlevel_name: "sha256_compression",
             kind: ReplacementKind::Single("sha256_compression"),
+        }],
+    },
+    ReplacementCrate {
+        file_name: "field_less_than.nr",
+        dep_name: "field_less_than",
+        source: include_str!("../../stdlib_replacements/src/field_less_than.nr"),
+        replacements: &[ReplacementSpec {
+            lowlevel_name: "field_less_than",
+            kind: ReplacementKind::Single("field_less_than"),
         }],
     },
 ];

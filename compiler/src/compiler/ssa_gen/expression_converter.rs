@@ -1226,6 +1226,12 @@ impl<'a> ExpressionConverter<'a> {
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
+        // Builtins with a Noir replacement (registered via REPLACEMENT_CRATES)
+        // dispatch to that replacement instead of the inline handling below.
+        if let Some(result) = self.try_call_replacement(name, call, b) {
+            return result;
+        }
+
         match name {
             "assert_eq" => {
                 let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
@@ -1374,10 +1380,20 @@ impl<'a> ExpressionConverter<'a> {
             return Some(result);
         }
 
-        let replacement = self
-            .lowlevel_replacements
-            .get(name)
-            .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name));
+        self.try_call_replacement(name, call, b)
+            .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name))
+    }
+
+    /// If a Noir replacement function is registered for `name`, emit a call to
+    /// it and return the result. Returns `None` if no replacement is
+    /// registered.
+    fn try_call_replacement(
+        &mut self,
+        name: &str,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<Option<ValueId>> {
+        let replacement = self.lowlevel_replacements.get(name)?;
 
         let replacement_id = match replacement {
             LowLevelReplacement::Single(func_id) => func_id,
@@ -1404,15 +1420,26 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         let return_size = self.return_size(&call.return_type);
-        let results = b
-            .block(self.current_block)
-            .call(*ssa_func_id, args, return_size);
 
-        if results.is_empty() {
+        // If the replacement is natively unconstrained and we're being called
+        // from a constrained context, emit an unconstrained call. Otherwise
+        // the replacement's body (e.g. loop `break`s, witness-conditional
+        // mutation) would leak into the caller's constrained SSA.
+        let is_unconstrained_call =
+            !self.in_unconstrained && self.natively_unconstrained.contains(replacement_id);
+        let results = if is_unconstrained_call {
+            b.block(self.current_block)
+                .call_unconstrained(*ssa_func_id, args, return_size)
+        } else {
+            b.block(self.current_block)
+                .call(*ssa_func_id, args, return_size)
+        };
+
+        Some(if results.is_empty() {
             None
         } else {
             Some(results[0])
-        }
+        })
     }
 
     /// Handle mavros-specific foreign functions directly in SSA,
