@@ -2796,10 +2796,8 @@ impl LookupTableSpec {
     }
 
     fn witness_slots(self) -> usize {
-        match self.columns {
-            LookupTableColumns::KeyOnly => self.length,
-            LookupTableColumns::KeyValue => 2 * self.length,
-        }
+        // β-power LogUp: 1 aux y-witness per slot for either column kind.
+        self.length
     }
 
     fn constraint_slots(self) -> usize {

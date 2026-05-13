@@ -294,8 +294,69 @@ pub struct LookupConstraint {
 #[derive(Clone, Debug)]
 pub enum Table {
     Range(u64),
-    OfElems(Vec<LC>),
+    /// N-dimensional lookup table.
+    ///
+    /// `values` holds the array's leaves in row-major flat order
+    /// (`values[i_1 * d_2 * .. * d_N + .. + i_N]`).
+    /// `dims = [d_1, d_2, .., d_N]` records the original shape so the
+    /// per-slot key coordinates can be reconstructed at constraint-emission
+    /// time. The β-power LogUp denominator at slot `s` is
+    /// `α − value(s) − β·i_1(s) − β²·i_2(s) − … − β^N·i_N(s)`.
+    OfElems {
+        values: Vec<LC>,
+        dims: Vec<usize>,
+    },
     Spread(u8),
+}
+
+/// Flatten an N-D nested `Value::Array` into row-major leaves + shape.
+///
+/// Walks down through `Value::Array` nodes while every level is itself an
+/// array; the first level whose leaves aren't arrays defines the leaf type.
+fn flatten_nd_array(arr: &Rc<RefCell<ArrayData>>) -> (Vec<Value>, Vec<usize>) {
+    let mut dims = vec![arr.borrow().data.len()];
+    // Probe the first leaf to discover further dims.
+    let mut cursor = arr.borrow().data.first().cloned();
+    while let Some(Value::Array(inner)) = cursor {
+        let len = inner.borrow().data.len();
+        dims.push(len);
+        cursor = inner.borrow().data.first().cloned();
+    }
+    let mut flat = Vec::new();
+    flatten_into(arr, &dims, 0, &mut flat);
+    assert_eq!(
+        flat.len(),
+        dims.iter().product::<usize>(),
+        "ICE: flattened length ({}) does not match product of dims ({:?})",
+        flat.len(),
+        dims
+    );
+    (flat, dims)
+}
+
+fn flatten_into(arr: &Rc<RefCell<ArrayData>>, dims: &[usize], level: usize, out: &mut Vec<Value>) {
+    let borrowed = arr.borrow();
+    assert_eq!(
+        borrowed.data.len(),
+        dims[level],
+        "ICE: inconsistent N-D array shape at level {}",
+        level
+    );
+    if level + 1 == dims.len() {
+        for v in borrowed.data.iter() {
+            out.push(v.clone());
+        }
+    } else {
+        for v in borrowed.data.iter() {
+            match v {
+                Value::Array(inner) => flatten_into(inner, dims, level + 1, out),
+                _ => panic!(
+                    "ICE: expected nested Value::Array at level {} of N-D flatten",
+                    level + 1
+                ),
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -343,9 +404,11 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     match self.tables[0] {
                         Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
+                        Table::OfElems { .. } | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
+                // Rangecheck has no value column — `elements` is the single
+                // key whose β-power-0 slot doubles as the lookup target.
                 let els = keys
                     .into_iter()
                     .chain(results)
@@ -367,7 +430,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     match self.tables[0] {
                         Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
+                        Table::OfElems { .. } | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
                 let els = keys
@@ -394,9 +457,11 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         self.tables.len() - 1
                     }
                 };
-                let els = keys
+                // Convention: value (β⁰) first, then keys (β^j). For Spread,
+                // `results = [spread_output]` and `keys = [spread_input]`.
+                let els = results
                     .into_iter()
-                    .chain(results)
+                    .chain(keys)
                     .map(|e| e.expect_linear_combination())
                     .collect();
                 self.lookups.push(LookupConstraint {
@@ -408,22 +473,22 @@ impl symbolic_executor::Context<Value> for R1CGen {
             super::ssa::LookupTarget::Array(arr) => {
                 let arr = arr.expect_array();
                 let table_id = if arr.borrow().table_id.is_none() {
-                    let elems = arr
-                        .borrow()
-                        .data
+                    let (flat_values, dims) = flatten_nd_array(&arr);
+                    let values: Vec<LC> = flat_values
                         .iter()
                         .map(|e| e.expect_linear_combination())
                         .collect();
-                    self.tables.push(Table::OfElems(elems));
+                    self.tables.push(Table::OfElems { values, dims });
                     let idx = self.tables.len() - 1;
                     arr.borrow_mut().table_id = Some(idx);
                     idx
                 } else {
                     arr.borrow().table_id.unwrap()
                 };
-                let els = keys
+                // Convention: value (β⁰) first, then keys k_1..k_N (β¹..β^N).
+                let els = results
                     .into_iter()
-                    .chain(results)
+                    .chain(keys)
                     .map(|e| e.expect_linear_combination())
                     .collect();
                 self.lookups.push(LookupConstraint {
@@ -942,42 +1007,29 @@ impl R1CGen {
             sum_constraint_idx: usize,
         }
         let mut table_infos = vec![];
-        let mut max_width = 0;
+        // `max_n_keys` is the largest N in any β-power-LogUp table or lookup
+        // (number of β^1..β^N terms in the denominator). Rangechecks have N=0.
+        let mut max_n_keys: usize = 0;
         for table in self.tables.into_iter() {
-            match table {
-                Table::Range(len) => {
-                    let len = 1 << len;
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table,
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(1);
-                    witness_layout.multiplicities_size += len;
-                }
-                Table::OfElems(els) => {
-                    let len = els.len();
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table: Table::OfElems(els),
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(2);
-                    witness_layout.multiplicities_size += len;
-                }
-                Table::Spread(bits) => {
-                    let len = 1usize << bits;
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table,
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(2); // key + spread_value
-                    witness_layout.multiplicities_size += len;
-                }
+            let (len, n_keys) = match &table {
+                Table::Range(bits) => (1usize << bits, 0usize),
+                Table::OfElems { values, dims } => (values.len(), dims.len()),
+                Table::Spread(bits) => (1usize << bits, 1usize),
+            };
+            table_infos.push(TableInfo {
+                multiplicities_witness_off: witness_layout.multiplicities_size
+                    + witness_layout.algebraic_size,
+                table,
+                sum_constraint_idx: 0,
+            });
+            max_n_keys = max_n_keys.max(n_keys);
+            witness_layout.multiplicities_size += len;
+        }
+        // Lookups can request more keys than any table currently registered
+        // (shouldn't happen — every lookup goes via a table — but be defensive).
+        for lookup in &self.lookups {
+            if lookup.elements.len() >= 2 {
+                max_n_keys = max_n_keys.max(lookup.elements.len() - 1);
             }
         }
 
@@ -992,104 +1044,128 @@ impl R1CGen {
         // challenges init
         let alpha = witness_layout.challenges_end();
         witness_layout.challenges_size += 1;
-        let beta = if max_width > 1 {
+
+        // β and β-power chain. β^j (for j ≥ 2) is a derived witness with the
+        // constraint β · β^{j-1} = β^j. Allocated up-front so per-slot/per-query
+        // constraints can reference them as plain witness indices.
+        // `beta_powers[j-1] = β^j` slot. Empty if `max_n_keys == 0` (no β at all).
+        let mut beta_powers: Vec<usize> = Vec::with_capacity(max_n_keys);
+        if max_n_keys >= 1 {
             let beta = witness_layout.challenges_end();
             witness_layout.challenges_size += 1;
-            beta
-        } else {
-            usize::MAX // hoping this crashes soon if used
+            beta_powers.push(beta);
+            for j in 2..=max_n_keys {
+                let bp = witness_layout.next_table_data();
+                // R1C: β · β^{j-1} = β^j
+                result.push(R1C {
+                    a: vec![(beta_powers[0], crate::compiler::Field::ONE)],
+                    b: vec![(beta_powers[j - 2], crate::compiler::Field::ONE)],
+                    c: vec![(bp, crate::compiler::Field::ONE)],
+                });
+                beta_powers.push(bp);
+            }
+        }
+        // β^j (j ≥ 1) lookup; panics if j == 0 (β^0 = 1 is the constant slot 0).
+        let beta_pow = |j: usize| -> usize {
+            assert!(j >= 1, "β^0 is the constant slot, not a witness");
+            beta_powers[j - 1]
         };
 
         // tables contents init
         for table_info in table_infos.iter_mut() {
             match &table_info.table {
                 Table::Range(bits) => {
-                    // for each element i, we need one witness `y = mᵢ / (α - i)`
-                    // and one constraint saying `y * (α - i) - mᵢ = 0`
-                    let len = 1 << bits;
+                    // For each i ∈ 0..2^bits: y · (α − i) = mᵢ
+                    let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            a: vec![(y, crate::compiler::Field::ONE)],
                             b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
+                                (alpha, crate::compiler::Field::ONE),
                                 (0, -crate::compiler::Field::from(i as u64)),
-                            ],
-                            c: vec![(m, ark_bn254::Fr::ONE)],
-                        });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
-                    }
-                    result.push(R1C {
-                        a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
-                        c: vec![], // this is prepared for the looked up values to come into
-                    });
-                    table_info.sum_constraint_idx = result.len() - 1;
-                }
-                Table::OfElems(els) => {
-                    // for each element (i, v), we need two witness/constraint pairs:
-                    // -> x = β * v, with the constraint `β * v - x = 0`
-                    // -> y = mᵢ / (α - i - x), with the constraint `y * (α - i - x) - mᵢ = 0`
-                    let mut sum_lhs: LC = vec![];
-                    for (i, v) in els.iter().enumerate() {
-                        let x = witness_layout.next_table_data();
-                        let y = witness_layout.next_table_data();
-                        let m = table_info.multiplicities_witness_off + i;
-                        result.push(R1C {
-                            a: vec![(beta, crate::compiler::Field::ONE)],
-                            b: v.clone(),
-                            c: vec![(x, -crate::compiler::Field::ONE)],
-                        });
-                        result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
-                            b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
-                                (x, -crate::compiler::Field::ONE),
                             ],
                             c: vec![(m, crate::compiler::Field::ONE)],
                         });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                        sum_lhs.push((y, crate::compiler::Field::ONE));
                     }
                     result.push(R1C {
                         a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
-                        c: vec![], // this is prepared for the looked up values to come into
+                        b: vec![(0, crate::compiler::Field::ONE)],
+                        c: vec![], // prepared for the looked up values to come into
+                    });
+                    table_info.sum_constraint_idx = result.len() - 1;
+                }
+                Table::OfElems { values, dims } => {
+                    // Row-major flat layout. For slot s with value v_s (LC) and
+                    // coords (i_1(s),…,i_N(s)) where N = dims.len():
+                    //   y_s · (α − v_s − β·i_1(s) − β²·i_2(s) − … − β^N·i_N(s)) = m_s
+                    // All coords are slot-derived constants → the entire B-side
+                    // is a flat LC, no per-slot β multiplications needed.
+                    let n_keys = dims.len();
+                    // suffix[j] = ∏ d_{k} for k=j..n_keys (product of dims after position j-1)
+                    let mut suffix = vec![1usize; n_keys + 1];
+                    for j in (0..n_keys).rev() {
+                        suffix[j] = suffix[j + 1] * dims[j];
+                    }
+                    let mut sum_lhs: LC = vec![];
+                    for (s, v) in values.iter().enumerate() {
+                        let y = witness_layout.next_table_data();
+                        let m = table_info.multiplicities_witness_off + s;
+                        let mut b = vec![(alpha, crate::compiler::Field::ONE)];
+                        // -v_s
+                        for (w, coeff) in v.iter() {
+                            b.push((*w, -*coeff));
+                        }
+                        // -β^j · i_j(s) for j in 1..=n_keys (coords as constants)
+                        for j in 1..=n_keys {
+                            let i_j = (s / suffix[j]) % dims[j - 1];
+                            if i_j != 0 {
+                                b.push((beta_pow(j), -crate::compiler::Field::from(i_j as u64)));
+                            }
+                        }
+                        result.push(R1C {
+                            a: vec![(y, crate::compiler::Field::ONE)],
+                            b,
+                            c: vec![(m, crate::compiler::Field::ONE)],
+                        });
+                        sum_lhs.push((y, crate::compiler::Field::ONE));
+                    }
+                    result.push(R1C {
+                        a: sum_lhs,
+                        b: vec![(0, crate::compiler::Field::ONE)],
+                        c: vec![],
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
                 Table::Spread(bits) => {
-                    // Spread table: for each entry i in 0..2^bits, value = spread(i)
-                    // Width = 2 (key=i, value=spread(i)), same structure as OfElems
+                    // 2-column table: value column (β⁰) = spread(i), key column (β¹) = i.
+                    // Per slot: y · (α − spread(i) − β·i) = m_i. Both terms constant.
                     let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
                         let spread_val = ssa_mod::spread_bits(i as u128, 32);
-                        let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
-                        let x = witness_layout.next_table_data();
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
+                        let mut b = vec![
+                            (alpha, crate::compiler::Field::ONE),
+                            (0, -crate::compiler::Field::from(spread_val)),
+                        ];
+                        if i != 0 {
+                            b.push((beta_pow(1), -crate::compiler::Field::from(i as u64)));
+                        }
                         result.push(R1C {
-                            a: vec![(beta, crate::compiler::Field::ONE)],
-                            b: v,
-                            c: vec![(x, -crate::compiler::Field::ONE)],
-                        });
-                        result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
-                            b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
-                                (x, -crate::compiler::Field::ONE),
-                            ],
+                            a: vec![(y, crate::compiler::Field::ONE)],
+                            b,
                             c: vec![(m, crate::compiler::Field::ONE)],
                         });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                        sum_lhs.push((y, crate::compiler::Field::ONE));
                     }
                     result.push(R1C {
                         a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        b: vec![(0, crate::compiler::Field::ONE)],
                         c: vec![],
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
@@ -1101,56 +1177,55 @@ impl R1CGen {
 
         // lookups init
         for lookup in self.lookups.into_iter() {
-            // if lookup.elements.len() >= 2 {
-            //     todo!("wide tables");
-            // }
-
-            let y_wit = match lookup.elements.len() {
-                1 => {
-                    let y = witness_layout.next_lookups_data();
-                    let mut b = vec![(alpha, ark_bn254::Fr::ONE)];
-                    for (w, coeff) in lookup.elements[0].iter() {
-                        b.push((*w, -*coeff));
-                    }
-                    // y * (α - key) = flag
-                    result.push(R1C {
-                        a: vec![(y, ark_bn254::Fr::ONE)],
-                        b,
-                        c: lookup.flag.clone(),
-                    });
-                    y
+            let n_elems = lookup.elements.len();
+            assert!(n_elems >= 1, "lookup must have at least one element");
+            let y_wit = if n_elems == 1 {
+                // Rangecheck-style: denom = α − v  (where v is the value being checked).
+                let y = witness_layout.next_lookups_data();
+                let mut b = vec![(alpha, crate::compiler::Field::ONE)];
+                for (w, coeff) in lookup.elements[0].iter() {
+                    b.push((*w, -*coeff));
                 }
-                2 => {
+                result.push(R1C {
+                    a: vec![(y, crate::compiler::Field::ONE)],
+                    b,
+                    c: lookup.flag.clone(),
+                });
+                y
+            } else {
+                // Value at β⁰ = elements[0]; keys at β^j = elements[j], 1 ≤ j ≤ n_keys.
+                // For each key: aux x_j = β^j · k_j (R1C), then
+                //   y · (α − value − x_1 − … − x_{n_keys}) = flag.
+                let n_keys = n_elems - 1;
+                let mut xs = Vec::with_capacity(n_keys);
+                for j in 1..=n_keys {
                     let x = witness_layout.next_lookups_data();
-                    let y = witness_layout.next_lookups_data();
-                    // β * value = -x  (defines x = -β*value)
                     result.push(R1C {
-                        a: vec![(beta, crate::compiler::Field::ONE)],
-                        b: lookup.elements[1].clone(),
-                        c: vec![(x, -crate::compiler::Field::ONE)],
+                        a: vec![(beta_pow(j), crate::compiler::Field::ONE)],
+                        b: lookup.elements[j].clone(),
+                        c: vec![(x, crate::compiler::Field::ONE)],
                     });
-
-                    // y * (α - x - key) = flag
-                    let mut b = vec![
-                        (alpha, ark_bn254::Fr::ONE),
-                        (x, -crate::compiler::Field::ONE),
-                    ];
-                    for (w, coeff) in lookup.elements[0].iter() {
-                        b.push((*w, -*coeff));
-                    }
-                    result.push(R1C {
-                        a: vec![(y, ark_bn254::Fr::ONE)],
-                        b,
-                        c: lookup.flag.clone(),
-                    });
-                    y
+                    xs.push(x);
                 }
-                _ => panic!("unsupported lookup width {}", lookup.elements.len()),
+                let y = witness_layout.next_lookups_data();
+                let mut b = vec![(alpha, crate::compiler::Field::ONE)];
+                for (w, coeff) in lookup.elements[0].iter() {
+                    b.push((*w, -*coeff));
+                }
+                for x in xs {
+                    b.push((x, -crate::compiler::Field::ONE));
+                }
+                result.push(R1C {
+                    a: vec![(y, crate::compiler::Field::ONE)],
+                    b,
+                    c: lookup.flag.clone(),
+                });
+                y
             };
 
             result[table_infos[lookup.table_id].sum_constraint_idx]
                 .c
-                .push((y_wit, ark_bn254::Fr::ONE));
+                .push((y_wit, crate::compiler::Field::ONE));
         }
 
         constraints_layout.lookups_data_size =

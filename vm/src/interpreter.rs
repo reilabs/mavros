@@ -295,7 +295,7 @@ pub fn run_phase2(
         let base = tbl.elem_inverses_constraint_section_offset;
 
         if tbl.num_values == 0 {
-            // Width-1 table (rangecheck): denom_i = α - i
+            // Width-1 table (rangecheck): denom_i = α − i
             for i in 0..tbl.length {
                 let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
                 let denom = alpha - Field::from(i as u64);
@@ -312,27 +312,22 @@ pub fn run_phase2(
                 "expected width-2 table, got num_values={}",
                 tbl.num_values
             );
-            // Width-2 table (array): x_i = -β*v_i, denom_i = α - i - x_i
+            // β-power LogUp (1-D): denom_i = α − v_i − β·i.
+            // Phase 1 stashed v_i in out_a[base + i]; we overwrite a/b/c with the
+            // real R1C values (y_i is filled by batch inversion at the bottom).
             let beta = phase1.out_wit_post_comm[1];
             for i in 0..tbl.length {
                 let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-
-                // Read v_i from the x-slot where the VM dumped it
-                let v_i = phase1.out_a[base + 2 * i];
-                let x_i = -beta * v_i;
-
-                // Fill x-constraint: β * v_i = -x_i
-                phase1.out_a[base + 2 * i] = beta;
-                phase1.out_b[base + 2 * i] = v_i;
-                phase1.out_c[base + 2 * i] = -x_i;
-
-                // Fill y-constraint slots (will be overwritten by batch inversion)
-                let denom = alpha - Field::from(i as u64) - x_i;
-                phase1.out_b[base + 2 * i + 1] = denom;
-                phase1.out_c[base + 2 * i + 1] = multiplicity;
+                let v_i = phase1.out_a[base + i];
+                let denom = alpha - v_i - beta * Field::from(i as u64);
+                phase1.out_b[base + i] = denom;
+                phase1.out_c[base + i] = multiplicity;
                 if multiplicity != Field::ZERO {
-                    phase1.out_a[base + 2 * i + 1] = running_prod;
+                    phase1.out_a[base + i] = running_prod;
                     running_prod *= denom;
+                } else {
+                    // Clear the stashed v_i if this slot's y is 0 (no contribution).
+                    phase1.out_a[base + i] = Field::ZERO;
                 }
             }
         }
@@ -343,34 +338,14 @@ pub fn run_phase2(
     for tbl in phase1.tables.iter().rev() {
         let base = tbl.elem_inverses_constraint_section_offset;
 
-        if tbl.num_values == 0 {
-            // Width-1: y-values at consecutive offsets
-            for i in (0..tbl.length).rev() {
-                let multiplicity = phase1.out_c[base + i];
-                let denom = phase1.out_b[base + i];
-                let running_prod = phase1.out_a[base + i];
-                if multiplicity != Field::ZERO {
-                    let elem = running_prod * running_inv;
-                    phase1.out_a[base + i] = elem;
-                    running_inv *= denom;
-                }
-            }
-        } else {
-            assert_eq!(
-                tbl.num_values, 1,
-                "expected width-2 table, got num_values={}",
-                tbl.num_values
-            );
-            // Width-2: y-values at odd offsets
-            for i in (0..tbl.length).rev() {
-                let multiplicity = phase1.out_c[base + 2 * i + 1];
-                let denom = phase1.out_b[base + 2 * i + 1];
-                let running_prod = phase1.out_a[base + 2 * i + 1];
-                if multiplicity != Field::ZERO {
-                    let elem = running_prod * running_inv;
-                    phase1.out_a[base + 2 * i + 1] = elem;
-                    running_inv *= denom;
-                }
+        for i in (0..tbl.length).rev() {
+            let multiplicity = phase1.out_c[base + i];
+            let denom = phase1.out_b[base + i];
+            let running_prod_i = phase1.out_a[base + i];
+            if multiplicity != Field::ZERO {
+                let elem = running_prod_i * running_inv;
+                phase1.out_a[base + i] = elem;
+                running_inv *= denom;
             }
         }
     }
@@ -389,7 +364,7 @@ pub fn run_phase2(
         let alpha = phase1.out_wit_post_comm[0];
 
         if table.num_values == 0 {
-            // Width-1 lookup (rangecheck): 1 constraint per lookup
+            // Width-1 lookup (rangecheck): 1 R1C, y · (α − key) = flag.
             let flag_u64 = phase1.out_c[cnst_off].0.0[0];
 
             if flag_u64 == 0 {
@@ -418,41 +393,42 @@ pub fn run_phase2(
                 "expected width-2 table, got num_values={}",
                 table.num_values
             );
-            // Width-2 lookup (array): 2 constraints per lookup
-            // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
-            // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
+            // β-power LogUp lookup (1-D), 2 R1Cs per query:
+            //   R1C 1 (β · key = x₁):   tape (table_id, key,   0)
+            //   R1C 2 (y · (α−v−x₁)=f): tape (table_id, value, flag_u64)
             let beta = phase1.out_wit_post_comm[1];
-            let result_value = phase1.out_b[cnst_off];
+            let key = phase1.out_b[cnst_off];
+            let value = phase1.out_b[cnst_off + 1];
             let flag_u64 = phase1.out_c[cnst_off + 1].0.0[0];
 
-            // x-constraint: β * value = -x → x = -β * value
-            let x = -beta * result_value;
+            // R1C 1: β · key = x₁
+            let x = beta * key;
             phase1.out_a[cnst_off] = beta;
-            phase1.out_b[cnst_off] = result_value;
-            phase1.out_c[cnst_off] = -x;
+            phase1.out_b[cnst_off] = key;
+            phase1.out_c[cnst_off] = x;
             phase1.out_wit_post_comm[wit_off] = x;
 
-            // y-constraint: y * (α - key - x) = flag
+            // R1C 2: y · (α − value − x₁) = flag
             let y_cnst_off = cnst_off + 1;
             let y_wit_off = wit_off + 1;
+            let denom = alpha - value - x;
 
             if flag_u64 == 0 {
-                let key = phase1.out_b[y_cnst_off];
-                let b_val = alpha - key - x;
                 phase1.out_a[y_cnst_off] = Field::ZERO;
-                phase1.out_b[y_cnst_off] = b_val;
+                phase1.out_b[y_cnst_off] = denom;
                 phase1.out_c[y_cnst_off] = Field::ZERO;
                 phase1.out_wit_post_comm[y_wit_off] = Field::ZERO;
             } else {
-                let ix_in_table = phase1.out_b[y_cnst_off].0.0[0];
+                // key is a full Montgomery Field; extract its integer value for
+                // the table-slot index.
+                let ix_in_table = ark_ff::PrimeField::into_bigint(key).0[0];
                 let tbl_base = table.elem_inverses_constraint_section_offset;
-                // Copy precomputed inverse from table's y-slot (odd offset)
-                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + 2 * ix_in_table as usize + 1];
-                phase1.out_b[y_cnst_off] = phase1.out_b[tbl_base + 2 * ix_in_table as usize + 1];
+                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + ix_in_table as usize];
+                phase1.out_b[y_cnst_off] = denom;
                 phase1.out_c[y_cnst_off] = Field::from(flag_u64);
                 phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
-                // Add to sum constraint (at offset 2*n in wide table)
-                let sum_off = tbl_base + 2 * table.length;
+                // Accumulate into the sum constraint at offset `length`.
+                let sum_off = tbl_base + table.length;
                 phase1.out_c[sum_off] += phase1.out_a[y_cnst_off];
             }
 
@@ -464,39 +440,18 @@ pub fn run_phase2(
         let base = tbl.elem_inverses_constraint_section_offset;
         let wit_base = tbl.elem_inverses_witness_section_offset;
 
-        if tbl.num_values == 0 {
-            // Width-1: y-values at consecutive offsets, sum constraint at offset length
-            for i in 0..tbl.length {
-                let multiplicity = phase1.out_c[base + i];
-                if multiplicity != Field::ZERO {
-                    let elem = phase1.out_a[base + i] * multiplicity;
-                    phase1.out_a[base + i] = elem;
-                    phase1.out_wit_post_comm[wit_base + i] = elem;
-                    phase1.out_a[base + tbl.length] += elem;
-                }
+        // β-power LogUp uses one y-witness per slot for both KeyOnly and KeyValue.
+        // Sum constraint sits at offset `length`.
+        for i in 0..tbl.length {
+            let multiplicity = phase1.out_c[base + i];
+            if multiplicity != Field::ZERO {
+                let elem = phase1.out_a[base + i] * multiplicity;
+                phase1.out_a[base + i] = elem;
+                phase1.out_wit_post_comm[wit_base + i] = elem;
+                phase1.out_a[base + tbl.length] += elem;
             }
-            phase1.out_b[base + tbl.length] = Field::ONE;
-        } else {
-            assert_eq!(
-                tbl.num_values, 1,
-                "expected width-2 table, got num_values={}",
-                tbl.num_values
-            );
-            // Width-2: y-values at odd offsets, sum constraint at offset 2*length
-            for i in 0..tbl.length {
-                let multiplicity = phase1.out_c[base + 2 * i + 1];
-                if multiplicity != Field::ZERO {
-                    let elem = phase1.out_a[base + 2 * i + 1] * multiplicity;
-                    phase1.out_a[base + 2 * i + 1] = elem;
-                    // x witness at even offset, y witness at odd offset
-                    phase1.out_wit_post_comm[wit_base + 2 * i + 1] = elem;
-                    phase1.out_a[base + 2 * tbl.length] += elem;
-                }
-                // x witness: x_i = -β * v_i; out_c stores -x_i = β*v_i, so negate
-                phase1.out_wit_post_comm[wit_base + 2 * i] = -phase1.out_c[base + 2 * i];
-            }
-            phase1.out_b[base + 2 * tbl.length] = Field::ONE;
         }
+        phase1.out_b[base + tbl.length] = Field::ONE;
     }
 
     WitgenResult {
