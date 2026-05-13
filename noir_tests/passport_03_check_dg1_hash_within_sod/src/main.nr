@@ -37,9 +37,9 @@ fn check_zero_padding<let N: u32>(padded_array: [u8; N], len: u32) {
 fn main(
     dg1: [u8; 95],
     dg1_padded_length: u64,
-    _current_date: pub u64,
-    _min_age_required: pub u8,
-    _max_age_required: pub u8,
+    current_date: pub u64,
+    min_age_required: pub u8,
+    max_age_required: pub u8,
     passport_validity_contents: PassportValidityContents,
 ) {
     check_zero_padding(
