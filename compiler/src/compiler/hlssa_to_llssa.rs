@@ -1510,8 +1510,7 @@ fn lower_ref_store(
     if needs_drop(&inner_type.expr) {
         let drop_fn = get_or_create_drop_fn(inner_type, llssa, drop_fns, ad_fns);
         let old = e.ll_load(slot, LLType::Ptr);
-        let null = e.null_ptr();
-        let is_null = e.int_eq(old, null);
+        let is_null = e.is_null(old);
         e.build_if_else(
             is_null,
             vec![],
@@ -2409,8 +2408,7 @@ fn generate_drop_function_for_ref(
 
                     let slot = e.struct_field_ptr(ptr, rc_struct.clone(), 1);
                     let inner_val = e.ll_load(slot, LLType::Ptr);
-                    let null = e.null_ptr();
-                    let is_null = e.int_eq(inner_val, null);
+                    let is_null = e.is_null(inner_val);
                     e.build_if_else(
                         is_null,
                         vec![],

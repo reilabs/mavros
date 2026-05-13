@@ -727,6 +727,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.value_map.insert(*result, val.into());
             }
 
+            LLOp::IsNull { result, ptr } => {
+                let p = self.value_map[ptr].into_pointer_value();
+                let val = self
+                    .builder
+                    .build_is_null(p, &format!("v{}", result.0))
+                    .unwrap();
+                self.value_map.insert(*result, val.into());
+            }
+
             LLOp::Not { result, value } => {
                 let val = self.value_map[value].into_int_value();
                 let not_val = self
