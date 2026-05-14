@@ -5,6 +5,7 @@ use std::{
 };
 
 use ark_ff::AdditiveGroup as _;
+use inkwell::OptimizationLevel;
 use noirc_frontend::debug::DebugInstrumenter;
 use noirc_frontend::monomorphization::Monomorphizer;
 use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
@@ -64,6 +65,7 @@ pub struct Driver {
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
+    wasm_opt_level: OptimizationLevel,
 }
 
 #[derive(Debug)]
@@ -101,7 +103,16 @@ impl Driver {
             abi: None,
             draw_cfg,
             main_is_unconstrained: false,
+            wasm_opt_level: OptimizationLevel::Aggressive,
         }
+    }
+
+    /// Override the LLVM optimization level used when emitting wasm32 objects.
+    /// `None` switches LLVM to FastISel + FastRegAlloc, which is dramatically
+    /// faster on large functions at the cost of unoptimized output — useful
+    /// for test pipelines that just need to validate correctness.
+    pub fn set_wasm_opt_level(&mut self, level: OptimizationLevel) {
+        self.wasm_opt_level = level;
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
@@ -448,7 +459,6 @@ impl Driver {
     ) -> Result<Option<String>, Error> {
         use crate::compiler::hlssa_to_llssa;
         use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         self.prepare_base_witgen_ssa();
@@ -498,7 +508,7 @@ impl Driver {
 
         if let Some(wasm_path) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
-            codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+            codegen.compile_to_wasm(&wasm_path, self.wasm_opt_level);
             info!(message = %"WASM object generated", path = %wasm_path.display());
             self.write_wasm_metadata(&wasm_path, r1cs)?;
         }
@@ -514,7 +524,6 @@ impl Driver {
     ) -> Result<(), Error> {
         use crate::compiler::hlssa_to_llssa;
         use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         // Prepare AD SSA: same pass pipeline as compile_ad()
@@ -568,7 +577,7 @@ impl Driver {
         codegen.compile(&llssa, &ll_flow_analysis);
 
         codegen.write_ir(&wasm_path.with_extension("ll"));
-        codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+        codegen.compile_to_wasm(&wasm_path, self.wasm_opt_level);
         info!(message = %"AD WASM object generated", path = %wasm_path.display());
         self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
 

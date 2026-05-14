@@ -10,7 +10,7 @@ use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
 use mavros_compiler::{
-    Project, abi_helpers,
+    OptimizationLevel, Project, abi_helpers,
     compiler::Field,
     compiler::r1cs_gen::R1CS,
     driver::Driver,
@@ -90,6 +90,9 @@ fn run_single(root: PathBuf) {
     let driver = (|| {
         let project = Project::new(root.clone()).ok()?;
         let mut driver = Driver::new(project, false);
+        // Tests don't need optimized wasm output, only correct output;
+        // skipping SelectionDAG saves ~6x on wasm32 codegen for large circuits.
+        driver.set_wasm_opt_level(OptimizationLevel::None);
         driver.run_noir_compiler().ok()?;
         driver.make_struct_access_static().ok()?;
         driver.monomorphize().ok()?;

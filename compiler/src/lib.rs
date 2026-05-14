@@ -10,6 +10,7 @@ pub use mavros_artifacts as artifacts;
 pub use mavros_vm as vm;
 
 pub use error::Error;
+pub use inkwell::OptimizationLevel;
 pub use project::Project;
 
 pub mod api;
