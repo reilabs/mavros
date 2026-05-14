@@ -919,9 +919,10 @@ impl CodeGen {
                         items: args,
                     });
                 }
-                ssa::OpCode::MkRepeatedArray {
+                ssa::OpCode::MkRepeated {
                     result: r,
                     element,
+                    seq_type: _,
                     count,
                     elem_type: eltype,
                 } => {

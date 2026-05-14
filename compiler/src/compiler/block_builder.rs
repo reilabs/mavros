@@ -334,11 +334,18 @@ pub trait HLEmitter {
         r
     }
 
-    fn mk_repeated_array(&mut self, element: ValueId, count: usize, elem_type: Type) -> ValueId {
+    fn mk_repeated(
+        &mut self,
+        element: ValueId,
+        seq_type: SeqType,
+        count: usize,
+        elem_type: Type,
+    ) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::MkRepeatedArray {
+        self.emit(OpCode::MkRepeated {
             result: r,
             element,
+            seq_type,
             count,
             elem_type,
         });

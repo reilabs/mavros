@@ -607,7 +607,7 @@ impl PrepareEntryPoint {
             return e.mk_seq(Vec::new(), SeqType::Array(0), inner.clone());
         }
         let default_elem = Self::emit_default_value(e, inner);
-        e.mk_repeated_array(default_elem, size, inner.clone())
+        e.mk_repeated(default_elem, SeqType::Array(size), size, inner.clone())
     }
 
     fn emit_reconstruct_child_input_array(

@@ -702,9 +702,10 @@ impl WitnessTypeInference {
                             WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
                         );
                     }
-                    OpCode::MkRepeatedArray {
+                    OpCode::MkRepeated {
                         result,
                         element,
+                        seq_type: _,
                         count: _,
                         elem_type: tp,
                     } => {

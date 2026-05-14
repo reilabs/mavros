@@ -124,9 +124,10 @@ impl UntaintControlFlow {
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
-                    OpCode::MkRepeatedArray {
+                    OpCode::MkRepeated {
                         result: r,
                         element,
+                        seq_type,
                         count,
                         elem_type: tp,
                     } => {
@@ -134,9 +135,10 @@ impl UntaintControlFlow {
                             .get_value_witness_type(r)
                             .child_witness_type()
                             .unwrap();
-                        OpCode::MkRepeatedArray {
+                        OpCode::MkRepeated {
                             result: r,
                             element,
+                            seq_type,
                             count,
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
@@ -580,10 +582,11 @@ impl UntaintControlFlow {
                     },
                 );
             }
-            // -- Cast insertion for MkRepeatedArray --
-            OpCode::MkRepeatedArray {
+            // -- Cast insertion for MkRepeated --
+            OpCode::MkRepeated {
                 result: r,
                 element,
+                seq_type,
                 count,
                 elem_type: ref tp,
             } if type_info.is_some() => {
@@ -600,9 +603,10 @@ impl UntaintControlFlow {
                 maybe_guard(
                     new_instructions,
                     block_taint,
-                    OpCode::MkRepeatedArray {
+                    OpCode::MkRepeated {
                         result: r,
                         element: new_element,
+                        seq_type,
                         count,
                         elem_type: target_elem_type,
                     },

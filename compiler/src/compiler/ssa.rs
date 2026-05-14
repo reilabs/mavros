@@ -749,9 +749,10 @@ pub enum OpCode {
         seq_type: SeqType,
         elem_type: Type,
     },
-    MkRepeatedArray {
+    MkRepeated {
         result: ValueId,
         element: ValueId,
+        seq_type: SeqType,
         count: usize,
         elem_type: Type,
     },
@@ -1226,18 +1227,20 @@ impl Instruction for OpCode {
                     typ
                 )
             }
-            OpCode::MkRepeatedArray {
+            OpCode::MkRepeated {
                 result,
                 element,
+                seq_type,
                 count,
                 elem_type,
             } => {
                 format!(
-                    "v{}{} = [v{}; {}] of {}",
+                    "v{}{} = [v{}; {}] : {} of {}",
                     result.0,
                     annotate_value(*result),
                     element.0,
                     count,
+                    seq_type,
                     elem_type
                 )
             }
@@ -1598,9 +1601,10 @@ impl Instruction for OpCode {
                 seq_type: _,
                 elem_type: _,
             } => inputs.iter().collect::<Vec<_>>().into_iter(),
-            Self::MkRepeatedArray {
+            Self::MkRepeated {
                 result: _,
                 element,
+                seq_type: _,
                 count: _,
                 elem_type: _,
             } => vec![element].into_iter(),
@@ -1716,7 +1720,7 @@ impl Instruction for OpCode {
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
-            | Self::MkRepeatedArray { result: r, .. }
+            | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::Truncate { result: r, .. }
@@ -1880,9 +1884,10 @@ impl Instruction for OpCode {
                 seq_type: _,
                 elem_type: _,
             } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
-            Self::MkRepeatedArray {
+            Self::MkRepeated {
                 result: _,
                 element,
+                seq_type: _,
                 count: _,
                 elem_type: _,
             } => vec![element].into_iter(),
@@ -2132,9 +2137,10 @@ impl Instruction for OpCode {
                 ret_vec.extend(inputs);
                 ret_vec.into_iter()
             }
-            Self::MkRepeatedArray {
+            Self::MkRepeated {
                 result: r,
                 element,
+                seq_type: _,
                 count: _,
                 elem_type: _,
             } => vec![r, element].into_iter(),

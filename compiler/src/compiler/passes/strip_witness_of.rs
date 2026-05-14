@@ -91,7 +91,7 @@ impl StripWitnessOf {
             OpCode::MkSeq { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
-            OpCode::MkRepeatedArray { elem_type, .. } => {
+            OpCode::MkRepeated { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
             OpCode::Alloc { elem_type, .. } => {

@@ -321,9 +321,10 @@ impl Mem2Reg {
                             return false;
                         }
                     }
-                    OpCode::MkRepeatedArray {
+                    OpCode::MkRepeated {
                         result: _,
                         element: _,
+                        seq_type: _,
                         count: _,
                         elem_type: typ,
                     } => {

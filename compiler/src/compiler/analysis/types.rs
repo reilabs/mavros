@@ -414,13 +414,14 @@ impl Types {
                 function_info.values.insert(*r, top_tp.of(t.clone()));
                 Ok(())
             }
-            OpCode::MkRepeatedArray {
+            OpCode::MkRepeated {
                 result: r,
                 element: _,
-                count,
+                seq_type: top_tp,
+                count: _,
                 elem_type: t,
             } => {
-                function_info.values.insert(*r, t.clone().array_of(*count));
+                function_info.values.insert(*r, top_tp.of(t.clone()));
                 Ok(())
             }
             OpCode::Cast {

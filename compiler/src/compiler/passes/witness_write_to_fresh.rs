@@ -55,7 +55,7 @@ impl WitnessWriteToFresh {
                         OpCode::Cmp { .. }
                         | OpCode::Cast { .. }
                         | OpCode::MkSeq { .. }
-                        | OpCode::MkRepeatedArray { .. }
+                        | OpCode::MkRepeated { .. }
                         | OpCode::Alloc { .. }
                         | OpCode::BinaryArithOp { .. }
                         | OpCode::Truncate { .. }

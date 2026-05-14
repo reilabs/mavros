@@ -120,9 +120,10 @@ impl WitnessLowering {
                                 elem_type: new_elem_type,
                             });
                         }
-                        OpCode::MkRepeatedArray {
+                        OpCode::MkRepeated {
                             result: r,
                             element,
+                            seq_type,
                             count,
                             elem_type: tp,
                         } => {
@@ -133,9 +134,10 @@ impl WitnessLowering {
                                 type_info,
                                 &mut emitter,
                             );
-                            emitter.emit(OpCode::MkRepeatedArray {
+                            emitter.emit(OpCode::MkRepeated {
                                 result: r,
                                 element: new_element,
+                                seq_type,
                                 count,
                                 elem_type: new_elem_type,
                             });
@@ -582,7 +584,12 @@ impl WitnessLowering {
             return b.mk_seq(Vec::new(), SeqType::Array(0), elem_type.clone());
         }
         let dummy_elem = self.create_dummy_value(elem_type, b);
-        b.mk_repeated_array(dummy_elem, array_len, elem_type.clone())
+        b.mk_repeated(
+            dummy_elem,
+            SeqType::Array(array_len),
+            array_len,
+            elem_type.clone(),
+        )
     }
 
     /// Create a single dummy value of the given target type.

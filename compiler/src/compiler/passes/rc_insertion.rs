@@ -356,16 +356,17 @@ impl RCInsertion {
                         }
                         currently_live.extend(inputs);
                     }
-                    OpCode::MkRepeatedArray {
+                    OpCode::MkRepeated {
                         result,
                         element,
+                        seq_type: _,
                         count,
                         elem_type,
                     } => {
-                        // MkRepeatedArray should return an RC counter of 1.
+                        // MkRepeated should return an RC counter of 1.
                         new_instructions.push(instruction.clone());
                         if self.type_needs_rc(elem_type) {
-                            // The element is aliased `count` times into the array.
+                            // The element is aliased `count` times into the seq.
                             // Each repetition needs a bump; we then decrease by one
                             // if the original value dies here.
                             let mut bump = *count;
@@ -381,7 +382,7 @@ impl RCInsertion {
                         }
                         if !currently_live.contains(result) {
                             panic!(
-                                "ICE: Result of MkRepeatedArray is immediately dropped. This is a bug."
+                                "ICE: Result of MkRepeated is immediately dropped. This is a bug."
                             )
                         }
                         currently_live.insert(*element);

@@ -778,7 +778,7 @@ impl ExplicitWitness {
             } => {
                 b.push(instruction);
             }
-            OpCode::MkRepeatedArray { .. } => {
+            OpCode::MkRepeated { .. } => {
                 b.push(instruction);
             }
             OpCode::MkTuple { .. } => {
@@ -1322,7 +1322,7 @@ impl ExplicitWitness {
             OpCode::Cast { .. }
             | OpCode::Const { .. }
             | OpCode::MkSeq { .. }
-            | OpCode::MkRepeatedArray { .. }
+            | OpCode::MkRepeated { .. }
             | OpCode::MkTuple { .. }
             | OpCode::TupleProj { .. } => {
                 // Pure data construction/access — no constraints. Emit unconditionally.

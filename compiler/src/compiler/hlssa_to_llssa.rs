@@ -780,13 +780,14 @@ fn lower_instruction(
             lower_mk_array(e, val_map, *result, elems, elem_type, *count);
         }
 
-        OpCode::MkRepeatedArray {
+        OpCode::MkRepeated {
             result,
             element,
+            seq_type: _,
             count,
             elem_type,
         } => {
-            lower_mk_repeated_array(e, val_map, *result, *element, elem_type, *count);
+            lower_mk_repeated(e, val_map, *result, *element, elem_type, *count);
         }
 
         OpCode::ArrayGet {
@@ -1443,11 +1444,12 @@ fn lower_mk_array(
     val_map.insert(result, arr);
 }
 
-/// Lower MkRepeatedArray to heap allocation + a counted loop that stores the
+/// Lower MkRepeated to heap allocation + a counted loop that stores the
 /// element at each index.  The HLSSA-level RC pass has already bumped the
 /// element's refcount by `count`, so we just spread the same `ll_element`
-/// across all slots.
-fn lower_mk_repeated_array(
+/// across all slots.  Used for both arrays and slices — at the LL level the
+/// runtime layout is identical.
+fn lower_mk_repeated(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
