@@ -189,7 +189,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                // Box::new(FlattenArrays::new()),
+                Box::new(FlattenArrays::new()),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
