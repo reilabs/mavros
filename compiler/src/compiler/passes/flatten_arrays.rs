@@ -106,9 +106,6 @@ fn run_flatten(ssa: &mut HLSSA, type_info: &TypeInfo) {
 }
 
 fn flatten_function(ssa: &mut HLSSA, fid: FunctionId, type_info: &TypeInfo) {
-    if !type_info.has_function(fid) {
-        return;
-    }
     let fn_type_info = type_info.get_function(fid);
 
     // Snapshot ORIGINAL types per value before mutating anything. We use

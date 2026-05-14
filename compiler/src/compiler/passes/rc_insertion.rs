@@ -510,27 +510,23 @@ impl RCInsertion {
                         start: _,
                         length: _,
                     } => {
-                        // SliceArray creates a view that holds a reference to `array`.
-                        // Treat like ArrayGet of a heap-allocated element: the view bumps
-                        // the parent if the parent is still live afterwards.
+                        // SliceArray allocates a fresh view header at RC=1 and the
+                        // VM opcode bumps the parent's RC internally to record the
+                        // view's reference. Unlike ArrayGet, the result is NOT
+                        // aliased with anything pre-existing, so no producer-side
+                        // bump is needed — use sites bump as required by the
+                        // standard rc_insertion convention.
                         if !currently_live.contains(array) {
                             new_instructions.push(OpCode::MemOp {
                                 kind: MemOp::Drop,
                                 value: *array,
                             });
                         }
-                        if self.needs_rc(type_info, result) {
-                            if currently_live.contains(result) {
-                                new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
-                                    value: *result,
-                                });
-                            } else {
-                                panic!(
-                                    "ICE: Result of SliceArray (V{} in block {}) is not live. This is a bug.",
-                                    result.0, block_id.0
-                                )
-                            }
+                        if !currently_live.contains(result) {
+                            panic!(
+                                "ICE: Result of SliceArray (V{} in block {}) is not live. This is a bug.",
+                                result.0, block_id.0
+                            );
                         }
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*array);
