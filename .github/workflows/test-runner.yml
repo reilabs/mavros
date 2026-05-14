@@ -104,12 +104,20 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
+      # Curated cache: include only the pieces that are expensive to rebuild
+      # and exclude the regeneratable ones. Notably we skip
+      # `~/.cargo/registry/src` (cargo unpacks this from `registry/cache/*.crate`
+      # on demand) and `target/release/{incremental,examples}` (unused on CI).
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            target
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            target/release/deps
+            target/release/build
+            target/release/.fingerprint
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
