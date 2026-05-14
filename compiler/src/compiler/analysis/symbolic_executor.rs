@@ -274,8 +274,7 @@ impl SymbolicExecutor {
                     } => {
                         let elem = scope[element.0 as usize].as_ref().unwrap().clone();
                         let a = vec![elem; *count];
-                        scope[r.0 as usize] =
-                            Some(V::mk_array(a, ctx, *seq_type, elem_type));
+                        scope[r.0 as usize] = Some(V::mk_array(a, ctx, *seq_type, elem_type));
                     }
                     crate::compiler::ssa::OpCode::Alloc {
                         result: r,

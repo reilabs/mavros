@@ -1001,9 +1001,9 @@ impl<'a> ExpressionConverter<'a> {
                     SeqType::Array(len)
                 };
                 let elem_type = self.type_converter.convert_type(elem_ast_type);
-                let result = b
-                    .block(self.current_block)
-                    .mk_repeated(element_val, seq_type, len, elem_type);
+                let result =
+                    b.block(self.current_block)
+                        .mk_repeated(element_val, seq_type, len, elem_type);
                 Some(result)
             }
             Literal::Str(s) => {
