@@ -785,6 +785,23 @@ pub enum OpCode {
         array: ValueId,
         index: ValueId,
     },
+    /// Witness-indexed lookup into an N-D pure array (or a partial-application
+    /// descriptor of one). The dispatch is by `result`'s type:
+    /// - `WitnessOf(Array<…>)`: *extending* — produces a (possibly extended)
+    ///   descriptor carrying root and accumulated keys; no R1CS constraint.
+    /// - `WitnessOf(scalar)`: *saturating* — emits one multi-key Lookup
+    ///   against the root array, with all accumulated keys + this `index`,
+    ///   and pins the looked-up value via `WriteWitness`.
+    ///
+    /// `array` may be either a pure `Array<…>` (first witness step) or a
+    /// `WitnessOf(Array<…>)` descriptor (chained step). `flag` is the lookup
+    /// activation flag (1 outside guards; condition inside).
+    WitnessArrayGet {
+        result: ValueId,
+        array: ValueId,
+        index: ValueId,
+        flag: ValueId,
+    },
     ArraySet {
         result: ValueId,
         array: ValueId,
@@ -1064,6 +1081,21 @@ impl Instruction for OpCode {
                     annotate_value(*result),
                     array.0,
                     index.0
+                )
+            }
+            OpCode::WitnessArrayGet {
+                result,
+                array,
+                index,
+                flag,
+            } => {
+                format!(
+                    "v{}{} = witness_array_get(v{}, v{}, flag=v{})",
+                    result.0,
+                    annotate_value(*result),
+                    array.0,
+                    index.0,
+                    flag.0
                 )
             }
             OpCode::ArraySet {
@@ -1487,6 +1519,12 @@ impl Instruction for OpCode {
                 array: b,
                 index: c,
             } => vec![b, c].into_iter(),
+            Self::WitnessArrayGet {
+                result: _,
+                array,
+                index,
+                flag,
+            } => vec![array, index, flag].into_iter(),
             Self::Spread {
                 result: _,
                 value: v,
@@ -1684,6 +1722,7 @@ impl Instruction for OpCode {
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
+            | Self::WitnessArrayGet { result: r, .. }
             | Self::ArraySet { result: r, .. }
             | Self::SlicePush { result: r, .. }
             | Self::SliceLen { result: r, .. }
@@ -1766,6 +1805,12 @@ impl Instruction for OpCode {
                 const_val: b,
                 var: c,
             } => vec![b, c].into_iter(),
+            Self::WitnessArrayGet {
+                result: _,
+                array,
+                index,
+                flag,
+            } => vec![array, index, flag].into_iter(),
             Self::Spread {
                 result: _,
                 value: v,
@@ -1986,6 +2031,12 @@ impl Instruction for OpCode {
                 const_val: b,
                 var: c,
             } => vec![a, b, c].into_iter(),
+            Self::WitnessArrayGet {
+                result,
+                array,
+                index,
+                flag,
+            } => vec![result, array, index, flag].into_iter(),
             Self::Cast {
                 result: a,
                 value: b,

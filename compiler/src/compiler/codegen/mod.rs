@@ -88,6 +88,13 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
+    /// Reserve a ptr-sized scratch slot not bound to any SSA value.
+    fn alloc_ptr_temp(&mut self) -> bytecode::FramePosition {
+        let r = self.next_free;
+        self.next_free += 1;
+        bytecode::FramePosition(r)
+    }
+
     fn type_size(&self, tp: &Type) -> usize {
         match tp.expr {
             TypeExpr::Field => bytecode::LIMBS,
@@ -313,6 +320,18 @@ impl CodeGen {
             layouter.alloc_value(*param, tp);
         }
 
+        // Build a def map so `WitnessArrayGet` codegen can tell whether its
+        // `array` operand is a pure root or a descriptor produced by a prior
+        // extending `WitnessArrayGet`.
+        let mut def_map: HashMap<ssa::ValueId, ssa::OpCode> = HashMap::new();
+        for (_, block) in function.get_blocks() {
+            for instr in block.get_instructions() {
+                for result in <ssa::OpCode as ssa::Instruction>::get_results(instr) {
+                    def_map.insert(*result, instr.clone());
+                }
+            }
+        }
+
         self.run_block_body(
             function,
             function.get_entry_id(),
@@ -323,6 +342,7 @@ impl CodeGen {
             &mut emitter,
             global_layouter,
             struct_interner,
+            &def_map,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -343,6 +363,7 @@ impl CodeGen {
                 &mut emitter,
                 global_layouter,
                 struct_interner,
+                &def_map,
             );
         }
 
@@ -446,6 +467,7 @@ impl CodeGen {
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
         struct_interner: &mut StructLayoutInterner,
+        def_map: &HashMap<ssa::ValueId, ssa::OpCode>,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -842,6 +864,77 @@ impl CodeGen {
                             .type_size(&type_info.get_value_type(*arr).get_array_element()),
                     });
                 }
+                ssa::OpCode::WitnessArrayGet {
+                    result: r,
+                    array,
+                    index,
+                    flag,
+                } => {
+                    // After StripWitnessOf, types don't reveal descriptor vs
+                    // pure-root; use the def map to tell. If `array`'s def is
+                    // another `WitnessArrayGet` whose result was Array-typed
+                    // (extending step), then `array` is a runtime descriptor;
+                    // otherwise it's the pure root array.
+                    let array_is_descriptor = matches!(
+                        def_map.get(array),
+                        Some(ssa::OpCode::WitnessArrayGet { result: prev_res, .. })
+                            if type_info.get_value_type(*prev_res).strip_witness().is_array()
+                    );
+                    let result_type = type_info.get_value_type(*r);
+                    let result_is_scalar = matches!(
+                        result_type.strip_witness().expr,
+                        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)
+                    );
+
+                    let res = layouter.alloc_value(*r, result_type);
+                    let array_pos = layouter.get_value(*array);
+                    let index_pos = layouter.get_value(*index);
+                    let flag_pos = layouter.get_value(*flag);
+
+                    match (array_is_descriptor, result_is_scalar) {
+                        (false, true) => {
+                            panic!(
+                                "ICE: WitnessArrayGet with pure root + scalar result should be \
+                                 handled by `gen_witness_array_get`, not emitted as WitnessArrayGet"
+                            );
+                        }
+                        (false, false) => {
+                            // First extending step on a pure root: allocate a
+                            // 1-key descriptor.
+                            emitter.push_op(bytecode::OpCode::MakeWitnessDescriptor {
+                                root: array_pos,
+                                key: index_pos,
+                                result: res,
+                            });
+                        }
+                        (true, false) => {
+                            // Subsequent extending step: extend the prior
+                            // descriptor with the new key.
+                            emitter.push_op(bytecode::OpCode::ExtendWitnessDescriptor {
+                                desc_in: array_pos,
+                                new_key: index_pos,
+                                result: res,
+                            });
+                        }
+                        (true, true) => {
+                            // Saturating step: emit the multi-key Lookup tape +
+                            // multiplicity bump + leaf-pin.
+                            //
+                            // The leaf stride and elem_kind come from the root's
+                            // leaf element type. Walk the result type — since
+                            // result is the scalar, `result_type` is the leaf.
+                            let (leaf_stride, elem_kind) = lookup_elem_kind(result_type);
+                            emitter.push_op(bytecode::OpCode::WitnessArrayLookupField {
+                                desc: array_pos,
+                                new_key: index_pos,
+                                result: res,
+                                flag: flag_pos,
+                                leaf_stride,
+                                elem_kind,
+                            });
+                        }
+                    }
+                }
                 ssa::OpCode::TupleProj {
                     result: r,
                     tuple: t,
@@ -1214,19 +1307,52 @@ impl CodeGen {
                     results,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
                     assert!(results.len() == 1);
                     let arr_type = type_info.get_value_type(*arr);
-                    let elem_type = arr_type.get_array_element();
-                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
-                    emitter.push_op(bytecode::OpCode::DarrayLookupField {
-                        array: layouter.get_value(*arr),
-                        index: layouter.get_value(keys[0]),
-                        result: layouter.get_value(results[0]),
-                        flag: layouter.get_value(*flag),
-                        stride,
-                        elem_kind,
-                    });
+                    if keys.len() == 1 {
+                        let elem_type = arr_type.get_array_element();
+                        let (stride, elem_kind) = lookup_elem_kind(&elem_type);
+                        emitter.push_op(bytecode::OpCode::DarrayLookupField {
+                            array: layouter.get_value(*arr),
+                            index: layouter.get_value(keys[0]),
+                            result: layouter.get_value(results[0]),
+                            flag: layouter.get_value(*flag),
+                            stride,
+                            elem_kind,
+                        });
+                    } else {
+                        // Multi-key N-D AD lookup: pack keys into a fresh
+                        // scratch array (PrimArray of raw pointer words) and
+                        // dispatch to `dnd_array_lookup_field`. Using PrimArray
+                        // means `dec_rc` won't recursively decref the keys
+                        // — the keys' RC lifetimes are managed by SSA-level
+                        // rc_insertion, not by the transient container.
+                        // The leaf elem_kind is computed by walking down the
+                        // array type by `keys.len()` levels.
+                        let mut leaf_type = arr_type.clone();
+                        for _ in 0..keys.len() {
+                            leaf_type = leaf_type.get_array_element();
+                        }
+                        let (leaf_stride, elem_kind) = lookup_elem_kind(&leaf_type);
+                        let key_positions: Vec<bytecode::FramePosition> =
+                            keys.iter().map(|k| layouter.get_value(*k)).collect();
+                        let keys_arr_pos = layouter.alloc_ptr_temp();
+                        emitter.push_op(bytecode::OpCode::ArrayAlloc {
+                            res: keys_arr_pos,
+                            stride: 1,
+                            meta: vm::array::BoxedLayout::array(keys.len(), false),
+                            items: key_positions,
+                        });
+                        emitter.push_op(bytecode::OpCode::DndArrayLookupField {
+                            array: layouter.get_value(*arr),
+                            keys_arr: keys_arr_pos,
+                            result: layouter.get_value(results[0]),
+                            flag: layouter.get_value(*flag),
+                            n_keys: keys.len(),
+                            leaf_stride,
+                            elem_kind,
+                        });
+                    }
                 }
                 ssa::OpCode::Lookup {
                     target: LookupTarget::Spread(bits),

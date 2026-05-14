@@ -5,10 +5,9 @@ use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 
-use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
+use crate::array::{BoxedLayout, BoxedValue, DataType, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
-use crate::array::DataType;
 use std::fmt::Display;
 use std::ptr;
 
@@ -131,6 +130,11 @@ pub struct TableInfo {
     pub length: usize,
     pub elem_inverses_witness_section_offset: usize,
     pub elem_inverses_constraint_section_offset: usize,
+    /// Per-dimension sizes (row-major). For 1-D tables `dims = [length]`;
+    /// for 2-D `dims = [d_outer, d_inner]`, etc. Used by Phase 2 to decompose
+    /// slot index `s ∈ 0..length` into coordinates `i_j(s)` for the β-power
+    /// LogUp denominator `α − v_s − Σ β^j · i_j(s)`.
+    pub dims: Vec<usize>,
 }
 
 #[derive(Copy, Clone)]
@@ -162,6 +166,12 @@ pub struct AdArrays {
     pub current_cnst_off: usize,
     pub current_cnst_tables_off: usize,
     pub current_cnst_lookups_off: usize,
+    /// Constraint-section base offset of the β-power chain R1Cs (which precede
+    /// per-table content in the tables_data section).
+    pub beta_chain_cnst_base: usize,
+    /// Witness-section base offset of the β-power chain witnesses, relative
+    /// to `logup_wit_challenge_off` (i.e. β² is at offset `+1+1`, etc.).
+    pub beta_chain_wit_base: usize,
 }
 
 pub union Arrays {
@@ -177,6 +187,10 @@ pub struct VM {
     pub spread_tables: [Option<usize>; 17],
     pub globals: *mut u64,
     pub struct_layouts: Vec<StructDescriptor>,
+    /// Whether AD bumps for the β-power chain R1Cs have been emitted yet
+    /// (only relevant on the AD path; emitted once per program by the first
+    /// `dnd_array_lookup_field` invocation).
+    pub beta_chain_ad_emitted: bool,
 }
 
 impl VM {
@@ -216,6 +230,7 @@ impl VM {
             spread_tables: [None; 17],
             globals,
             struct_layouts,
+            beta_chain_ad_emitted: false,
         }
     }
 
@@ -240,11 +255,14 @@ impl VM {
                     current_wit_off: 0,
                     logup_wit_challenge_off: witness_layout.challenges_start(),
                     current_wit_multiplicities_off: witness_layout.multiplicities_start(),
-                    current_wit_tables_off: witness_layout.tables_data_start(),
+                    current_wit_tables_off: witness_layout.per_table_data_start(),
                     current_wit_lookups_off: witness_layout.lookups_data_start(),
                     current_cnst_off: 0,
-                    current_cnst_tables_off: constraints_layout.tables_data_start(),
+                    current_cnst_tables_off: constraints_layout.per_table_data_start(),
                     current_cnst_lookups_off: constraints_layout.lookups_data_start(),
+                    beta_chain_cnst_base: constraints_layout.tables_data_start(),
+                    beta_chain_wit_base: witness_layout.tables_data_start()
+                        - witness_layout.challenges_start(),
                 },
             },
             allocation_instrumenter: AllocationInstrumenter::new(),
@@ -253,6 +271,7 @@ impl VM {
             spread_tables: [None; 17],
             globals,
             struct_layouts,
+            beta_chain_ad_emitted: false,
         }
     }
 
@@ -286,6 +305,80 @@ fn unspread_bits(v: u64) -> (u32, u32) {
     let even = compact_bits(v);
     let odd = compact_bits(v >> 1);
     (odd, even)
+}
+
+/// Emit a forward N-D key-value lookup. Writes N+1 tape entries:
+///   Entry 1 (R1C 1, β·k_1=x_1):   table_id, k_1,   0
+///   Entry j (R1C j, β^j·k_j=x_j): table_id, k_j,   0
+///   Entry N+1 (y · denom = flag):  table_id, value, flag_u64
+unsafe fn forward_nd_lookup_emit(
+    table_idx: usize,
+    keys: &[Field],
+    value: Field,
+    flag_u64: u64,
+    flat_idx: u64,
+    vm: &mut VM,
+) {
+    let table_info = &vm.tables[table_idx];
+
+    if flag_u64 != 0 {
+        unsafe {
+            let ptr = table_info.multiplicities_wit.offset(flat_idx as isize);
+            *(ptr as *mut u64) += flag_u64;
+        }
+    }
+
+    // Key R1C entries: one per key, all with c=0.
+    for key in keys.iter() {
+        unsafe {
+            *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+            *vm.data.as_forward.lookups_b = *key;
+            *(vm.data.as_forward.lookups_c as *mut u64) = 0;
+            vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+            vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+            vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+        }
+    }
+
+    // y-constraint entry: (table_id, value, flag).
+    unsafe {
+        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+        *vm.data.as_forward.lookups_b = value;
+        *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
+        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
+        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+    }
+}
+
+/// Walk an N-D nested pure array along `keys` to fetch the leaf Field. Also
+/// records each level's dimension size into `dims_out`. The last level is
+/// addressed with `leaf_stride` (LIMBS for Field, 1 for u_N). Intermediate
+/// levels are addressed as BoxedArray-of-pointers (stride 1).
+unsafe fn nd_array_walk(
+    root: BoxedValue,
+    keys: &[u64],
+    leaf_stride: usize,
+    elem_kind: usize,
+    dims_out: &mut Vec<usize>,
+) -> Field {
+    let mut cur = root;
+    let n = keys.len();
+    for (level, &k) in keys.iter().enumerate() {
+        if level == n - 1 {
+            // Leaf level: cur is a flat array of leaf elements.
+            let leaf_len = cur.layout().array_size() / leaf_stride;
+            dims_out.push(leaf_len);
+            let leaf_ptr = cur.array_idx(k as usize, leaf_stride);
+            return unsafe { read_pure_elem_as_field(leaf_ptr, elem_kind) };
+        }
+        // Intermediate level: cur is BoxedArray of pointers.
+        let level_len = cur.layout().array_size();
+        dims_out.push(level_len);
+        let inner_ptr = cur.array_idx(k as usize, 1) as *mut BoxedValue;
+        cur = unsafe { *inner_ptr };
+    }
+    unreachable!("nd_array_walk requires at least one key");
 }
 
 /// Emit a forward key-value lookup under the β-power LogUp encoding:
@@ -334,6 +427,104 @@ unsafe fn forward_kv_lookup_emit(
         vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
         vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
         vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+    }
+}
+
+/// Emit AD bumps for a β-power LogUp N-D key-value lookup:
+///   R1C j (1..=N): β^j · k_j = x_j           A=(β^j,1)  B=k_j    C=(x_j,1)
+///   R1C N+1:       y · (α − value − Σ x_j) = flag
+///                                            A=(y,1)  B=α−value−Σx_j   C=flag
+/// Plus each query's `y` contributes (y_wit, 1) to the sum constraint's C.
+unsafe fn ad_nd_kv_lookup_emit(
+    table_idx: usize,
+    keys: &[BoxedValue],
+    value: BoxedValue,
+    flag: BoxedValue,
+    vm: &mut VM,
+) {
+    let table_info = &vm.tables[table_idx];
+    let cnst_off = table_info.elem_inverses_constraint_section_offset;
+    let length = table_info.length;
+    let n_keys = keys.len();
+
+    // Sum constraint at offset `length`.
+    let inv_sum_coeff = unsafe { *vm.data.as_ad.ad_coeffs.add(cnst_off + length) };
+
+    // Allocate one (x_j_coeff, x_j_wit_off) pair per key R1C, plus (y_coeff, y_wit_off).
+    let mut x_coeffs = Vec::with_capacity(n_keys);
+    let mut x_wit_offs = Vec::with_capacity(n_keys);
+    for _ in 0..n_keys {
+        let x_coeff = unsafe {
+            let r = *vm
+                .data
+                .as_ad
+                .ad_coeffs
+                .add(vm.data.as_ad.current_cnst_lookups_off);
+            vm.data.as_ad.current_cnst_lookups_off += 1;
+            r
+        };
+        let x_wit_off = unsafe {
+            let r = vm.data.as_ad.current_wit_lookups_off;
+            vm.data.as_ad.current_wit_lookups_off += 1;
+            r
+        };
+        x_coeffs.push(x_coeff);
+        x_wit_offs.push(x_wit_off);
+    }
+    let y_coeff = unsafe {
+        let r = *vm
+            .data
+            .as_ad
+            .ad_coeffs
+            .add(vm.data.as_ad.current_cnst_lookups_off);
+        vm.data.as_ad.current_cnst_lookups_off += 1;
+        r
+    };
+    let y_wit_off = unsafe {
+        let r = vm.data.as_ad.current_wit_lookups_off;
+        vm.data.as_ad.current_wit_lookups_off += 1;
+        r
+    };
+
+    // Per key R1C j: A=(β^j,1), B=k_j, C=(x_j,1)
+    // β^1 is at logup_wit_challenge_off + 1, β^j (j>=2) is at
+    // table_data_start + (j-2) which translates to logup_wit_challenge_off + 2 + (j-2)
+    // because the post-comm witness is laid out as [α, β, β², β³, …].
+    for (j, key) in keys.iter().enumerate() {
+        let beta_pow_off = if j == 0 {
+            // β¹ = β challenge at offset +1.
+            vm.data.as_ad.logup_wit_challenge_off + 1
+        } else {
+            // β^(j+1) at logup_wit_challenge_off + 2 + (j-1) = + 1 + j.
+            // (j=1 → β² at offset +2, j=2 → β³ at +3, etc.)
+            vm.data.as_ad.logup_wit_challenge_off + 1 + j
+        };
+        unsafe {
+            *vm.data.as_ad.out_da.add(beta_pow_off) += x_coeffs[j];
+        }
+        key.bump_db(x_coeffs[j], vm);
+        unsafe {
+            *vm.data.as_ad.out_dc.add(x_wit_offs[j]) += x_coeffs[j];
+        }
+    }
+
+    // y R1C: A=(y,1), B=(α,1) + (−value) + (−x_1) + … + (−x_N), C=flag
+    unsafe {
+        *vm.data.as_ad.out_da.add(y_wit_off) += y_coeff;
+        *vm.data
+            .as_ad
+            .out_db
+            .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
+        for x_wit_off in &x_wit_offs {
+            *vm.data.as_ad.out_db.add(*x_wit_off) -= y_coeff;
+        }
+    }
+    value.bump_db(-y_coeff, vm);
+    flag.bump_dc(y_coeff, vm);
+
+    // Sum constraint: this query's y_wit contributes (y_wit, 1) to C.
+    unsafe {
+        *vm.data.as_ad.out_dc.add(y_wit_off) += inv_sum_coeff;
     }
 }
 
@@ -1115,6 +1306,7 @@ mod def {
                 elem_inverses_witness_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_witness_section_offset
                 },
+                dims: vec![length],
             };
             vm.spread_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
@@ -1161,6 +1353,7 @@ mod def {
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
+                dims: vec![length],
             };
             vm.spread_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
@@ -1248,6 +1441,7 @@ mod def {
                 elem_inverses_witness_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_witness_section_offset
                 },
+                dims: vec![256],
             };
             vm.rgchk_8 = Some(vm.tables.len());
             vm.tables.push(table_info);
@@ -1308,6 +1502,7 @@ mod def {
                 elem_inverses_witness_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_witness_section_offset
                 },
+                dims: vec![length],
             };
             let new_table_idx = vm.tables.len();
             vm.tables.push(table_info);
@@ -1342,6 +1537,179 @@ mod def {
         unsafe { forward_kv_lookup_emit(table_idx, index, result, flag_u64, vm) };
     }
 
+    /// Allocate a fresh 1-key `WitnessArrayDescriptor` retaining `root` and
+    /// holding the single key `key`. Bumps `root`'s RC.
+    #[opcode]
+    fn make_witness_descriptor(
+        #[frame] root: BoxedValue,
+        #[frame] key: Field,
+        #[out] result: *mut BoxedValue,
+        vm: &mut VM,
+    ) {
+        let layout = BoxedLayout::witness_descriptor(1);
+        let desc = BoxedValue::alloc(layout, vm);
+        unsafe {
+            // root_ptr field (refcounted) — retain.
+            root.inc_rc(1);
+            *desc.desc_root_ptr() = root;
+            // First key.
+            *desc.desc_key_ptr(0) = key;
+            *result = desc;
+        }
+    }
+
+    /// Allocate a fresh `(n_keys+1)`-key descriptor from a prior descriptor
+    /// plus the new key. Retains the same `root` (bumps RC).
+    #[opcode]
+    fn extend_witness_descriptor(
+        #[frame] desc_in: BoxedValue,
+        #[frame] new_key: Field,
+        #[out] result: *mut BoxedValue,
+        vm: &mut VM,
+    ) {
+        debug_assert!(desc_in.layout().data_type() == DataType::WitnessArrayDescriptor);
+        let prior_n = desc_in.layout().descriptor_n_keys();
+        let new_n = prior_n + 1;
+        let new_desc = BoxedValue::alloc(BoxedLayout::witness_descriptor(new_n), vm);
+        unsafe {
+            // Copy root (bump RC since both descriptors retain it).
+            let root = *desc_in.desc_root_ptr();
+            root.inc_rc(1);
+            *new_desc.desc_root_ptr() = root;
+            // Copy prior keys.
+            for i in 0..prior_n {
+                *new_desc.desc_key_ptr(i) = *desc_in.desc_key_ptr(i);
+            }
+            // Append new key.
+            *new_desc.desc_key_ptr(prior_n) = new_key;
+            *result = new_desc;
+        }
+    }
+
+    /// Saturating N-D lookup. The descriptor carries the root and `prior_n`
+    /// keys; the new key is `new_key`. Walks the root nesting along all
+    /// `prior_n + 1` keys to read the leaf, emits N+1 tape entries (one per
+    /// key R1C plus the y-constraint), and bumps the flat-indexed multiplicity.
+    ///
+    /// On the first call against a given root, registers a new flat-length
+    /// table whose `dims` records each dimension size for Phase 2's denominator
+    /// reconstruction.
+    #[opcode]
+    fn witness_array_lookup_field(
+        #[frame] desc: BoxedValue,
+        #[frame] new_key: Field,
+        #[out] result: *mut Field,
+        #[frame] flag: Field,
+        leaf_stride: usize,
+        elem_kind: usize,
+        vm: &mut VM,
+    ) {
+        debug_assert!(desc.layout().data_type() == DataType::WitnessArrayDescriptor);
+        let prior_n = desc.layout().descriptor_n_keys();
+        let total_n = prior_n + 1;
+
+        // Read root + keys from descriptor.
+        let root = unsafe { *desc.desc_root_ptr() };
+        let mut keys: Vec<Field> = Vec::with_capacity(total_n);
+        let mut key_u64s: Vec<u64> = Vec::with_capacity(total_n);
+        for i in 0..prior_n {
+            let k = unsafe { *desc.desc_key_ptr(i) };
+            keys.push(k);
+            key_u64s.push(ark_ff::PrimeField::into_bigint(k).0[0]);
+        }
+        keys.push(new_key);
+        key_u64s.push(ark_ff::PrimeField::into_bigint(new_key).0[0]);
+
+        // First lookup against this root: register table.
+        let table_id_ptr = root.table_id();
+        let table_idx = unsafe { *table_id_ptr };
+        let table_idx = if table_idx == u64::MAX {
+            // Walk the root once with the current keys to discover dims; then
+            // walk every flat slot to stash leaf values.
+            let mut dims: Vec<usize> = Vec::with_capacity(total_n);
+            let _probe = unsafe {
+                nd_array_walk(root, &key_u64s, leaf_stride, elem_kind, &mut dims)
+            };
+            let length: usize = dims.iter().product();
+            let table_info = TableInfo {
+                multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
+                num_indices: total_n,
+                num_values: 1,
+                length,
+                elem_inverses_constraint_section_offset: unsafe {
+                    vm.data.as_forward.elem_inverses_constraint_section_offset
+                },
+                elem_inverses_witness_section_offset: unsafe {
+                    vm.data.as_forward.elem_inverses_witness_section_offset
+                },
+                dims: dims.clone(),
+            };
+            let new_table_idx = vm.tables.len();
+            vm.tables.push(table_info);
+
+            // Stash each leaf at out_a_base[cnst_off + flat_idx]. Walk all
+            // flat slots by decomposing s into per-dim coords.
+            unsafe {
+                let cnst_off = vm.data.as_forward.elem_inverses_constraint_section_offset;
+                let mut suffix = vec![1usize; total_n + 1];
+                for j in (0..total_n).rev() {
+                    suffix[j] = suffix[j + 1] * dims[j];
+                }
+                for s in 0..length {
+                    let coords: Vec<u64> = (0..total_n)
+                        .map(|j| ((s / suffix[j + 1]) % dims[j]) as u64)
+                        .collect();
+                    let mut tmp_dims = Vec::new();
+                    let leaf =
+                        nd_array_walk(root, &coords, leaf_stride, elem_kind, &mut tmp_dims);
+                    *vm.data.as_forward.out_a_base.add(cnst_off + s) = leaf;
+                }
+
+                vm.data.as_forward.multiplicities_witness =
+                    vm.data.as_forward.multiplicities_witness.add(length);
+                vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
+                vm.data.as_forward.elem_inverses_witness_section_offset += length;
+            }
+
+            unsafe { *table_id_ptr = new_table_idx as u64 };
+            new_table_idx
+        } else {
+            table_idx as usize
+        };
+
+        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+
+        // Compute flat index from the keys, using table.dims.
+        let dims = vm.tables[table_idx].dims.clone();
+        let mut suffix = vec![1usize; total_n + 1];
+        for j in (0..total_n).rev() {
+            suffix[j] = suffix[j + 1] * dims[j];
+        }
+        let flat_idx: u64 = (0..total_n)
+            .map(|j| key_u64s[j] * suffix[j + 1] as u64)
+            .sum();
+
+        // Compute the leaf value by walking root with the integer keys.
+        let mut tmp_dims = Vec::new();
+        let leaf_value = unsafe {
+            nd_array_walk(root, &key_u64s, leaf_stride, elem_kind, &mut tmp_dims)
+        };
+        unsafe { *result = leaf_value };
+
+        // Pin the value into the algebraic witness vector. R1CGen allocated a
+        // fresh witness slot for the lookup result; the Lookup constraint will
+        // reference that slot. The prover (us) must populate it.
+        unsafe {
+            *vm.data.as_forward.algebraic_witness = leaf_value;
+            vm.data.as_forward.algebraic_witness =
+                vm.data.as_forward.algebraic_witness.offset(1);
+        }
+
+        unsafe {
+            forward_nd_lookup_emit(table_idx, &keys, leaf_value, flag_u64, flat_idx, vm)
+        };
+    }
+
     #[opcode]
     fn drngchk_8_field(#[frame] val: BoxedValue, #[frame] flag: BoxedValue, vm: &mut VM) {
         if vm.rgchk_8.is_none() {
@@ -1356,6 +1724,7 @@ mod def {
                 length: 256,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
+                dims: vec![256],
             };
             vm.rgchk_8 = Some(vm.tables.len());
             vm.tables.push(table_info);
@@ -1495,6 +1864,7 @@ mod def {
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
+                dims: vec![length],
             };
             let new_table_idx = vm.tables.len();
             vm.tables.push(table_info);
@@ -1565,6 +1935,169 @@ mod def {
         };
 
         unsafe { ad_kv_lookup_emit(table_idx, index, result, flag, vm) };
+    }
+
+    /// AD-path N-D array lookup. `keys_arr` is a `BoxedArray` of `n_keys`
+    /// `BoxedValue` witness refs (one per dim). On first use against a given
+    /// root, registers an N-D table and emits per-slot R1C bumps. Per-call,
+    /// emits the N+1 R1C bumps for the query via `ad_nd_kv_lookup_emit`.
+    ///
+    /// Also emits AD bumps for the β-power chain R1Cs (`β · β^(j-1) = β^j`)
+    /// on first ever invocation. These are global R1Cs in the tables_data
+    /// constraint section, emitted once per program.
+    #[opcode]
+    fn dnd_array_lookup_field(
+        #[frame] array: BoxedValue,
+        #[frame] keys_arr: BoxedValue,
+        #[frame] result: BoxedValue,
+        #[frame] flag: BoxedValue,
+        n_keys: usize,
+        leaf_stride: usize,
+        elem_kind: usize,
+        vm: &mut VM,
+    ) {
+        // Emit β-power chain R1C bumps once, before any tables are registered
+        // (so the chain's constraint offsets are unconditionally tables_data_start..
+        // +chain_len).
+        if !vm.beta_chain_ad_emitted {
+            let chain_base = unsafe { vm.data.as_ad.beta_chain_cnst_base };
+            for j in 2..=n_keys {
+                let coeff = unsafe { *vm.data.as_ad.ad_coeffs.add(chain_base + j - 2) };
+                // β at challenges_start+1; β^(j-1) at challenges_start+1+(j-2)
+                //  (j=2 → β at +1, β^(j-1)=β at +1); β^j at +1+(j-1).
+                let beta_off = unsafe { vm.data.as_ad.logup_wit_challenge_off } + 1;
+                let prev_pow_off =
+                    unsafe { vm.data.as_ad.logup_wit_challenge_off } + 1 + (j - 2);
+                let new_pow_off =
+                    unsafe { vm.data.as_ad.logup_wit_challenge_off } + 1 + (j - 1);
+                unsafe {
+                    *vm.data.as_ad.out_da.add(beta_off) += coeff;
+                    *vm.data.as_ad.out_db.add(prev_pow_off) += coeff;
+                    *vm.data.as_ad.out_dc.add(new_pow_off) += coeff;
+                }
+            }
+            vm.beta_chain_ad_emitted = true;
+        }
+
+        let table_id_ptr = array.table_id();
+        let table_idx = unsafe { *table_id_ptr };
+
+        let table_idx = if table_idx == u64::MAX {
+            // First AD call on this array: probe dims by walking root with
+            // (0, …, 0) keys, register table, emit per-slot R1C bumps.
+            let mut dims: Vec<usize> = Vec::with_capacity(n_keys);
+            let probe_keys = vec![0u64; n_keys];
+            let _probe = unsafe {
+                nd_array_walk(array, &probe_keys, leaf_stride, elem_kind, &mut dims)
+            };
+            let length: usize = dims.iter().product();
+
+            let inverses_constraint_section_offset =
+                unsafe { vm.data.as_ad.current_cnst_tables_off };
+            let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
+            let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
+            let table_info = TableInfo {
+                multiplicities_wit: ptr::null_mut(),
+                num_indices: n_keys,
+                num_values: 1,
+                length,
+                elem_inverses_witness_section_offset: inverses_witness_section_offset,
+                elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
+                dims: dims.clone(),
+            };
+            let new_table_idx = vm.tables.len();
+            vm.tables.push(table_info);
+            unsafe {
+                vm.data.as_ad.current_wit_multiplicities_off += length;
+                vm.data.as_ad.current_wit_tables_off += length;
+                vm.data.as_ad.current_cnst_tables_off += length + 1;
+            }
+
+            let sum_coeff = unsafe {
+                *vm.data
+                    .as_ad
+                    .ad_coeffs
+                    .offset(inverses_constraint_section_offset as isize + length as isize)
+            };
+
+            // Pre-compute suffix products for slot-coord decomposition.
+            let mut suffix = vec![1usize; n_keys + 1];
+            for j in (0..n_keys).rev() {
+                suffix[j] = suffix[j + 1] * dims[j];
+            }
+
+            for s in 0..length {
+                // Walk the root to fetch the leaf at (i_1(s), …, i_N(s)).
+                let coords: Vec<u64> = (0..n_keys)
+                    .map(|j| ((s / suffix[j + 1]) % dims[j]) as u64)
+                    .collect();
+                let mut tmp_dims = Vec::new();
+                let leaf =
+                    unsafe { nd_array_walk(array, &coords, leaf_stride, elem_kind, &mut tmp_dims) };
+
+                let y_coeff = unsafe {
+                    *vm.data
+                        .as_ad
+                        .ad_coeffs
+                        .offset(inverses_constraint_section_offset as isize + s as isize)
+                };
+                unsafe {
+                    // A=(y_s,1): dA[y_wit_s] += y_coeff
+                    *vm.data
+                        .as_ad
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + s as isize) +=
+                        y_coeff;
+                    // B=(α,1): dB[α] += y_coeff
+                    *vm.data
+                        .as_ad
+                        .out_db
+                        .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
+                    // B=(slot 0, -leaf_field_value): dB at constant slot 0
+                    *vm.data.as_ad.out_db -= y_coeff * leaf;
+                    // B=(β^j, -i_j(s)) for j=1..=n_keys
+                    for j in 0..n_keys {
+                        let beta_pow_off = if j == 0 {
+                            vm.data.as_ad.logup_wit_challenge_off + 1
+                        } else {
+                            vm.data.as_ad.logup_wit_challenge_off + 1 + j
+                        };
+                        *vm.data.as_ad.out_db.add(beta_pow_off) -=
+                            y_coeff * Field::from(coords[j]);
+                    }
+                    // C=(m_s,1): dC[mult_wit_s] += y_coeff
+                    *vm.data.as_ad.out_dc.add(multiplicities_wit_offset + s) += y_coeff;
+                }
+
+                // Sum constraint A: (y_wit_s, 1)
+                unsafe {
+                    *vm.data
+                        .as_ad
+                        .out_da
+                        .add(inverses_witness_section_offset + s) += sum_coeff;
+                }
+            }
+
+            // Sum constraint B = (slot 0, 1).
+            unsafe {
+                *vm.data.as_ad.out_db += sum_coeff;
+            }
+
+            unsafe { *table_id_ptr = new_table_idx as u64 };
+            new_table_idx
+        } else {
+            table_idx as usize
+        };
+
+        // Read keys from keys_arr (a scratch PrimArray of `BoxedValue` words).
+        let keys: Vec<BoxedValue> = (0..n_keys)
+            .map(|i| unsafe { *(keys_arr.array_idx(i, 1) as *mut BoxedValue) })
+            .collect();
+        unsafe { ad_nd_kv_lookup_emit(table_idx, &keys, result, flag, vm) };
+        // keys_arr was allocated by codegen as a scratch BoxedArray (rc=1)
+        // for this call; nothing else references it, so drop now. Inner
+        // BoxedValue keys retain their own RCs via their original SSA chain.
+        keys_arr.dec_rc(vm);
     }
 
     #[opcode]

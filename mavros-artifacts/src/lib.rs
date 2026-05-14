@@ -103,6 +103,10 @@ pub struct WitnessLayout {
 
     pub tables_data_size: usize,
     pub lookups_data_size: usize,
+    /// Number of β-power chain auxiliary witnesses reserved at the START of
+    /// the tables_data section (one per `β^j` for `j = 2..=max_n_keys`).
+    /// Mirrors `ConstraintsLayout::beta_power_chain_len`.
+    pub beta_power_chain_len: usize,
 }
 
 impl WitnessLayout {
@@ -138,6 +142,11 @@ impl WitnessLayout {
 
     pub fn tables_data_start(&self) -> usize {
         self.challenges_end()
+    }
+
+    /// Where per-table witness slots start, after the β-power chain.
+    pub fn per_table_data_start(&self) -> usize {
+        self.tables_data_start() + self.beta_power_chain_len
     }
 
     pub fn tables_data_end(&self) -> usize {
@@ -186,6 +195,12 @@ pub struct ConstraintsLayout {
     pub algebraic_size: usize,
     pub tables_data_size: usize,
     pub lookups_data_size: usize,
+    /// Number of β-power chain R1Cs reserved at the START of the tables_data
+    /// section (one per `β^j = β · β^(j-1)` constraint for `j = 2..=max_n_keys`).
+    /// Zero for purely 1-D programs. Used by Phase 2 to fill in the β-power
+    /// witness/constraint slots, and by the host to seed the per-table cursor
+    /// past these slots.
+    pub beta_power_chain_len: usize,
 }
 
 impl ConstraintsLayout {
@@ -195,6 +210,11 @@ impl ConstraintsLayout {
 
     pub fn tables_data_start(&self) -> usize {
         self.algebraic_size
+    }
+
+    /// Where per-table content starts, after the β-power chain R1Cs.
+    pub fn per_table_data_start(&self) -> usize {
+        self.tables_data_start() + self.beta_power_chain_len
     }
 
     pub fn lookups_data_start(&self) -> usize {

@@ -1,0 +1,6 @@
+[package]
+name = "array_nd_lookup_2d"
+type = "bin"
+authors = [""]
+
+[dependencies]

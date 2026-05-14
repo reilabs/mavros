@@ -973,6 +973,7 @@ impl CSE {
                     | OpCode::SliceLen { .. }
                     | OpCode::MemOp { kind: _, value: _ }
                     | OpCode::Lookup { .. }
+                    | OpCode::WitnessArrayGet { .. }
                     | OpCode::DLookup {
                         target: _,
                         keys: _,

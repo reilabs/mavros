@@ -569,6 +569,12 @@ impl WitnessTypeInference {
                         );
                         value_wt.insert(*r, result_wt);
                     }
+                    OpCode::WitnessArrayGet { .. } => {
+                        panic!(
+                            "ICE: WitnessArrayGet is emitted by ExplicitWitness, \
+                             which runs after WitnessTypeInference"
+                        );
+                    }
                     OpCode::ArraySet {
                         result: r,
                         array: arr,

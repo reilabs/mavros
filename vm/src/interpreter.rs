@@ -235,8 +235,8 @@ pub fn run_phase1(
                 .as_mut_ptr()
                 .add(constraints_layout.lookups_data_start())
         },
-        constraints_layout.tables_data_start(),
-        witness_layout.tables_data_start() - witness_layout.challenges_start(),
+        constraints_layout.per_table_data_start(),
+        witness_layout.per_table_data_start() - witness_layout.challenges_start(),
         global_frame.as_mut_ptr(),
         struct_layouts,
     );
@@ -289,6 +289,38 @@ pub fn run_phase2(
         phase1.out_wit_post_comm[i] = *challenge;
     }
 
+    // Compute β-power chain (β², β³, …) into the reserved table-data witness
+    // slots and fill the corresponding R1Cs at the start of the tables_data
+    // constraint section. β² lives at post-comm[tables_data_start - challenges_start],
+    // β³ at the next slot, etc.
+    let beta_power_chain_len = constraints_layout.beta_power_chain_len;
+    let mut beta_powers: Vec<Field> = Vec::with_capacity(1 + beta_power_chain_len);
+    // beta_powers[0] = β¹ (the challenge); beta_powers[j] = β^(j+1).
+    if beta_power_chain_len + 1 >= 1 {
+        // β is at challenges_start + 1 → post-comm offset 1.
+        if challenges.len() > 1 {
+            beta_powers.push(phase1.out_wit_post_comm[1]);
+        }
+    }
+    if beta_power_chain_len > 0 {
+        let tables_data_first_post =
+            witness_layout.tables_data_start() - witness_layout.challenges_start();
+        let beta_power_cnst_base = constraints_layout.tables_data_start();
+        let beta = beta_powers[0];
+        let mut prev_pow = beta;
+        for j in 0..beta_power_chain_len {
+            let new_pow = beta * prev_pow;
+            let wit_off = tables_data_first_post + j;
+            phase1.out_wit_post_comm[wit_off] = new_pow;
+            let r1c_off = beta_power_cnst_base + j;
+            phase1.out_a[r1c_off] = beta;
+            phase1.out_b[r1c_off] = prev_pow;
+            phase1.out_c[r1c_off] = new_pow;
+            beta_powers.push(new_pow);
+            prev_pow = new_pow;
+        }
+    }
+
     let mut running_prod = Field::from(1);
     for tbl in phase1.tables.iter() {
         let alpha = phase1.out_wit_post_comm[0];
@@ -309,25 +341,35 @@ pub fn run_phase2(
         } else {
             assert_eq!(
                 tbl.num_values, 1,
-                "expected width-2 table, got num_values={}",
+                "expected key-value table, got num_values={}",
                 tbl.num_values
             );
-            // β-power LogUp (1-D): denom_i = α − v_i − β·i.
-            // Phase 1 stashed v_i in out_a[base + i]; we overwrite a/b/c with the
-            // real R1C values (y_i is filled by batch inversion at the bottom).
-            let beta = phase1.out_wit_post_comm[1];
-            for i in 0..tbl.length {
-                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-                let v_i = phase1.out_a[base + i];
-                let denom = alpha - v_i - beta * Field::from(i as u64);
-                phase1.out_b[base + i] = denom;
-                phase1.out_c[base + i] = multiplicity;
+            // β-power LogUp (N-D): denom_s = α − v_s − β·i_1(s) − β²·i_2(s) − ….
+            // Phase 1 stashed v_s in out_a[base + s]; we overwrite a/b/c with the
+            // real R1C values (y_s is filled by batch inversion at the bottom).
+            //
+            // Coords i_j(s) decompose s in row-major order using `tbl.dims`.
+            let n_keys = tbl.dims.len();
+            // Pre-compute suffix products: suffix[j] = product of dims[j..].
+            let mut suffix = vec![1usize; n_keys + 1];
+            for j in (0..n_keys).rev() {
+                suffix[j] = suffix[j + 1] * tbl.dims[j];
+            }
+            for s in 0..tbl.length {
+                let multiplicity = unsafe { *tbl.multiplicities_wit.add(s) };
+                let v_s = phase1.out_a[base + s];
+                let mut denom = alpha - v_s;
+                for j in 0..n_keys {
+                    let coord = (s / suffix[j + 1]) % tbl.dims[j];
+                    denom -= beta_powers[j] * Field::from(coord as u64);
+                }
+                phase1.out_b[base + s] = denom;
+                phase1.out_c[base + s] = multiplicity;
                 if multiplicity != Field::ZERO {
-                    phase1.out_a[base + i] = running_prod;
+                    phase1.out_a[base + s] = running_prod;
                     running_prod *= denom;
                 } else {
-                    // Clear the stashed v_i if this slot's y is 0 (no contribution).
-                    phase1.out_a[base + i] = Field::ZERO;
+                    phase1.out_a[base + s] = Field::ZERO;
                 }
             }
         }
@@ -390,28 +432,40 @@ pub fn run_phase2(
         } else {
             assert_eq!(
                 table.num_values, 1,
-                "expected width-2 table, got num_values={}",
+                "expected key-value table, got num_values={}",
                 table.num_values
             );
-            // β-power LogUp lookup (1-D), 2 R1Cs per query:
-            //   R1C 1 (β · key = x₁):   tape (table_id, key,   0)
-            //   R1C 2 (y · (α−v−x₁)=f): tape (table_id, value, flag_u64)
-            let beta = phase1.out_wit_post_comm[1];
-            let key = phase1.out_b[cnst_off];
-            let value = phase1.out_b[cnst_off + 1];
-            let flag_u64 = phase1.out_c[cnst_off + 1].0.0[0];
+            // β-power LogUp lookup (N-D), N+1 R1Cs per query:
+            //   R1C j (β^j · k_j = x_j) for j=1..=N:   tape (table_id, k_j, 0)
+            //   R1C N+1 (y · (α − v − Σ x_j) = flag):  tape (table_id, value, flag_u64)
+            let n_keys = table.dims.len();
+            let n_r1cs = n_keys + 1;
 
-            // R1C 1: β · key = x₁
-            let x = beta * key;
-            phase1.out_a[cnst_off] = beta;
-            phase1.out_b[cnst_off] = key;
-            phase1.out_c[cnst_off] = x;
-            phase1.out_wit_post_comm[wit_off] = x;
+            // Collect keys + compute x_j's.
+            let mut keys: Vec<Field> = Vec::with_capacity(n_keys);
+            let mut xs: Vec<Field> = Vec::with_capacity(n_keys);
+            for j in 0..n_keys {
+                let key = phase1.out_b[cnst_off + j];
+                let x = beta_powers[j] * key;
+                keys.push(key);
+                xs.push(x);
+                // Fill R1C j: A=β^j, B=key, C=x_j.
+                phase1.out_a[cnst_off + j] = beta_powers[j];
+                phase1.out_b[cnst_off + j] = key;
+                phase1.out_c[cnst_off + j] = x;
+                phase1.out_wit_post_comm[wit_off + j] = x;
+            }
 
-            // R1C 2: y · (α − value − x₁) = flag
-            let y_cnst_off = cnst_off + 1;
-            let y_wit_off = wit_off + 1;
-            let denom = alpha - value - x;
+            // y-constraint slot is at offset cnst_off + n_keys.
+            let y_cnst_off = cnst_off + n_keys;
+            let y_wit_off = wit_off + n_keys;
+            let value = phase1.out_b[y_cnst_off];
+            let flag_u64 = phase1.out_c[y_cnst_off].0.0[0];
+
+            let mut denom = alpha - value;
+            for x in &xs {
+                denom -= *x;
+            }
 
             if flag_u64 == 0 {
                 phase1.out_a[y_cnst_off] = Field::ZERO;
@@ -419,11 +473,20 @@ pub fn run_phase2(
                 phase1.out_c[y_cnst_off] = Field::ZERO;
                 phase1.out_wit_post_comm[y_wit_off] = Field::ZERO;
             } else {
-                // key is a full Montgomery Field; extract its integer value for
-                // the table-slot index.
-                let ix_in_table = ark_ff::PrimeField::into_bigint(key).0[0];
+                // Compute flat slot index from key integer values + table.dims.
+                let key_u64s: Vec<u64> = keys
+                    .iter()
+                    .map(|k| ark_ff::PrimeField::into_bigint(*k).0[0])
+                    .collect();
+                let mut suffix = vec![1usize; n_keys + 1];
+                for j in (0..n_keys).rev() {
+                    suffix[j] = suffix[j + 1] * table.dims[j];
+                }
+                let flat_idx: u64 = (0..n_keys)
+                    .map(|j| key_u64s[j] * suffix[j + 1] as u64)
+                    .sum();
                 let tbl_base = table.elem_inverses_constraint_section_offset;
-                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + ix_in_table as usize];
+                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + flat_idx as usize];
                 phase1.out_b[y_cnst_off] = denom;
                 phase1.out_c[y_cnst_off] = Field::from(flag_u64);
                 phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
@@ -432,7 +495,7 @@ pub fn run_phase2(
                 phase1.out_c[sum_off] += phase1.out_a[y_cnst_off];
             }
 
-            current_lookup_off += 2;
+            current_lookup_off += n_r1cs;
         }
     }
 

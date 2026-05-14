@@ -296,6 +296,35 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
+            OpCode::WitnessArrayGet {
+                result,
+                array,
+                index,
+                flag: _,
+            } => {
+                let array_type = function_info.values.get(array).ok_or_else(|| {
+                    format!("Array value {:?} not found in type assignments", array)
+                })?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
+                // Peel off one array level. The result is `WitnessOf` of that
+                // only when one of the operands is witness-tainted (pre-strip).
+                // After `StripWitnessOf` runs in the witgen/AD pipelines no
+                // operand is WitnessOf, and the result is the bare element
+                // type — matching the pattern in `ArrayGet`'s handler.
+                let stripped_array = array_type.strip_witness();
+                let element_type = stripped_array.get_array_element();
+                let any_witness =
+                    array_type.is_witness_of() || index_type.is_witness_of();
+                let result_type = if any_witness && !element_type.is_witness_of() {
+                    Type::witness_of(element_type)
+                } else {
+                    element_type
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
             OpCode::ArraySet {
                 result,
                 array,

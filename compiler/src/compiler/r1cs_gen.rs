@@ -42,6 +42,16 @@ pub enum Value {
     Array(Rc<RefCell<ArrayData>>),
     Tuple(Rc<RefCell<TupleData>>),
     Ptr(Rc<RefCell<Value>>),
+    /// Partial-application descriptor: a `WitnessOf(Array<…>)` value during
+    /// symbolic execution. Carries the original pure root array (whose
+    /// `table_id` is cached) and the witness keys accumulated by prior
+    /// `WitnessArrayGet`s. When fully saturated (a subsequent
+    /// `WitnessArrayGet` whose result is scalar), this becomes a multi-key
+    /// `Lookup` against `root`.
+    Descriptor {
+        root: Rc<RefCell<ArrayData>>,
+        keys: Vec<LC>,
+    },
     Invalid,
 }
 
@@ -496,6 +506,73 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     elements: els,
                     flag: flag_lc,
                 });
+            }
+        }
+    }
+
+    fn witness_array_get(
+        &mut self,
+        array: Value,
+        index: Value,
+        flag: Value,
+        result_type: &Type,
+    ) -> Value {
+        // Resolve `array` into (root, prior_keys). A pure array starts a
+        // descriptor with zero keys; a Descriptor adds to its key list.
+        let (root, mut keys): (Rc<RefCell<ArrayData>>, Vec<LC>) = match array {
+            Value::Array(arr) => (arr, Vec::new()),
+            Value::Descriptor { root, keys } => (root, keys),
+            other => panic!("witness_array_get: array operand must be Array or Descriptor, got {:?}", other),
+        };
+        let new_key_lc = index.expect_linear_combination();
+        keys.push(new_key_lc);
+
+        // Dispatch on result type: scalar => saturating, Array => extending.
+        let stripped = result_type.strip_witness();
+        match stripped.expr {
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+                // Saturating: allocate a witness slot for the looked-up value
+                // and emit one multi-key Lookup against `root`. The result
+                // value is an LC over that fresh slot — downstream casts
+                // produce the appropriate scalar type.
+                let witness_var = self.next_witness();
+                let result_lc = vec![(witness_var, ark_bn254::Fr::ONE)];
+                let flag_lc = flag.expect_linear_combination();
+                let table_id = if root.borrow().table_id.is_none() {
+                    let (flat_values, dims) = flatten_nd_array(&root);
+                    let values: Vec<LC> = flat_values
+                        .iter()
+                        .map(|e| e.expect_linear_combination())
+                        .collect();
+                    self.tables.push(Table::OfElems { values, dims });
+                    let idx = self.tables.len() - 1;
+                    root.borrow_mut().table_id = Some(idx);
+                    idx
+                } else {
+                    root.borrow().table_id.unwrap()
+                };
+                // Convention: value (β⁰) first, then keys k_1..k_N (β¹..β^N).
+                let mut elements = Vec::with_capacity(1 + keys.len());
+                elements.push(result_lc.clone());
+                elements.extend(keys);
+                self.lookups.push(LookupConstraint {
+                    table_id,
+                    elements,
+                    flag: flag_lc,
+                });
+                Value::LC(result_lc)
+            }
+            TypeExpr::Array(_, _) => Value::Descriptor { root, keys },
+            TypeExpr::Slice(_) | TypeExpr::Tuple(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
+                panic!(
+                    "witness_array_get: unsupported result type {:?}; only scalar and Array are handled",
+                    stripped
+                )
+            }
+            TypeExpr::WitnessOf(_) => {
+                panic!(
+                    "ICE: witness_array_get's `result_type.strip_witness()` should not be WitnessOf"
+                )
             }
         }
     }
@@ -992,11 +1069,13 @@ impl R1CGen {
             challenges_size: 0,
             tables_data_size: 0,
             lookups_data_size: 0,
+            beta_power_chain_len: 0,
         };
         let mut constraints_layout = ConstraintsLayout {
             algebraic_size: self.constraints.len(),
             tables_data_size: 0,
             lookups_data_size: 0,
+            beta_power_chain_len: 0,
         };
         let mut result = self.constraints;
 
@@ -1065,6 +1144,12 @@ impl R1CGen {
                 beta_powers.push(bp);
             }
         }
+        // Record the β-power chain length so the host can advance the per-table
+        // cursor past these slots. For `max_n_keys ≤ 1` the chain is empty.
+        let beta_power_chain_len = max_n_keys.saturating_sub(1);
+        witness_layout.beta_power_chain_len = beta_power_chain_len;
+        constraints_layout.beta_power_chain_len = beta_power_chain_len;
+
         // β^j (j ≥ 1) lookup; panics if j == 0 (β^0 = 1 is the constant slot 0).
         let beta_pow = |j: usize| -> usize {
             assert!(j >= 1, "β^0 is the constant slot, not a witness");

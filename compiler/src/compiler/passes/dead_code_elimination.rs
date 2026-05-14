@@ -88,6 +88,7 @@ impl DCE {
             | OpCode::Constrain { .. }
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. }
+            | OpCode::WitnessArrayGet { .. }
             | OpCode::NextDCoeff { .. }
             | OpCode::BumpD { .. }
             | OpCode::MemOp { .. }

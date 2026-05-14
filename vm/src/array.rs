@@ -22,6 +22,14 @@ pub enum DataType {
     ADMulConst = 5,
     Struct = 6,
     RefCell = 7,
+    /// Partial-application descriptor for N-D witness array lookups.
+    /// Heap layout (after the 3-word header):
+    ///   - word 0: root_ptr — pointer to the pure root array (BoxedValue),
+    ///     refcounted by the descriptor.
+    ///   - words 1..1+4·n_keys: n_keys consecutive Field elements (4 words each)
+    ///     holding the witness keys accumulated so far.
+    /// The `BoxedLayout` 56-bit payload stores `n_keys`.
+    WitnessArrayDescriptor = 8,
 }
 
 /// Per-shape struct layout, interned by the compiler and shared across all
@@ -148,6 +156,20 @@ impl BoxedLayout {
         (self.0 as usize >> 8) & 0x8 != 0
     }
 
+    /// Witness-array descriptor with `n_keys` accumulated keys. Total payload
+    /// is `1 + 4*n_keys` u64 words (root ptr + `n_keys` Field elements).
+    pub fn witness_descriptor(n_keys: usize) -> Self {
+        assert!(n_keys < (1 << 56), "descriptor n_keys overflow");
+        Self::new_sized(DataType::WitnessArrayDescriptor, n_keys)
+    }
+
+    /// Number of keys in a `WitnessArrayDescriptor` layout.
+    #[inline(always)]
+    pub fn descriptor_n_keys(&self) -> usize {
+        debug_assert!(self.data_type() == DataType::WitnessArrayDescriptor);
+        (self.0 >> 8) as usize
+    }
+
     pub fn ad_const() -> Self {
         Self::new(DataType::ADConst)
     }
@@ -197,6 +219,10 @@ impl BoxedLayout {
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
             DataType::Struct => 8 * self.as_struct(struct_layouts).total_size(),
             DataType::RefCell => 8 * self.ref_cell_elem_size(),
+            DataType::WitnessArrayDescriptor => {
+                // 1 word for root_ptr + 4 words per key (Field) — flat.
+                8 * (1 + 4 * self.descriptor_n_keys())
+            }
         };
         base_byte_size.div_ceil(8) + 3
     }
@@ -264,6 +290,21 @@ impl BoxedValue {
         unsafe { self.0.offset(3) }
     }
 
+    /// `WitnessArrayDescriptor` accessors. The first word of the payload is
+    /// the root `BoxedValue`; subsequent 4-word groups are the keys.
+    pub fn desc_root_ptr(&self) -> *mut BoxedValue {
+        debug_assert!(self.layout().data_type() == DataType::WitnessArrayDescriptor);
+        self.data() as *mut BoxedValue
+    }
+
+    /// Pointer to the i-th key Field within a descriptor. Caller must ensure
+    /// `i < n_keys`.
+    pub fn desc_key_ptr(&self, i: usize) -> *mut crate::Field {
+        debug_assert!(self.layout().data_type() == DataType::WitnessArrayDescriptor);
+        debug_assert!(i < self.layout().descriptor_n_keys());
+        unsafe { (self.data().add(1 + 4 * i)) as *mut crate::Field }
+    }
+
     pub fn as_ad_const(&self) -> *mut ADConst {
         self.data() as *mut ADConst
     }
@@ -312,6 +353,9 @@ impl BoxedValue {
             DataType::RefCell => {
                 panic!("bump_da for RefCell")
             }
+            DataType::WitnessArrayDescriptor => {
+                panic!("bump_da for WitnessArrayDescriptor")
+            }
         }
     }
 
@@ -347,6 +391,9 @@ impl BoxedValue {
             DataType::RefCell => {
                 panic!("bump_db for RefCell")
             }
+            DataType::WitnessArrayDescriptor => {
+                panic!("bump_db for WitnessArrayDescriptor")
+            }
         }
     }
 
@@ -375,6 +422,9 @@ impl BoxedValue {
             }
             DataType::BoxedArray => {
                 panic!("bump_dc for BoxedArray")
+            }
+            DataType::WitnessArrayDescriptor => {
+                panic!("bump_dc for WitnessArrayDescriptor")
             }
             DataType::Struct => {
                 panic!("bump_dc for Struct")
@@ -481,6 +531,13 @@ impl BoxedValue {
                             .value
                             .bump_dc(ad_mul_const.dc * ad_mul_const.coeff, vm);
                         queue.push_back(ad_mul_const.value);
+                        item.free(vm);
+                    }
+                    DataType::WitnessArrayDescriptor => {
+                        // Recursively drop the retained root array; keys are
+                        // plain Field cells (no refcount).
+                        let root = unsafe { *(item.data() as *mut BoxedValue) };
+                        queue.push_back(root);
                         item.free(vm);
                     }
                 }

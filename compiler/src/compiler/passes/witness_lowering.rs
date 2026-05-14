@@ -7,7 +7,10 @@ use crate::compiler::{
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, BlockId, DMatrix, OpCode, SeqType, Terminator, ValueId},
+    ssa::{
+        BinaryArithOpKind, BlockId, CastTarget, DMatrix, Instruction, LookupTarget, OpCode,
+        SeqType, Terminator, ValueId,
+    },
 };
 
 pub struct WitnessLowering {}
@@ -40,6 +43,16 @@ impl WitnessLowering {
         for (function_id, function) in ssa.iter_functions_mut() {
             let type_info = type_info.get_function(*function_id);
             let cfg = flow_analysis.get_function_cfg(*function_id);
+            // Pre-build a def map so `WitnessArrayGet` rewriting can trace
+            // descriptor chains back to the pure root.
+            let mut def_map: HashMap<ValueId, OpCode> = HashMap::new();
+            for (_, block) in function.get_blocks() {
+                for instr in block.get_instructions() {
+                    for r in <OpCode as Instruction>::get_results(instr) {
+                        def_map.insert(*r, instr.clone());
+                    }
+                }
+            }
             for rtp in function.iter_returns_mut() {
                 *rtp = self.witness_lowering_in_type(rtp);
             }
@@ -150,6 +163,113 @@ impl WitnessLowering {
                                 variable: c,
                                 sensitivity: new_val,
                             });
+                        }
+                        OpCode::WitnessArrayGet {
+                            result,
+                            array,
+                            index,
+                            flag,
+                        } => {
+                            // AD-side rewrite of `WitnessArrayGet` into existing
+                            // AD-friendly opcodes. We don't need to compute the
+                            // leaf value (AD only emits derivative bumps); we
+                            // just need the SSA to match the R1CS structure:
+                            //   - Saturating step: allocate a fresh witness
+                            //     slot (FreshWitness) for the looked-up value,
+                            //     and emit a multi-key `DLookup` against the
+                            //     pure root with all accumulated keys.
+                            //   - Extending step: alias result to the original
+                            //     `array` operand via a Nop-cast; the descriptor
+                            //     concept dissolves in AD (the next WitnessArrayGet
+                            //     in the chain finds keys via def_map).
+                            let mut prior_keys: Vec<ValueId> = Vec::new();
+                            let mut cur = array;
+                            while let Some(OpCode::WitnessArrayGet {
+                                array: prev_arr,
+                                index: prev_idx,
+                                ..
+                            }) = def_map.get(&cur)
+                            {
+                                prior_keys.push(*prev_idx);
+                                cur = *prev_arr;
+                            }
+                            prior_keys.reverse();
+                            let root = cur;
+                            let mut all_keys = prior_keys;
+                            all_keys.push(index);
+
+                            let result_type = type_info.get_value_type(result).clone();
+                            let stripped = result_type.strip_witness();
+                            let result_is_scalar = matches!(
+                                stripped.expr,
+                                TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)
+                            );
+
+                            if result_is_scalar {
+                                // FreshWitness needs a result_type of the
+                                // unwrapped scalar (Field/U/I). Strip witness.
+                                let scalar_type = stripped.clone();
+                                let r_wit = emitter.fresh_value();
+                                emitter.emit(OpCode::FreshWitness {
+                                    result: r_wit,
+                                    result_type: scalar_type,
+                                });
+                                // Alias original `result` to r_wit so downstream
+                                // uses still work without touching `type_info`.
+                                emitter.emit(OpCode::Cast {
+                                    result,
+                                    value: r_wit,
+                                    target: CastTarget::Nop,
+                                });
+                                // Emit DLookup with all keys as Field-typed
+                                // WitnessOf refs.
+                                let key_witness_refs: Vec<ValueId> = all_keys
+                                    .iter()
+                                    .map(|k| {
+                                        let k_ty = type_info.get_value_type(*k).clone();
+                                        let was_witness = k_ty.is_witness_of();
+                                        let (k_field, kf_witness) = if k_ty
+                                            .strip_witness()
+                                            .is_field()
+                                        {
+                                            (*k, was_witness)
+                                        } else {
+                                            (emitter.cast_to_field(*k), was_witness)
+                                        };
+                                        if !kf_witness {
+                                            emitter.cast_to_witness_of(k_field)
+                                        } else {
+                                            k_field
+                                        }
+                                    })
+                                    .collect();
+                                let flag_witness = {
+                                    let ftype = type_info.get_value_type(flag);
+                                    if !ftype.is_witness_of() {
+                                        emitter.cast_to_witness_of(flag)
+                                    } else {
+                                        flag
+                                    }
+                                };
+                                emitter.emit(OpCode::DLookup {
+                                    target: LookupTarget::Array(root),
+                                    keys: key_witness_refs,
+                                    results: vec![r_wit],
+                                    flag: flag_witness,
+                                });
+                            } else {
+                                // Extending: pass through `array` (the descriptor
+                                // semantics dissolve in AD). DCE will remove this
+                                // if `result` has no other users (which is the
+                                // common case — only the next WitnessArrayGet
+                                // would reference it, and that one walks the chain
+                                // via def_map instead).
+                                emitter.emit(OpCode::Cast {
+                                    result,
+                                    value: array,
+                                    target: CastTarget::Nop,
+                                });
+                            }
                         }
                         OpCode::Lookup {
                             target,

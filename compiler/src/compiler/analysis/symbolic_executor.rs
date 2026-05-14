@@ -95,6 +95,18 @@ pub trait Context<V> {
         panic!("ICE: backend does not implement dlookup");
     }
 
+    /// Witness-indexed lookup into an N-D pure array (or a descriptor of one).
+    ///
+    /// Dispatch on `result_type`:
+    /// - `WitnessOf(scalar)`: saturating — backend should emit a multi-key
+    ///   `Lookup` against the root with all accumulated keys + `index`, and
+    ///   return the looked-up witness as the result `V`.
+    /// - `WitnessOf(Array<…>)`: extending — backend should return a descriptor
+    ///   `V` carrying root and accumulated keys including `index`.
+    fn witness_array_get(&mut self, _array: V, _index: V, _flag: V, _result_type: &Type) -> V {
+        panic!("ICE: backend does not implement witness_array_get");
+    }
+
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<V> {
         panic!("Todo opcode encountered: {}", payload);
     }
@@ -336,6 +348,19 @@ impl SymbolicExecutor {
                         let i = scope[i.0 as usize].as_ref().unwrap();
                         scope[r.0 as usize] =
                             Some(a.array_get(i, &fn_type_info.get_value_type(*r), ctx));
+                    }
+                    crate::compiler::ssa::OpCode::WitnessArrayGet {
+                        result: r,
+                        array,
+                        index,
+                        flag,
+                    } => {
+                        let arr_v = scope[array.0 as usize].as_ref().unwrap().clone();
+                        let idx_v = scope[index.0 as usize].as_ref().unwrap().clone();
+                        let flag_v = scope[flag.0 as usize].as_ref().unwrap().clone();
+                        let result_type = fn_type_info.get_value_type(*r);
+                        scope[r.0 as usize] =
+                            Some(ctx.witness_array_get(arr_v, idx_v, flag_v, result_type));
                     }
                     crate::compiler::ssa::OpCode::ArraySet {
                         result: r,

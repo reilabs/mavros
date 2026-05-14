@@ -491,6 +491,36 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*array);
                     }
+                    OpCode::WitnessArrayGet {
+                        result: _,
+                        array,
+                        index,
+                        flag,
+                    } => {
+                        // Drop the array operand if it dies here.
+                        //
+                        // Unlike `ArrayGet`, `WitnessArrayGet` produces fresh
+                        // values: the extending variant allocates a new heap
+                        // descriptor (rc=1 from the alloc), and the saturating
+                        // variant produces a scalar (no RC). So there's no
+                        // need to bump the result — the alloc's rc=1 already
+                        // accounts for the single use the def-walked chain
+                        // gives us, and a downstream Drop completes the cycle.
+                        if !currently_live.contains(array) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Drop,
+                                value: *array,
+                            });
+                        }
+                        new_instructions.push(instruction.clone());
+                        currently_live.insert(*array);
+                        if self.needs_rc(type_info, index) {
+                            currently_live.insert(*index);
+                        }
+                        if self.needs_rc(type_info, flag) {
+                            currently_live.insert(*flag);
+                        }
+                    }
                     OpCode::SliceLen { result: _, slice } => {
                         // SliceLen returns u32, which doesn't need RC
                         // But we need to keep the slice alive if it's currently live

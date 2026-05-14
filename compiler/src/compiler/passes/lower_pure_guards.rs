@@ -301,6 +301,15 @@ impl LowerPureGuards {
                 });
             }
 
+            // WitnessArrayGet is only emitted by ExplicitWitness, which runs
+            // AFTER LowerPureGuards. Seeing one here is an ICE.
+            OpCode::WitnessArrayGet { .. } => {
+                panic!(
+                    "ICE: WitnessArrayGet should not be present before ExplicitWitness; \
+                     LowerPureGuards runs first"
+                );
+            }
+
             // -- Pure computation, no constraints, can't fail → unwrap --
             OpCode::Const { .. }
             | OpCode::Cmp { .. }

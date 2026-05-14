@@ -448,6 +448,9 @@ fn read_table_info_slot(
             length: length as usize,
             elem_inverses_witness_section_offset: inv_wit_off as usize,
             elem_inverses_constraint_section_offset: inv_cnst_off as usize,
+            // WASM-side codegen doesn't yet emit multi-D tables; treat as 1-D
+            // with `dims = [length]`. This branch is broken for N-D anyway.
+            dims: vec![length as usize],
         },
     )
 }
@@ -574,9 +577,11 @@ fn run_wasm(
         b_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
     let lookups_c_cursor =
         c_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
-    let current_cnst_tables_off = r1cs.constraints_layout.tables_data_start() as u32;
-    let current_wit_tables_off =
-        (r1cs.witness_layout.tables_data_start() - r1cs.witness_layout.challenges_start()) as u32;
+    // Advance past the β-power chain slots so the first table-init opcode
+    // doesn't overlap them.
+    let current_cnst_tables_off = r1cs.constraints_layout.per_table_data_start() as u32;
+    let current_wit_tables_off = (r1cs.witness_layout.per_table_data_start()
+        - r1cs.witness_layout.challenges_start()) as u32;
 
     // Initialize VM struct with buffer pointers
     {
@@ -891,8 +896,10 @@ fn run_ad_wasm(
     // starts; first-use lookup helpers snapshot them and then bump by their
     // own table footprint.
     let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
-    let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
-    let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;
+    // Advance past β-power chain slots so first table-init opcode doesn't
+    // overlap them.
+    let cnst_tables_start = r1cs.constraints_layout.per_table_data_start() as u32;
+    let wit_tables_start = r1cs.witness_layout.per_table_data_start() as u32;
     let wit_mults_start = r1cs.witness_layout.multiplicities_start() as u32;
     // Initialize AD VM struct
     {

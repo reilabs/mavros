@@ -67,6 +67,7 @@ impl WitnessWriteToFresh {
                         | OpCode::AssertR1C { .. }
                         | OpCode::Call { .. }
                         | OpCode::ArrayGet { .. }
+                        | OpCode::WitnessArrayGet { .. }
                         | OpCode::ArraySet { .. }
                         | OpCode::SlicePush { .. }
                         | OpCode::SliceLen { .. }
