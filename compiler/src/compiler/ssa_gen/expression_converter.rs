@@ -995,16 +995,16 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 let element_val = self.convert_expression(element, b).unwrap();
                 let len = *length as usize;
-                let elements: Vec<ValueId> = std::iter::repeat(element_val).take(len).collect();
-                let seq_type = if *is_vector {
-                    SeqType::Slice
-                } else {
-                    SeqType::Array(len)
-                };
                 let elem_type = self.type_converter.convert_type(elem_ast_type);
-                let result = b
-                    .block(self.current_block)
-                    .mk_seq(elements, seq_type, elem_type);
+                let result = if *is_vector {
+                    let elements: Vec<ValueId> =
+                        std::iter::repeat(element_val).take(len).collect();
+                    b.block(self.current_block)
+                        .mk_seq(elements, SeqType::Slice, elem_type)
+                } else {
+                    b.block(self.current_block)
+                        .mk_repeated_array(element_val, len, elem_type)
+                };
                 Some(result)
             }
             Literal::Str(s) => {

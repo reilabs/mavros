@@ -748,6 +748,28 @@ mod def {
     }
 
     #[opcode]
+    fn array_alloc_repeated(
+        #[out] res: *mut BoxedValue,
+        stride: usize,
+        meta: BoxedLayout,
+        count: usize,
+        item: FramePosition,
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let array = BoxedValue::alloc(meta, vm);
+        for i in 0..count {
+            let tgt = array.array_idx(i, stride);
+            unsafe {
+                frame.write_to(tgt, item.0 as isize, stride);
+            }
+        }
+        unsafe {
+            *res = array;
+        }
+    }
+
+    #[opcode]
     #[inline(never)]
     fn tuple_alloc(
         #[out] res: *mut BoxedValue,

@@ -321,6 +321,16 @@ impl Mem2Reg {
                             return false;
                         }
                     }
+                    OpCode::MkRepeatedArray {
+                        result: _,
+                        element: _,
+                        count: _,
+                        elem_type: typ,
+                    } => {
+                        if self.type_contains_ptr(typ) {
+                            return false;
+                        }
+                    }
                     OpCode::Load { result: r, ptr: _ } => {
                         let rtyp = type_info.get_value_type(*r);
                         if self.type_contains_ptr(rtyp) {
