@@ -395,6 +395,8 @@ impl WitnessLowering {
                         | OpCode::Call { .. }
                         | OpCode::ArrayGet { .. }
                         | OpCode::SliceLen { .. }
+                        | OpCode::SliceArray { .. }
+                        | OpCode::BlockSet { .. }
                         | OpCode::ToBits { .. }
                         | OpCode::ToRadix { .. }
                         | OpCode::MemOp { .. }

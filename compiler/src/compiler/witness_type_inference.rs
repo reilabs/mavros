@@ -614,6 +614,50 @@ impl WitnessTypeInference {
                     } => {
                         value_wt.insert(*r, WitnessType::Scalar(ConstantWitness::Pure));
                     }
+                    OpCode::SliceArray {
+                        result: r,
+                        array: arr,
+                        start,
+                        length: _,
+                    } => {
+                        // A view shares the parent's element type at SSA level.
+                        // Witness taint flows from both the parent's element type
+                        // and the start index.
+                        let arr_wt = value_wt.get(arr).unwrap();
+                        let start_wt = value_wt.get(start).unwrap();
+                        let elem_wt = arr_wt.child_witness_type().unwrap();
+                        let toplevel = arr_wt
+                            .toplevel_info()
+                            .join(start_wt.toplevel_info())
+                            .join(elem_wt.toplevel_info());
+                        let result_wt = WitnessType::Array(toplevel, Box::new(elem_wt.clone()));
+                        value_wt.insert(*r, result_wt);
+                    }
+                    OpCode::BlockSet {
+                        result: r,
+                        array: arr,
+                        dst_offset,
+                        source,
+                        length: _,
+                    } => {
+                        let arr_wt = value_wt.get(arr).unwrap();
+                        let off_wt = value_wt.get(dst_offset).unwrap();
+                        let src_wt = value_wt.get(source).unwrap();
+                        let arr_elem_wt = arr_wt.child_witness_type().unwrap();
+                        let src_elem_wt = src_wt.child_witness_type().unwrap();
+                        let off_info = off_wt.toplevel_info();
+                        let result_arr_elem = arr_elem_wt.join(&src_elem_wt).with_toplevel_info(
+                            arr_elem_wt
+                                .toplevel_info()
+                                .join(src_elem_wt.toplevel_info())
+                                .join(off_info),
+                        );
+                        let result_wt = WitnessType::Array(
+                            arr_wt.toplevel_info().join(src_wt.toplevel_info()),
+                            Box::new(result_arr_elem),
+                        );
+                        value_wt.insert(*r, result_wt);
+                    }
                     OpCode::Call {
                         results,
                         function: CallTarget::Static(callee_id),

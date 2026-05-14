@@ -379,6 +379,35 @@ pub trait HLEmitter {
         r
     }
 
+    fn slice_array(&mut self, array: ValueId, start: ValueId, length: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::SliceArray {
+            result: r,
+            array,
+            start,
+            length,
+        });
+        r
+    }
+
+    fn block_set(
+        &mut self,
+        array: ValueId,
+        dst_offset: ValueId,
+        source: ValueId,
+        length: usize,
+    ) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BlockSet {
+            result: r,
+            array,
+            dst_offset,
+            source,
+            length,
+        });
+        r
+    }
+
     // -- Bits / Radix --
 
     fn to_bits(&mut self, value: ValueId, endianness: Endianness, count: usize) -> ValueId {

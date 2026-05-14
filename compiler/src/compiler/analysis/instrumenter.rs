@@ -1765,6 +1765,66 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
     }
 
+    fn slice_array(
+        &mut self,
+        array: &SpecSplitValue,
+        start: &SpecSplitValue,
+        length: usize,
+        _out_type: &Type,
+    ) -> SpecSplitValue {
+        let pick_range = |val: &Value, start_v: &Value| -> Value {
+            match (val, start_v) {
+                (Value::Array(values), Value::U(_, start_u)) => {
+                    let s = *start_u as usize;
+                    Value::Array(values[s..s + length].to_vec())
+                }
+                _ => panic!("slice_array: unsupported operands {:?} / {:?}", val, start_v),
+            }
+        };
+        SpecSplitValue {
+            unspecialized: pick_range(&array.unspecialized, &start.unspecialized),
+            specialized: pick_range(&array.specialized, &start.specialized),
+        }
+    }
+
+    fn block_set(
+        &mut self,
+        array: &SpecSplitValue,
+        dst_offset: &SpecSplitValue,
+        source: &SpecSplitValue,
+        length: usize,
+        _out_type: &Type,
+    ) -> SpecSplitValue {
+        let splice = |arr: &Value, off: &Value, src: &Value| -> Value {
+            match (arr, off, src) {
+                (Value::Array(arr_v), Value::U(_, off_u), Value::Array(src_v)) => {
+                    let off = *off_u as usize;
+                    let mut new_v = arr_v.clone();
+                    for i in 0..length {
+                        new_v[off + i] = src_v[i].clone();
+                    }
+                    Value::Array(new_v)
+                }
+                _ => panic!(
+                    "block_set: unsupported operands {:?} / {:?} / {:?}",
+                    arr, off, src
+                ),
+            }
+        };
+        SpecSplitValue {
+            unspecialized: splice(
+                &array.unspecialized,
+                &dst_offset.unspecialized,
+                &source.unspecialized,
+            ),
+            specialized: splice(
+                &array.specialized,
+                &dst_offset.specialized,
+                &source.specialized,
+            ),
+        }
+    }
+
     fn on_guard(
         &mut self,
         inner: &crate::compiler::ssa::OpCode,

@@ -459,6 +459,41 @@ impl symbolic_executor::Context<Value> for R1CGen {
         Value::Const(ark_bn254::Fr::from(array.borrow().data.len() as u128))
     }
 
+    fn slice_array(
+        &mut self,
+        array: &Value,
+        start: &Value,
+        length: usize,
+        _out_type: &Type,
+    ) -> Value {
+        // Symbolic execution: just materialize the sub-range as a fresh array.
+        let start_idx = start.expect_u32() as usize;
+        let src = array.expect_array();
+        let data: Vec<Value> = src.borrow().data[start_idx..start_idx + length]
+            .iter()
+            .cloned()
+            .collect();
+        Value::mk_array(data)
+    }
+
+    fn block_set(
+        &mut self,
+        array: &Value,
+        dst_offset: &Value,
+        source: &Value,
+        length: usize,
+        _out_type: &Type,
+    ) -> Value {
+        let dst = dst_offset.expect_u32() as usize;
+        let src = source.expect_array();
+        let src_data = src.borrow();
+        let mut new_data = array.expect_array().borrow().data.clone();
+        for i in 0..length {
+            new_data[dst + i] = src_data.data[i].clone();
+        }
+        Value::mk_array(new_data)
+    }
+
     fn on_guard(
         &mut self,
         _inner: &crate::compiler::ssa::OpCode,

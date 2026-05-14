@@ -665,6 +665,33 @@ impl ExplicitWitness {
                 assert!(!slice_taint);
                 b.push(instruction);
             }
+            OpCode::SliceArray {
+                result: _,
+                array: arr,
+                start,
+                length: _,
+            } => {
+                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
+                let start_taint = function_type_info.get_value_type(start).is_witness_of();
+                assert!(!arr_taint);
+                assert!(!start_taint);
+                b.push(instruction);
+            }
+            OpCode::BlockSet {
+                result: _,
+                array: arr,
+                dst_offset,
+                source,
+                length: _,
+            } => {
+                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
+                let off_taint = function_type_info.get_value_type(dst_offset).is_witness_of();
+                let src_taint = function_type_info.get_value_type(source).is_witness_of();
+                assert!(!arr_taint);
+                assert!(!off_taint);
+                assert!(!src_taint);
+                b.push(instruction);
+            }
             OpCode::Select {
                 result: res,
                 cond,

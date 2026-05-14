@@ -899,6 +899,44 @@ impl CodeGen {
                         stride,
                     });
                 }
+                ssa::OpCode::SliceArray {
+                    result: r,
+                    array: arr,
+                    start,
+                    length,
+                } => {
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let arr_type = type_info.get_value_type(*arr);
+                    let elem_type = arr_type.get_array_element();
+                    let stride = layouter.type_size(&elem_type);
+                    emitter.push_op(bytecode::OpCode::SliceArray {
+                        res,
+                        parent: layouter.get_value(*arr),
+                        start: layouter.get_value(*start),
+                        length: *length,
+                        stride,
+                    });
+                }
+                ssa::OpCode::BlockSet {
+                    result: r,
+                    array: arr,
+                    dst_offset,
+                    source,
+                    length,
+                } => {
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let arr_type = type_info.get_value_type(*arr);
+                    let elem_type = arr_type.get_array_element();
+                    let stride = layouter.type_size(&elem_type);
+                    emitter.push_op(bytecode::OpCode::BlockSet {
+                        res,
+                        array: layouter.get_value(*arr),
+                        dst_offset: layouter.get_value(*dst_offset),
+                        source: layouter.get_value(*source),
+                        length: *length,
+                        stride,
+                    });
+                }
                 ssa::OpCode::MkSeq {
                     result: r,
                     elems: vals,

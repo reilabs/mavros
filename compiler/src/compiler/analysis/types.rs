@@ -343,6 +343,33 @@ impl Types {
                 function_info.values.insert(*result, Type::u(32));
                 Ok(())
             }
+            OpCode::SliceArray {
+                result,
+                array,
+                start: _,
+                length,
+            } => {
+                let array_type = function_info.values.get(array).ok_or_else(|| {
+                    format!("Array value {:?} not found in type assignments", array)
+                })?;
+                let elem_type = array_type.get_array_element();
+                let result_type = elem_type.array_of(*length);
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::BlockSet {
+                result,
+                array,
+                dst_offset: _,
+                source: _,
+                length: _,
+            } => {
+                let array_type = function_info.values.get(array).ok_or_else(|| {
+                    format!("Array value {:?} not found in type assignments", array)
+                })?;
+                function_info.values.insert(*result, array_type.clone());
+                Ok(())
+            }
             OpCode::Select {
                 result,
                 cond,

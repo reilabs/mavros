@@ -504,6 +504,64 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*slice);
                     }
+                    OpCode::SliceArray {
+                        result,
+                        array,
+                        start: _,
+                        length: _,
+                    } => {
+                        // SliceArray creates a view that holds a reference to `array`.
+                        // Treat like ArrayGet of a heap-allocated element: the view bumps
+                        // the parent if the parent is still live afterwards.
+                        if !currently_live.contains(array) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Drop,
+                                value: *array,
+                            });
+                        }
+                        if self.needs_rc(type_info, result) {
+                            if currently_live.contains(result) {
+                                new_instructions.push(OpCode::MemOp {
+                                    kind: MemOp::Bump(1),
+                                    value: *result,
+                                });
+                            } else {
+                                panic!(
+                                    "ICE: Result of SliceArray (V{} in block {}) is not live. This is a bug.",
+                                    result.0, block_id.0
+                                )
+                            }
+                        }
+                        new_instructions.push(instruction.clone());
+                        currently_live.insert(*array);
+                    }
+                    OpCode::BlockSet {
+                        result,
+                        array,
+                        dst_offset: _,
+                        source,
+                        length: _,
+                    } => {
+                        // Functional: BlockSet returns a new array (or reuses storage if
+                        // RC permits). Mirror ArraySet for RC handling.
+                        new_instructions.push(instruction.clone());
+                        if currently_live.contains(array) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Bump(1),
+                                value: *array,
+                            });
+                        }
+                        if self.needs_rc(type_info, source) && currently_live.contains(source) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Bump(1),
+                                value: *source,
+                            });
+                        }
+                        if !currently_live.contains(result) {
+                            panic!("ICE: Result of BlockSet is immediately dropped. This is a bug.")
+                        }
+                        currently_live.extend(vec![*array, *source]);
+                    }
                     OpCode::ReadGlobal {
                         result: r,
                         offset: _,

@@ -107,6 +107,21 @@ pub trait Context<V> {
         panic!("ICE: backend does not implement slice_len");
     }
 
+    fn slice_array(&mut self, _array: &V, _start: &V, _length: usize, _out_type: &Type) -> V {
+        panic!("ICE: backend does not implement slice_array");
+    }
+
+    fn block_set(
+        &mut self,
+        _array: &V,
+        _dst_offset: &V,
+        _source: &V,
+        _length: usize,
+        _out_type: &Type,
+    ) -> V {
+        panic!("ICE: backend does not implement block_set");
+    }
+
     /// Handle a Guard instruction. Receives the inner opcode, the condition value,
     /// all resolved inner inputs, and result types. Returns values for each result.
     /// The implementer should nuke information on outputs and handle effectful ops
@@ -368,6 +383,39 @@ impl SymbolicExecutor {
                     } => {
                         let sl = scope[sl.0 as usize].as_ref().unwrap();
                         scope[r.0 as usize] = Some(ctx.slice_len(sl));
+                    }
+                    crate::compiler::ssa::OpCode::SliceArray {
+                        result: r,
+                        array: arr,
+                        start,
+                        length,
+                    } => {
+                        let arr_v = scope[arr.0 as usize].as_ref().unwrap();
+                        let start_v = scope[start.0 as usize].as_ref().unwrap();
+                        scope[r.0 as usize] = Some(ctx.slice_array(
+                            arr_v,
+                            start_v,
+                            *length,
+                            &fn_type_info.get_value_type(*r),
+                        ));
+                    }
+                    crate::compiler::ssa::OpCode::BlockSet {
+                        result: r,
+                        array: arr,
+                        dst_offset,
+                        source,
+                        length,
+                    } => {
+                        let arr_v = scope[arr.0 as usize].as_ref().unwrap();
+                        let off_v = scope[dst_offset.0 as usize].as_ref().unwrap();
+                        let src_v = scope[source.0 as usize].as_ref().unwrap();
+                        scope[r.0 as usize] = Some(ctx.block_set(
+                            arr_v,
+                            off_v,
+                            src_v,
+                            *length,
+                            &fn_type_info.get_value_type(*r),
+                        ));
                     }
                     crate::compiler::ssa::OpCode::Select {
                         result: r,

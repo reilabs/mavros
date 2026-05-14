@@ -801,6 +801,25 @@ pub enum OpCode {
         result: ValueId,
         slice: ValueId,
     },
+    /// Create a view of `length` elements into `array` starting at element
+    /// offset `start`. Result is typed `Array<elem, length>`; at runtime it
+    /// is a small heap object referencing the parent array.
+    SliceArray {
+        result: ValueId,
+        array: ValueId,
+        start: ValueId,
+        length: usize,
+    },
+    /// Functional block copy: clone `array`, overwrite the `length` elements
+    /// starting at `dst_offset` with `source[0..length]`, return the new
+    /// array. `array` may be owned or a view.
+    BlockSet {
+        result: ValueId,
+        array: ValueId,
+        dst_offset: ValueId,
+        source: ValueId,
+        length: usize,
+    },
     Select {
         result: ValueId,
         cond: ValueId,
@@ -1107,6 +1126,38 @@ impl Instruction for OpCode {
                     result.0,
                     annotate_value(*result),
                     slice.0
+                )
+            }
+            OpCode::SliceArray {
+                result,
+                array,
+                start,
+                length,
+            } => {
+                format!(
+                    "v{}{} = slice_array(v{}, start=v{}, len={})",
+                    result.0,
+                    annotate_value(*result),
+                    array.0,
+                    start.0,
+                    length
+                )
+            }
+            OpCode::BlockSet {
+                result,
+                array,
+                dst_offset,
+                source,
+                length,
+            } => {
+                format!(
+                    "v{}{} = block_set(v{}, dst=v{}, src=v{}, len={})",
+                    result.0,
+                    annotate_value(*result),
+                    array.0,
+                    dst_offset.0,
+                    source.0,
+                    length
                 )
             }
             OpCode::Select {
@@ -1518,6 +1569,19 @@ impl Instruction for OpCode {
                 result: _,
                 slice: b,
             } => vec![b].into_iter(),
+            Self::SliceArray {
+                result: _,
+                array: b,
+                start: c,
+                length: _,
+            } => vec![b, c].into_iter(),
+            Self::BlockSet {
+                result: _,
+                array: b,
+                dst_offset: c,
+                source: d,
+                length: _,
+            } => vec![b, c, d].into_iter(),
             Self::AssertCmp {
                 kind: _,
                 lhs: b,
@@ -1687,6 +1751,8 @@ impl Instruction for OpCode {
             | Self::ArraySet { result: r, .. }
             | Self::SlicePush { result: r, .. }
             | Self::SliceLen { result: r, .. }
+            | Self::SliceArray { result: r, .. }
+            | Self::BlockSet { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
             | Self::Select { result: r, .. }
@@ -1798,6 +1864,19 @@ impl Instruction for OpCode {
                 result: _,
                 slice: b,
             } => vec![b].into_iter(),
+            Self::SliceArray {
+                result: _,
+                array: b,
+                start: c,
+                length: _,
+            } => vec![b, c].into_iter(),
+            Self::BlockSet {
+                result: _,
+                array: b,
+                dst_offset: c,
+                source: d,
+                length: _,
+            } => vec![b, c, d].into_iter(),
             Self::AssertCmp {
                 kind: _,
                 lhs: b,
@@ -2024,6 +2103,19 @@ impl Instruction for OpCode {
                 result: a,
                 slice: b,
             } => vec![a, b].into_iter(),
+            Self::SliceArray {
+                result: a,
+                array: b,
+                start: c,
+                length: _,
+            } => vec![a, b, c].into_iter(),
+            Self::BlockSet {
+                result: a,
+                array: b,
+                dst_offset: c,
+                source: d,
+                length: _,
+            } => vec![a, b, c, d].into_iter(),
             Self::AssertR1C { a, b, c } | Self::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             Self::Store { ptr: a, value: b }
             | Self::Load { result: a, ptr: b }

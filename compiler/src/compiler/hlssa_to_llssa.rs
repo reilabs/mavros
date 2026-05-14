@@ -808,6 +808,45 @@ fn lower_instruction(
             );
         }
 
+        OpCode::SliceArray {
+            result,
+            array,
+            start,
+            length,
+        } => {
+            lower_slice_array(
+                e,
+                val_map,
+                fn_type_info,
+                *result,
+                *array,
+                *start,
+                *length,
+            );
+        }
+
+        OpCode::BlockSet {
+            result,
+            array,
+            dst_offset,
+            source,
+            length,
+        } => {
+            lower_block_set(
+                e,
+                val_map,
+                fn_type_info,
+                *result,
+                *array,
+                *dst_offset,
+                *source,
+                *length,
+                llssa,
+                drop_fns,
+                ad_fns,
+            );
+        }
+
         // -- RC operations --
         OpCode::MemOp {
             kind: MemOp::Bump(n),
@@ -1399,6 +1438,152 @@ fn lower_unspread(
 // =============================================================================
 
 /// Lower MkSeq(Array) to heap allocation + element stores.
+/// Lower `SliceArray` by eagerly materializing the view: allocate a fresh
+/// owned array of `length` elements and copy from `parent[start..start+length]`.
+fn lower_slice_array(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    result: ValueId,
+    array: ValueId,
+    start: ValueId,
+    length: usize,
+) {
+    let arr_type = fn_type_info.get_value_type(array);
+    let (et, _parent_count) = array_info(arr_type);
+    let parent_rc_struct = rc_array_struct(et, _parent_count);
+    let new_rc_struct = rc_array_struct(et, length);
+    let es = elem_struct(et);
+    let ll_elem_type = lower_type(et);
+
+    let ll_arr = val_map[&array];
+    let ll_start = val_map[&start];
+    let start64 = e.zext(ll_start, 64);
+
+    // Allocate the new owned array.
+    let new_arr = e.heap_alloc(new_rc_struct.clone(), None);
+    let rc_hdr = e.struct_field_ptr(new_arr, new_rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+    let table_id = e.struct_field_ptr(new_arr, new_rc_struct.clone(), 1);
+    let unassigned = e.int_const(64, u64::MAX);
+    e.ll_store(table_id, unassigned);
+
+    // Copy elements one by one (unroll since `length` is static).
+    let parent_data = e.struct_field_ptr(ll_arr, parent_rc_struct, 2);
+    let new_data = e.struct_field_ptr(new_arr, new_rc_struct, 2);
+    let elem_is_rc = needs_drop(&et.expr);
+    for i in 0..length {
+        let i64v = e.int_const(64, i as u64);
+        let src_idx = e.int_add(start64, i64v);
+        let src_ptr = e.array_elem_ptr(parent_data, es.clone(), src_idx);
+        let val = e.ll_load(src_ptr, ll_elem_type.clone());
+        let dst_ptr = e.array_elem_ptr(new_data, es.clone(), i64v);
+        e.ll_store(dst_ptr, val);
+        // If elements are heap-allocated (RC'd), bump their RC since they
+        // are now aliased between the parent and the new array.
+        if elem_is_rc {
+            // val is the pointer; bump its refcount header.
+            let rc_field = e.struct_field_ptr(val, LLStruct::rc_header(), 0);
+            let cur = e.ll_load(rc_field, LLType::i64());
+            let next = e.int_add(cur, one);
+            e.ll_store(rc_field, next);
+        }
+    }
+
+    val_map.insert(result, new_arr);
+}
+
+/// Lower `BlockSet` via clone + range write.
+fn lower_block_set(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    result: ValueId,
+    array: ValueId,
+    dst_offset: ValueId,
+    source: ValueId,
+    length: usize,
+    llssa: &mut LLSSA,
+    _drop_fns: &mut Vec<DropFnEntry>,
+    _ad_fns: &mut AdFunctions,
+) {
+    let arr_type = fn_type_info.get_value_type(array);
+    let (et, count) = array_info(arr_type);
+    let rc_struct = rc_array_struct(et, count);
+    let es = elem_struct(et);
+    let ll_elem_type = lower_type(et);
+    let elem_is_rc = needs_drop(&et.expr);
+
+    let ll_arr = val_map[&array];
+    let ll_off = val_map[&dst_offset];
+    let off64 = e.zext(ll_off, 64);
+    let ll_src = val_map[&source];
+
+    // Always clone: this is the simplest correct path. RC management ensures
+    // the parent array stays consistent.
+    let new_arr = e.heap_alloc(rc_struct.clone(), None);
+    let rc_hdr = e.struct_field_ptr(new_arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+    let table_id = e.struct_field_ptr(new_arr, rc_struct.clone(), 1);
+    let unassigned = e.int_const(64, u64::MAX);
+    e.ll_store(table_id, unassigned);
+
+    // Determine source element layout. We assume `source` is the same shape
+    // (RC array of the same element type) — true for our pass which produces
+    // BlockSet with source being an array of the same scalar element type.
+    let source_type = fn_type_info.get_value_type(source);
+    let (_src_et, src_count) = array_info(source_type);
+    let src_rc_struct = rc_array_struct(et, src_count);
+
+    let parent_data = e.struct_field_ptr(ll_arr, rc_struct.clone(), 2);
+    let new_data = e.struct_field_ptr(new_arr, rc_struct.clone(), 2);
+    let src_data = e.struct_field_ptr(ll_src, src_rc_struct, 2);
+
+    // Copy ALL elements from `array` into `new_arr`, then overwrite the range.
+    for i in 0..count {
+        let i64v = e.int_const(64, i as u64);
+        let src_ptr = e.array_elem_ptr(parent_data, es.clone(), i64v);
+        let val = e.ll_load(src_ptr, ll_elem_type.clone());
+        let dst_ptr = e.array_elem_ptr(new_data, es.clone(), i64v);
+        e.ll_store(dst_ptr, val);
+        if elem_is_rc {
+            let rc_field = e.struct_field_ptr(val, LLStruct::rc_header(), 0);
+            let cur = e.ll_load(rc_field, LLType::i64());
+            let next = e.int_add(cur, one);
+            e.ll_store(rc_field, next);
+        }
+    }
+
+    // Overwrite the range `[dst_offset..dst_offset+length]` from `source`.
+    for i in 0..length {
+        let i64v = e.int_const(64, i as u64);
+        let dst_idx = e.int_add(off64, i64v);
+        let src_ptr = e.array_elem_ptr(src_data, es.clone(), i64v);
+        let val = e.ll_load(src_ptr, ll_elem_type.clone());
+        let dst_ptr = e.array_elem_ptr(new_data, es.clone(), dst_idx);
+
+        if elem_is_rc {
+            // Drop the element we are overwriting (was copied just above).
+            let old = e.ll_load(dst_ptr, LLType::Ptr);
+            let drop_fn = get_or_create_drop_fn(et, llssa, _drop_fns, _ad_fns);
+            e.call(drop_fn, vec![old], 0);
+            // Bump the source element's RC since it's now aliased.
+            let rc_field = e.struct_field_ptr(val, LLStruct::rc_header(), 0);
+            let cur = e.ll_load(rc_field, LLType::i64());
+            let next = e.int_add(cur, one);
+            e.ll_store(rc_field, next);
+        }
+
+        e.ll_store(dst_ptr, val);
+    }
+
+    val_map.insert(result, new_arr);
+}
+
 fn lower_mk_array(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,

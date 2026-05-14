@@ -108,6 +108,8 @@ impl DCE {
             | OpCode::TupleProj { .. }
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
+            | OpCode::SliceArray { .. }
+            | OpCode::BlockSet { .. }
             | OpCode::MkSeq { .. }
             | OpCode::Cast { .. }
             | OpCode::Truncate { .. }

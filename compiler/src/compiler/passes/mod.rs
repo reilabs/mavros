@@ -5,6 +5,7 @@ pub mod deduplicate_phis;
 pub mod defunctionalize;
 pub mod explicit_witness;
 pub mod fix_double_jumps;
+pub mod flatten_arrays;
 pub mod lower_guards;
 pub mod lower_pure_guards;
 pub mod mem2reg;

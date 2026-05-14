@@ -317,6 +317,8 @@ impl LowerPureGuards {
             | OpCode::Select { .. }
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
+            | OpCode::SliceArray { .. }
+            | OpCode::BlockSet { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::ValueOf { .. }

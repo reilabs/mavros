@@ -741,6 +741,29 @@ impl symbolic_executor::Context<Val> for SpecializationState {
         }
     }
 
+    fn slice_array(
+        &mut self,
+        array: &Val,
+        start: &Val,
+        length: usize,
+        _out_type: &crate::compiler::ir::r#type::Type,
+    ) -> Val {
+        let val = HLEmitter::slice_array(self, array.0, start.0, length);
+        Val(val)
+    }
+
+    fn block_set(
+        &mut self,
+        array: &Val,
+        dst_offset: &Val,
+        source: &Val,
+        length: usize,
+        _out_type: &crate::compiler::ir::r#type::Type,
+    ) -> Val {
+        let val = HLEmitter::block_set(self, array.0, dst_offset.0, source.0, length);
+        Val(val)
+    }
+
     fn on_guard(
         &mut self,
         inner: &crate::compiler::ssa::OpCode,

@@ -22,6 +22,12 @@ pub enum DataType {
     ADMulConst = 5,
     Struct = 6,
     RefCell = 7,
+    /// A non-owning view into another array. Created by the `slice_array`
+    /// bytecode opcode. Its `data()` area holds `[parent: BoxedValue,
+    /// offset_elems: u64, stride: u64]`. The layout's payload (56 bits)
+    /// stores `length_elems * stride` (same convention as owned arrays) so
+    /// that `slice_len` works without branching.
+    ArrayView = 8,
 }
 
 /// Per-shape struct layout, interned by the compiler and shared across all
@@ -122,6 +128,13 @@ impl BoxedLayout {
         }
     }
 
+    /// Construct an ArrayView layout. `payload_size` is `length_elems * stride`
+    /// (same convention as `array`), so `array_size()` returns it directly.
+    pub fn array_view(payload_size: usize) -> Self {
+        assert!(payload_size < (1 << 56));
+        Self::new_sized(DataType::ArrayView, payload_size)
+    }
+
     /// Build a struct layout pointing at descriptor `idx` in the program's struct-layout table.
     pub fn new_struct(idx: usize) -> Self {
         Self::new_sized(DataType::Struct, idx)
@@ -188,6 +201,10 @@ impl BoxedLayout {
         self.data_type() == DataType::PrimArray
     }
 
+    pub fn is_array_view(&self) -> bool {
+        self.data_type() == DataType::ArrayView
+    }
+
     pub fn underlying_array_size(&self, struct_layouts: &[StructDescriptor]) -> usize {
         let base_byte_size = match self.data_type() {
             DataType::ADConst => size_of::<ADConst>(),
@@ -197,6 +214,9 @@ impl BoxedLayout {
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
             DataType::Struct => 8 * self.as_struct(struct_layouts).total_size(),
             DataType::RefCell => 8 * self.ref_cell_elem_size(),
+            // ArrayView stores 3 u64 words of metadata (parent, offset, stride)
+            // regardless of the payload size encoded in the layout.
+            DataType::ArrayView => 24,
         };
         base_byte_size.div_ceil(8) + 3
     }
@@ -312,6 +332,9 @@ impl BoxedValue {
             DataType::RefCell => {
                 panic!("bump_da for RefCell")
             }
+            DataType::ArrayView => {
+                panic!("bump_da for ArrayView")
+            }
         }
     }
 
@@ -346,6 +369,9 @@ impl BoxedValue {
             }
             DataType::RefCell => {
                 panic!("bump_db for RefCell")
+            }
+            DataType::ArrayView => {
+                panic!("bump_db for ArrayView")
             }
         }
     }
@@ -382,6 +408,9 @@ impl BoxedValue {
             DataType::RefCell => {
                 panic!("bump_dc for RefCell")
             }
+            DataType::ArrayView => {
+                panic!("bump_dc for ArrayView")
+            }
         }
     }
 
@@ -390,7 +419,38 @@ impl BoxedValue {
     // }
 
     pub fn array_idx(&self, idx: usize, stride: usize) -> *mut u64 {
+        if self.layout().data_type() == DataType::ArrayView {
+            let parent = self.view_parent();
+            let offset = self.view_offset_elems();
+            return parent.array_idx(offset + idx, stride);
+        }
         unsafe { self.data().offset(idx as isize * stride as isize) }
+    }
+
+    // -- ArrayView accessors --
+
+    /// Read this view's parent BoxedValue. Caller must ensure self is a view.
+    pub fn view_parent(&self) -> BoxedValue {
+        unsafe { *(self.data() as *mut BoxedValue) }
+    }
+
+    /// Read this view's element offset into its parent.
+    pub fn view_offset_elems(&self) -> usize {
+        unsafe { *(self.data().add(1)) as usize }
+    }
+
+    /// Read this view's stride (in u64 words per element).
+    pub fn view_stride(&self) -> usize {
+        unsafe { *(self.data().add(2)) as usize }
+    }
+
+    /// Write the view's metadata fields. Used by `slice_array`.
+    pub fn write_view_meta(&self, parent: BoxedValue, offset_elems: usize, stride: usize) {
+        unsafe {
+            *(self.data() as *mut BoxedValue) = parent;
+            *(self.data().add(1)) = offset_elems as u64;
+            *(self.data().add(2)) = stride as u64;
+        }
     }
 
     pub fn inc_rc(&self, by: u64) {
@@ -483,6 +543,12 @@ impl BoxedValue {
                         queue.push_back(ad_mul_const.value);
                         item.free(vm);
                     }
+                    DataType::ArrayView => {
+                        // Drop the parent reference, then free this view's header.
+                        let parent = item.view_parent();
+                        queue.push_back(parent);
+                        item.free(vm);
+                    }
                 }
             } else {
                 unsafe {
@@ -519,6 +585,41 @@ impl BoxedValue {
     }
 
     pub fn copy_if_reused(&self, vm: &mut VM) -> Self {
+        let layout = self.layout();
+
+        if layout.data_type() == DataType::ArrayView {
+            // Always materialize a view: writing through a view would mutate
+            // the parent, which violates the functional semantics of
+            // array_set. The new owned array is a PrimArray of the right
+            // payload size; the parent's data is copied from the view's
+            // offset.
+            let parent = self.view_parent();
+            let offset = self.view_offset_elems();
+            let stride = self.view_stride();
+            let parent_is_boxed = parent.layout().data_type() == DataType::BoxedArray;
+            let new_layout = BoxedLayout::array(layout.array_size(), parent_is_boxed);
+            let new_array = BoxedValue::alloc(new_layout, vm);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    parent.array_idx(offset, stride),
+                    new_array.data(),
+                    layout.array_size(),
+                );
+                // If parent stores boxed pointers, the materialized copy
+                // aliases each element — bump RC of every copied element.
+                if parent_is_boxed {
+                    let length_elems = layout.array_size() / stride;
+                    for i in 0..length_elems {
+                        let elem = *(new_array.array_idx(i, stride) as *mut BoxedValue);
+                        elem.inc_rc(1);
+                    }
+                }
+            }
+            // Drop our reference to the view.
+            self.dec_rc(vm);
+            return new_array;
+        }
+
         let rc = self.rc();
         let rc_val = unsafe { *rc };
 
@@ -527,7 +628,6 @@ impl BoxedValue {
             *self
         } else {
             // println!("Array @{:?} is not dying, copy", self.0);
-            let layout = self.layout();
             let new_array = BoxedValue::alloc(layout, vm);
 
             unsafe {

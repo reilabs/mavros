@@ -26,6 +26,7 @@ use crate::{
             defunctionalize::Defunctionalize,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
+            flatten_arrays::FlattenArrays,
             lower_guards::LowerGuards,
             lower_pure_guards::LowerPureGuards,
             mem2reg::Mem2Reg,
@@ -188,6 +189,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
+                Box::new(FlattenArrays::new()),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),

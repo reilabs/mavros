@@ -971,6 +971,8 @@ impl CSE {
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }
+                    | OpCode::SliceArray { .. }
+                    | OpCode::BlockSet { .. }
                     | OpCode::MemOp { kind: _, value: _ }
                     | OpCode::Lookup { .. }
                     | OpCode::DLookup {

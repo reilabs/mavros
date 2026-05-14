@@ -123,6 +123,8 @@ impl StripWitnessOf {
             | OpCode::ArraySet { .. }
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
+            | OpCode::SliceArray { .. }
+            | OpCode::BlockSet { .. }
             | OpCode::Select { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }

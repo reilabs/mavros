@@ -893,6 +893,83 @@ mod def {
     }
 
     #[opcode]
+    fn slice_array(
+        #[out] res: *mut BoxedValue,
+        #[frame] parent: BoxedValue,
+        #[frame] start: u64,
+        length: usize,
+        stride: usize,
+        vm: &mut VM,
+    ) {
+        // Allocate a small view-header heap object. Payload-size encoded in
+        // the layout is `length * stride` (so slice_len returns `length`).
+        let view_layout = BoxedLayout::array_view(length * stride);
+        let view = BoxedValue::alloc(view_layout, vm);
+        view.write_view_meta(parent, start as usize, stride);
+        // The view shares the parent: bump parent RC.
+        parent.inc_rc(1);
+        unsafe {
+            *res = view;
+        }
+    }
+
+    #[opcode]
+    #[inline(never)]
+    fn block_set(
+        #[out] res: *mut BoxedValue,
+        #[frame] array: BoxedValue,
+        #[frame] dst_offset: u64,
+        #[frame] source: BoxedValue,
+        length: usize,
+        stride: usize,
+        vm: &mut VM,
+    ) {
+        // Functional: clone `array` (materializing if it's a view), copy
+        // `length` elements from `source[0..]` into the clone at `dst_offset`,
+        // return the clone.
+        let new_array = array.copy_if_reused(vm);
+        let dst_byte_offset = (dst_offset as usize) * stride;
+        let nwords = length * stride;
+        if new_array.layout().data_type() == DataType::BoxedArray {
+            // The destination's slot currently holds pointer elements that
+            // we're about to overwrite — drop their RC first if we own this
+            // copy (copy_if_reused on a non-shared array reuses storage).
+            if new_array.0 == array.0 {
+                for i in 0..length {
+                    let elem = unsafe {
+                        *(new_array.array_idx((dst_offset as usize) + i, stride) as *mut BoxedValue)
+                    };
+                    elem.dec_rc(vm);
+                }
+            } else {
+                // Storage was cloned: bump RC of every element NOT in the
+                // overwrite range (they're now aliased).
+                let total_len = new_array.layout().array_size() / stride;
+                for i in 0..total_len {
+                    if i < (dst_offset as usize) || i >= (dst_offset as usize) + length {
+                        let elem = unsafe {
+                            *(new_array.array_idx(i, stride) as *mut BoxedValue)
+                        };
+                        elem.inc_rc(1);
+                    }
+                }
+            }
+            // The source's elements are being copied in: bump their RC.
+            for i in 0..length {
+                let elem = unsafe { *(source.array_idx(i, stride) as *mut BoxedValue) };
+                elem.inc_rc(1);
+            }
+        }
+        unsafe {
+            let dst = new_array.data().add(dst_byte_offset);
+            // source may itself be a view; use array_idx which handles that.
+            let src_ptr = source.array_idx(0, stride);
+            ptr::copy_nonoverlapping(src_ptr, dst, nwords);
+            *res = new_array;
+        }
+    }
+
+    #[opcode]
     fn inc_rc(#[frame] array: BoxedValue, amount: u64) {
         // println!("inc_array_rc_intro");
         array.inc_rc(amount);
