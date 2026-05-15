@@ -1115,12 +1115,15 @@ impl CodeGen {
                 }
                 ssa::OpCode::ToRadix {
                     result: _,
-                    value: _,
-                    radix: _,
-                    endianness: _,
-                    count: _,
+                    value: v,
+                    radix,
+                    endianness,
+                    count,
                 } => {
-                    panic!("ToRadix not yet implemented");
+                    panic!(
+                        "ToRadix not yet implemented: radix={:?} endianness={:?} count={} value_type={:?}",
+                        radix, endianness, count, type_info.get_value_type(*v),
+                    );
                 }
                 ssa::OpCode::NextDCoeff { result: out } => {
                     let v = layouter.alloc_field(*out);
