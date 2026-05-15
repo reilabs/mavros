@@ -50,6 +50,41 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
     }
 }
 
+/// Recursively collect pointers to every scalar leaf of an array (possibly
+/// nested) into `out`, in row-major order.
+///
+/// `stride` describes the per-leaf element width for primitive (Field/Word)
+/// arrays. For boxed arrays the recursion descends into each cell; if a cell's
+/// inner value is itself an array, the recursion continues; otherwise the cell
+/// pointer is the leaf (e.g., a witness/AD value, accessed by dereferencing
+/// the cell to get the BoxedValue handle, as `lookup_elem_bump_db` does).
+unsafe fn collect_array_leaves(array: BoxedValue, stride: usize, out: &mut Vec<*mut u64>) {
+    let layout = array.layout();
+    if layout.is_boxed_array() {
+        let size = layout.array_size();
+        for i in 0..size {
+            let cell_ptr = array.array_idx(i, 1);
+            let inner = unsafe { *(cell_ptr as *mut BoxedValue) };
+            let inner_layout = inner.layout();
+            if inner_layout.is_boxed_array() || inner_layout.is_prim_array() {
+                unsafe { collect_array_leaves(inner, stride, out) };
+            } else {
+                out.push(cell_ptr);
+            }
+        }
+    } else if layout.is_prim_array() {
+        let n_elems = layout.array_size() / stride;
+        for i in 0..n_elems {
+            out.push(array.array_idx(i, stride));
+        }
+    } else {
+        panic!(
+            "Unexpected array data type in lookup-table flatten: {:?}",
+            layout.data_type()
+        );
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct FramePosition(pub usize);
 
@@ -1317,8 +1352,13 @@ mod def {
         let table_idx = unsafe { *table_id_ptr };
 
         let table_idx = if table_idx == u64::MAX {
-            // First lookup on this array: create a new table
-            let length = array.layout().array_size() / stride;
+            // First lookup on this array: create a new table.
+            // Nested arrays are flattened row-major; `leaves` is the per-leaf
+            // pointer list, so `length` is the total leaf count regardless of
+            // nesting depth.
+            let mut leaves: Vec<*mut u64> = Vec::new();
+            unsafe { collect_array_leaves(array, stride, &mut leaves) };
+            let length = leaves.len();
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
                 num_indices: 1,
@@ -1337,8 +1377,7 @@ mod def {
             // Dump array element values into the x-slots (even offsets) of the table section
             unsafe {
                 let cnst_off = vm.data.as_forward.elem_inverses_constraint_section_offset;
-                for i in 0..length {
-                    let elem_ptr = array.array_idx(i, stride);
+                for (i, elem_ptr) in leaves.iter().copied().enumerate() {
                     let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind);
                     // Write it into the x-slot (even offset: 2*i) of the constraint section
                     *vm.data.as_forward.out_a_base.add(cnst_off + 2 * i) = elem_field;
@@ -1497,8 +1536,12 @@ mod def {
         let table_idx = unsafe { *table_id_ptr };
 
         let table_idx = if table_idx == u64::MAX {
-            // First AD call on this array: create table and process table constraints
-            let length = array.layout().array_size() / stride;
+            // First AD call on this array: create table and process table constraints.
+            // Nested arrays are flattened row-major: `leaves` enumerates per-leaf
+            // pointers and `length` is the total leaf count.
+            let mut leaves: Vec<*mut u64> = Vec::new();
+            unsafe { collect_array_leaves(array, stride, &mut leaves) };
+            let length = leaves.len();
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
@@ -1528,8 +1571,7 @@ mod def {
                     .offset(inverses_constraint_section_offset as isize + 2 * length as isize)
             };
 
-            for i in 0..length {
-                let elem_ptr = array.array_idx(i, stride);
+            for (i, elem_ptr) in leaves.iter().copied().enumerate() {
 
                 // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
                 let x_coeff = unsafe {

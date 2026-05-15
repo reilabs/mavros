@@ -21,6 +21,19 @@ use crate::compiler::{
 use num_bigint::BigInt;
 use num_traits::{One, Signed};
 
+/// Number of scalar leaves contained in a (possibly nested) type. Used to
+/// compute the flat lookup-table stride for witness-indexed ND-array reads.
+fn leaf_scalar_count(t: &Type) -> usize {
+    match &t.expr {
+        TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
+        TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
+        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
+            panic!("leaf_scalar_count: unsupported type {}", t)
+        }
+    }
+}
+
 /// Number of bits needed to represent every value in the interval as a
 /// non-negative integer. Returns `None` if the interval may contain a negative
 /// value or has no upper bound.
@@ -2347,6 +2360,12 @@ impl ExplicitWitness {
 
     /// Lower a witness-indexed ArrayGet into a hint + lookup constraint.
     /// `flag` is the lookup flag: `1` unconditionally, or the guard condition.
+    ///
+    /// For scalar element types this emits a single `write_witness` + `lookup_arr`.
+    /// For multi-dimensional array elements the array is hint-reconstructed
+    /// element-by-element: each scalar leaf is written as a witness and then
+    /// constrained via a lookup into the original array's flattened lookup
+    /// table at offset `idx * stride + leaf_offset`.
     fn gen_witness_array_get(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2356,17 +2375,40 @@ impl ExplicitWitness {
         result: ValueId,
         flag: ValueId,
     ) {
-        let result_type = function_type_info
-            .get_value_type(result)
-            .strip_all_witness();
+        let result_type_full = function_type_info.get_value_type(result).clone();
+        let result_type = result_type_full.strip_all_witness();
+        let arr_elem_type = function_type_info
+            .get_value_type(arr)
+            .get_array_element();
+
+        // ND-array case: hint the entire slice, then constrain each leaf with a
+        // lookup at a computed flat offset.
+        if matches!(&result_type.expr, TypeExpr::Array(..)) {
+            let pure_idx = b.value_of(idx);
+            let idx_field = b.cast_to_field(idx);
+            let inner_hint = b.array_get(arr, pure_idx);
+            let outer_stride = leaf_scalar_count(&result_type);
+            let stride_const = b.field_const(Field::from(outer_stride as u128));
+            let base_key = b.mul(idx_field, stride_const);
+            self.gen_witness_array_get_nd(
+                b,
+                arr,
+                base_key,
+                inner_hint,
+                &arr_elem_type,
+                &result_type_full,
+                0u128,
+                Some(result),
+                flag,
+            );
+            return;
+        }
+
         let back_cast_target = match &result_type.expr {
             TypeExpr::U(s) => CastTarget::U(*s),
             TypeExpr::I(s) => CastTarget::I(*s),
             TypeExpr::Field => CastTarget::Field,
             TypeExpr::WitnessOf(_) => CastTarget::Field,
-            TypeExpr::Array(_, _) => {
-                todo!("array types in witnessed array reads")
-            }
             TypeExpr::Slice(_) => {
                 todo!("slice types in witnessed array reads")
             }
@@ -2376,6 +2418,7 @@ impl ExplicitWitness {
             TypeExpr::Tuple(_elements) => {
                 todo!("Tuples not supported yet")
             }
+            TypeExpr::Array(_, _) => unreachable!("handled above"),
             TypeExpr::Function => {
                 panic!("Function type not expected in witnessed array reads")
             }
@@ -2384,11 +2427,7 @@ impl ExplicitWitness {
         let pure_idx = b.value_of(idx);
         let mut r_pure_val = b.array_get(arr, pure_idx);
 
-        let elem_is_witness = function_type_info
-            .get_value_type(arr)
-            .get_array_element()
-            .is_witness_of();
-        if elem_is_witness {
+        if arr_elem_type.is_witness_of() {
             r_pure_val = b.value_of(r_pure_val);
         }
 
@@ -2401,6 +2440,108 @@ impl ExplicitWitness {
             target: back_cast_target,
         });
         b.lookup_arr(arr, idx_field, r_wit, flag);
+    }
+
+    /// Recursive helper for [`gen_witness_array_get`] in the ND case. Walks the
+    /// target type tree, allocating intermediate `MkSeq` per non-leaf level and
+    /// emitting per-leaf `write_witness` + `lookup_arr` constraints.
+    ///
+    /// `arr_elem_type` is the original (possibly WitnessOf-leaved) type of the
+    /// current `hint` slice; used only to decide whether to unwrap a hint leaf.
+    /// `target_type` is the inferred type of the value being produced.
+    /// `leaf_offset` is the running flat-table offset for the current subtree.
+    /// `result_override`, when `Some`, becomes the id of the outermost `MkSeq`
+    /// or leaf `Cast`, so the caller can pre-allocate the final result id.
+    #[allow(clippy::too_many_arguments)]
+    fn gen_witness_array_get_nd(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        arr: ValueId,
+        base_key: ValueId,
+        hint: ValueId,
+        arr_elem_type: &Type,
+        target_type: &Type,
+        leaf_offset: u128,
+        result_override: Option<ValueId>,
+        flag: ValueId,
+    ) -> ValueId {
+        let stripped = target_type.strip_all_witness();
+        match &stripped.expr {
+            TypeExpr::Array(inner_stripped, n) => {
+                assert!(
+                    !target_type.is_witness_of(),
+                    "ICE: ND witness array read produced WitnessOf at the array container level — \
+                     the leaf-tinting rules in witness_type_inference and analysis/types must \
+                     push WitnessOf into scalar leaves instead. target_type = {target_type}"
+                );
+                let inner_target = target_type.get_array_element();
+                let inner_arr_type = arr_elem_type.get_array_element();
+                let inner_leaves = leaf_scalar_count(inner_stripped.as_ref()) as u128;
+                let mut elems = Vec::with_capacity(*n);
+                for i in 0..*n {
+                    let i_const = b.u_const(32, i as u128);
+                    let child_hint = b.array_get(hint, i_const);
+                    let child_offset = leaf_offset + (i as u128) * inner_leaves;
+                    let child = self.gen_witness_array_get_nd(
+                        b,
+                        arr,
+                        base_key,
+                        child_hint,
+                        &inner_arr_type,
+                        &inner_target,
+                        child_offset,
+                        None,
+                        flag,
+                    );
+                    elems.push(child);
+                }
+                let id = result_override.unwrap_or_else(|| b.fresh_value());
+                b.push(OpCode::MkSeq {
+                    result: id,
+                    elems,
+                    seq_type: SeqType::Array(*n),
+                    elem_type: inner_target,
+                });
+                id
+            }
+            TypeExpr::Slice(_) => {
+                panic!("ND witness array read: slice element types not supported")
+            }
+            TypeExpr::Tuple(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
+                panic!(
+                    "ND witness array read: unsupported element type {}",
+                    target_type
+                )
+            }
+            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+                let leaf_pure = if arr_elem_type.is_witness_of() {
+                    b.value_of(hint)
+                } else {
+                    hint
+                };
+                let leaf_field = b.cast_to_field(leaf_pure);
+                let leaf_wit = b.write_witness(leaf_field);
+                let offset_const = b.field_const(Field::from(leaf_offset));
+                let flat_key = b.add(base_key, offset_const);
+                b.lookup_arr(arr, flat_key, leaf_wit, flag);
+                let cast_target = match &stripped.expr {
+                    TypeExpr::U(s) => CastTarget::U(*s),
+                    TypeExpr::I(s) => CastTarget::I(*s),
+                    TypeExpr::Field => CastTarget::Field,
+                    _ => unreachable!(),
+                };
+                let id = result_override.unwrap_or_else(|| b.fresh_value());
+                b.push(OpCode::Cast {
+                    result: id,
+                    value: leaf_wit,
+                    target: cast_target,
+                });
+                id
+            }
+            TypeExpr::WitnessOf(_) => {
+                unreachable!("strip_all_witness should remove all WitnessOf wrappers")
+            }
+        }
     }
 
     fn ensure_field(

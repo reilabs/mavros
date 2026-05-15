@@ -14,6 +14,9 @@ use crate::{
 };
 
 /// Returns (stride, elem_kind) for an array element type in a lookup opcode.
+/// Nested arrays and slices are flattened: the runtime lookup table is a flat
+/// row-major sequence of scalar leaves, so we descend through Array/Slice
+/// wrappers and report the leaf type.
 fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
     match &elem_type.expr {
         TypeExpr::Field => (bytecode::LIMBS, bytecode::ELEM_FIELD),
@@ -32,6 +35,7 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
             );
             (1, bytecode::ELEM_WITNESS)
         }
+        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner),
         _ => panic!("Unsupported array element type in lookup: {elem_type}"),
     }
 }
