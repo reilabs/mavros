@@ -423,6 +423,15 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 }
                             }
                         }
+                        OpCode::MkRepeated {
+                            result, element, ..
+                        } => {
+                            changed |= propagate(&mut reaching, (fid, *element), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *element)) {
+                                changed |=
+                                    propagate(&mut reaching, (fid, *result), (fid, *element));
+                            }
+                        }
                         OpCode::ArrayGet { result, array, .. } => {
                             changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *result)) {
@@ -617,6 +626,7 @@ fn replace_function_type(typ: &mut Type) {
 fn replace_function_types_in_instruction(instr: &mut OpCode) {
     match instr {
         OpCode::MkSeq { elem_type, .. } => replace_function_type(elem_type),
+        OpCode::MkRepeated { elem_type, .. } => replace_function_type(elem_type),
         OpCode::Alloc { elem_type, .. } => replace_function_type(elem_type),
         OpCode::MkTuple { element_types, .. } => {
             for t in element_types.iter_mut() {

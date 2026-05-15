@@ -311,6 +311,7 @@ impl LowerPureGuards {
             }
             | OpCode::Cast { .. }
             | OpCode::MkSeq { .. }
+            | OpCode::MkRepeated { .. }
             | OpCode::MkTuple { .. }
             | OpCode::TupleProj { .. }
             | OpCode::Load { .. }

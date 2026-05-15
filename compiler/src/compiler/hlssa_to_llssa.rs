@@ -780,6 +780,16 @@ fn lower_instruction(
             lower_mk_array(e, val_map, *result, elems, elem_type, *count);
         }
 
+        OpCode::MkRepeated {
+            result,
+            element,
+            seq_type: _,
+            count,
+            elem_type,
+        } => {
+            lower_mk_repeated(e, val_map, *result, *element, elem_type, *count);
+        }
+
         OpCode::ArrayGet {
             result,
             array,
@@ -1430,6 +1440,44 @@ fn lower_mk_array(
         let ll_elem = val_map[elem];
         e.ll_store(elem_ptr, ll_elem);
     }
+
+    val_map.insert(result, arr);
+}
+
+/// Lower MkRepeated to heap allocation + a counted loop that stores the
+/// element at each index.  The HLSSA-level RC pass has already bumped the
+/// element's refcount by `count`, so we just spread the same `ll_element`
+/// across all slots.  Used for both arrays and slices — at the LL level the
+/// runtime layout is identical.
+fn lower_mk_repeated(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    element: ValueId,
+    elem_type: &Type,
+    count: usize,
+) {
+    let rc_struct = rc_array_struct(elem_type, count);
+    let es = elem_struct(elem_type);
+
+    let arr = e.heap_alloc(rc_struct.clone(), None);
+
+    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.int_const(64, 1);
+    e.ll_store(rc_word, one);
+    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let unassigned = e.int_const(64, u64::MAX);
+    e.ll_store(table_id, unassigned);
+
+    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let ll_element = val_map[&element];
+
+    e.build_counted_loop(count, vec![], |emitter, i, _accs| {
+        let elem_ptr = emitter.array_elem_ptr(data, es.clone(), i);
+        emitter.ll_store(elem_ptr, ll_element);
+        vec![]
+    });
 
     val_map.insert(result, arr);
 }

@@ -919,6 +919,25 @@ impl CodeGen {
                         items: args,
                     });
                 }
+                ssa::OpCode::MkRepeated {
+                    result: r,
+                    element,
+                    seq_type: _,
+                    count,
+                    elem_type: eltype,
+                } => {
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let item = layouter.get_value(*element);
+                    let is_ptr = eltype.is_heap_allocated();
+                    let stride = layouter.type_size(eltype);
+                    emitter.push_op(bytecode::OpCode::ArrayAllocRepeated {
+                        res,
+                        stride,
+                        meta: vm::array::BoxedLayout::array(*count * stride, is_ptr),
+                        count: *count,
+                        item,
+                    });
+                }
                 ssa::OpCode::MkTuple {
                     result,
                     elems,

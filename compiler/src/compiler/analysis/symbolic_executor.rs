@@ -265,6 +265,17 @@ impl SymbolicExecutor {
                             .collect::<Vec<_>>();
                         scope[r.0 as usize] = Some(V::mk_array(a, ctx, *seq_type, elem_type));
                     }
+                    crate::compiler::ssa::OpCode::MkRepeated {
+                        result: r,
+                        element,
+                        seq_type,
+                        count,
+                        elem_type,
+                    } => {
+                        let elem = scope[element.0 as usize].as_ref().unwrap().clone();
+                        let a = vec![elem; *count];
+                        scope[r.0 as usize] = Some(V::mk_array(a, ctx, *seq_type, elem_type));
+                    }
                     crate::compiler::ssa::OpCode::Alloc {
                         result: r,
                         elem_type,

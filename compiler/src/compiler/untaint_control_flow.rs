@@ -124,6 +124,25 @@ impl UntaintControlFlow {
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
+                    OpCode::MkRepeated {
+                        result: r,
+                        element,
+                        seq_type,
+                        count,
+                        elem_type: tp,
+                    } => {
+                        let r_wt = function_wt
+                            .get_value_witness_type(r)
+                            .child_witness_type()
+                            .unwrap();
+                        OpCode::MkRepeated {
+                            result: r,
+                            element,
+                            seq_type,
+                            count,
+                            elem_type: apply_witness_type(tp, &r_wt),
+                        }
+                    }
                     OpCode::MkTuple {
                         result: r,
                         elems: l,
@@ -559,6 +578,36 @@ impl UntaintControlFlow {
                         result: r,
                         elems: new_vs,
                         seq_type: s,
+                        elem_type: target_elem_type,
+                    },
+                );
+            }
+            // -- Cast insertion for MkRepeated --
+            OpCode::MkRepeated {
+                result: r,
+                element,
+                seq_type,
+                count,
+                elem_type: ref tp,
+            } if type_info.is_some() => {
+                let ti = type_info.unwrap();
+                let target_elem_type = tp.clone();
+                let mut cast_instrs = Vec::new();
+                let new_element = {
+                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    convert_if_needed(element, &target_elem_type, ti, &mut builder)
+                };
+                for instr in cast_instrs {
+                    maybe_guard(new_instructions, block_taint, instr);
+                }
+                maybe_guard(
+                    new_instructions,
+                    block_taint,
+                    OpCode::MkRepeated {
+                        result: r,
+                        element: new_element,
+                        seq_type,
+                        count,
                         elem_type: target_elem_type,
                     },
                 );

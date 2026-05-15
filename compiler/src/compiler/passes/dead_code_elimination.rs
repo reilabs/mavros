@@ -109,6 +109,7 @@ impl DCE {
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
             | OpCode::MkSeq { .. }
+            | OpCode::MkRepeated { .. }
             | OpCode::Cast { .. }
             | OpCode::Truncate { .. }
             | OpCode::SExt { .. }

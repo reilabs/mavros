@@ -603,13 +603,11 @@ impl PrepareEntryPoint {
     }
 
     fn emit_default_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
-        let elems = if size == 0 {
-            Vec::new()
-        } else {
-            let default_elem = Self::emit_default_value(e, inner);
-            vec![default_elem; size]
-        };
-        e.mk_seq(elems, SeqType::Array(size), inner.clone())
+        if size == 0 {
+            return e.mk_seq(Vec::new(), SeqType::Array(0), inner.clone());
+        }
+        let default_elem = Self::emit_default_value(e, inner);
+        e.mk_repeated(default_elem, SeqType::Array(size), size, inner.clone())
     }
 
     fn emit_reconstruct_child_input_array(

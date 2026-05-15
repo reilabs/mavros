@@ -967,6 +967,7 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::MkRepeated { .. }
                     | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }

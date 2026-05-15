@@ -356,6 +356,37 @@ impl RCInsertion {
                         }
                         currently_live.extend(inputs);
                     }
+                    OpCode::MkRepeated {
+                        result,
+                        element,
+                        seq_type: _,
+                        count,
+                        elem_type,
+                    } => {
+                        // MkRepeated should return an RC counter of 1.
+                        new_instructions.push(instruction.clone());
+                        if self.type_needs_rc(elem_type) {
+                            // The element is aliased `count` times into the seq.
+                            // Each repetition needs a bump; we then decrease by one
+                            // if the original value dies here.
+                            let mut bump = *count;
+                            if !currently_live.contains(element) {
+                                bump -= 1;
+                            }
+                            if bump > 0 {
+                                new_instructions.push(OpCode::MemOp {
+                                    kind: MemOp::Bump(bump),
+                                    value: *element,
+                                });
+                            }
+                        }
+                        if !currently_live.contains(result) {
+                            panic!(
+                                "ICE: Result of MkRepeated is immediately dropped. This is a bug."
+                            )
+                        }
+                        currently_live.insert(*element);
+                    }
                     OpCode::Alloc {
                         result,
                         elem_type: _,

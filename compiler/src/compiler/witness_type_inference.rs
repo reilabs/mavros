@@ -702,6 +702,20 @@ impl WitnessTypeInference {
                             WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
                         );
                     }
+                    OpCode::MkRepeated {
+                        result,
+                        element,
+                        seq_type: _,
+                        count: _,
+                        elem_type: tp,
+                    } => {
+                        let base = Self::construct_pure_witness_for_type(tp);
+                        let result_wt = base.join(value_wt.get(element).unwrap());
+                        value_wt.insert(
+                            *result,
+                            WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
+                        );
+                    }
                     OpCode::Spread { result, value, .. } => {
                         let val_wt = value_wt.get(value).unwrap().clone();
                         value_wt.insert(*result, val_wt);

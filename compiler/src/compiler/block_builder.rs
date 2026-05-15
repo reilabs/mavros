@@ -334,6 +334,24 @@ pub trait HLEmitter {
         r
     }
 
+    fn mk_repeated(
+        &mut self,
+        element: ValueId,
+        seq_type: SeqType,
+        count: usize,
+        elem_type: Type,
+    ) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::MkRepeated {
+            result: r,
+            element,
+            seq_type,
+            count,
+            elem_type,
+        });
+        r
+    }
+
     fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::Select {
