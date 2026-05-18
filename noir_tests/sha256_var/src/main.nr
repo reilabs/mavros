@@ -1,17 +1,4 @@
 // Reproducer from https://github.com/reilabs/mavros/issues/165.
-//
-// Iteratively hashing a witness `[u8; 32]` through `sha256_var` exercises:
-//   - the witness-cast no-op path (#165): the `data` Jmp arg into the loop
-//     head carries a tuple-shaped value whose pure u32 fields used to trip
-//     `emit_value_conversion`,
-//   - witness `Shl/Shr` lowering: sha256's byte-packing in
-//     `process_full_blocks` / `finalize_sha256_blocks` shifts witness u32s by
-//     pure amounts,
-//   - witness big-endian `ToRadix` lowering: `(state[j] as Field).to_be_bytes()`
-//     in `hash_final_block`,
-//   - the `Radix::Dyn -> Bytes` rewrite: `to_be_bytes` reaches the builtin
-//     through `to_be_radix(256)` so the radix is a stdlib function parameter
-//     that gets runtime-asserted == 256.
 use sha256::sha256_var;
 
 global NUM_SHA_CALLS: u32 = 35;

@@ -503,8 +503,6 @@ impl ExplicitWitness {
                 // Witness-l, pure-r: lower `l op r` to mul/div by `1 << r`.
                 // `1 << r` is itself a pure shift, which falls through this pass
                 // unchanged and is handled by downstream codegen.
-                // Witness-r (shift amount as a witness) has no straightforward
-                // circuit lowering and is left as a panic until we have a need.
                 if r_taint {
                     panic!(
                         "Shift {:?} with witness shift amount is not supported",
@@ -948,9 +946,29 @@ impl ExplicitWitness {
                 endianness,
                 count,
             } => {
+                // `Radix::Dyn(rv)` only reaches mavros via Noir's
+                // `to_be_radix` / `to_le_radix` builtins, which Noir doesn't
+                // currently expose to user code; the stdlib only ever calls
+                // them with `256`. Codegen also only has a specialised
+                // bytecode op for `Radix::Bytes`. Pin the assumption with a
+                // runtime `assert(rv == 256)` and proceed as Bytes.
+                let radix = match radix {
+                    Radix::Dyn(rv) => {
+                        let const_256 = b.u_const(32, 256);
+                        b.assert_eq(rv, const_256);
+                        Radix::Bytes
+                    }
+                    Radix::Bytes => Radix::Bytes,
+                };
                 let value_taint = function_type_info.get_value_type(value).is_witness_of();
                 if !value_taint {
-                    b.push(instruction);
+                    b.push(OpCode::ToRadix {
+                        result,
+                        value,
+                        radix,
+                        endianness,
+                        count,
+                    });
                 } else {
                     let pure_value = b.value_of(value);
                     // Compute digit hints in the caller's requested endianness;

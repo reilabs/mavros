@@ -13,7 +13,7 @@ use crate::compiler::{
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BinaryArithOpKind, CastTarget, CmpKind, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
-        Radix, ValueId,
+        ValueId,
     },
 };
 
@@ -421,49 +421,6 @@ impl Simplifier {
                     });
                 }
                 None
-            }
-            OpCode::ToRadix {
-                result,
-                value,
-                radix: Radix::Dyn(rv),
-                endianness,
-                count,
-            } => {
-                // Codegen only has a specialized bytecode op for base-256, but
-                // the Noir frontend always routes `to_be_bytes` / `to_le_bytes`
-                // through `to_be_radix(256)` / `to_le_radix(256)`. The stdlib
-                // wraps the builtin in
-                // `to_be_radix(self, radix: u32) { __to_be_radix(self, radix) }`,
-                // so by the time we see it the literal 256 has typically been
-                // hidden behind a function-parameter Ident — proving it static
-                // would need inter-procedural const propagation. Cheap
-                // alternative: rewrite to the Bytes specialisation
-                // unconditionally and add a runtime `assert(rv == 256)`. If a
-                // caller ever passes a different radix the assert fails, which
-                // is the same outcome as today (compile-time panic / unsat
-                // constraint) — just at the right layer.
-                let const_256 = function.fresh_value();
-                let eq_result = function.fresh_value();
-                Some(Rewrite::Replace(vec![
-                    OpCode::Const {
-                        result: const_256,
-                        value: ConstValue::U(32, 256),
-                    },
-                    OpCode::Cmp {
-                        kind: CmpKind::Eq,
-                        result: eq_result,
-                        lhs: *rv,
-                        rhs: const_256,
-                    },
-                    OpCode::Assert { value: eq_result },
-                    OpCode::ToRadix {
-                        result: *result,
-                        value: *value,
-                        radix: Radix::Bytes,
-                        endianness: *endianness,
-                        count: *count,
-                    },
-                ]))
             }
             _ => None,
         }
