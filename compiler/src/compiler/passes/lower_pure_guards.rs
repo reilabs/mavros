@@ -1,3 +1,27 @@
+//! Lowers pure Guard instructions into plain control flow where possible.
+//!
+//! After UntaintControlFlow, Guards wrap operations in witness-conditional blocks. Many of these
+//! Guards are unnecessary because the inner operation is a pure computation that doesn't generate
+//! constraints or have side effects. In these cases, we can collapse them to control flow.
+//!
+//! Classification:
+//!
+//! - **Always unwrap** (no constraints, no side effects, can't fail): Const, Cmp, Not, And, Or,
+//!   Xor, Cast, Truncate, ExtractTupleField, MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
+//! - **Lower with OOB check** (can fail if given an out-of-bounds index): ArrayGet — if OOB, assert
+//!   !cond and produce default; else array_get.
+//! - **Lower with OOB check + passthrough** (RC-tracked allocation): ArraySet — if OOB, assert
+//!   !cond and pass through array; else array_set.
+//! - **Lower with overflow check** (pure inputs only, can fail): Integer Add/Sub/Mul — widen,
+//!   compute, if overflow assert !cond and produce 0; else narrow.
+//! - **Lower with shift check** (pure inputs only, can fail): Integer Shl/Shr — validate shift
+//!   amount before shifting; Shl also checks overflow so we fail there too.
+//! - **Lower with div-zero check** (pure inputs only, can fail): Div/Mod — if divisor==0 assert
+//!   !cond and produce 0; else compute.
+//! - **Keep as Guard** (side-effectful or generates constraints): Store, Call, WriteWitness,
+//!   Assert, AssertCmp, AssertR1C, Constrain, Rangecheck, and failable ops with witness inputs
+//!   (SExt, integer arith).
+
 use crate::compiler::{
     analysis::types::TypeInfo,
     block_builder::{HLBlockEmitter, HLEmitter},
@@ -9,29 +33,6 @@ use crate::compiler::{
     },
 };
 
-/// Lowers pure Guard instructions into plain control flow where possible.
-///
-/// After UntaintControlFlow, Guards wrap operations in witness-conditional
-/// blocks. Many of these Guards are unnecessary because the inner operation
-/// is a pure computation that doesn't generate constraints or have side effects.
-///
-/// Classification:
-/// - **Always unwrap** (no constraints, no side effects, can't fail):
-///   Const, Cmp, Not, And, Or, Xor, Cast, Truncate, ExtractTupleField,
-///   MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
-/// - **Lower with OOB check** (can fail on out-of-bounds index):
-///   ArrayGet — if OOB, assert !cond and produce default; else array_get.
-/// - **Lower with OOB check + passthrough** (RC-tracked allocation):
-///   ArraySet — if OOB, assert !cond and pass through array; else array_set.
-/// - **Lower with overflow check** (pure inputs only, can fail):
-///   Integer Add/Sub/Mul — widen, compute, if overflow assert !cond and produce 0; else narrow.
-/// - **Lower with shift check** (pure inputs only, can fail):
-///   Integer Shl/Shr — validate shift amount before shifting; Shl also checks overflow.
-/// - **Lower with div-zero check** (pure inputs only, can fail):
-///   Div/Mod — if divisor==0 assert !cond and produce 0; else compute.
-/// - **Keep as Guard** (side-effectful or generates constraints):
-///   Store, Call, WriteWitness, Assert, AssertCmp, AssertR1C, Constrain, Rangecheck,
-///   and failable ops with witness inputs (SExt, integer arith).
 pub struct LowerPureGuards {}
 
 impl Pass for LowerPureGuards {

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::{
     compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
         analysis::types::{FunctionTypeInfo, TypeInfo},
-        flow_analysis::{CFG, FlowAnalysis},
         ir::r#type::{Type, TypeExpr},
         ssa::{
             self, BinaryArithOpKind, BlockId, CmpKind, DMatrix, Endianness, FunctionId, HLBlock,
@@ -13,10 +13,13 @@ use crate::{
     vm::{self, bytecode},
 };
 
+/// The number of `u64` cells taken up by a pointer.
+pub const POINTER_SIZE_CELLS: usize = 1;
+
 /// Returns (stride, elem_kind) for an array element type in a lookup opcode.
 fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
     match &elem_type.expr {
-        TypeExpr::Field => (bytecode::LIMBS, bytecode::ELEM_FIELD),
+        TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
         TypeExpr::U(bits) | TypeExpr::I(bits) => {
             assert!(
                 *bits <= 64,
@@ -71,13 +74,13 @@ impl FrameLayouter {
     fn alloc_field(&mut self, value: ValueId) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
-        self.next_free += bytecode::LIMBS;
+        self.next_free += bytecode::FELT_LIMBS;
         bytecode::FramePosition(r)
     }
 
     fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
         let r = self.next_free;
-        self.next_free += bytecode::LIMBS;
+        self.next_free += bytecode::FELT_LIMBS;
         bytecode::FramePosition(r)
     }
 
@@ -88,18 +91,19 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
+    /// Returns the size of `tp` in u`64` cells.
     fn type_size(&self, tp: &Type) -> usize {
         match tp.expr {
-            TypeExpr::Field => bytecode::LIMBS,
+            TypeExpr::Field => bytecode::FELT_LIMBS,
             TypeExpr::U(bits) | TypeExpr::I(bits) => {
                 assert!(bits <= 64);
                 1
             }
-            TypeExpr::Array(_, _) => 1,  // Ptr
-            TypeExpr::Slice(_) => 1,     // Ptr
-            TypeExpr::WitnessOf(_) => 1, // Ptr
-            TypeExpr::Tuple(_) => 1,     // Ptr
-            TypeExpr::Ref(_) => 1,       // Ptr
+            TypeExpr::Array(_, _) => POINTER_SIZE_CELLS,
+            TypeExpr::Slice(_) => POINTER_SIZE_CELLS,
+            TypeExpr::WitnessOf(_) => POINTER_SIZE_CELLS,
+            TypeExpr::Tuple(_) => POINTER_SIZE_CELLS,
+            TypeExpr::Ref(_) => POINTER_SIZE_CELLS,
             _ => todo!(),
         }
     }
@@ -207,7 +211,7 @@ impl GlobalFrameLayouter {
     fn type_frame_size(typ: &Type) -> usize {
         use crate::compiler::ir::r#type::TypeExpr;
         match &typ.expr {
-            TypeExpr::Field => bytecode::LIMBS,
+            TypeExpr::Field => bytecode::FELT_LIMBS,
             TypeExpr::U(bits) | TypeExpr::I(bits) => {
                 assert!(*bits <= 64);
                 1
@@ -1368,7 +1372,7 @@ impl CodeGen {
                     }
                     ssa::ConstValue::Field(val) => {
                         let start = layouter.alloc_field(*result);
-                        for i in 0..bytecode::LIMBS {
+                        for i in 0..bytecode::FELT_LIMBS {
                             emitter.push_op(bytecode::OpCode::MovConst {
                                 res: start.offset(i as isize),
                                 val: val.0.0[i],

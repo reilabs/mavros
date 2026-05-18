@@ -13,9 +13,10 @@ use std::{
     marker::PhantomData,
 };
 
+use crate::compiler::analysis::flow_analysis;
+use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::block_builder::{LLBlockEmitter, LLEmitter};
-use crate::compiler::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
@@ -489,7 +490,7 @@ fn lower_inner(
 fn lower_function(
     function: &HLFunction,
     fn_type_info: &FunctionTypeInfo,
-    cfg: &crate::compiler::flow_analysis::CFG,
+    cfg: &flow_analysis::CFG,
     fn_map: &HashMap<FunctionId, FunctionId>,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,

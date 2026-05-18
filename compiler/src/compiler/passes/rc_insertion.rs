@@ -1,12 +1,19 @@
+//! Handles the insertion of reference count increments (`Bump(n)` which does `rc += n`) and
+//! decrements (`Drop`, which does `rc -= 1`) into the SSA in order to ensure correct retention of
+//! heap-allocated values at runtime.
+//!
+//! It also handles cases where values die along edges instead of within a block to actually perform
+//! the necessary decrements.
+
 use itertools::Itertools;
 use tracing::{Level, debug, instrument, trace};
 
 use crate::compiler::{
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     analysis::{
         liveness::{FunctionLiveness, LivenessAnalysis},
         types::{FunctionTypeInfo, TypeInfo},
     },
-    flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{CastTarget, HLFunction, HLSSA, Instruction, MemOp, OpCode, Terminator, ValueId},
@@ -594,18 +601,11 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         if currently_live.contains(slice) {
                             // Slice push will decrease the RC and oportunistically reuse the storage,
-                            // if it notices a refcount of 0. So we need to bump _before_
-                            // we enter it.
+                            // if it notices a refcount of 0. So we need to bump _before_ we enter it.
                             new_instructions.push(OpCode::MemOp {
                                 kind: MemOp::Bump(1),
                                 value: *slice,
                             });
-                            if self.needs_rc(type_info, slice) {
-                                new_instructions.push(OpCode::MemOp {
-                                    kind: MemOp::Bump(1),
-                                    value: *slice,
-                                });
-                            }
                         }
                         let slice_type = type_info.get_value_type(*slice);
                         let elem_type = slice_type.get_array_element();

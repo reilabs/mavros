@@ -1,3 +1,10 @@
+//! Implements a specialization cost-estimation analysis for the compiler.
+//!
+//! It functions by performing speculative specialization to estimate how many constraints, lookups,
+//! and range-checks could be saved by certain specializations. This is done using symbolic
+//! execution combined with an instrumenter for the circuit cost, and gives the compiler an idea of
+//! how much a function could be shrunk through specialization on concrete inputs.
+
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
@@ -6,15 +13,13 @@ use tracing::instrument;
 
 use crate::compiler::{
     Field,
-    analysis::{
-        symbolic_executor::{self, SymbolicExecutor},
-        types::TypeInfo,
-    },
+    analysis::types::TypeInfo,
     ir::r#type::{Type, TypeExpr},
     ssa::{
         self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
         MemOp, Radix, SeqType, SliceOpDir,
     },
+    symbolic_executor::{self, SymbolicExecutor},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,8 +43,8 @@ impl ScalarKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
-    U(usize, u128),
-    I(usize, u128),
+    U { bits_size: usize, value: u128 },
+    I { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
@@ -51,8 +56,8 @@ pub enum ValueSignature {
 impl ValueSignature {
     pub fn to_value(&self) -> Value {
         match self {
-            ValueSignature::U(size, val) => Value::U(*size, *val),
-            ValueSignature::I(size, val) => Value::I(*size, *val),
+            ValueSignature::U { bits_size, value } => Value::U(*bits_size, *value),
+            ValueSignature::I { bits_size, value } => Value::I(*bits_size, *value),
             ValueSignature::Field(field) => Value::Field(*field),
             ValueSignature::Array(vals) => {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
@@ -68,7 +73,9 @@ impl ValueSignature {
 
     pub fn pretty_print(&self, full: bool) -> String {
         match self {
-            ValueSignature::U(_, v) | ValueSignature::I(_, v) => format!("{v}"),
+            ValueSignature::U { value, .. } | ValueSignature::I { value, .. } => {
+                format!("{value}")
+            }
             ValueSignature::Field(f) => format!("{}", f),
             ValueSignature::Array(items) => {
                 if full {
@@ -512,8 +519,14 @@ impl Value {
             Value::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
-            Value::U(s, v) => ValueSignature::U(*s, *v),
-            Value::I(s, v) => ValueSignature::I(*s, *v),
+            Value::U(s, v) => ValueSignature::U {
+                bits_size: *s,
+                value: *v,
+            },
+            Value::I(s, v) => ValueSignature::I {
+                bits_size: *s,
+                value: *v,
+            },
             Value::Field(f) => ValueSignature::Field(*f),
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())

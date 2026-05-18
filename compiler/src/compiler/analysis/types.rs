@@ -1,10 +1,13 @@
+//! An analysis pass that gathers (extrinsic) type information wherever needed, avoiding the need to
+//! perform detailed bookkeeping of type information whenever transforming the IR.
+
 use core::panic;
 use std::collections::HashMap;
 
 use tracing::{Level, instrument};
 
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     ssa::{CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, ValueId},
 };
