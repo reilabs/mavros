@@ -1,0 +1,7 @@
+[package]
+name = "sha256_var"
+type = "bin"
+authors = [""]
+
+[dependencies]
+sha256 = { path = "../passport_03_check_dg1_hash_within_sod/vendor/sha256" }
