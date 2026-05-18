@@ -1122,7 +1122,10 @@ impl CodeGen {
                 } => {
                     panic!(
                         "ToRadix not yet implemented: radix={:?} endianness={:?} count={} value_type={:?}",
-                        radix, endianness, count, type_info.get_value_type(*v),
+                        radix,
+                        endianness,
+                        count,
+                        type_info.get_value_type(*v),
                     );
                 }
                 ssa::OpCode::NextDCoeff { result: out } => {
