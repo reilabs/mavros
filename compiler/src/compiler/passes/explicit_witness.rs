@@ -551,10 +551,9 @@ impl ExplicitWitness {
                         let factor_range = function_value_ranges
                             .try_get(r)
                             .map(|r_range| {
-                                let lo = r_range.lo.as_ref().and_then(|v| v.to_u32()).unwrap_or(0);
+                                let lo = r_range.lo().and_then(|v| v.to_u32()).unwrap_or(0);
                                 let hi = r_range
-                                    .hi
-                                    .as_ref()
+                                    .hi()
                                     .and_then(|v| v.to_u32())
                                     .unwrap_or(bits as u32 - 1)
                                     .min(bits as u32 - 1);
