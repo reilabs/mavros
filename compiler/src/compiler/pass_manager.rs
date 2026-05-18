@@ -265,7 +265,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
     }
 
     fn output_debug_info(&mut self, ssa: &SSA<Op, Ty>, pass_index: usize, pass_name: &str) {
-        use crate::compiler::flow_analysis::FlowAnalysis;
+        use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 
         let Some(debug_output_dir) = &self.debug_output_dir else {
             return;
@@ -289,7 +289,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
     }
 
     fn output_final_debug_info(&mut self, ssa: &mut SSA<Op, Ty>) {
-        use crate::compiler::flow_analysis::FlowAnalysis;
+        use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 
         if self.analyses.try_get::<FlowAnalysis>().is_none() {
             let cfg = FlowAnalysis::run(ssa);

@@ -1,3 +1,9 @@
+//! Builds a mapping from ever SSA `ValueId` back to the place at which it is defined on a
+//! per-function basis.
+//!
+//! This is mainly consumed by the simplifier, avoiding the need to perform an `O(n)` scan of every
+//! block to find a value's defining instruction.
+
 use std::collections::HashMap;
 
 use crate::compiler::{

@@ -1,3 +1,14 @@
+//! Implements a defunctionalization pass that eliminates first-class function values from the SSA,
+//! ensuring that the rest of the compiler only has to deal with calls that can be resolved
+//! statically.
+//!
+//! It does this as follows:
+//!
+//! 1. Analyses the whole program to determine which functions are reachable from each call target.
+//! 2. Synthesizes dispatch functions for each call target that takes the function identifier and
+//!    params, dispatches to the right call, and then merges into a single return.
+//! 3. Rewrites the original call site to use this dispatch function.
+
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
@@ -297,6 +308,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
+            // It is safe to stop here as Noir doesn't have early return.
             if let Some(Terminator::Return(vals)) = block.get_terminator() {
                 return_values.insert(fid, vals.clone());
                 break;
@@ -512,6 +524,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 }
                             }
                         }
+                        // TODO Make exhaustive (#175).
                         _ => {}
                     }
                 }

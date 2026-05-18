@@ -5,7 +5,6 @@
 // Helper functions
 // ====================
 
-
 pub fn vec_add<let T: u32>(lhs: [Field; T], rhs: [Field; T]) -> [Field; T] {
     let mut result = [0; T];
     for i in 0..T {
@@ -55,7 +54,6 @@ pub fn mds_4(mut state: [Field; 4]) -> [Field; 4] {
 // Poseidon2 BN254 Core
 // ====================
 
-
 pub struct Poseidon2Bn254Config<let T: u32, let R: u32> {
     first_full_rc: [[Field; T]; 4],
     partial_rc: [Field; R],
@@ -91,7 +89,6 @@ fn permute_bn254<let T: u32, let R: u32>(
 // ====================
 // Constants
 // ====================
-
 
 pub fn x5_2_config() -> Poseidon2Bn254Config<2, 56> {
     Poseidon2Bn254Config {

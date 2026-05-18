@@ -1,3 +1,10 @@
+//! Implements a promotion from stack-based load-store traffic into pure SSA values (virtual
+//! registers) akin to the same pass in LLVM.
+//!
+//! Note that we use block parameters instead of phi edges here, but other than that it is a
+//! standard Cytron-style (TOPLAS '91) dominance-frontier iteration. Note that the escape analysis
+//! is currently extremely conservative, and can be improved.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use tracing::{Level, debug, instrument};
@@ -5,7 +12,7 @@ use tracing::{Level, debug, instrument};
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::passes::fix_double_jumps::ValueReplacements;
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{BlockId, HLFunction, HLSSA, OpCode, Terminator, ValueId},
@@ -258,9 +265,9 @@ impl Mem2Reg {
         result
     }
 
-    // This is _very_ crude. We give up on mem2reg for the entire function
-    // if we detect _any_ pointer escaping or entering the function, or being
-    // written to another pointer. Obviously this needs a better implementation.
+    // This is _very_ crude. We give up on mem2reg for the entire function if we detect _any_
+    // pointer escaping or entering the function, or being written to another pointer. Obviously
+    // this needs a better implementation (#168).
     fn escape_safe(&self, function: &HLFunction, type_info: &FunctionTypeInfo) -> bool {
         for (_, block) in function.get_blocks() {
             for (_, typ) in block.get_parameters() {

@@ -1,3 +1,10 @@
+//! Lowers `Guard` and `Select` instructions to control flow (JmpIf).
+//!
+//! This pass runs in the witgen pipeline, converting:
+//!
+//! - Guard(cond, op) → JmpIf(cond, exec_block, skip_block)
+//! - Select(cond, l, r) → JmpIf(cond, t_block, f_block) → merge with phi params
+
 use crate::compiler::{
     analysis::types::TypeInfo,
     block_builder::{HLBlockEmitter, HLEmitter},
@@ -5,11 +12,6 @@ use crate::compiler::{
     ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator},
 };
 
-/// Lowers Guard and Select instructions to control flow (JmpIf).
-///
-/// This pass runs in the witgen pipeline, converting:
-/// - Guard(cond, op) → JmpIf(cond, exec_block, skip_block)
-/// - Select(cond, l, r) → JmpIf(cond, t_block, f_block) → merge with phi params
 pub struct LowerGuards {}
 
 impl Pass for LowerGuards {

@@ -1,5 +1,7 @@
+//! Performs constant propagation of known condition values into downstream blocks.
+
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{BlockId, ConstValue, HLSSA, OpCode, Terminator, ValueId},

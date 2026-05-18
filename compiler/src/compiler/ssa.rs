@@ -1,3 +1,6 @@
+//! The definition for the generic SSA structure used as the backend for both the HLSSA and LLSSA
+//! variants used by the compiler.
+
 use crate::compiler::ir::r#type::{SSAType, Type};
 use itertools::Itertools;
 use std::{collections::HashMap, fmt::Display, vec};
@@ -683,7 +686,10 @@ impl SeqType {
 
 #[derive(Debug, Clone, Copy)]
 pub enum MemOp {
+    /// A reference count increment operation, bumping by the provided amount.
     Bump(usize),
+
+    /// A reference count decrement operation (always by one).
     Drop,
 }
 
