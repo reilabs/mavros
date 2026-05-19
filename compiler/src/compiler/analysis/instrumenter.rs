@@ -152,6 +152,34 @@ impl Value {
         }
     }
 
+    /// Construct a structurally-correct `Unknown` value for a given type.
+    /// Scalar types collapse to `Value::Unknown`; composite types retain their
+    /// shape with unknown leaves. Used when the symbolic executor needs a
+    /// placeholder value (e.g. the result of a witness-indexed array read) but
+    /// must preserve the IR's expectation that the value is, say, an array of
+    /// arrays rather than a flat scalar.
+    fn unknown_from_type(tp: &Type) -> Value {
+        match &tp.expr {
+            TypeExpr::Field => Value::Unknown(ScalarKind::Field),
+            TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+            TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
+            TypeExpr::WitnessOf(inner) => {
+                Value::WitnessOf(Box::new(Value::unknown_from_type(inner)))
+            }
+            TypeExpr::Array(elem, n) => {
+                Value::Array((0..*n).map(|_| Value::unknown_from_type(elem)).collect())
+            }
+            TypeExpr::Slice(_) => Value::Array(Vec::new()),
+            TypeExpr::Tuple(elems) => {
+                Value::Tuple(elems.iter().map(Value::unknown_from_type).collect())
+            }
+            TypeExpr::Ref(inner) => {
+                Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
+            }
+            TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
+        }
+    }
+
     fn ult_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
@@ -572,9 +600,9 @@ impl Value {
         }
     }
 
-    fn array_get(&self, index: &Value, _tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn array_get(&self, index: &Value, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
         if matches!(self, Value::Unknown(_)) {
-            return Value::Unknown(ScalarKind::Field);
+            return Value::unknown_from_type(tp);
         }
 
         let arr = self.unwrap_witness();
@@ -585,14 +613,14 @@ impl Value {
                 Value::U(_, index) => vals[*index as usize].clone(),
                 _ => {
                     instrumenter.record_lookups(vals.len(), 1, 1);
-                    Value::Unknown(ScalarKind::Field)
+                    Value::unknown_from_type(tp)
                 }
             },
             (Value::Array(vals), Value::Unknown(_)) => {
                 instrumenter.record_lookups(vals.len(), 1, 1);
-                Value::Unknown(ScalarKind::Field)
+                Value::unknown_from_type(tp)
             }
-            (Value::Unknown(_), _) => Value::Unknown(ScalarKind::Field),
+            (Value::Unknown(_), _) => Value::unknown_from_type(tp),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
