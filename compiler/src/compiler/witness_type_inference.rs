@@ -1,9 +1,13 @@
-use crate::compiler::flow_analysis::FlowAnalysis;
+//! Performs whole program analysis to determine which values are potentially witness tainted, which
+//! are _only_ witnesses, and which are only non-witness values.
+
+use crate::compiler::analysis::flow_analysis;
+use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::ir::r#type::{Type, TypeExpr};
 use crate::compiler::ssa::{
     BlockId, CallTarget, FunctionId, HLSSA, OpCode, SsaAnnotator, Terminator, ValueId,
 };
-use crate::compiler::witness_info::{ConstantWitness, FunctionWitnessType, WitnessType};
+use crate::compiler::witness_info::{FunctionWitnessType, WitnessShape, WitnessType};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // ---------------------------------------------------------------------------
@@ -13,15 +17,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[derive(Eq, Hash, PartialEq, Clone, Debug)]
 struct SpecKey {
     original_func_id: FunctionId,
-    arg_types: Vec<WitnessType>,
-    cfg_witness: ConstantWitness,
+    arg_types: Vec<WitnessShape>,
+    cfg_witness: WitnessType,
 }
 
 #[derive(Clone, Debug)]
 struct SpecValue {
     specialized_func_id: FunctionId,
-    return_types: Vec<WitnessType>,
-    arg_types_out: Vec<WitnessType>,
+    return_types: Vec<WitnessShape>,
+    arg_types_out: Vec<WitnessShape>,
 }
 
 // ---------------------------------------------------------------------------
@@ -29,10 +33,10 @@ struct SpecValue {
 // ---------------------------------------------------------------------------
 
 struct PropagationResult {
-    return_types: Vec<WitnessType>,
-    arg_types_out: Vec<WitnessType>,
-    value_wt: HashMap<ValueId, WitnessType>,
-    block_cfg: HashMap<BlockId, ConstantWitness>,
+    return_types: Vec<WitnessShape>,
+    arg_types_out: Vec<WitnessShape>,
+    value_wt: HashMap<ValueId, WitnessShape>,
+    block_cfg: HashMap<BlockId, WitnessType>,
     /// Call sites discovered: (callee_func_id, arg_types, cfg_witness, return_value_ids, arg_value_ids)
     call_sites: Vec<CallSiteInfo>,
 }
@@ -40,8 +44,8 @@ struct PropagationResult {
 #[derive(Clone)]
 struct CallSiteInfo {
     callee_func_id: FunctionId,
-    arg_types: Vec<WitnessType>,
-    cfg_witness: ConstantWitness,
+    arg_types: Vec<WitnessShape>,
+    cfg_witness: WitnessType,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,19 +84,19 @@ impl WitnessTypeInference {
         let main_func = ssa.get_function(main_id);
 
         // 1. Compute main's arg types: all Pure (WriteWitness in PrepareEntryPoint bridges to Witness)
-        let main_arg_types: Vec<WitnessType> = main_func
+        let main_arg_types: Vec<WitnessShape> = main_func
             .get_entry()
             .get_parameters()
             .map(|(_, tp)| Self::construct_pure_witness_for_type(tp))
             .collect();
 
-        let main_return_types: Vec<WitnessType> = main_func
+        let main_return_types: Vec<WitnessShape> = main_func
             .get_returns()
             .iter()
-            .map(|_| WitnessType::Scalar(ConstantWitness::Pure)) // optimistic
+            .map(|_| WitnessShape::Scalar(WitnessType::Pure)) // optimistic
             .collect();
 
-        let main_cfg_witness = ConstantWitness::Pure;
+        let main_cfg_witness = WitnessType::Pure;
 
         // 2. Register main specialization
         let main_key = SpecKey {
@@ -172,7 +176,7 @@ impl WitnessTypeInference {
                 if !specializations.contains_key(&callee_key) {
                     // New specialization: clone function, register with optimistic Pure returns
                     let callee_func = ssa.get_function(callee_key.original_func_id);
-                    let callee_return_types: Vec<WitnessType> = callee_func
+                    let callee_return_types: Vec<WitnessShape> = callee_func
                         .get_returns()
                         .iter()
                         .map(Self::construct_pure_witness_for_type)
@@ -278,9 +282,9 @@ impl WitnessTypeInference {
 
     fn propagate_function(
         func: &crate::compiler::ssa::HLFunction,
-        cfg: &crate::compiler::flow_analysis::CFG,
-        arg_types: &[WitnessType],
-        cfg_witness: ConstantWitness,
+        cfg: &flow_analysis::CFG,
+        arg_types: &[WitnessShape],
+        cfg_witness: WitnessType,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
     ) -> PropagationResult {
@@ -288,9 +292,9 @@ impl WitnessTypeInference {
         let block_queue: Vec<BlockId> = cfg.get_blocks_bfs().collect();
 
         // Inner state
-        let mut value_wt: HashMap<ValueId, WitnessType> = HashMap::new();
-        let mut block_cfg: HashMap<BlockId, ConstantWitness> = HashMap::new();
-        let mut alloc_inner: HashMap<ValueId, WitnessType> = HashMap::new();
+        let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
+        let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
+        let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::new();
 
         // Initialize entry block params from arg_types
         let entry_params: Vec<(ValueId, Type)> =
@@ -376,7 +380,7 @@ impl WitnessTypeInference {
                         // Skip unconstrained calls — not specialized
                         continue;
                     }
-                    let callee_arg_types: Vec<WitnessType> = args
+                    let callee_arg_types: Vec<WitnessShape> = args
                         .iter()
                         .map(|v| value_wt.get(v).unwrap().clone())
                         .collect();
@@ -389,7 +393,7 @@ impl WitnessTypeInference {
             }
 
             if let Some(Terminator::Return(values)) = block.get_terminator() {
-                let ret_wts: Vec<WitnessType> = values
+                let ret_wts: Vec<WitnessShape> = values
                     .iter()
                     .map(|v| value_wt.get(v).unwrap().clone())
                     .collect();
@@ -415,15 +419,15 @@ impl WitnessTypeInference {
         }
 
         // Compute arg_types_out: for Ref args, reflect updated alloc_inner
-        let arg_types_out: Vec<WitnessType> = entry_params
+        let arg_types_out: Vec<WitnessShape> = entry_params
             .iter()
             .zip(arg_types.iter())
             .map(|((value_id, _), original_arg)| {
                 match original_arg {
-                    WitnessType::Ref(_, _) => {
+                    WitnessShape::Ref(_, _) => {
                         // Look up the alloc_inner for this ref value
                         if let Some(inner) = alloc_inner.get(value_id) {
-                            WitnessType::Ref(ConstantWitness::Pure, Box::new(inner.clone()))
+                            WitnessShape::Ref(WitnessType::Pure, Box::new(inner.clone()))
                         } else {
                             original_arg.clone()
                         }
@@ -445,12 +449,12 @@ impl WitnessTypeInference {
     /// Single forward pass over all blocks
     fn propagate_once(
         func: &crate::compiler::ssa::HLFunction,
-        cfg: &crate::compiler::flow_analysis::CFG,
+        cfg: &flow_analysis::CFG,
         block_queue: &[BlockId],
         _entry_id: BlockId,
-        value_wt: &mut HashMap<ValueId, WitnessType>,
-        block_cfg: &mut HashMap<BlockId, ConstantWitness>,
-        alloc_inner: &mut HashMap<ValueId, WitnessType>,
+        value_wt: &mut HashMap<ValueId, WitnessShape>,
+        block_cfg: &mut HashMap<BlockId, WitnessType>,
+        alloc_inner: &mut HashMap<ValueId, WitnessShape>,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
     ) {
@@ -458,341 +462,14 @@ impl WitnessTypeInference {
             let block = func.get_block(*block_id);
             let block_cw = *block_cfg.get(block_id).unwrap();
 
-            for instruction in block.get_instructions() {
-                match instruction {
-                    OpCode::BinaryArithOp {
-                        kind: _,
-                        result: r,
-                        lhs,
-                        rhs,
-                    }
-                    | OpCode::Cmp {
-                        kind: _,
-                        result: r,
-                        lhs,
-                        rhs,
-                    } => {
-                        let result_wt = Self::infer_binop_cmp_result(
-                            value_wt.get(lhs).unwrap(),
-                            value_wt.get(rhs).unwrap(),
-                        );
-                        value_wt.insert(*r, result_wt);
-                    }
-                    OpCode::Select {
-                        result: r,
-                        cond,
-                        if_t,
-                        if_f,
-                    } => {
-                        let result_wt = Self::infer_select_result(
-                            value_wt.get(cond).unwrap(),
-                            value_wt.get(if_t).unwrap(),
-                            value_wt.get(if_f).unwrap(),
-                        );
-                        value_wt.insert(*r, result_wt);
-                    }
-                    OpCode::Alloc {
-                        result: r,
-                        elem_type: _tp,
-                    } => {
-                        let inner = alloc_inner.get(r).unwrap().clone();
-                        value_wt
-                            .insert(*r, WitnessType::Ref(ConstantWitness::Pure, Box::new(inner)));
-                    }
-                    OpCode::Store { ptr, value: v } => {
-                        let val_wt = value_wt.get(v).unwrap();
-                        // Find the alloc origin for this ptr
-                        let origin = Self::find_alloc_origin(ptr, alloc_inner);
-                        if let Some(origin_id) = origin {
-                            let current_inner = alloc_inner.get(&origin_id).unwrap().clone();
-                            // Join stored value into alloc inner;
-                            // cfg_witness contributes to toplevel of what's stored
-                            let store_wt =
-                                val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
-                            // The alloc's elem_type may not match the actual stored value's
-                            let new_inner = current_inner.join(&store_wt);
-                            alloc_inner.insert(origin_id, new_inner);
-                        }
-                    }
-                    OpCode::Load { result: r, ptr } => {
-                        let ptr_wt = value_wt.get(ptr).unwrap();
-                        let origin = Self::find_alloc_origin(ptr, alloc_inner);
-                        if let Some(origin_id) = origin {
-                            let inner = alloc_inner.get(&origin_id).unwrap().clone();
-                            let ptr_toplevel = ptr_wt.toplevel_info();
-                            let result_wt =
-                                inner.with_toplevel_info(inner.toplevel_info().join(ptr_toplevel));
-                            value_wt.insert(*r, result_wt);
-                        } else {
-                            // Ref param — use the Ref's inner type
-                            match ptr_wt {
-                                WitnessType::Ref(ptr_info, inner) => {
-                                    value_wt.insert(
-                                        *r,
-                                        inner.with_toplevel_info(
-                                            inner.toplevel_info().join(*ptr_info),
-                                        ),
-                                    );
-                                }
-                                _ => panic!("Load from non-ref type"),
-                            }
-                        }
-                    }
-                    OpCode::ReadGlobal {
-                        result: r,
-                        offset: _,
-                        result_type: tp,
-                    } => {
-                        let result_wt = Self::construct_pure_witness_for_type(tp);
-                        value_wt.insert(*r, result_wt);
-                    }
-                    OpCode::Assert { .. }
-                    | OpCode::AssertCmp { .. }
-                    | OpCode::AssertR1C { .. }
-                    | OpCode::InitGlobal { .. }
-                    | OpCode::DropGlobal { .. }
-                    | OpCode::Rangecheck { .. }
-                    | OpCode::MemOp { .. } => {}
-                    OpCode::ArrayGet {
-                        result: r,
-                        array: arr,
-                        index: idx,
-                    } => {
-                        let arr_wt = value_wt.get(arr).unwrap();
-                        let idx_wt = value_wt.get(idx).unwrap();
-                        let elem_wt = arr_wt.child_witness_type().unwrap();
-                        // For witness-indexed reads the witness-ness must reach the
-                        // scalar leaves of the element, not just the outer container,
-                        // so that ND-array reads correctly mark each leaf as a witness.
-                        let pushed_info =
-                            arr_wt.toplevel_info().join(idx_wt.toplevel_info());
-                        let result_wt = elem_wt.with_witness_in_leaves(pushed_info);
-                        value_wt.insert(*r, result_wt);
-                    }
-                    OpCode::ArraySet {
-                        result: r,
-                        array: arr,
-                        index: idx,
-                        value,
-                    } => {
-                        let arr_wt = value_wt.get(arr).unwrap();
-                        let idx_wt = value_wt.get(idx).unwrap();
-                        let val_wt = value_wt.get(value).unwrap();
-                        let arr_elem_wt = arr_wt.child_witness_type().unwrap();
-                        // Join existing element with new value, taint by index witness-ness
-                        let idx_info = idx_wt.toplevel_info();
-                        let result_arr_elem = arr_elem_wt.join(val_wt).with_toplevel_info(
-                            arr_elem_wt
-                                .toplevel_info()
-                                .join(val_wt.toplevel_info())
-                                .join(idx_info),
-                        );
-                        let result_wt =
-                            WitnessType::Array(arr_wt.toplevel_info(), Box::new(result_arr_elem));
-                        value_wt.insert(*r, result_wt);
-                    }
-                    OpCode::SlicePush {
-                        dir: _,
-                        result: r,
-                        slice: sl,
-                        values,
-                    } => {
-                        let slice_wt = value_wt.get(sl).unwrap();
-                        let slice_elem_wt = slice_wt.child_witness_type().unwrap();
-                        let mut result_elem_wt = slice_elem_wt.clone();
-                        for value in values {
-                            let val_wt = value_wt.get(value).unwrap();
-                            result_elem_wt = result_elem_wt.join(val_wt);
-                        }
-                        let result_wt =
-                            WitnessType::Array(slice_wt.toplevel_info(), Box::new(result_elem_wt));
-                        value_wt.insert(*r, result_wt);
-                    }
-                    OpCode::SliceLen {
-                        result: r,
-                        slice: _,
-                    } => {
-                        value_wt.insert(*r, WitnessType::Scalar(ConstantWitness::Pure));
-                    }
-                    OpCode::Call {
-                        results,
-                        function: CallTarget::Static(callee_id),
-                        args,
-                        unconstrained,
-                    } => {
-                        if *unconstrained {
-                            // Unconstrained calls produce pure witness values
-                            // (their outputs go through WriteWitness in PrepareEntryPoint)
-                            let callee_func = ssa.get_function(*callee_id);
-                            let callee_return_types = callee_func.get_returns();
-                            for (result, ret_type) in results.iter().zip(callee_return_types.iter())
-                            {
-                                let pure_wt = Self::construct_pure_witness_for_type(ret_type);
-                                value_wt.insert(*result, pure_wt);
-                            }
-                        } else {
-                            let callee_arg_types: Vec<WitnessType> = args
-                                .iter()
-                                .map(|v| value_wt.get(v).unwrap().clone())
-                                .collect();
-                            let callee_key = SpecKey {
-                                original_func_id: *callee_id,
-                                arg_types: callee_arg_types,
-                                cfg_witness: block_cw,
-                            };
-
-                            if let Some(callee_spec) = specializations.get(&callee_key) {
-                                // Use callee's return types
-                                for (result, ret_wt) in
-                                    results.iter().zip(callee_spec.return_types.iter())
-                                {
-                                    value_wt.insert(*result, ret_wt.clone());
-                                }
-                                // Update alloc_inner from arg_types_out for Ref args
-                                for (arg, arg_out) in
-                                    args.iter().zip(callee_spec.arg_types_out.iter())
-                                {
-                                    if let WitnessType::Ref(_, inner_out) = arg_out {
-                                        let origin = Self::find_alloc_origin(arg, alloc_inner);
-                                        if let Some(origin_id) = origin {
-                                            let current_inner =
-                                                alloc_inner.get(&origin_id).unwrap().clone();
-                                            let new_inner = current_inner.join(inner_out);
-                                            alloc_inner.insert(origin_id, new_inner);
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Specialization not yet registered — use optimistic Pure returns
-                                // based on the callee function's return type structure
-                                let callee_func = ssa.get_function(*callee_id);
-                                let callee_return_types = callee_func.get_returns();
-                                for (result, ret_type) in
-                                    results.iter().zip(callee_return_types.iter())
-                                {
-                                    let pure_wt = Self::construct_pure_witness_for_type(ret_type);
-                                    // Join with existing value if present (from prior iteration)
-                                    let result_wt = value_wt
-                                        .get(result)
-                                        .map(|existing| existing.join(&pure_wt))
-                                        .unwrap_or(pure_wt);
-                                    value_wt.insert(*result, result_wt);
-                                }
-                            }
-                        }
-                    }
-                    OpCode::Call {
-                        function: CallTarget::Dynamic(_),
-                        ..
-                    } => {
-                        panic!("Dynamic call targets are not supported in witness type inference");
-                    }
-                    OpCode::MkSeq {
-                        result,
-                        elems,
-                        seq_type: _,
-                        elem_type: tp,
-                    } => {
-                        let base = Self::construct_pure_witness_for_type(tp);
-                        let result_wt = elems
-                            .iter()
-                            .fold(base, |acc, v| acc.join(value_wt.get(v).unwrap()));
-                        value_wt.insert(
-                            *result,
-                            WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
-                        );
-                    }
-                    OpCode::MkRepeated {
-                        result,
-                        element,
-                        seq_type: _,
-                        count: _,
-                        elem_type: tp,
-                    } => {
-                        let base = Self::construct_pure_witness_for_type(tp);
-                        let result_wt = base.join(value_wt.get(element).unwrap());
-                        value_wt.insert(
-                            *result,
-                            WitnessType::Array(ConstantWitness::Pure, Box::new(result_wt)),
-                        );
-                    }
-                    OpCode::Spread { result, value, .. } => {
-                        let val_wt = value_wt.get(value).unwrap().clone();
-                        value_wt.insert(*result, val_wt);
-                    }
-                    OpCode::Unspread {
-                        result_odd,
-                        result_even,
-                        value,
-                        ..
-                    } => {
-                        let val_wt = value_wt.get(value).unwrap().clone();
-                        value_wt.insert(*result_odd, val_wt.clone());
-                        value_wt.insert(*result_even, val_wt);
-                    }
-                    OpCode::Cast { result, value, .. }
-                    | OpCode::Truncate { result, value, .. }
-                    | OpCode::SExt { result, value, .. }
-                    | OpCode::Not { result, value } => {
-                        let val_wt = value_wt.get(value).unwrap().clone();
-                        value_wt.insert(*result, val_wt);
-                    }
-                    OpCode::ToBits { result, value, .. }
-                    | OpCode::ToRadix { result, value, .. } => {
-                        let val_wt = value_wt.get(value).unwrap().clone();
-                        value_wt.insert(
-                            *result,
-                            WitnessType::Array(ConstantWitness::Pure, Box::new(val_wt)),
-                        );
-                    }
-                    OpCode::TupleProj { result, tuple, idx } => {
-                        let tuple_wt = value_wt.get(tuple).unwrap();
-                        match tuple_wt {
-                            WitnessType::Tuple(top, children) => {
-                                let elem_wt = &children[*idx];
-                                let result_wt = elem_wt
-                                    .with_toplevel_info((*top).join(elem_wt.toplevel_info()));
-                                value_wt.insert(*result, result_wt);
-                            }
-                            _ => {
-                                panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
-                            }
-                        }
-                    }
-                    OpCode::MkTuple { result, elems, .. } => {
-                        let children: Vec<WitnessType> = elems
-                            .iter()
-                            .map(|v| value_wt.get(v).unwrap().clone())
-                            .collect();
-                        value_wt
-                            .insert(*result, WitnessType::Tuple(ConstantWitness::Pure, children));
-                    }
-                    OpCode::WriteWitness { result, .. } => {
-                        // WriteWitness records a value on the witness tape.
-                        // Its output is always Witness-typed.
-                        if let Some(result) = result {
-                            value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Witness));
-                        }
-                    }
-                    OpCode::Constrain { .. }
-                    | OpCode::FreshWitness { .. }
-                    | OpCode::BumpD { .. }
-                    | OpCode::NextDCoeff { .. }
-                    | OpCode::MulConst { .. }
-                    | OpCode::Lookup { .. }
-                    | OpCode::DLookup { .. }
-                    | OpCode::Todo { .. }
-                    | OpCode::ValueOf { .. } => {
-                        panic!("Should not be present at this stage {:?}", instruction);
-                    }
-                    OpCode::Const { result, .. } => {
-                        value_wt.insert(*result, WitnessType::Scalar(ConstantWitness::Pure));
-                    }
-                    OpCode::Guard { .. } => {
-                        panic!("ICE: Guard should not be present during witness type inference");
-                    }
-                }
-            }
+            Self::propagate_block_instructions(
+                block,
+                block_cw,
+                value_wt,
+                alloc_inner,
+                specializations,
+                ssa,
+            );
 
             // Handle terminator
             if let Some(terminator) = block.get_terminator() {
@@ -838,6 +515,344 @@ impl WitnessTypeInference {
         }
     }
 
+    /// Process all instructions in a single block, updating `value_wt` and
+    /// `alloc_inner` according to each opcode's witness-type rules.
+    fn propagate_block_instructions(
+        block: &crate::compiler::ssa::HLBlock,
+        block_cw: WitnessType,
+        value_wt: &mut HashMap<ValueId, WitnessShape>,
+        alloc_inner: &mut HashMap<ValueId, WitnessShape>,
+        specializations: &HashMap<SpecKey, SpecValue>,
+        ssa: &HLSSA,
+    ) {
+        for instruction in block.get_instructions() {
+            match instruction {
+                OpCode::BinaryArithOp {
+                    kind: _,
+                    result: r,
+                    lhs,
+                    rhs,
+                }
+                | OpCode::Cmp {
+                    kind: _,
+                    result: r,
+                    lhs,
+                    rhs,
+                } => {
+                    let result_wt = Self::infer_binop_cmp_result(
+                        value_wt.get(lhs).unwrap(),
+                        value_wt.get(rhs).unwrap(),
+                    );
+                    value_wt.insert(*r, result_wt);
+                }
+                OpCode::Select {
+                    result: r,
+                    cond,
+                    if_t,
+                    if_f,
+                } => {
+                    let result_wt = Self::infer_select_result(
+                        value_wt.get(cond).unwrap(),
+                        value_wt.get(if_t).unwrap(),
+                        value_wt.get(if_f).unwrap(),
+                    );
+                    value_wt.insert(*r, result_wt);
+                }
+                OpCode::Alloc {
+                    result: r,
+                    elem_type: _tp,
+                } => {
+                    let inner = alloc_inner.get(r).unwrap().clone();
+                    value_wt.insert(*r, WitnessShape::Ref(WitnessType::Pure, Box::new(inner)));
+                }
+                OpCode::Store { ptr, value: v } => {
+                    let val_wt = value_wt.get(v).unwrap();
+                    // Find the alloc origin for this ptr
+                    let origin = Self::find_alloc_origin(ptr, alloc_inner);
+                    if let Some(origin_id) = origin {
+                        let current_inner = alloc_inner.get(&origin_id).unwrap().clone();
+                        // Join stored value into alloc inner;
+                        // cfg_witness contributes to toplevel of what's stored
+                        let store_wt =
+                            val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
+                        // The alloc's elem_type may not match the actual stored value's
+                        let new_inner = current_inner.join(&store_wt);
+                        alloc_inner.insert(origin_id, new_inner);
+                    }
+                }
+                OpCode::Load { result: r, ptr } => {
+                    let ptr_wt = value_wt.get(ptr).unwrap();
+                    let origin = Self::find_alloc_origin(ptr, alloc_inner);
+                    if let Some(origin_id) = origin {
+                        let inner = alloc_inner.get(&origin_id).unwrap().clone();
+                        let ptr_toplevel = ptr_wt.toplevel_info();
+                        let result_wt =
+                            inner.with_toplevel_info(inner.toplevel_info().join(ptr_toplevel));
+                        value_wt.insert(*r, result_wt);
+                    } else {
+                        // Ref param — use the Ref's inner type
+                        match ptr_wt {
+                            WitnessShape::Ref(ptr_info, inner) => {
+                                value_wt.insert(
+                                    *r,
+                                    inner.with_toplevel_info(inner.toplevel_info().join(*ptr_info)),
+                                );
+                            }
+                            _ => panic!("Load from non-ref type"),
+                        }
+                    }
+                }
+                OpCode::ReadGlobal {
+                    result: r,
+                    offset: _,
+                    result_type: tp,
+                } => {
+                    let result_wt = Self::construct_pure_witness_for_type(tp);
+                    value_wt.insert(*r, result_wt);
+                }
+                OpCode::Assert { .. }
+                | OpCode::AssertCmp { .. }
+                | OpCode::AssertR1C { .. }
+                | OpCode::InitGlobal { .. }
+                | OpCode::DropGlobal { .. }
+                | OpCode::Rangecheck { .. }
+                | OpCode::MemOp { .. } => {}
+                OpCode::ArrayGet {
+                    result: r,
+                    array: arr,
+                    index: idx,
+                } => {
+                    let arr_wt = value_wt.get(arr).unwrap();
+                    let idx_wt = value_wt.get(idx).unwrap();
+                    let elem_wt = arr_wt.child_witness_type().unwrap();
+                    // For witness-indexed reads the witness-ness must reach the
+                    // scalar leaves of the element, not just the outer container,
+                    // so that ND-array reads correctly mark each leaf as a witness.
+                    let pushed_info = arr_wt.toplevel_info().join(idx_wt.toplevel_info());
+                    let result_wt = elem_wt.with_witness_in_leaves(pushed_info);
+                    value_wt.insert(*r, result_wt);
+                }
+                OpCode::ArraySet {
+                    result: r,
+                    array: arr,
+                    index: idx,
+                    value,
+                } => {
+                    let arr_wt = value_wt.get(arr).unwrap();
+                    let idx_wt = value_wt.get(idx).unwrap();
+                    let val_wt = value_wt.get(value).unwrap();
+                    let arr_elem_wt = arr_wt.child_witness_type().unwrap();
+                    // Join existing element with new value, taint by index witness-ness
+                    let idx_info = idx_wt.toplevel_info();
+                    let result_arr_elem = arr_elem_wt.join(val_wt).with_toplevel_info(
+                        arr_elem_wt
+                            .toplevel_info()
+                            .join(val_wt.toplevel_info())
+                            .join(idx_info),
+                    );
+                    let result_wt =
+                        WitnessShape::Array(arr_wt.toplevel_info(), Box::new(result_arr_elem));
+                    value_wt.insert(*r, result_wt);
+                }
+                OpCode::SlicePush {
+                    dir: _,
+                    result: r,
+                    slice: sl,
+                    values,
+                } => {
+                    let slice_wt = value_wt.get(sl).unwrap();
+                    let slice_elem_wt = slice_wt.child_witness_type().unwrap();
+                    let mut result_elem_wt = slice_elem_wt.clone();
+                    for value in values {
+                        let val_wt = value_wt.get(value).unwrap();
+                        result_elem_wt = result_elem_wt.join(val_wt);
+                    }
+                    let result_wt =
+                        WitnessShape::Array(slice_wt.toplevel_info(), Box::new(result_elem_wt));
+                    value_wt.insert(*r, result_wt);
+                }
+                OpCode::SliceLen {
+                    result: r,
+                    slice: _,
+                } => {
+                    value_wt.insert(*r, WitnessShape::Scalar(WitnessType::Pure));
+                }
+                OpCode::Call {
+                    results,
+                    function: CallTarget::Static(callee_id),
+                    args,
+                    unconstrained,
+                } => {
+                    if *unconstrained {
+                        // Unconstrained calls produce pure witness values
+                        // (their outputs go through WriteWitness in PrepareEntryPoint)
+                        let callee_func = ssa.get_function(*callee_id);
+                        let callee_return_types = callee_func.get_returns();
+                        for (result, ret_type) in results.iter().zip(callee_return_types.iter()) {
+                            let pure_wt = Self::construct_pure_witness_for_type(ret_type);
+                            value_wt.insert(*result, pure_wt);
+                        }
+                    } else {
+                        let callee_arg_types: Vec<WitnessShape> = args
+                            .iter()
+                            .map(|v| value_wt.get(v).unwrap().clone())
+                            .collect();
+                        let callee_key = SpecKey {
+                            original_func_id: *callee_id,
+                            arg_types: callee_arg_types,
+                            cfg_witness: block_cw,
+                        };
+
+                        if let Some(callee_spec) = specializations.get(&callee_key) {
+                            // Use callee's return types
+                            for (result, ret_wt) in
+                                results.iter().zip(callee_spec.return_types.iter())
+                            {
+                                value_wt.insert(*result, ret_wt.clone());
+                            }
+                            // Update alloc_inner from arg_types_out for Ref args
+                            for (arg, arg_out) in args.iter().zip(callee_spec.arg_types_out.iter())
+                            {
+                                if let WitnessShape::Ref(_, inner_out) = arg_out {
+                                    let origin = Self::find_alloc_origin(arg, alloc_inner);
+                                    if let Some(origin_id) = origin {
+                                        let current_inner =
+                                            alloc_inner.get(&origin_id).unwrap().clone();
+                                        let new_inner = current_inner.join(inner_out);
+                                        alloc_inner.insert(origin_id, new_inner);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Specialization not yet registered — use optimistic Pure returns
+                            // based on the callee function's return type structure
+                            let callee_func = ssa.get_function(*callee_id);
+                            let callee_return_types = callee_func.get_returns();
+                            for (result, ret_type) in results.iter().zip(callee_return_types.iter())
+                            {
+                                let pure_wt = Self::construct_pure_witness_for_type(ret_type);
+                                // Join with existing value if present (from prior iteration)
+                                let result_wt = value_wt
+                                    .get(result)
+                                    .map(|existing| existing.join(&pure_wt))
+                                    .unwrap_or(pure_wt);
+                                value_wt.insert(*result, result_wt);
+                            }
+                        }
+                    }
+                }
+                OpCode::Call {
+                    function: CallTarget::Dynamic(_),
+                    ..
+                } => {
+                    panic!("Dynamic call targets are not supported in witness type inference");
+                }
+                OpCode::MkSeq {
+                    result,
+                    elems,
+                    seq_type: _,
+                    elem_type: tp,
+                } => {
+                    let base = Self::construct_pure_witness_for_type(tp);
+                    let result_wt = elems
+                        .iter()
+                        .fold(base, |acc, v| acc.join(value_wt.get(v).unwrap()));
+                    value_wt.insert(
+                        *result,
+                        WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
+                    );
+                }
+                OpCode::MkRepeated {
+                    result,
+                    element,
+                    seq_type: _,
+                    count: _,
+                    elem_type: tp,
+                } => {
+                    let base = Self::construct_pure_witness_for_type(tp);
+                    let result_wt = base.join(value_wt.get(element).unwrap());
+                    value_wt.insert(
+                        *result,
+                        WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
+                    );
+                }
+                OpCode::Spread { result, value, .. } => {
+                    let val_wt = value_wt.get(value).unwrap().clone();
+                    value_wt.insert(*result, val_wt);
+                }
+                OpCode::Unspread {
+                    result_odd,
+                    result_even,
+                    value,
+                    ..
+                } => {
+                    let val_wt = value_wt.get(value).unwrap().clone();
+                    value_wt.insert(*result_odd, val_wt.clone());
+                    value_wt.insert(*result_even, val_wt);
+                }
+                OpCode::Cast { result, value, .. }
+                | OpCode::Truncate { result, value, .. }
+                | OpCode::SExt { result, value, .. }
+                | OpCode::Not { result, value } => {
+                    let val_wt = value_wt.get(value).unwrap().clone();
+                    value_wt.insert(*result, val_wt);
+                }
+                OpCode::ToBits { result, value, .. } | OpCode::ToRadix { result, value, .. } => {
+                    let val_wt = value_wt.get(value).unwrap().clone();
+                    value_wt.insert(
+                        *result,
+                        WitnessShape::Array(WitnessType::Pure, Box::new(val_wt)),
+                    );
+                }
+                OpCode::TupleProj { result, tuple, idx } => {
+                    let tuple_wt = value_wt.get(tuple).unwrap();
+                    match tuple_wt {
+                        WitnessShape::Tuple(top, children) => {
+                            let elem_wt = &children[*idx];
+                            let result_wt =
+                                elem_wt.with_toplevel_info((*top).join(elem_wt.toplevel_info()));
+                            value_wt.insert(*result, result_wt);
+                        }
+                        _ => {
+                            panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
+                        }
+                    }
+                }
+                OpCode::MkTuple { result, elems, .. } => {
+                    let children: Vec<WitnessShape> = elems
+                        .iter()
+                        .map(|v| value_wt.get(v).unwrap().clone())
+                        .collect();
+                    value_wt.insert(*result, WitnessShape::Tuple(WitnessType::Pure, children));
+                }
+                OpCode::WriteWitness { result, .. } => {
+                    // WriteWitness records a value on the witness tape.
+                    // Its output is always Witness-typed.
+                    if let Some(result) = result {
+                        value_wt.insert(*result, WitnessShape::Scalar(WitnessType::Witness));
+                    }
+                }
+                OpCode::Constrain { .. }
+                | OpCode::FreshWitness { .. }
+                | OpCode::BumpD { .. }
+                | OpCode::NextDCoeff { .. }
+                | OpCode::MulConst { .. }
+                | OpCode::Lookup { .. }
+                | OpCode::DLookup { .. }
+                | OpCode::Todo { .. }
+                | OpCode::ValueOf { .. } => {
+                    panic!("Should not be present at this stage {:?}", instruction);
+                }
+                OpCode::Const { result, .. } => {
+                    value_wt.insert(*result, WitnessShape::Scalar(WitnessType::Pure));
+                }
+                OpCode::Guard { .. } => {
+                    panic!("ICE: Guard should not be present during witness type inference");
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
@@ -847,7 +862,7 @@ impl WitnessTypeInference {
     /// Returns None for Ref-typed function parameters (external refs).
     fn find_alloc_origin(
         ptr: &ValueId,
-        alloc_inner: &HashMap<ValueId, WitnessType>,
+        alloc_inner: &HashMap<ValueId, WitnessShape>,
     ) -> Option<ValueId> {
         // In SSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
         // If there's no alloc_inner entry, it's an external ref (function parameter).
@@ -861,8 +876,8 @@ impl WitnessTypeInference {
     fn build_function_witness_type(
         spec_key: &SpecKey,
         spec_value: &SpecValue,
-        value_wt: &HashMap<ValueId, WitnessType>,
-        block_cfg: &HashMap<BlockId, ConstantWitness>,
+        value_wt: &HashMap<ValueId, WitnessShape>,
+        block_cfg: &HashMap<BlockId, WitnessType>,
     ) -> FunctionWitnessType {
         FunctionWitnessType {
             returns_witness: spec_value.return_types.clone(),
@@ -873,15 +888,15 @@ impl WitnessTypeInference {
         }
     }
 
-    fn infer_binop_cmp_result(lhs_wt: &WitnessType, rhs_wt: &WitnessType) -> WitnessType {
-        WitnessType::Scalar(lhs_wt.toplevel_info().join(rhs_wt.toplevel_info()))
+    fn infer_binop_cmp_result(lhs_wt: &WitnessShape, rhs_wt: &WitnessShape) -> WitnessShape {
+        WitnessShape::Scalar(lhs_wt.toplevel_info().join(rhs_wt.toplevel_info()))
     }
 
     fn infer_select_result(
-        cond_wt: &WitnessType,
-        then_wt: &WitnessType,
-        otherwise_wt: &WitnessType,
-    ) -> WitnessType {
+        cond_wt: &WitnessShape,
+        then_wt: &WitnessShape,
+        otherwise_wt: &WitnessShape,
+    ) -> WitnessShape {
         then_wt.join(otherwise_wt).with_toplevel_info(
             cond_wt
                 .toplevel_info()
@@ -890,34 +905,34 @@ impl WitnessTypeInference {
         )
     }
 
-    fn construct_pure_witness_for_type(typ: &Type) -> WitnessType {
+    fn construct_pure_witness_for_type(typ: &Type) -> WitnessShape {
         match &typ.expr {
             TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field => {
-                WitnessType::Scalar(ConstantWitness::Pure)
+                WitnessShape::Scalar(WitnessType::Pure)
             }
-            TypeExpr::Array(i, _) => WitnessType::Array(
-                ConstantWitness::Pure,
+            TypeExpr::Array(i, _) => WitnessShape::Array(
+                WitnessType::Pure,
                 Box::new(Self::construct_pure_witness_for_type(i)),
             ),
-            TypeExpr::Slice(i) => WitnessType::Array(
-                ConstantWitness::Pure,
+            TypeExpr::Slice(i) => WitnessShape::Array(
+                WitnessType::Pure,
                 Box::new(Self::construct_pure_witness_for_type(i)),
             ),
-            TypeExpr::Ref(i) => WitnessType::Ref(
-                ConstantWitness::Pure,
+            TypeExpr::Ref(i) => WitnessShape::Ref(
+                WitnessType::Pure,
                 Box::new(Self::construct_pure_witness_for_type(i)),
             ),
             TypeExpr::WitnessOf(_) => {
                 panic!("ICE: WitnessOf should not be present at this stage");
             }
-            TypeExpr::Tuple(elements) => WitnessType::Tuple(
-                ConstantWitness::Pure,
+            TypeExpr::Tuple(elements) => WitnessShape::Tuple(
+                WitnessType::Pure,
                 elements
                     .iter()
                     .map(Self::construct_pure_witness_for_type)
                     .collect(),
             ),
-            TypeExpr::Function => WitnessType::Scalar(ConstantWitness::Pure),
+            TypeExpr::Function => WitnessShape::Scalar(WitnessType::Pure),
         }
     }
 }

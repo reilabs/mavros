@@ -1,10 +1,15 @@
+//! Deduplicates expressions when one occurrence dominates the other.
+//!
+//! Does not float expressions across branches or otherwise move them outside the block in which
+//! they appear (#172).
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
 };
 
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     ssa::{
         BinaryArithOpKind, BlockId, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
         OpCode, Radix, ValueId,
@@ -372,10 +377,6 @@ impl Debug for Expr {
         write!(f, "{}", self)
     }
 }
-
-/// Deduplicates expressions when one occurrence dominates the other.
-/// Does not float expressions across branches or otherwise move them
-/// outside the block in which they appear.
 pub struct CSE {}
 
 impl Pass for CSE {

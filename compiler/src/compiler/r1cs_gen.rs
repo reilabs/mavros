@@ -1,15 +1,13 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::compiler::{
-    analysis::{
-        symbolic_executor::{self, SymbolicExecutor},
-        types::TypeInfo,
-    },
+    analysis::types::TypeInfo,
     ir::r#type::{Type, TypeExpr},
     ssa::{
         self as ssa_mod, BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix,
         SliceOpDir,
     },
+    symbolic_executor::{self, SymbolicExecutor},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};

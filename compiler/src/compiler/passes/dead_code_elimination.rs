@@ -1,14 +1,21 @@
+//! Performs dead-code elimination using a standard mark-and-sweep liveness algorithm with
+//! cross-function propagation.
+//!
+//! It is capable of dropping dead blocks, dead instructions, and dead block parameters. It also
+//! prunes arguments and results in call instructions to live parameters, and rewrites terminators.
+//!
+//! TODO Refactor to use the existing liveness analysis (#157).
+
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     ssa::{
         BlockId, CallTarget, FunctionId, HLFunction, HLSSA, Instruction, OpCode, Terminator,
         ValueId,
     },
 };
-
 pub struct DCE {
     config: Config,
 }
@@ -126,7 +133,6 @@ impl DCE {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
-        let main_id = ssa.get_main_id();
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
@@ -183,15 +189,8 @@ impl DCE {
                     }
                 }
 
-                if let Some(Terminator::Return(values)) = block.get_terminator() {
+                if matches!(block.get_terminator(), Some(Terminator::Return(_))) {
                     worklist.push(WorkItem::LiveBlock(*function_id, *block_id));
-
-                    if *function_id == main_id {
-                        for (i, value) in values.iter().enumerate() {
-                            worklist.push(WorkItem::LiveReturnSlot(*function_id, i));
-                            worklist.push(WorkItem::LiveValue(*function_id, *value));
-                        }
-                    }
                 }
             }
         }
@@ -217,6 +216,7 @@ impl DCE {
                         worklist.push(WorkItem::LiveBlock(function_id, pd));
                         live_branches.entry(function_id).or_default().insert(pd);
 
+                        // This is an invariant enforced by Flow Analysis.
                         match function.get_block(pd).get_terminator() {
                             Some(Terminator::JmpIf(condition, _, _)) => {
                                 worklist.push(WorkItem::LiveValue(function_id, *condition));

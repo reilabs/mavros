@@ -1,16 +1,17 @@
+//! Strips all `WitnessOf` type wrappers from the SSA.
+//!
+//! In the witgen pipeline, all computation is concrete — there's no need for the WitnessOf
+//! distinction. This pass converts all `WitnessOf(X)` types back to `X` and removes
+//! `Cast { target: WitnessOf }` instructions.
+
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    analysis::flow_analysis::FlowAnalysis,
     ir::r#type::Type,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{CastTarget, HLSSA, OpCode},
 };
 
-/// Strips all `WitnessOf` type wrappers from the SSA.
-///
-/// In the witgen pipeline, all computation is concrete — there's no need
-/// for the WitnessOf distinction. This pass converts all `WitnessOf(X)` types
-/// back to `X` and removes `Cast { target: WitnessOf }` instructions.
 pub struct StripWitnessOf {}
 
 impl Pass for StripWitnessOf {
@@ -145,8 +146,8 @@ impl StripWitnessOf {
             | OpCode::Const { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => {}
-            OpCode::Guard { inner, .. } => {
-                Self::strip_instruction(inner);
+            OpCode::Guard { .. } => {
+                panic!("ICE: Found Guard but `LowerGuards` should have removed them")
             }
         }
     }

@@ -42,6 +42,7 @@ impl TypeConverter {
                 let inner_type = self.convert_type(inner);
                 inner_type.ref_of()
             }
+            // We defunctionalize as soon as possible, so we can simply throw this information away.
             AstType::Function(_, _, _, _) => Type::function(),
             AstType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)

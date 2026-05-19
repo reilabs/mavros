@@ -21,7 +21,8 @@ use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
 
-use crate::compiler::flow_analysis::FlowAnalysis;
+use crate::compiler::analysis::flow_analysis;
+use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::llssa::{
     FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
 };
@@ -439,7 +440,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         &mut self,
         fn_id: FunctionId,
         function: &LLFunction,
-        cfg: &crate::compiler::flow_analysis::CFG,
+        cfg: &flow_analysis::CFG,
         main_id: FunctionId,
     ) {
         self.value_map.clear();
