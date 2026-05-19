@@ -4,6 +4,10 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use cargo_metadata::MetadataCommand;
@@ -61,7 +65,8 @@ fn main() {
 
     // Parent mode
     let output_path = parse_output_arg(&args);
-    run_parent(&output_path);
+    let jobs = parse_jobs_arg(&args);
+    run_parent(&output_path, jobs);
 }
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
@@ -73,6 +78,21 @@ fn parse_output_arg(args: &[String]) -> PathBuf {
         i += 1;
     }
     PathBuf::from("STATUS.md")
+}
+
+fn parse_jobs_arg(args: &[String]) -> usize {
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--jobs" && i + 1 < args.len() {
+            let n: usize = args[i + 1]
+                .parse()
+                .expect("--jobs requires a positive integer");
+            assert!(n >= 1, "--jobs must be >= 1");
+            return n;
+        }
+        i += 1;
+    }
+    1
 }
 
 // ── Child: run a single test ──────────────────────────────────────────
@@ -1075,7 +1095,7 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
     dirs
 }
 
-fn run_parent(output_path: &Path) {
+fn run_parent(output_path: &Path, jobs: usize) {
     let mut entries: Vec<TestEntry> = Vec::new();
 
     // 1. Local noir_tests/ directory
@@ -1103,28 +1123,53 @@ fn run_parent(output_path: &Path) {
     assert!(!entries.is_empty(), "No test directories found");
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
-    let mut results = Vec::new();
+    let total = entries.len();
+    eprintln!("Running {total} test(s) with {jobs} parallel job(s)");
 
-    for entry in &entries {
-        let abs = fs::canonicalize(&entry.path).unwrap();
-        eprintln!("Running: {}", entry.display_name);
+    let next_idx = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<TestResult>>> = (0..total).map(|_| Mutex::new(None)).collect();
 
-        let mut child = Command::new(&exe)
-            .args(["--run-single", abs.to_str().unwrap()])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("Failed to spawn child");
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let idx = next_idx.fetch_add(1, Ordering::SeqCst);
+                    if idx >= total {
+                        break;
+                    }
+                    let entry = &entries[idx];
+                    let abs = fs::canonicalize(&entry.path).unwrap();
 
-        let stdout = child.stdout.take().unwrap();
-        let lines: Vec<String> = BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .collect();
+                    let mut child = Command::new(&exe)
+                        .args(["--run-single", abs.to_str().unwrap()])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::inherit())
+                        .spawn()
+                        .expect("Failed to spawn child");
 
-        let _ = child.wait();
-        results.push(parse_child_output(&entry.display_name, &lines));
-    }
+                    let stdout = child.stdout.take().unwrap();
+                    let lines: Vec<String> = BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                        .collect();
+
+                    let _ = child.wait();
+                    let result = parse_child_output(&entry.display_name, &lines);
+
+                    let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                    eprintln!("[{n}/{total}] {}", entry.display_name);
+
+                    *slots[idx].lock().unwrap() = Some(result);
+                }
+            });
+        }
+    });
+
+    let results: Vec<TestResult> = slots
+        .into_iter()
+        .map(|m| m.into_inner().unwrap().expect("test slot unfilled"))
+        .collect();
 
     let md = render_markdown(&results);
     fs::write(output_path, &md).expect("Cannot write output file");
