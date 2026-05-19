@@ -1128,8 +1128,7 @@ fn run_parent(output_path: &Path, jobs: usize) {
 
     let next_idx = AtomicUsize::new(0);
     let completed = AtomicUsize::new(0);
-    let slots: Vec<Mutex<Option<TestResult>>> =
-        (0..total).map(|_| Mutex::new(None)).collect();
+    let slots: Vec<Mutex<Option<TestResult>>> = (0..total).map(|_| Mutex::new(None)).collect();
 
     std::thread::scope(|scope| {
         for _ in 0..jobs {
