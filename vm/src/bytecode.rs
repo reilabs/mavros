@@ -1572,7 +1572,6 @@ mod def {
             };
 
             for (i, elem_ptr) in leaves.iter().copied().enumerate() {
-
                 // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
                 let x_coeff = unsafe {
                     *vm.data

@@ -2485,9 +2485,7 @@ impl ExplicitWitness {
     ) {
         let result_type_full = function_type_info.get_value_type(result).clone();
         let result_type = result_type_full.strip_all_witness();
-        let arr_elem_type = function_type_info
-            .get_value_type(arr)
-            .get_array_element();
+        let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
         // ND-array case: hint the entire slice, then constrain each leaf with a
         // lookup at a computed flat offset.
