@@ -25,7 +25,7 @@ use crate::compiler::{
 };
 
 use num_bigint::BigInt;
-use num_traits::{One, Signed};
+use num_traits::{One, Signed, ToPrimitive};
 
 /// Number of bits needed to represent every value in the interval as a
 /// non-negative integer. Returns `None` if the interval may contain a negative
@@ -496,16 +496,91 @@ impl ExplicitWitness {
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                result: res,
                 lhs: l,
                 rhs: r,
-                ..
             } => {
                 let l_taint = function_type_info.get_value_type(l).is_witness_of();
                 let r_taint = function_type_info.get_value_type(r).is_witness_of();
-                if l_taint || r_taint {
-                    panic!("Shift {:?} on witness operands is not supported", kind);
+                if !l_taint && !r_taint {
+                    b.push(instruction);
+                    return;
                 }
-                b.push(instruction);
+                // Witness-l, pure-r: lower `l op r` to mul/div by `1 << r`.
+                // `1 << r` is itself a pure shift, which falls through this pass
+                // unchanged and is handled by downstream codegen.
+                if r_taint {
+                    panic!(
+                        "Shift {:?} with witness shift amount is not supported",
+                        kind
+                    );
+                }
+                let l_type = function_type_info.get_value_type(l).strip_witness();
+                let bits = match l_type.expr {
+                    TypeExpr::U(n) => n,
+                    _ => panic!(
+                        "Shift {:?} on witness operand of non-unsigned-int type {:?}",
+                        kind, l_type
+                    ),
+                };
+                let one_u = b.u_const(bits, 1);
+                let factor = b.fresh_value();
+                b.push(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Shl,
+                    result: factor,
+                    lhs: one_u,
+                    rhs: r,
+                });
+                let one_field = b.field_const(Field::ONE);
+                match kind {
+                    BinaryArithOpKind::Shl => {
+                        // x << k  ==  (x * (1 << k)) truncated to `bits` bits.
+                        let l_field = b.cast_to_field(l);
+                        let factor_field = b.cast_to_field(factor);
+                        let arith_result = b.mul(l_field, factor_field);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, one_field);
+                        b.push(OpCode::Cast {
+                            result: res,
+                            value: arith_result,
+                            target: CastTarget::U(bits),
+                        });
+                    }
+                    BinaryArithOpKind::Shr => {
+                        // x >> k  ==  x / (1 << k)  (integer floor division).
+                        let l_range = function_value_ranges.get(l);
+                        let factor_range = function_value_ranges
+                            .try_get(r)
+                            .map(|r_range| {
+                                let lo = r_range.lo().and_then(|v| v.to_u32()).unwrap_or(0);
+                                let hi = r_range
+                                    .hi()
+                                    .and_then(|v| v.to_u32())
+                                    .unwrap_or(bits as u32 - 1)
+                                    .min(bits as u32 - 1);
+                                IntInterval::closed(BigInt::one() << lo, BigInt::one() << hi)
+                            })
+                            .unwrap_or_else(|| {
+                                IntInterval::closed(
+                                    BigInt::one(),
+                                    BigInt::one() << (bits as u32 - 1),
+                                )
+                            });
+                        self.gen_witness_divmod(
+                            b,
+                            l,
+                            factor,
+                            bits,
+                            BinaryArithOpKind::Div,
+                            one_field,
+                            res,
+                            l_taint,
+                            false,
+                            &l_range,
+                            &factor_range,
+                        );
+                    }
+                    _ => unreachable!(),
+                }
             }
             OpCode::Store { ptr, value: _ } => {
                 let ptr_taint = function_type_info.get_value_type(ptr).is_witness_of();
@@ -876,18 +951,39 @@ impl ExplicitWitness {
                 endianness,
                 count,
             } => {
+                // `Radix::Dyn(rv)` only reaches mavros via Noir's
+                // `to_be_radix` / `to_le_radix` builtins, which Noir doesn't
+                // currently expose to user code; the stdlib only ever calls
+                // them with `256`. Codegen also only has a specialised
+                // bytecode op for `Radix::Bytes`. Pin the assumption with a
+                // runtime `assert(rv == 256)` and proceed as Bytes.
+                let radix = match radix {
+                    Radix::Dyn(rv) => {
+                        let const_256 = b.u_const(32, 256);
+                        b.assert_eq(rv, const_256);
+                        Radix::Bytes
+                    }
+                    Radix::Bytes => Radix::Bytes,
+                };
                 let value_taint = function_type_info.get_value_type(value).is_witness_of();
                 if !value_taint {
-                    b.push(instruction);
+                    b.push(OpCode::ToRadix {
+                        result,
+                        value,
+                        radix,
+                        endianness,
+                        count,
+                    });
                 } else {
-                    assert!(endianness == Endianness::Little);
                     let pure_value = b.value_of(value);
+                    // Compute digit hints in the caller's requested endianness;
+                    // the reconstruction below visits them MSB-first either way.
                     let hint = b.fresh_value();
                     b.push(OpCode::ToRadix {
                         result: hint,
                         value: pure_value,
                         radix,
-                        endianness: Endianness::Little,
+                        endianness,
                         count,
                     });
                     let mut witnesses = vec![ValueId(0); count];
@@ -900,8 +996,14 @@ impl ExplicitWitness {
                         Radix::Bytes => LookupTarget::Rangecheck(8),
                         Radix::Dyn(radix) => LookupTarget::DynRangecheck(radix),
                     };
+                    // Walk hint indices MSB-first so the Horner accumulator
+                    // ends up equal to the reconstructed value.
                     // TODO this should probably be an SSA loop for codesize reasons.
-                    for i in (0..count).rev() {
+                    let visit_order: Box<dyn Iterator<Item = usize>> = match endianness {
+                        Endianness::Little => Box::new((0..count).rev()),
+                        Endianness::Big => Box::new(0..count),
+                    };
+                    for i in visit_order {
                         let idx = b.u_const(32, i as u128);
                         let byte = b.array_get(hint, idx);
                         let byte_field = b.cast_to_field(byte);

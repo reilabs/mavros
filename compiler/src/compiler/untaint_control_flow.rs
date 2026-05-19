@@ -787,6 +787,9 @@ fn emit_value_conversion(
     target_type: &Type,
     builder: &mut HLInstrBuilder<'_>,
 ) -> ValueId {
+    if source_type == target_type {
+        return value;
+    }
     match (&source_type.expr, &target_type.expr) {
         // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
         (TypeExpr::Field, TypeExpr::WitnessOf(_))
@@ -815,8 +818,6 @@ fn emit_value_conversion(
             }
             builder.mk_tuple(converted_elems, tgt_fields.clone())
         }
-        // WitnessOf→WitnessOf: identity (same runtime repr)
-        (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => value,
         _ => panic!(
             "witness cast insertion: unsupported conversion {:?} -> {:?}",
             source_type, target_type
