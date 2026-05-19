@@ -358,6 +358,24 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
+        // For unsigned Add/Sub we can detect overflow with a post-result
+        // comparison and skip the widening cast. (Modular wrap is what
+        // produces the result, so e.g. `a + b` overflows iff the wrapped
+        // result is below `a`.) Mul still needs the widening since there's
+        // no symmetric post-result trick. For signed, the sign-XOR rules
+        // work but aren't implemented yet.
+        if !signed && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
+            self.lower_unsigned_add_sub_guard(
+                emitter,
+                condition,
+                kind,
+                original_result,
+                lhs,
+                rhs,
+                bits,
+            );
+            return;
+        }
         let wide_bits = wider_bits(bits);
 
         // Widen operands
@@ -418,6 +436,51 @@ impl LowerPureGuards {
                 e.cast_to(narrow_target, wide_result)
             },
             signed,
+            bits,
+        );
+    }
+
+    /// Lower `Guard(cond, (Add|Sub)(lhs, rhs))` for unsigned types without
+    /// widening. The native op already produces the modular-wrapped result;
+    /// overflow shows up as a post-result comparison:
+    ///   Add: overflow iff `result < lhs` (wrap brings it below an operand).
+    ///   Sub: underflow iff `result > lhs` (wrap brings it above the minuend).
+    fn lower_unsigned_add_sub_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        kind: BinaryArithOpKind,
+        original_result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        let result_type = Type {
+            expr: TypeExpr::U(bits),
+        };
+
+        let native_result = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result: native_result,
+            lhs,
+            rhs,
+        });
+
+        let overflow = match kind {
+            BinaryArithOpKind::Add => emitter.lt(native_result, lhs),
+            BinaryArithOpKind::Sub => emitter.lt(lhs, native_result),
+            _ => unreachable!("lower_unsigned_add_sub_guard called for {:?}", kind),
+        };
+
+        self.emit_guarded_branch(
+            emitter,
+            condition,
+            overflow,
+            original_result,
+            &result_type,
+            |_| native_result,
+            false,
             bits,
         );
     }
@@ -512,23 +575,14 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) -> ValueId {
-        let wide_bits = wider_bits(bits);
-        let wide_target = if signed {
-            CastTarget::I(wide_bits)
-        } else {
-            CastTarget::U(wide_bits)
-        };
-        let lhs_wide = emitter.cast_to(wide_target, lhs);
-        let rhs_wide = emitter.cast_to(wide_target, rhs);
-        let wide_result = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shl,
-            result: wide_result,
-            lhs: lhs_wide,
-            rhs: rhs_wide,
-        });
-
-        let overflow = self.emit_overflow_cond(emitter, wide_result, bits, signed, wide_bits);
+        // Detect overflow without widening: shift left in the native bit width
+        // (which wraps modulo 2^bits) and verify `(lhs << rhs) >> rhs == lhs`.
+        // If any high bits were lost the round-trip fails. Works for both
+        // unsigned (logical shifts) and signed (arithmetic shift right
+        // restores the sign extension on a non-overflowing value).
+        //
+        // `emit_invalid_shift_cond` has already filtered out `rhs >= bits`, so
+        // both shifts here have a valid shift amount.
         let result_type = if signed {
             Type {
                 expr: TypeExpr::I(bits),
@@ -539,43 +593,30 @@ impl LowerPureGuards {
             }
         };
 
+        let shifted = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shl,
+            result: shifted,
+            lhs,
+            rhs,
+        });
+        let back = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shr,
+            result: back,
+            lhs: shifted,
+            rhs,
+        });
+        let identity_eq = emitter.eq(back, lhs);
+        let overflow = emitter.not(identity_eq);
+
         let result = emitter.build_if_else(
             overflow,
             vec![result_type],
             |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
-            |e| {
-                let narrow_target = if signed {
-                    CastTarget::I(bits)
-                } else {
-                    CastTarget::U(bits)
-                };
-                vec![e.cast_to(narrow_target, wide_result)]
-            },
+            |_| vec![shifted],
         );
         result[0]
-    }
-
-    fn emit_overflow_cond(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        wide_result: ValueId,
-        bits: usize,
-        signed: bool,
-        wide_bits: usize,
-    ) -> ValueId {
-        if signed {
-            // Signed: check result < -(2^(bits-1)) || result >= 2^(bits-1)
-            let min_val = emitter.i_const(wide_bits, (-(1i128 << (bits - 1))) as u128);
-            let max_val = emitter.i_const(wide_bits, 1u128 << (bits - 1));
-            let too_low = emitter.lt(wide_result, min_val);
-            let too_high = emitter.cmp(max_val, wide_result, CmpKind::Lt);
-            emitter.or(too_low, too_high)
-        } else {
-            // Unsigned: check result >= 2^bits
-            let max_val = emitter.u_const(wide_bits, 1u128 << bits);
-            let fits = emitter.lt(wide_result, max_val);
-            emitter.not(fits)
-        }
     }
 
     /// Lower `Guard(cond, div/mod(lhs, rhs) -> result)` for division by zero.
