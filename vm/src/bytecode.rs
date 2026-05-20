@@ -1,6 +1,5 @@
 #![allow(unused_variables)]
 
-use crate::interpreter::dispatch;
 use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
@@ -402,9 +401,9 @@ unsafe fn ad_kv_lookup_emit(
 #[interpreter]
 mod def {
     #[raw_opcode]
-    fn jmp(pc: *const u64, frame: Frame, vm: &mut VM, target: JumpTarget) {
+    fn jmp(pc: *const u64, frame: Frame, vm: &mut VM, target: JumpTarget) -> (*const u64, Frame) {
         let pc = unsafe { pc.offset(target.0) };
-        unsafe { dispatch(pc, frame, vm) };
+        (pc, frame)
     }
 
     #[raw_opcode]
@@ -415,10 +414,10 @@ mod def {
         #[frame] cond: u64,
         if_t: JumpTarget,
         if_f: JumpTarget,
-    ) {
+    ) -> (*const u64, Frame) {
         let target = if cond != 0 { if_t } else { if_f };
         let pc = unsafe { pc.offset(target.0) };
-        unsafe { dispatch(pc, frame, vm) };
+        (pc, frame)
     }
 
     #[raw_opcode]
@@ -429,7 +428,7 @@ mod def {
         func: JumpTarget,
         args: &[(usize, FramePosition)],
         ret: FramePosition,
-    ) {
+    ) -> (*const u64, Frame) {
         let func_pc = unsafe { pc.offset(func.0) };
         let func_frame_size = unsafe { *func_pc.offset(-1) };
         let new_frame = Frame::push(func_frame_size, frame, vm);
@@ -448,17 +447,18 @@ mod def {
             current_child = unsafe { current_child.add(*arg_size) };
         }
 
-        unsafe { dispatch(func_pc, new_frame, vm) };
+        (func_pc, new_frame)
     }
 
     #[raw_opcode]
-    fn ret(_pc: *const u64, frame: Frame, vm: &mut VM) {
+    fn ret(_pc: *const u64, frame: Frame, vm: &mut VM) -> (*const u64, Frame) {
         let ret_address = unsafe { *frame.data.offset(1) } as *mut u64;
         let new_frame = frame.pop(vm);
         if new_frame.data.is_null() {
-            return;
+            // Halt: returning a null pc tells `dispatch` to stop.
+            return (std::ptr::null(), new_frame);
         }
-        unsafe { dispatch(ret_address, new_frame, vm) };
+        (ret_address, new_frame)
     }
 
     #[raw_opcode]
@@ -469,7 +469,7 @@ mod def {
         #[frame] a: Field,
         #[frame] b: Field,
         #[frame] c: Field,
-    ) {
+    ) -> (*const u64, Frame) {
         unsafe {
             *vm.data.as_forward.out_a = a;
             *vm.data.as_forward.out_b = b;
@@ -482,17 +482,22 @@ mod def {
             vm.data.as_forward.out_c = vm.data.as_forward.out_c.offset(1);
         };
         let pc = unsafe { pc.offset(4) };
-        unsafe { dispatch(pc, frame, vm) };
+        (pc, frame)
     }
 
     #[raw_opcode]
-    fn write_witness(pc: *const u64, frame: Frame, vm: &mut VM, #[frame] val: Field) {
+    fn write_witness(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] val: Field,
+    ) -> (*const u64, Frame) {
         unsafe {
             *vm.data.as_forward.algebraic_witness = val;
             vm.data.as_forward.algebraic_witness = vm.data.as_forward.algebraic_witness.offset(1);
         };
         let pc = unsafe { pc.offset(2) };
-        unsafe { dispatch(pc, frame, vm) };
+        (pc, frame)
     }
 
     #[opcode]
