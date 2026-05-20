@@ -17,12 +17,37 @@ use crate::{
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
 
-pub type Handler = fn(*const u64, Frame, &mut VM);
+/// An opcode handler. Returns the `(pc, frame)` to feed into the next
+/// dispatch step. A null `pc` signals that execution should halt (the program
+/// has fallen off the base frame in `ret`).
+pub type Handler = fn(*const u64, Frame, &mut VM) -> (*const u64, Frame);
 
-#[inline(always)]
+/// Tail-call-recursive dispatch. Each step reads the opcode at `pc`,
+/// transmutes it into a `Handler`, and tail-calls into the next dispatch with
+/// whatever pc/frame the handler produced. Relies on LLVM's tail-call
+/// optimization — in debug builds (or anywhere TCO does not fire) this will
+/// blow the stack on long programs; enable the `branching-interpreter` feature
+/// to switch to a loop-based dispatch for those cases.
+#[cfg(not(feature = "branching-interpreter"))]
 pub unsafe fn dispatch(pc: *const u64, frame: Frame, vm: &mut VM) {
+    if pc.is_null() {
+        return;
+    }
     let opcode: Handler = unsafe { mem::transmute(*pc) };
-    opcode(pc, frame, vm);
+    let (next_pc, next_frame) = opcode(pc, frame, vm);
+    unsafe { dispatch(next_pc, next_frame, vm) }
+}
+
+/// Loop-based dispatch. Does not rely on tail-call optimization, so it works
+/// in debug builds.
+#[cfg(feature = "branching-interpreter")]
+pub unsafe fn dispatch(mut pc: *const u64, mut frame: Frame, vm: &mut VM) {
+    while !pc.is_null() {
+        let opcode: Handler = unsafe { mem::transmute(*pc) };
+        let (next_pc, next_frame) = opcode(pc, frame, vm);
+        pc = next_pc;
+        frame = next_frame;
+    }
 }
 
 // We don't want this file to compile if we can't safely pun u64 and pointer, so we add a
