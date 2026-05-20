@@ -1032,11 +1032,20 @@ impl ExplicitWitness {
                     }
                     let constrain_one = b.field_const(Field::from(1));
                     b.constrain(current_sum, constrain_one, value);
+                    // The caller's SSA type for this ToRadix is `Array<u8, count>`;
+                    // store byte-sized elements so the array layout matches what
+                    // downstream `array_get`s read. The witness `byte_wit` values
+                    // are `WitnessOf(Field)`, so cast each to `WitnessOf(U(8))`
+                    // (a 1-cell value carrying the byte) before the MkSeq.
+                    let byte_elems: Vec<ValueId> = witnesses
+                        .iter()
+                        .map(|&w| b.cast_to(CastTarget::U(8), w))
+                        .collect();
                     b.push(OpCode::MkSeq {
                         result,
-                        elems: witnesses,
+                        elems: byte_elems,
                         seq_type: SeqType::Array(count),
-                        elem_type: Type::witness_of(Type::field()),
+                        elem_type: Type::witness_of(Type::u(8)),
                     });
                 }
             }
@@ -1877,6 +1886,24 @@ impl ExplicitWitness {
             _ => panic!("ICE: rhs is not an integer type"),
         };
         let u1 = CastTarget::U(1);
+        // `b.lt` lowers to `lt_u64`/`lt_s64`, which read a single 64-bit frame
+        // cell. Field-typed operands would read a Montgomery limb instead of
+        // the value, so the comparison would be nonsense — reject those at the
+        // pass boundary rather than silently emitting broken code.
+        assert!(
+            !matches!(
+                function_type_info.get_value_type(lhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            "ICE: lower_witness_lt got Field-typed lhs; integer-typed operands required"
+        );
+        assert!(
+            !matches!(
+                function_type_info.get_value_type(rhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            "ICE: lower_witness_lt got Field-typed rhs; integer-typed operands required"
+        );
         let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
         let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
         let res_hint = b.lt(lhs_pure, rhs_pure);
@@ -2587,13 +2614,15 @@ impl ExplicitWitness {
         let result_type_full = function_type_info.get_value_type(result).clone();
         let result_type = result_type_full.strip_all_witness();
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
+        let safe_hint_idx =
+            |b: &mut HLInstrBuilder<'_>| self.clamped_hint_index(b, function_type_info, arr, idx);
 
         // ND-array case: hint the entire slice, then constrain each leaf with a
         // lookup at a computed flat offset.
         if matches!(&result_type.expr, TypeExpr::Array(..)) {
-            let pure_idx = b.value_of(idx);
+            let safe_idx = safe_hint_idx(b);
             let idx_field = b.cast_to_field(idx);
-            let inner_hint = b.array_get(arr, pure_idx);
+            let inner_hint = b.array_get(arr, safe_idx);
             let outer_stride = leaf_scalar_count(&result_type);
             let stride_const = b.field_const(Field::from(outer_stride as u128));
             let base_key = b.mul(idx_field, stride_const);
@@ -2631,8 +2660,8 @@ impl ExplicitWitness {
             }
         };
 
-        let pure_idx = b.value_of(idx);
-        let mut r_pure_val = b.array_get(arr, pure_idx);
+        let safe_idx = safe_hint_idx(b);
+        let mut r_pure_val = b.array_get(arr, safe_idx);
 
         if arr_elem_type.is_witness_of() {
             r_pure_val = b.value_of(r_pure_val);
@@ -2870,6 +2899,41 @@ impl ExplicitWitness {
                 unreachable!("strip_all_witness should remove all WitnessOf wrappers")
             }
         }
+    }
+
+    /// Index to use for the *hint-side* `array_get` inside a witness-indexed
+    /// lookup gadget: clamp `idx`'s pure value into `[0, len)` so the witgen
+    /// VM doesn't panic on out-of-bounds reads. The constraint side keeps the
+    /// original index — when the lookup's flag is off (the surrounding guard
+    /// is inactive), the witness value doesn't matter; when the flag is on,
+    /// the lookup enforces the right element, so a hint clamp can only ever
+    /// surface as a constraint failure downstream, never as an unsound proof.
+    fn clamped_hint_index(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &FunctionTypeInfo,
+        arr: ValueId,
+        idx: ValueId,
+    ) -> ValueId {
+        let arr_ty = function_type_info.get_value_type(arr);
+        let len = match &arr_ty.strip_witness().expr {
+            TypeExpr::Array(_, n) => *n,
+            TypeExpr::Slice(_) => {
+                // Slice length isn't known statically; fall back to the raw
+                // pure index. (We don't hit this path on any current test.)
+                return b.value_of(idx);
+            }
+            other => panic!("hint index on non-seq type: {:?}", other),
+        };
+        let idx_bits = match function_type_info.get_value_type(idx).strip_witness().expr {
+            TypeExpr::U(n) => n,
+            other => panic!("hint index of non-uint type: {:?}", other),
+        };
+        let pure_idx = b.value_of(idx);
+        let len_const = b.u_const(idx_bits, len as u128);
+        let in_bounds = b.lt(pure_idx, len_const);
+        let zero = b.u_const(idx_bits, 0);
+        b.select(in_bounds, pure_idx, zero)
     }
 
     fn ensure_field(
