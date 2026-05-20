@@ -149,35 +149,78 @@ pub fn add_lowlevel_replacements(
         &(String, FuncId, noirc_errors::Location, noirc_frontend::Type),
     > = functions.iter().map(|f| (f.0.as_str(), f)).collect();
 
+    // Queue each replacement TWICE — once with `in_unconstrained_function=false`
+    // to get a constrained monomorphization, once with `true` to get an
+    // unconstrained one. Both are stored in `LowLevelReplacement` so that the
+    // call site can route to the right variant based on its own runtime.
+    //
+    // Without this, the lowlevel replacement gets monomorphized with whatever
+    // `in_unconstrained_function` happens to be when add_lowlevel_replacements
+    // is called (leftover state from the prior `process_queue`), and there's
+    // only one variant for all call contexts — which silently turns
+    // constrained-context blackbox calls into unconstrained ones (or vice
+    // versa) depending on call-graph shape.
     for spec in replacement.replacements {
         let lowlevel = match &spec.kind {
             ReplacementKind::Single(name) => {
                 let (_, func_id, location, fn_type) = functions_by_name[name];
-                let mono_func_id = monomorphizer.queue_function_with_bindings(
-                    *func_id,
-                    *location,
-                    Default::default(),
-                    fn_type.clone(),
-                    Vec::new(),
-                    None,
-                );
-                LowLevelReplacement::Single(mono_func_id)
-            }
-            ReplacementKind::ByArraySize(entries) => {
-                let mut size_map: HashMap<u32, AstFuncId> = HashMap::new();
-                for (name, size) in *entries {
-                    let (_, func_id, location, fn_type) = functions_by_name[name];
-                    let mono_func_id = monomorphizer.queue_function_with_bindings(
+                let constrained = monomorphizer.with_unconstrained_state(false, |m| {
+                    m.queue_function_with_bindings(
                         *func_id,
                         *location,
                         Default::default(),
                         fn_type.clone(),
                         Vec::new(),
                         None,
-                    );
-                    size_map.insert(*size, mono_func_id);
+                    )
+                });
+                let unconstrained = monomorphizer.with_unconstrained_state(true, |m| {
+                    m.queue_function_with_bindings(
+                        *func_id,
+                        *location,
+                        Default::default(),
+                        fn_type.clone(),
+                        Vec::new(),
+                        None,
+                    )
+                });
+                LowLevelReplacement::Single {
+                    constrained,
+                    unconstrained,
                 }
-                LowLevelReplacement::ByArraySize(size_map)
+            }
+            ReplacementKind::ByArraySize(entries) => {
+                let mut constrained: HashMap<u32, AstFuncId> = HashMap::new();
+                let mut unconstrained: HashMap<u32, AstFuncId> = HashMap::new();
+                for (name, size) in *entries {
+                    let (_, func_id, location, fn_type) = functions_by_name[name];
+                    let c = monomorphizer.with_unconstrained_state(false, |m| {
+                        m.queue_function_with_bindings(
+                            *func_id,
+                            *location,
+                            Default::default(),
+                            fn_type.clone(),
+                            Vec::new(),
+                            None,
+                        )
+                    });
+                    let uc = monomorphizer.with_unconstrained_state(true, |m| {
+                        m.queue_function_with_bindings(
+                            *func_id,
+                            *location,
+                            Default::default(),
+                            fn_type.clone(),
+                            Vec::new(),
+                            None,
+                        )
+                    });
+                    constrained.insert(*size, c);
+                    unconstrained.insert(*size, uc);
+                }
+                LowLevelReplacement::ByArraySize {
+                    constrained,
+                    unconstrained,
+                }
             }
         };
         lowlevel_replacements.insert(spec.lowlevel_name.to_string(), lowlevel);

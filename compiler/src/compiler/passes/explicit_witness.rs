@@ -1569,6 +1569,23 @@ impl ExplicitWitness {
             OpCode::ArraySet { .. } => {
                 panic!("ArraySet inside Guard not supported yet: {:?}", inner);
             }
+            OpCode::WriteWitness {
+                result,
+                value,
+                pinned,
+            } => {
+                // Witness tape positions are static, so we always emit a write.
+                // When `condition` is true the value reaches the tape as-is; when
+                // it's false the resulting witness slot is unconstrained — every
+                // user of `result` lives inside the same Guard (or downstream
+                // Guards), so its read is also flagged off and the slot's value
+                // doesn't matter.
+                b.push(OpCode::WriteWitness {
+                    result,
+                    value,
+                    pinned,
+                });
+            }
             OpCode::Rangecheck { value, max_bits } => {
                 // Guard(cond, Rangecheck(value, max_bits)) → conditional rangecheck.
                 // If the value is witness-tainted the witness rangecheck gadget

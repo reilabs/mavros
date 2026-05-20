@@ -16,10 +16,22 @@ use crate::compiler::ssa::{
 
 use super::type_converter::TypeConverter;
 
-/// A LowLevel function replacement: either a single function or a family dispatched by array size.
+/// A LowLevel function replacement.
+///
+/// Each replacement holds BOTH a constrained and an unconstrained monomorphized
+/// variant. The call site picks the right variant based on whether it's being
+/// emitted from a constrained or unconstrained context. This mirrors the
+/// two-variant scheme mavros uses for regular Noir functions
+/// (`constrained_mapper` / `unconstrained_mapper`).
 pub enum LowLevelReplacement {
-    Single(AstFuncId),
-    ByArraySize(HashMap<u32, AstFuncId>),
+    Single {
+        constrained: AstFuncId,
+        unconstrained: AstFuncId,
+    },
+    ByArraySize {
+        constrained: HashMap<u32, AstFuncId>,
+        unconstrained: HashMap<u32, AstFuncId>,
+    },
 }
 
 /// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
@@ -1378,12 +1390,34 @@ impl<'a> ExpressionConverter<'a> {
             .get(name)
             .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name));
 
+        // Route to the constrained or unconstrained variant of the blackbox
+        // substitute depending on the current caller's context. R1CGen descends
+        // into constrained variants (emitting constraints) and skips
+        // unconstrained ones, which is exactly the dispatch we want for a
+        // call-from-unconstrained-context to bypass the body.
         let replacement_id = match replacement {
-            LowLevelReplacement::Single(func_id) => func_id,
-            LowLevelReplacement::ByArraySize(size_map) => {
+            LowLevelReplacement::Single {
+                constrained,
+                unconstrained,
+            } => {
+                if self.in_unconstrained {
+                    unconstrained
+                } else {
+                    constrained
+                }
+            }
+            LowLevelReplacement::ByArraySize {
+                constrained,
+                unconstrained,
+            } => {
                 let array_size = match &call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n,
                     _ => panic!("{} expected array return type", name),
+                };
+                let size_map = if self.in_unconstrained {
+                    unconstrained
+                } else {
+                    constrained
                 };
                 size_map
                     .get(&array_size)
