@@ -7,9 +7,14 @@
 
 use crate::compiler::{
     analysis::types::TypeInfo,
-    block_builder::{HLBlockEmitter, HLEmitter},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLFunction, HLSSA, Instruction, OpCode, Terminator},
+    ssa::{
+        BlockId, Instruction, Terminator,
+        hlssa::{
+            HLFunction, HLSSA, OpCode,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
+    },
 };
 
 pub struct LowerGuards {}

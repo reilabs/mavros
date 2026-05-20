@@ -13,17 +13,22 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::compiler::analysis::flow_analysis;
-use crate::compiler::analysis::flow_analysis::FlowAnalysis;
-use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
-use crate::compiler::block_builder::{LLBlockEmitter, LLEmitter};
-use crate::compiler::ir::r#type::{Type, TypeExpr};
-use crate::compiler::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
+use crate::compiler::analysis::{
+    flow_analysis::{self, FlowAnalysis},
+    types::{FunctionTypeInfo, TypeInfo},
 };
-use crate::compiler::ssa::{
-    BinaryArithOpKind, BlockId, CmpKind, DMatrix, FunctionId, HLFunction, HLSSA, Terminator,
-    ValueId,
+
+use super::{
+    BlockId, FunctionId, Terminator, ValueId,
+    hlssa::{
+        BinaryArithOpKind, CmpKind, DMatrix, HLFunction, HLSSA, Type as HLType,
+        TypeExpr as HLTypeExpr,
+    },
+    llssa::{
+        FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
+        Type as LLType,
+        builder::{LLBlockEmitter, LLEmitter},
+    },
 };
 use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
 
@@ -32,55 +37,55 @@ use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
 // =============================================================================
 
 /// Map an HLSSA type to an LLType.
-fn lower_type(ty: &Type) -> LLType {
+fn lower_type(ty: &HLType) -> LLType {
     match &ty.expr {
-        TypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
-        TypeExpr::U(bits) | TypeExpr::I(bits) => LLType::Int(*bits as u32),
-        TypeExpr::Array(..) => LLType::Ptr,
+        HLTypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => LLType::Int(*bits as u32),
+        HLTypeExpr::Array(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
-        TypeExpr::WitnessOf(_) => LLType::Ptr,
-        TypeExpr::Tuple(_) => LLType::Ptr,
-        TypeExpr::Ref(_) => LLType::Ptr,
+        HLTypeExpr::WitnessOf(_) => LLType::Ptr,
+        HLTypeExpr::Tuple(_) => LLType::Ptr,
+        HLTypeExpr::Ref(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
 
 /// Get the LLStruct layout for a single element of the given HLSSA type,
 /// for use in InlineArray fields. Scalar types become single-field structs.
-fn elem_struct(ty: &Type) -> LLStruct {
+fn elem_struct(ty: &HLType) -> LLStruct {
     match &ty.expr {
-        TypeExpr::Field => LLStruct::field_elem(),
-        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+        HLTypeExpr::Field => LLStruct::field_elem(),
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => {
             LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
         }
-        TypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
-        TypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
-        TypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
-        TypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
     }
 }
 
 /// Get the RC'd array struct for an Array<T, N> type.
-fn rc_array_struct(elem_type: &Type, count: usize) -> LLStruct {
+fn rc_array_struct(elem_type: &HLType, count: usize) -> LLStruct {
     LLStruct::rc_array(elem_struct(elem_type), count)
 }
 
 /// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
-fn tuple_field_type(ty: &Type) -> LLFieldType {
+fn tuple_field_type(ty: &HLType) -> LLFieldType {
     match &ty.expr {
-        TypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
-        TypeExpr::U(bits) | TypeExpr::I(bits) => LLFieldType::Int(*bits as u32),
-        TypeExpr::Array(..) => LLFieldType::Ptr,
-        TypeExpr::Tuple(_) => LLFieldType::Ptr,
-        TypeExpr::WitnessOf(_) => LLFieldType::Ptr,
-        TypeExpr::Ref(_) => LLFieldType::Ptr,
+        HLTypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => LLFieldType::Int(*bits as u32),
+        HLTypeExpr::Array(..) => LLFieldType::Ptr,
+        HLTypeExpr::Tuple(_) => LLFieldType::Ptr,
+        HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
+        HLTypeExpr::Ref(_) => LLFieldType::Ptr,
         _ => panic!("Unsupported tuple element type: {}", ty),
     }
 }
 
 /// Build the LLStruct layout for the heap-allocated RC'd cell `Ref<T>`.
-fn rc_ref_cell_struct(inner_type: &Type) -> LLStruct {
+fn rc_ref_cell_struct(inner_type: &HLType) -> LLStruct {
     LLStruct::new(vec![
         LLFieldType::Inline(LLStruct::rc_header()),
         tuple_field_type(inner_type),
@@ -89,7 +94,7 @@ fn rc_ref_cell_struct(inner_type: &Type) -> LLStruct {
 
 /// Build the LLStruct layout for a heap-allocated RC'd tuple.
 /// Layout: { Inline(RcHeader), field0, field1, ... }
-fn rc_tuple_struct(element_types: &[Type]) -> LLStruct {
+fn rc_tuple_struct(element_types: &[HLType]) -> LLStruct {
     let mut fields = vec![LLFieldType::Inline(LLStruct::rc_header())];
     for elem_ty in element_types {
         fields.push(tuple_field_type(elem_ty));
@@ -98,9 +103,9 @@ fn rc_tuple_struct(element_types: &[Type]) -> LLStruct {
 }
 
 /// Extract (element_type, count) from an HLSSA array type.
-fn array_info(ty: &Type) -> (&Type, usize) {
+fn array_info(ty: &HLType) -> (&HLType, usize) {
     match &ty.expr {
-        TypeExpr::Array(inner, n) => (inner.as_ref(), *n),
+        HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
         _ => panic!("Expected array type, got: {}", ty),
     }
 }
@@ -114,13 +119,13 @@ struct ArrayFn;
 struct DArrayFn;
 
 struct TypeFnEntry<Kind> {
-    ty: Type,
+    ty: HLType,
     fn_id: FunctionId,
     _marker: PhantomData<Kind>,
 }
 
 impl<Kind> TypeFnEntry<Kind> {
-    fn new(ty: Type, fn_id: FunctionId) -> Self {
+    fn new(ty: HLType, fn_id: FunctionId) -> Self {
         Self {
             ty,
             fn_id,
@@ -135,7 +140,7 @@ type ArrayLookupFnEntry<Kind> = TypeFnEntry<Kind>;
 /// Get or create a drop function for a type that needs dropping (currently Array or WitnessOf).
 /// For arrays, recursively creates drop functions for inner elements that need dropping.
 fn get_or_create_drop_fn(
-    ty: &Type,
+    ty: &HLType,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
@@ -149,19 +154,19 @@ fn get_or_create_drop_fn(
 
     // Recursively create drop fns for inner heap-allocated elements first
     match &ty.expr {
-        TypeExpr::Array(inner, _) => {
+        HLTypeExpr::Array(inner, _) => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
             }
         }
-        TypeExpr::Tuple(elements) => {
+        HLTypeExpr::Tuple(elements) => {
             for elem in elements {
                 if needs_drop(&elem.expr) {
                     get_or_create_drop_fn(elem, llssa, drop_fns, ad_fns);
                 }
             }
         }
-        TypeExpr::Ref(inner) => {
+        HLTypeExpr::Ref(inner) => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
             }
@@ -171,10 +176,10 @@ fn get_or_create_drop_fn(
 
     // Resolve or create the drop function ID
     let fn_id = match &ty.expr {
-        TypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
-        TypeExpr::Array(_inner, _) => llssa.add_function(format!("drop_{}", ty)),
-        TypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
-        TypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
+        HLTypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
+        HLTypeExpr::Array(_inner, _) => llssa.add_function(format!("drop_{}", ty)),
+        HLTypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
+        HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
         _ => panic!("{} is not supported yet", ty),
     };
     drop_fns.push(DropFnEntry::new(ty.clone(), fn_id));
@@ -316,7 +321,7 @@ impl LookupFunctions {
         id
     }
 
-    fn get_array_lookup_fn(&mut self, array_type: &Type, llssa: &mut LLSSA) -> FunctionId {
+    fn get_array_lookup_fn(&mut self, array_type: &HLType, llssa: &mut LLSSA) -> FunctionId {
         if let Some(entry) = self.array.iter().find(|entry| entry.ty == *array_type) {
             return entry.fn_id;
         }
@@ -326,7 +331,7 @@ impl LookupFunctions {
         id
     }
 
-    fn get_darray_call_fn(&mut self, array_type: &Type, llssa: &mut LLSSA) -> FunctionId {
+    fn get_darray_call_fn(&mut self, array_type: &HLType, llssa: &mut LLSSA) -> FunctionId {
         if let Some(entry) = self
             .darray_call
             .iter()
@@ -425,7 +430,7 @@ fn lower_inner(
     let mut lookup_fns = LookupFunctions::new();
 
     // Transfer global types from HLSSA to LLSSA
-    let hlssa_global_types: Vec<Type> = hlssa.get_global_types().to_vec();
+    let hlssa_global_types: Vec<HLType> = hlssa.get_global_types().to_vec();
     let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(lower_type).collect();
     llssa.set_global_types(ll_global_types);
 
@@ -496,7 +501,7 @@ fn lower_function(
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
-    hlssa_global_types: &[Type],
+    hlssa_global_types: &[HLType],
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -589,7 +594,7 @@ fn add_vm_parameter(func: &mut LLFunction) -> ValueId {
 /// Lower a single HLSSA instruction to LLSSA ops.
 #[allow(clippy::too_many_arguments)]
 fn lower_instruction(
-    instruction: &crate::compiler::ssa::OpCode,
+    instruction: &crate::compiler::ssa::hlssa::OpCode,
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
@@ -598,9 +603,11 @@ fn lower_instruction(
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
-    hlssa_global_types: &[Type],
+    hlssa_global_types: &[HLType],
 ) {
-    use crate::compiler::ssa::{CallTarget, CastTarget, ConstValue, MemOp, OpCode, Radix, SeqType};
+    use crate::compiler::ssa::hlssa::{
+        CallTarget, CastTarget, ConstValue, OpCode, Radix, RefCountOp, SequenceTargetType,
+    };
 
     match instruction {
         OpCode::BinaryArithOp {
@@ -614,7 +621,7 @@ fn lower_instruction(
             let result_type = fn_type_info.get_value_type(*result);
 
             let ll_result = match &result_type.expr {
-                TypeExpr::Field => {
+                HLTypeExpr::Field => {
                     let op = match kind {
                         BinaryArithOpKind::Mul => FieldArithOp::Mul,
                         BinaryArithOpKind::Add => FieldArithOp::Add,
@@ -624,7 +631,7 @@ fn lower_instruction(
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::U(_) => {
+                HLTypeExpr::U(_) => {
                     let op = match kind {
                         BinaryArithOpKind::Add => IntArithOp::Add,
                         BinaryArithOpKind::Sub => IntArithOp::Sub,
@@ -639,7 +646,7 @@ fn lower_instruction(
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::I(_) => {
+                HLTypeExpr::I(_) => {
                     let op = match kind {
                         BinaryArithOpKind::Add => IntArithOp::Add,
                         BinaryArithOpKind::Sub => IntArithOp::Sub,
@@ -654,7 +661,7 @@ fn lower_instruction(
                     };
                     e.int_arith(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::WitnessOf(_) => {
+                HLTypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind {
                         BinaryArithOpKind::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
@@ -683,18 +690,18 @@ fn lower_instruction(
             let lhs_type = fn_type_info.get_value_type(*lhs);
 
             let ll_result = match &lhs_type.strip_witness().expr {
-                TypeExpr::U(_) => {
+                HLTypeExpr::U(_) => {
                     let op = match kind {
                         CmpKind::Lt => IntCmpOp::ULt,
                         CmpKind::Eq => IntCmpOp::Eq,
                     };
                     e.int_cmp(op, ll_lhs, ll_rhs)
                 }
-                TypeExpr::I(_) => match kind {
+                HLTypeExpr::I(_) => match kind {
                     CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
                     CmpKind::Lt => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
                 },
-                TypeExpr::Field => match kind {
+                HLTypeExpr::Field => match kind {
                     CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
                     _ => panic!("Unsupported field comparison: {:?}", kind),
                 },
@@ -775,7 +782,7 @@ fn lower_instruction(
         OpCode::MkSeq {
             result,
             elems,
-            seq_type: SeqType::Array(count),
+            seq_type: SequenceTargetType::Array(count),
             elem_type,
         } => {
             lower_mk_array(e, val_map, *result, elems, elem_type, *count);
@@ -821,7 +828,7 @@ fn lower_instruction(
 
         // -- RC operations --
         OpCode::MemOp {
-            kind: MemOp::Bump(n),
+            kind: RefCountOp::Bump(n),
             value,
         } => {
             let val_type = fn_type_info.get_value_type(*value);
@@ -833,7 +840,7 @@ fn lower_instruction(
         }
 
         OpCode::MemOp {
-            kind: MemOp::Drop,
+            kind: RefCountOp::Drop,
             value,
         } => {
             let val_type = fn_type_info.get_value_type(*value);
@@ -902,10 +909,10 @@ fn lower_instruction(
                     } else {
                         // U(n)/I(n) → Field: zero-extend to i64, build {val, 0, 0, 0} limbs, FieldFromLimbs
                         let val64 = match &source_type.expr {
-                            TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => {
+                            HLTypeExpr::U(bits) | HLTypeExpr::I(bits) if *bits < 64 => {
                                 e.zext(ll_value, 64)
                             }
-                            TypeExpr::U(64) | TypeExpr::I(64) => ll_value,
+                            HLTypeExpr::U(64) | HLTypeExpr::I(64) => ll_value,
                             _ => panic!("Cast to Field from unsupported type: {}", source_type),
                         };
                         let zero = e.int_const(64, 0);
@@ -916,7 +923,7 @@ fn lower_instruction(
                 }
                 CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
                     let ll_result = match &source_type.expr {
-                        TypeExpr::Field => {
+                        HLTypeExpr::Field => {
                             // Field → U(n)/I(n): FieldToLimbs, extract limb 0, truncate
                             let limbs = e.field_to_limbs(ll_value);
                             let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
@@ -926,7 +933,7 @@ fn lower_instruction(
                                 limb0
                             }
                         }
-                        TypeExpr::U(source_bits) | TypeExpr::I(source_bits) => {
+                        HLTypeExpr::U(source_bits) | HLTypeExpr::I(source_bits) => {
                             // Integer → Integer: zext or truncate
                             if *target_bits > *source_bits {
                                 e.zext(ll_value, *target_bits as u32)
@@ -967,7 +974,7 @@ fn lower_instruction(
             };
 
             let ll_result = match &source_type.expr {
-                TypeExpr::Field => {
+                HLTypeExpr::Field => {
                     let limbs = e.field_to_limbs(ll_value);
                     let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
                     let masked_low = if to_bits == 64 {
@@ -981,7 +988,7 @@ fn lower_instruction(
                         e.mk_struct(LLStruct::limbs(), vec![masked_low, zero, zero, zero]);
                     e.field_from_limbs(new_limbs)
                 }
-                TypeExpr::U(bits) | TypeExpr::I(bits) => {
+                HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => {
                     let bits = *bits as u32;
                     if to_bits >= bits {
                         ll_value
@@ -1075,16 +1082,16 @@ fn lower_instruction(
 
             let cmp_result = match kind {
                 CmpKind::Eq => match &lhs_type.expr {
-                    TypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
-                    TypeExpr::U(_) | TypeExpr::I(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
+                    HLTypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
+                    HLTypeExpr::U(_) | HLTypeExpr::I(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
                     _ => panic!(
                         "Unsupported type for AssertCmp Eq in HLSSA->LLSSA lowering: {:?}",
                         lhs_type
                     ),
                 },
                 CmpKind::Lt => match &lhs_type.expr {
-                    TypeExpr::U(_) => e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs),
-                    TypeExpr::I(_) => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
+                    HLTypeExpr::U(_) => e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs),
+                    HLTypeExpr::I(_) => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
                     _ => panic!(
                         "Unsupported type for AssertCmp Lt in HLSSA->LLSSA lowering: {:?}",
                         lhs_type
@@ -1161,7 +1168,7 @@ fn lower_instruction(
             radix: Radix::Bytes,
             endianness,
             count,
-        } if matches!(fn_type_info.get_value_type(*value).expr, TypeExpr::Field) => {
+        } if matches!(fn_type_info.get_value_type(*value).expr, HLTypeExpr::Field) => {
             lower_to_bytes(e, val_map, *result, *value, *endianness, *count);
         }
 
@@ -1169,7 +1176,7 @@ fn lower_instruction(
             let value_type = fn_type_info.get_value_type(*value);
             let reason = match (radix, &value_type.expr) {
                 (Radix::Dyn(_), _) => "ToRadix with a dynamic radix is not supported".to_string(),
-                (Radix::Bytes, TypeExpr::WitnessOf(_)) => {
+                (Radix::Bytes, HLTypeExpr::WitnessOf(_)) => {
                     "ToRadix on a witness value is not supported; witness byte decomposition \
                      must be lowered via constrained byte decomposition before this pass"
                         .to_string()
@@ -1183,7 +1190,7 @@ fn lower_instruction(
         }
 
         OpCode::Lookup {
-            target: crate::compiler::ssa::LookupTarget::Array(arr),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Array(arr),
             keys,
             results,
             flag,
@@ -1203,7 +1210,7 @@ fn lower_instruction(
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::Lookup {
-            target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
             keys,
             results,
             flag,
@@ -1223,7 +1230,7 @@ fn lower_instruction(
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::Lookup {
-            target: crate::compiler::ssa::LookupTarget::Spread(bits),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Spread(bits),
             keys,
             results,
             flag,
@@ -1248,7 +1255,7 @@ fn lower_instruction(
         }
 
         OpCode::DLookup {
-            target: crate::compiler::ssa::LookupTarget::Array(arr),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Array(arr),
             keys,
             results,
             flag,
@@ -1268,7 +1275,7 @@ fn lower_instruction(
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::DLookup {
-            target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
             keys,
             results,
             flag,
@@ -1288,7 +1295,7 @@ fn lower_instruction(
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::DLookup {
-            target: crate::compiler::ssa::LookupTarget::Spread(bits),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Spread(bits),
             keys,
             results,
             flag,
@@ -1319,10 +1326,10 @@ fn lower_instruction(
     }
 }
 
-fn integer_width(ty: &Type) -> u32 {
+fn integer_width(ty: &HLType) -> u32 {
     let scalar_ty = ty.strip_witness();
     match scalar_ty.expr {
-        TypeExpr::U(bits) | TypeExpr::I(bits) => bits as u32,
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => bits as u32,
         _ => panic!("Expected integer type, got {}", ty),
     }
 }
@@ -1333,8 +1340,8 @@ fn integer_width(ty: &Type) -> u32 {
 fn lower_spread(
     e: &mut LLBlockEmitter<'_>,
     value: ValueId,
-    value_type: &Type,
-    result_type: &Type,
+    value_type: &HLType,
+    result_type: &HLType,
     bits: u8,
 ) -> ValueId {
     let input_bits = integer_width(value_type);
@@ -1364,9 +1371,9 @@ fn lower_spread(
 fn lower_unspread(
     e: &mut LLBlockEmitter<'_>,
     value: ValueId,
-    value_type: &Type,
-    odd_type: &Type,
-    even_type: &Type,
+    value_type: &HLType,
+    odd_type: &HLType,
+    even_type: &HLType,
     bits: u8,
 ) -> (ValueId, ValueId) {
     let input_bits = integer_width(value_type);
@@ -1415,7 +1422,7 @@ fn lower_mk_array(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     elems: &[ValueId],
-    elem_type: &Type,
+    elem_type: &HLType,
     count: usize,
 ) {
     let rc_struct = rc_array_struct(elem_type, count);
@@ -1455,7 +1462,7 @@ fn lower_mk_repeated(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     element: ValueId,
-    elem_type: &Type,
+    elem_type: &HLType,
     count: usize,
 ) {
     let rc_struct = rc_array_struct(elem_type, count);
@@ -1488,10 +1495,10 @@ fn lower_to_bytes(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     value: ValueId,
-    endianness: crate::compiler::ssa::Endianness,
+    endianness: crate::compiler::ssa::hlssa::Endianness,
     count: usize,
 ) {
-    use crate::compiler::ssa::Endianness;
+    use crate::compiler::ssa::hlssa::Endianness;
 
     let ll_value = val_map[&value];
 
@@ -1529,7 +1536,7 @@ fn lower_to_bytes(
     }
 
     // Allocate RC'd array of u8
-    let u8_type = Type::u(8);
+    let u8_type = HLType::u(8);
     let rc_struct = rc_array_struct(&u8_type, count);
     let es = elem_struct(&u8_type);
 
@@ -1565,7 +1572,7 @@ fn lower_mk_tuple(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     elems: &[ValueId],
-    element_types: &[Type],
+    element_types: &[HLType],
 ) {
     let rc_struct = rc_tuple_struct(element_types);
 
@@ -1618,7 +1625,7 @@ fn lower_alloc(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
-    elem_type: &Type,
+    elem_type: &HLType,
 ) {
     let rc_struct = rc_ref_cell_struct(elem_type);
 
@@ -1644,7 +1651,7 @@ fn lower_ref_store(
     val_map: &HashMap<ValueId, ValueId>,
     ptr: ValueId,
     value: ValueId,
-    inner_type: &Type,
+    inner_type: &HLType,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
@@ -1680,7 +1687,7 @@ fn lower_ref_load(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     ptr: ValueId,
-    inner_type: &Type,
+    inner_type: &HLType,
 ) {
     let rc_struct = rc_ref_cell_struct(inner_type);
     let ll_ptr = val_map[&ptr];
@@ -1752,9 +1759,9 @@ fn lower_array_set(
     };
     let inner_rc_struct = if elem_is_rc {
         Some(match &et.expr {
-            TypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
-            TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
-            TypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
+            HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
+            HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+            HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
             _ => panic!("Unsupported RC element type: {}", et),
         })
     } else {
@@ -1867,9 +1874,9 @@ fn lower_rc_bump(
     let val_type = fn_type_info.get_value_type(value);
 
     let rc_struct = match &val_type.expr {
-        TypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
-        TypeExpr::Tuple(elements) => rc_tuple_struct(elements),
-        TypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
+        HLTypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
+        HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+        HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
         _ => panic!("lower_rc_bump: unexpected type {}", val_type),
     };
 
@@ -1905,14 +1912,18 @@ fn lower_rc_drop(
 
 /// Ensure a value is Field-sized ({i64, i64, i64, i64}).
 /// Non-Field integer types are zero-extended to i64 and packed into limbs.
-fn ensure_field_sized(e: &mut LLBlockEmitter<'_>, ll_val: ValueId, source_type: &Type) -> ValueId {
+fn ensure_field_sized(
+    e: &mut LLBlockEmitter<'_>,
+    ll_val: ValueId,
+    source_type: &HLType,
+) -> ValueId {
     if source_type.is_field() || source_type.is_witness_of() {
         return ll_val;
     }
     // U(n)/I(n) → build {val_as_i64, 0, 0, 0}, then FieldFromLimbs
     let val64 = match &source_type.expr {
-        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits < 64 => e.zext(ll_val, 64),
-        TypeExpr::U(64) | TypeExpr::I(64) => ll_val,
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) if *bits < 64 => e.zext(ll_val, 64),
+        HLTypeExpr::U(64) | HLTypeExpr::I(64) => ll_val,
         _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
     };
     let zero = e.int_const(64, 0);
@@ -1926,7 +1937,7 @@ fn lower_ad_const_wrap(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     value: ValueId,
-    source_type: &Type,
+    source_type: &HLType,
 ) {
     let ll_val = ensure_field_sized(e, val_map[&value], source_type);
     let node_struct = LLStruct::ad_const_node();
@@ -2020,7 +2031,7 @@ fn lower_ad_mul_const(
     result: ValueId,
     const_val: ValueId,
     var: ValueId,
-    coeff_type: &Type,
+    coeff_type: &HLType,
 ) {
     let ll_coeff = ensure_field_sized(e, val_map[&const_val], coeff_type);
     let ll_var = val_map[&var];
@@ -2353,13 +2364,13 @@ fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFun
 fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     for entry in drop_fns {
         let func = match &entry.ty.expr {
-            TypeExpr::Array(..) => generate_drop_function_for_array(&entry.ty, drop_fns),
-            TypeExpr::Tuple(elements) => {
+            HLTypeExpr::Array(..) => generate_drop_function_for_array(&entry.ty, drop_fns),
+            HLTypeExpr::Tuple(elements) => {
                 generate_drop_function_for_tuple(elements, &entry.ty, drop_fns)
             }
-            TypeExpr::Ref(inner) => generate_drop_function_for_ref(inner, &entry.ty, drop_fns),
+            HLTypeExpr::Ref(inner) => generate_drop_function_for_ref(inner, &entry.ty, drop_fns),
             // WitnessOf points to ad_drop, whose body is generated by generate_all_ad_functions
-            TypeExpr::WitnessOf(_) => continue,
+            HLTypeExpr::WitnessOf(_) => continue,
             other => panic!("No drop function generator for type: {:?}", other),
         };
         let _old = llssa.take_function(entry.fn_id);
@@ -2367,10 +2378,13 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     }
 }
 
-fn needs_drop(expr: &TypeExpr) -> bool {
+fn needs_drop(expr: &HLTypeExpr) -> bool {
     matches!(
         expr,
-        TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::WitnessOf(..) | TypeExpr::Ref(..)
+        HLTypeExpr::Array(..)
+            | HLTypeExpr::Tuple(..)
+            | HLTypeExpr::WitnessOf(..)
+            | HLTypeExpr::Ref(..)
     )
 }
 
@@ -2384,7 +2398,7 @@ fn needs_drop(expr: &TypeExpr) -> bool {
 ///         drop(ptr.data[i])
 ///       free(ptr)
 ///     return
-fn generate_drop_function_for_array(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFunction {
+fn generate_drop_function_for_array(ty: &HLType, drop_fns: &[DropFnEntry]) -> LLFunction {
     let (et, count) = array_info(ty);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
@@ -2451,8 +2465,8 @@ fn generate_drop_function_for_array(ty: &Type, drop_fns: &[DropFnEntry]) -> LLFu
 ///       free(ptr)
 ///     return
 fn generate_drop_function_for_tuple(
-    element_types: &[Type],
-    ty: &Type,
+    element_types: &[HLType],
+    ty: &HLType,
     drop_fns: &[DropFnEntry],
 ) -> LLFunction {
     let rc_struct = rc_tuple_struct(element_types);
@@ -2518,8 +2532,8 @@ fn generate_drop_function_for_tuple(
 ///       free(ptr)
 ///     return
 fn generate_drop_function_for_ref(
-    inner_type: &Type,
-    ty: &Type,
+    inner_type: &HLType,
+    ty: &HLType,
     drop_fns: &[DropFnEntry],
 ) -> LLFunction {
     let rc_struct = rc_ref_cell_struct(inner_type);
@@ -2588,7 +2602,7 @@ fn lower_terminator(
     val_map: &HashMap<ValueId, ValueId>,
     block_map: &HashMap<BlockId, BlockId>,
     fn_type_info: &FunctionTypeInfo,
-    return_types: &[Type],
+    return_types: &[HLType],
 ) {
     match terminator {
         Terminator::Jmp(target, args) => {
@@ -3057,15 +3071,15 @@ fn int_to_field(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> Valu
 fn load_pure_lookup_elem_as_field(
     e: &mut LLBlockEmitter<'_>,
     elem_ptr: ValueId,
-    elem_type: &Type,
+    elem_type: &HLType,
 ) -> ValueId {
     match &elem_type.expr {
-        TypeExpr::Field => e.ll_load(elem_ptr, LLType::Struct(LLStruct::field_elem())),
-        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+        HLTypeExpr::Field => e.ll_load(elem_ptr, LLType::Struct(LLStruct::field_elem())),
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => {
             let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
             int_to_field(e, value, *bits)
         }
-        TypeExpr::WitnessOf(_) => {
+        HLTypeExpr::WitnessOf(_) => {
             panic!("Forward array lookup cannot materialize WitnessOf table elements")
         }
         _ => panic!("Unsupported array element type in lookup: {}", elem_type),
@@ -3075,21 +3089,21 @@ fn load_pure_lookup_elem_as_field(
 fn ad_bump_lookup_elem_db(
     e: &mut LLBlockEmitter<'_>,
     elem_ptr: ValueId,
-    elem_type: &Type,
+    elem_type: &HLType,
     coeff: ValueId,
     bump_db_fn: FunctionId,
 ) {
     match &elem_type.expr {
-        TypeExpr::Field => {
+        HLTypeExpr::Field => {
             let value = e.ll_load(elem_ptr, LLType::Struct(LLStruct::field_elem()));
             e.ad_write_const(DMatrix::B, value, coeff);
         }
-        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => {
             let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
             let value_field = int_to_field(e, value, *bits);
             e.ad_write_const(DMatrix::B, value_field, coeff);
         }
-        TypeExpr::WitnessOf(inner) => {
+        HLTypeExpr::WitnessOf(inner) => {
             assert!(
                 !inner.is_witness_of(),
                 "Nested WitnessOf in array lookup element type: {}",
@@ -3102,7 +3116,7 @@ fn ad_bump_lookup_elem_db(
     }
 }
 
-fn generate_array_lookup_function(array_type: &Type) -> LLFunction {
+fn generate_array_lookup_function(array_type: &HLType) -> LLFunction {
     let (elem_type, count) = array_info(array_type);
     let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
@@ -3212,8 +3226,8 @@ fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunct
         |e, inv_cnst_off| {
             let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
             let a_base = e.ll_load(a_base_slot, LLType::Ptr);
-            let input_ty = Type::u(bits as usize);
-            let result_ty = Type::u(bits as usize * 2);
+            let input_ty = HLType::u(bits as usize);
+            let result_ty = HLType::u(bits as usize * 2);
             e.build_counted_loop(length, vec![], |e, i_i64, _| {
                 let i_key = e.truncate(i_i64, bits as u32);
                 let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
@@ -3568,8 +3582,8 @@ fn emit_spread_ad_init_body(
     );
     let lookup = LookupTableSpec::spread(bits);
 
-    let input_ty = Type::u(bits as usize);
-    let result_ty = Type::u(bits as usize * 2);
+    let input_ty = HLType::u(bits as usize);
+    let result_ty = HLType::u(bits as usize * 2);
     emit_key_value_ad_table_init_body(
         e,
         lookup,
@@ -3592,7 +3606,7 @@ fn emit_spread_ad_init_body(
 fn emit_array_ad_init_body(
     e: &mut LLBlockEmitter<'_>,
     array: ValueId,
-    array_type: &Type,
+    array_type: &HLType,
     bump_db_fn: FunctionId,
     witness_layout: WitnessLayout,
 ) -> ValueId {
@@ -3621,7 +3635,7 @@ fn emit_array_ad_init_body(
 }
 
 fn generate_darray_ad_call(
-    array_type: &Type,
+    array_type: &HLType,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     bump_db_fn: FunctionId,

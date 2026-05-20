@@ -9,8 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::compiler::ir::r#type::SSAType;
-use crate::compiler::ssa::{BlockId, FunctionId, Instruction, SSA, Terminator};
+use crate::compiler::ssa::{BlockId, FunctionId, Instruction, SSA, SSAType, Terminator};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JumpType {
@@ -433,7 +432,7 @@ impl CFG {
                 &func_name,
                 func_id,
                 *block_id,
-                &crate::compiler::ssa::DefaultSsaAnnotator,
+                &crate::compiler::ssa::DefaultSSAAnnotator,
             );
 
             // Escape special characters for DOT

@@ -7,8 +7,9 @@ use std::collections::HashSet;
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLSSA},
+    ssa::{BlockId, hlssa::HLSSA},
 };
+
 pub struct RemoveUnreachableBlocks {}
 
 impl RemoveUnreachableBlocks {

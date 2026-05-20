@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use mavros_compiler::Project;
 use mavros_compiler::api;
 use mavros_compiler::compiler::Field;
-use mavros_compiler::compiler::r1cs_gen::R1CS;
+use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
 use mavros_compiler::driver::Driver;
 use mavros_compiler::plotting;
 

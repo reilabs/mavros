@@ -3,7 +3,7 @@
 //! Two consumers must agree on these byte offsets:
 //!   - the test harness in `src/bin/test_runner.rs` that populates the struct
 //!     in WASM linear memory before invoking `mavros_main`;
-//!   - `src/compiler/llssa_llvm_codegen.rs`, which emits GEP/load/store ops
+//!   - `src/compiler/codegen/llssa_llvm_codegen.rs`, which emits GEP/load/store ops
 //!     into `vm_ptr` for the generated forward-pass writes and AD helpers.
 //!
 //! All offsets are in bytes. wasm32: pointers are 4 bytes, usize/i32 is 4 bytes.

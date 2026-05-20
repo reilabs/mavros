@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::compiler::{
-    ir::r#type::Type,
-    ssa::{BlockId, FunctionId, HLFunction, HLSSA, Instruction, OpCode, ValueId},
+use crate::compiler::ssa::{
+    BlockId, FunctionId, Instruction, ValueId,
+    hlssa::{HLFunction, HLSSA, OpCode, Type},
 };
 
 pub enum ValueDefinition {

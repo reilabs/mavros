@@ -16,7 +16,7 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::r1cs_gen::R1CS,
+    compiler::codegen::hlssa_to_r1cs::R1CS,
     driver::Driver,
     vm::{bytecode::TableInfo, interpreter},
 };

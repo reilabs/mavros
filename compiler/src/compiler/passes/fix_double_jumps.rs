@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLSSA, Instruction, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, Instruction, Terminator, ValueId,
+        hlssa::{HLSSA, OpCode},
+    },
 };
 
 pub struct ValueReplacements {
