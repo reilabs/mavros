@@ -3,6 +3,12 @@ name = "mavros-vm"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# When enabled, the interpreter uses an explicit dispatch loop instead of
+# tail-call-recursive dispatch. This makes debug builds (where the tail-call
+# optimizer is not reliably applied) work without overflowing the stack.
+branching-interpreter = []
+
 [dependencies]
 # Dependencies within the Mavros project
 mavros-artifacts.workspace = true
