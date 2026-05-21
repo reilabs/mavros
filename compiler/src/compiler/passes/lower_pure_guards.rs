@@ -141,10 +141,28 @@ impl LowerPureGuards {
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Constrain { .. }
-            | OpCode::Rangecheck { .. }
             | OpCode::MemOp { .. }
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. } => {
+                emitter.emit(OpCode::Guard {
+                    condition,
+                    inner: Box::new(inner),
+                });
+            }
+
+            // -- Rangecheck: lower with OOB check if input is pure.
+            // An unconditional rangecheck on a pure value would still fire
+            // (and panic the VM / fail the proof) when the surrounding guard
+            // is inactive. Translate to `if v >= 2^max_bits { assert(!cond) }`
+            // so the failure is gated on the guard.
+            OpCode::Rangecheck { value, max_bits }
+                if !type_info.get_value_type(value).is_witness_of() =>
+            {
+                self.lower_rangecheck_guard(emitter, condition, value, max_bits, type_info);
+            }
+            OpCode::Rangecheck { .. } => {
+                // Witness value: keep as Guard, ExplicitWitness gates the
+                // gadget with the guard condition as the lookup flag.
                 emitter.emit(OpCode::Guard {
                     condition,
                     inner: Box::new(inner),
@@ -747,6 +765,63 @@ impl LowerPureGuards {
             },
             // In-bounds: do the get
             |e| vec![e.array_get(array, index)],
+        );
+    }
+
+    /// Lower `Guard(cond, Rangecheck(v, max_bits))` for a pure `v` into
+    /// `if v >= 2^max_bits { assert(cond == 0) }`. When the type bound on
+    /// `v` already implies the rangecheck holds, the lowering collapses to
+    /// a no-op.
+    fn lower_rangecheck_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        value: ValueId,
+        max_bits: usize,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+    ) {
+        let val_type = type_info.get_value_type(value);
+        let val_bits = match &val_type.expr {
+            TypeExpr::U(n) | TypeExpr::I(n) => *n,
+            other => panic!(
+                "LowerPureGuards: pure rangecheck on unsupported type {:?}; \
+                 add a comparison strategy for this type",
+                other
+            ),
+        };
+        if val_bits <= max_bits {
+            return;
+        }
+        // The bytecode VM compares integers in u64 slots, so both the value
+        // and `1 << max_bits` must fit there.
+        assert!(
+            val_bits <= 64 && max_bits < 64,
+            "LowerPureGuards: pure rangecheck on {val_type} with max_bits = \
+             {max_bits} needs wider-than-u64 comparison; not yet supported"
+        );
+        let cmp_bits = val_bits.max(max_bits + 1);
+        let v_cmp = if val_bits == cmp_bits {
+            value
+        } else {
+            emitter.cast_to(CastTarget::U(cmp_bits), value)
+        };
+        let bound = emitter.u_const(cmp_bits, 1u128 << max_bits);
+        let in_range = emitter.lt(v_cmp, bound);
+        let oob = emitter.not(in_range);
+
+        emitter.build_if_else_into(
+            oob,
+            vec![],
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![]
+            },
+            |_| vec![],
         );
     }
 
