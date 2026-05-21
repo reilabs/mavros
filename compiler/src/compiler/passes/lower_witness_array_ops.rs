@@ -18,42 +18,25 @@ use crate::compiler::{
     },
 };
 
-fn leaf_scalar_count(t: &Type) -> usize {
-    match &t.expr {
-        TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
-        TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
-            panic!("leaf_scalar_count: unsupported type {}", t)
-        }
-    }
-}
-
-fn scalar_cast_target(ty: &Type, context: &str) -> CastTarget {
-    match &ty.strip_all_witness().expr {
-        TypeExpr::U(s) => CastTarget::U(*s),
-        TypeExpr::I(s) => CastTarget::I(*s),
-        TypeExpr::Field => CastTarget::Field,
-        other => panic!("{context}: unsupported scalar type {:?}", other),
-    }
-}
-
-fn array_len(ty: &Type, context: &str) -> usize {
-    match &ty.strip_witness().expr {
-        TypeExpr::Array(_, n) => *n,
-        TypeExpr::Slice(_) => panic!("{context}: slice is not supported"),
-        other => panic!("{context}: expected array type, got {:?}", other),
-    }
-}
-
-fn uint_bits(ty: &Type, context: &str) -> usize {
-    match ty.strip_witness().expr {
-        TypeExpr::U(n) => n,
-        _ => panic!("{context}: expected unsigned integer type, got {ty}"),
-    }
-}
-
 pub struct LowerWitnessArrayOps {}
+
+impl Pass for LowerWitnessArrayOps {
+    fn name(&self) -> &'static str {
+        "lower_witness_array_ops"
+    }
+
+    fn needs(&self) -> Vec<AnalysisId> {
+        vec![TypeInfo::id()]
+    }
+
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        self.do_run(ssa, store.get::<TypeInfo>());
+    }
+
+    fn preserves(&self) -> Vec<AnalysisId> {
+        vec![]
+    }
+}
 
 impl LowerWitnessArrayOps {
     pub fn new() -> Self {
@@ -425,20 +408,37 @@ impl LowerWitnessArrayOps {
     }
 }
 
-impl Pass for LowerWitnessArrayOps {
-    fn name(&self) -> &'static str {
-        "lower_witness_array_ops"
+fn leaf_scalar_count(t: &Type) -> usize {
+    match &t.expr {
+        TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
+        TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
+        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
+            panic!("leaf_scalar_count: unsupported type {}", t)
+        }
     }
+}
 
-    fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
+fn scalar_cast_target(ty: &Type, context: &str) -> CastTarget {
+    match &ty.strip_all_witness().expr {
+        TypeExpr::U(s) => CastTarget::U(*s),
+        TypeExpr::I(s) => CastTarget::I(*s),
+        TypeExpr::Field => CastTarget::Field,
+        other => panic!("{context}: unsupported scalar type {:?}", other),
     }
+}
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
+fn array_len(ty: &Type, context: &str) -> usize {
+    match &ty.strip_witness().expr {
+        TypeExpr::Array(_, n) => *n,
+        TypeExpr::Slice(_) => panic!("{context}: slice is not supported"),
+        other => panic!("{context}: expected array type, got {:?}", other),
     }
+}
 
-    fn preserves(&self) -> Vec<AnalysisId> {
-        vec![]
+fn uint_bits(ty: &Type, context: &str) -> usize {
+    match ty.strip_witness().expr {
+        TypeExpr::U(n) => n,
+        _ => panic!("{context}: expected unsigned integer type, got {ty}"),
     }
 }
