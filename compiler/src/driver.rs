@@ -48,7 +48,7 @@ use crate::{
         witness_type_inference::WitnessTypeInference,
     },
     lowlevel_replacement::{
-        REPLACEMENT_CRATES, add_lowlevel_replacements, find_needed_lowlevels,
+        REPLACEMENT_CRATES, add_lowlevel_replacements,
         prepare_replacement_crate,
     },
 };
@@ -135,23 +135,24 @@ impl Driver {
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
 
-        monomorphizer.process_queue().unwrap();
-        let needed_lowlevels = find_needed_lowlevels(&monomorphizer);
-
+        // Queue all lowlevel replacements RIGHT AFTER compile_main (before
+        // draining the queue). At this point `in_unconstrained_function` is
+        // still the value compile_main set it to for `main`, which for a
+        // constrained main is `false`. That lets `pub fn` blackbox substitutes
+        // get a constrained specialization even when user code reaches the
+        // blackbox only from unconstrained call paths (e.g. through an `if
+        // is_unconstrained()` branch). The `_uc` source variant gets its
+        // correct unconstrained flag from its own `unconstrained fn`
+        // declaration, so both variants end up properly labelled.
+        // Unused replacements get DCE'd later.
         let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
         for (replacement, functions) in &prepared_replacements {
-            if replacement
-                .lowlevel_names()
-                .iter()
-                .any(|name| needed_lowlevels.contains(*name))
-            {
-                add_lowlevel_replacements(
-                    replacement,
-                    functions,
-                    &mut monomorphizer,
-                    &mut lowlevel_replacements,
-                );
-            }
+            add_lowlevel_replacements(
+                replacement,
+                functions,
+                &mut monomorphizer,
+                &mut lowlevel_replacements,
+            );
         }
 
         monomorphizer.process_queue().unwrap();

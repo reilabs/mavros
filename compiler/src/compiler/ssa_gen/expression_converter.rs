@@ -18,11 +18,11 @@ use super::type_converter::TypeConverter;
 
 /// A LowLevel function replacement.
 ///
-/// Each replacement holds BOTH a constrained and an unconstrained monomorphized
-/// variant. The call site picks the right variant based on whether it's being
-/// emitted from a constrained or unconstrained context. This mirrors the
-/// two-variant scheme mavros uses for regular Noir functions
-/// (`constrained_mapper` / `unconstrained_mapper`).
+/// Each entry holds both a constrained and an unconstrained monomorphized
+/// variant of the substitute. `convert_lowlevel_call` picks the right variant
+/// based on whether the caller is in constrained or unconstrained context, so
+/// R1CGen descends into the constraining body only when the caller actually
+/// wants constraints.
 pub enum LowLevelReplacement {
     Single {
         constrained: AstFuncId,
@@ -1391,10 +1391,7 @@ impl<'a> ExpressionConverter<'a> {
             .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name));
 
         // Route to the constrained or unconstrained variant of the blackbox
-        // substitute depending on the current caller's context. R1CGen descends
-        // into constrained variants (emitting constraints) and skips
-        // unconstrained ones, which is exactly the dispatch we want for a
-        // call-from-unconstrained-context to bypass the body.
+        // substitute depending on the current caller's context.
         let replacement_id = match replacement {
             LowLevelReplacement::Single {
                 constrained,

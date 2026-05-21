@@ -1118,6 +1118,16 @@ pub fn t16(input: [Field; 16]) -> [Field; 16] {
     permute_bn254(input, external, internal_16, x5_16_config())
 }
 
+// Unconstrained-context entry points for the poseidon2 blackbox replacements.
+// mavros routes blackbox calls from unconstrained code to these so R1CGen
+// never descends into the constraining bodies when the caller is unconstrained.
+pub unconstrained fn t2_uc(input: [Field; 2]) -> [Field; 2] { t2(input) }
+pub unconstrained fn t3_uc(input: [Field; 3]) -> [Field; 3] { t3(input) }
+pub unconstrained fn t4_uc(input: [Field; 4]) -> [Field; 4] { t4(input) }
+pub unconstrained fn t8_uc(input: [Field; 8]) -> [Field; 8] { t8(input) }
+pub unconstrained fn t12_uc(input: [Field; 12]) -> [Field; 12] { t12(input) }
+pub unconstrained fn t16_uc(input: [Field; 16]) -> [Field; 16] { t16(input) }
+
 #[test]
 fn test_2() {
     assert(
