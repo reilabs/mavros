@@ -11,7 +11,7 @@ use crate::compiler::{
         BlockId, Terminator, ValueId,
         hlssa::{
             BinaryArithOpKind, DMatrix, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter},
+            builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
 };
@@ -43,14 +43,18 @@ impl WitnessLowering {
         type_info: &crate::compiler::analysis::types::TypeInfo,
         flow_analysis: &FlowAnalysis,
     ) {
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let type_info = type_info.get_function(*function_id);
-            let cfg = flow_analysis.get_function_cfg(*function_id);
-            for rtp in function.iter_returns_mut() {
+        let fids: Vec<_> = ssa.get_function_ids().collect();
+        let mut sb = HLSSABuilder::new(ssa);
+        for function_id in fids {
+            let type_info = type_info.get_function(function_id);
+            let cfg = flow_analysis.get_function_cfg(function_id);
+            sb.modify_function(function_id, |fb| {
+            for rtp in fb.function.iter_returns_mut() {
                 *rtp = self.witness_lowering_in_type(rtp);
             }
             // Collect converted block parameter types before taking blocks
-            let block_param_types: HashMap<BlockId, Vec<Type>> = function
+            let block_param_types: HashMap<BlockId, Vec<Type>> = fb
+                .function
                 .get_blocks()
                 .map(|(bid, block)| {
                     let types = block
@@ -65,17 +69,17 @@ impl WitnessLowering {
             let block_ids: Vec<BlockId> = cfg.get_domination_pre_order().collect();
             for bid in block_ids {
                 // Convert block parameters in-place
-                let old_params = function.get_block_mut(bid).take_parameters();
+                let old_params = fb.function.get_block_mut(bid).take_parameters();
                 let new_params = old_params
                     .into_iter()
                     .map(|(r, tp)| (r, self.witness_lowering_in_type(&tp)))
                     .collect();
-                function.get_block_mut(bid).put_parameters(new_params);
+                fb.function.get_block_mut(bid).put_parameters(new_params);
 
-                let terminator = function.get_block_mut(bid).take_terminator();
-                let instructions = function.get_block_mut(bid).take_instructions();
+                let terminator = fb.function.get_block_mut(bid).take_terminator();
+                let instructions = fb.function.get_block_mut(bid).take_instructions();
 
-                let mut emitter = HLBlockEmitter::new(function, bid);
+                let mut emitter = fb.block(bid);
 
                 for mut instruction in instructions.into_iter() {
                     replacements.replace_instruction(&mut instruction);
@@ -485,6 +489,7 @@ impl WitnessLowering {
                     emitter.set_terminator(terminator);
                 }
             }
+            });
         }
     }
 

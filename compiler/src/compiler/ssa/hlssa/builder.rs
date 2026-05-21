@@ -1,9 +1,9 @@
 use crate::compiler::ssa::{
     ValueId,
-    builder::{BlockEmitter, FunctionBuilder, InstrBuilder},
+    builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, ConstValue, Endianness, LookupTarget,
-        OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type,
+        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, ConstValue, Constants, Endianness,
+        LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type,
     },
 };
 
@@ -613,9 +613,10 @@ pub trait HLEmitter {
 // Type aliases
 // ---------------------------------------------------------------------------
 
-pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type>;
-pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type>;
-pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type>;
+pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type, Constants>;
+pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type, Constants>;
+pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type, Constants>;
+pub type HLSSABuilder<'a> = SSABuilder<'a, OpCode, Type, Constants>;
 
 // ---------------------------------------------------------------------------
 // HLEmitter impls
@@ -623,7 +624,7 @@ pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type>;
 
 impl HLEmitter for HLInstrBuilder<'_> {
     fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
+        self.ssa.fresh_value()
     }
 
     fn emit(&mut self, op: OpCode) {
@@ -633,7 +634,7 @@ impl HLEmitter for HLInstrBuilder<'_> {
 
 impl HLEmitter for HLBlockEmitter<'_> {
     fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
+        self.ssa.fresh_value()
     }
 
     fn emit(&mut self, op: OpCode) {

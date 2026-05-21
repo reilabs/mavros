@@ -21,7 +21,7 @@ use crate::compiler::{
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
             OpCode, Radix, SequenceTargetType, Type, TypeExpr,
-            builder::{HLEmitter, HLInstrBuilder},
+            builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
         },
     },
 };
@@ -115,25 +115,30 @@ impl ExplicitWitness {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo, value_ranges: &ValueRanges) {
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let function_type_info = type_info.get_function(*function_id);
-            let function_value_ranges = value_ranges.get_function(*function_id);
-            let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
-            for (bid, mut block) in function.take_blocks().into_iter() {
-                let mut new_instructions = Vec::new();
-                for instruction in block.take_instructions().into_iter() {
-                    let b = &mut HLInstrBuilder::new(function, &mut new_instructions);
-                    self.process_instruction(
-                        b,
-                        function_type_info,
-                        function_value_ranges,
-                        instruction,
-                    );
+        let fids: Vec<_> = ssa.get_function_ids().collect();
+        let mut sb = HLSSABuilder::new(ssa);
+        for function_id in fids {
+            let function_type_info = type_info.get_function(function_id);
+            let function_value_ranges = value_ranges.get_function(function_id);
+            sb.modify_function(function_id, |fb| {
+                let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
+                for (bid, mut block) in fb.function.take_blocks().into_iter() {
+                    let mut new_instructions = Vec::new();
+                    for instruction in block.take_instructions().into_iter() {
+                        let b =
+                            &mut HLInstrBuilder::new(fb.function, fb.ssa, &mut new_instructions);
+                        self.process_instruction(
+                            b,
+                            function_type_info,
+                            function_value_ranges,
+                            instruction,
+                        );
+                    }
+                    block.put_instructions(new_instructions);
+                    new_blocks.insert(bid, block);
                 }
-                block.put_instructions(new_instructions);
-                new_blocks.insert(bid, block);
-            }
-            function.put_blocks(new_blocks);
+                fb.function.put_blocks(new_blocks);
+            });
         }
     }
 

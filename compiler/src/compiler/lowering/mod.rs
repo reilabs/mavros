@@ -16,7 +16,7 @@ use crate::compiler::ssa::{
     FunctionId,
     hlssa::{
         HLFunction, HLSSA,
-        builder::{HLEmitter, HLFunctionBuilder},
+        builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
     },
 };
 
@@ -97,17 +97,20 @@ impl SSAConverter {
             if ast_func.unconstrained {
                 // Natively unconstrained: convert once with is_unconstrained=true
                 let ssa_func_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(ast_func, &self.unconstrained_mapper, true);
+                let converted =
+                    self.convert_function(&mut ssa, ast_func, &self.unconstrained_mapper, true);
                 *ssa.get_function_mut(ssa_func_id) = converted;
             } else {
                 // Constrained version
                 let constrained_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(ast_func, &self.constrained_mapper, false);
+                let converted =
+                    self.convert_function(&mut ssa, ast_func, &self.constrained_mapper, false);
                 *ssa.get_function_mut(constrained_id) = converted;
 
                 // Unconstrained variant (for calls from unconstrained context)
                 let unconstrained_id = *self.unconstrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(ast_func, &self.unconstrained_mapper, true);
+                let converted =
+                    self.convert_function(&mut ssa, ast_func, &self.unconstrained_mapper, true);
                 *ssa.get_function_mut(unconstrained_id) = converted;
             }
         }
@@ -245,11 +248,9 @@ impl SSAConverter {
 
         // Build init function
         let init_fn_id = ssa.add_function("globals_init".to_string());
-        {
-            let init_fn = ssa.get_function_mut(init_fn_id);
-            let entry = init_fn.get_entry_id();
-
-            let mut b = HLFunctionBuilder::new(init_fn);
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(init_fn_id, |b| {
+            let entry = b.function.get_entry_id();
 
             // We need an ExpressionConverter to evaluate initializer expressions
             let mut expr_converter = ExpressionConverter::new_with_globals(
@@ -263,9 +264,7 @@ impl SSAConverter {
 
             for gid in &ordered_ids {
                 let (_name, _typ, init_expr) = &program.globals[gid];
-                let value = expr_converter
-                    .convert_expression(init_expr, &mut b)
-                    .unwrap();
+                let value = expr_converter.convert_expression(init_expr, b).unwrap();
                 let idx = self.global_slots[gid];
                 b.block(expr_converter.current_block())
                     .init_global(idx, value);
@@ -273,21 +272,19 @@ impl SSAConverter {
 
             b.block(expr_converter.current_block())
                 .terminate_return(vec![]);
-        }
+        });
 
         // Build deinit function
-        let deinit_fn_id = ssa.add_function("globals_deinit".to_string());
-        {
-            let deinit_fn = ssa.get_function_mut(deinit_fn_id);
-            let entry = deinit_fn.get_entry_id();
-            let mut b = HLFunctionBuilder::new(deinit_fn);
+        let deinit_fn_id = sb.ssa().add_function("globals_deinit".to_string());
+        sb.modify_function(deinit_fn_id, |b| {
+            let entry = b.function.get_entry_id();
             for (i, typ) in global_types.iter().enumerate() {
                 if typ.is_heap_allocated() {
                     b.block(entry).drop_global(i);
                 }
             }
             b.block(entry).terminate_return(vec![]);
-        }
+        });
 
         ssa.set_global_types(global_types);
         ssa.set_globals_init_fn(init_fn_id);
@@ -297,6 +294,7 @@ impl SSAConverter {
     /// Convert a single function to SSA.
     fn convert_function(
         &self,
+        ssa: &mut HLSSA,
         ast_func: &AstFunction,
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
@@ -318,7 +316,7 @@ impl SSAConverter {
             function.add_return_type(return_type);
         }
 
-        let mut b = HLFunctionBuilder::new(&mut function);
+        let mut b = HLFunctionBuilder::new(&mut function, ssa);
 
         // Create expression converter
         let mut expr_converter = ExpressionConverter::new_with_globals(

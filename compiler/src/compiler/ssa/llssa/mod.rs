@@ -17,7 +17,15 @@ pub use super::hlssa::DMatrix;
 
 /// The low-level SSA exposes runtime details: explicit struct layouts, pointer arithmetic,
 /// integer/field arithmetic split, and explicit memory management.
-pub type LLSSA = SSA<LLOp, Type>;
+pub type LLSSA = SSA<LLOp, Type, Constants>;
+
+// CONSTANT STORAGE
+// ================================================================================================
+
+/// Constant storage for the low-level SSA. Currently a placeholder while constants still live
+/// inline as `LLOp::IntConst` / `LLOp::NullPtr` instructions; future work moves the constant data
+/// into this side-table for the LLVM backend.
+pub type Constants = ();
 
 // LLSSA OPCODES
 // ================================================================================================
@@ -1016,7 +1024,7 @@ impl Display for FieldArithOp {
 mod tests {
     use super::*;
     use crate::compiler::ssa::DefaultSSAAnnotator;
-    use crate::compiler::ssa::llssa::builder::{LLBlockEmitter, LLEmitter};
+    use crate::compiler::ssa::llssa::builder::{LLEmitter, LLSSABuilder};
 
     #[test]
     fn field_elem_is_value_safe() {
@@ -1111,17 +1119,17 @@ mod tests {
 
     #[test]
     fn build_simple_function() {
-        let mut ssa = LLSSA::with_main("test_main".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut ssa = LLSSA::with_main("test_main".to_string(), ());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let x = e.int_const(64, 42);
             let y = e.int_const(64, 7);
             let z = e.int_add(x, y);
             e.terminate_return(vec![z]);
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("int_const i64 42"));
@@ -1132,9 +1140,8 @@ mod tests {
 
     #[test]
     fn build_struct_ops() {
-        let mut ssa = LLSSA::with_main("struct_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("struct_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1143,8 +1150,10 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let l0 = e.int_const(64, 1);
             let l1 = e.int_const(64, 0);
             let l2 = e.int_const(64, 0);
@@ -1152,7 +1161,7 @@ mod tests {
             let s = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
             let f0 = e.extract_field(s, field_elem, 0);
             e.terminate_return(vec![f0, s]);
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("mk_struct"));
@@ -1161,9 +1170,8 @@ mod tests {
 
     #[test]
     fn build_memory_ops() {
-        let mut ssa = LLSSA::with_main("memory_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("memory_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let rc_header = LLStruct::new(vec![LLFieldType::Int(64)]);
         let field_elem = LLStruct::new(vec![
@@ -1177,8 +1185,10 @@ mod tests {
             LLFieldType::InlineArray(field_elem.clone(), 3),
         ]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let arr = e.heap_alloc(rc_array.clone(), None);
             let rc_ptr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_word = e.struct_field_ptr(rc_ptr, rc_header, 0);
@@ -1191,7 +1201,7 @@ mod tests {
             let loaded = e.ll_load(elem_ptr, Type::i64());
             e.free(arr);
             e.terminate_return(vec![loaded]);
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("heap_alloc"));
@@ -1204,20 +1214,20 @@ mod tests {
 
     #[test]
     fn build_call_and_select() {
-        let mut ssa = LLSSA::with_main("call_test".to_string());
+        let mut ssa = LLSSA::with_main("call_test".to_string(), ());
         let helper_id = ssa.add_function("helper".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let a = e.int_const(64, 1);
             let b = e.int_const(64, 2);
             let results = e.call(helper_id, vec![a, b], 1);
             let cond = e.int_eq(results[0], a);
             let selected = e.select(cond, a, b);
             e.terminate_return(vec![selected]);
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("call helper@"));
@@ -1227,9 +1237,8 @@ mod tests {
 
     #[test]
     fn build_field_ops() {
-        let mut ssa = LLSSA::with_main("field_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("field_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1238,8 +1247,10 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let l0 = e.int_const(64, 1);
             let l1 = e.int_const(64, 0);
             let l2 = e.int_const(64, 0);
@@ -1253,7 +1264,7 @@ mod tests {
             let limbs = e.field_to_limbs(d);
             let back = e.field_from_limbs(limbs);
             e.terminate_return(vec![eq, back]);
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("field.add"));
@@ -1265,19 +1276,19 @@ mod tests {
 
     #[test]
     fn build_width_and_global() {
-        let mut ssa = LLSSA::with_main("width_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut ssa = LLSSA::with_main("width_test".to_string(), ());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let x = e.int_const(64, 256);
             let narrow = e.truncate(x, 8);
             let wide = e.zext(narrow, 64);
             let gp = e.global_addr(3);
             e.ll_store(gp, wide);
             e.trap();
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("trunc"));
@@ -1288,32 +1299,35 @@ mod tests {
 
     #[test]
     fn build_branching() {
-        let mut ssa = LLSSA::with_main("branch_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-        let then_blk = func.add_block();
-        let else_blk = func.add_block();
-        let merge_blk = func.add_block();
+        let mut ssa = LLSSA::with_main("branch_test".to_string(), ());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let then_blk = fb.function.add_block();
+            let else_blk = fb.function.add_block();
+            let merge_blk = fb.function.add_block();
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
-            let x = e.int_const(64, 42);
-            let zero = e.int_const(64, 0);
-            let cond = e.int_eq(x, zero);
-            e.terminate_jmp_if(cond, then_blk, else_blk);
-        }
-        {
-            let mut e = LLBlockEmitter::new(func, then_blk);
-            let one = e.int_const(64, 1);
-            e.terminate_jmp(merge_blk, vec![one]);
-        }
-        {
-            let mut e = LLBlockEmitter::new(func, else_blk);
-            let two = e.int_const(64, 2);
-            e.terminate_jmp(merge_blk, vec![two]);
-        }
+            {
+                let mut e = fb.block(entry);
+                let x = e.int_const(64, 42);
+                let zero = e.int_const(64, 0);
+                let cond = e.int_eq(x, zero);
+                e.terminate_jmp_if(cond, then_blk, else_blk);
+            }
+            {
+                let mut e = fb.block(then_blk);
+                let one = e.int_const(64, 1);
+                e.terminate_jmp(merge_blk, vec![one]);
+            }
+            {
+                let mut e = fb.block(else_blk);
+                let two = e.int_const(64, 2);
+                e.terminate_jmp(merge_blk, vec![two]);
+            }
 
-        func.terminate_block_with_return(merge_blk, vec![]);
+            fb.function.terminate_block_with_return(merge_blk, vec![]);
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("jmp_if"));
@@ -1322,20 +1336,21 @@ mod tests {
 
     #[test]
     fn build_memcpy() {
-        let mut ssa = LLSSA::with_main("memcpy_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("memcpy_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let elem = LLStruct::new(vec![LLFieldType::Int(64)]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let dst = e.null_ptr();
             let src = e.null_ptr();
             let count = e.int_const(64, 10);
             e.memcpy(dst, src, elem, Some(count));
             e.terminate_return(vec![]);
-        }
+        });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("memcpy"));
