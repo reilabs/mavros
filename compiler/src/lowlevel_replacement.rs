@@ -10,15 +10,10 @@ use crate::compiler::lowering::LowLevelReplacement;
 use crate::driver::Error;
 
 pub enum ReplacementKind {
-    /// A blackbox replacement pair: (constrained_fn, unconstrained_fn).
-    /// The unconstrained variant is used when the blackbox is called from
-    /// unconstrained context; R1CGen never descends into it.
-    Single {
-        constrained: &'static str,
-        unconstrained: &'static str,
-    },
-    /// Family of replacements dispatched by array size, each carrying both variants.
-    ByArraySize(&'static [(&'static str, &'static str, u32)]),
+    /// A single Noir function that substitutes for the blackbox intrinsic.
+    Single(&'static str),
+    /// Family of replacements dispatched by array size.
+    ByArraySize(&'static [(&'static str, u32)]),
 }
 
 pub struct ReplacementSpec {
@@ -38,14 +33,10 @@ impl ReplacementCrate {
         self.replacements
             .iter()
             .flat_map(|spec| match &spec.kind {
-                ReplacementKind::Single {
-                    constrained,
-                    unconstrained,
-                } => vec![*constrained, *unconstrained],
-                ReplacementKind::ByArraySize(entries) => entries
-                    .iter()
-                    .flat_map(|(c, uc, _)| [*c, *uc])
-                    .collect(),
+                ReplacementKind::Single(name) => vec![*name],
+                ReplacementKind::ByArraySize(entries) => {
+                    entries.iter().map(|(name, _)| *name).collect()
+                }
             })
             .collect()
     }
@@ -82,12 +73,12 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
         replacements: &[ReplacementSpec {
             lowlevel_name: "poseidon2_permutation",
             kind: ReplacementKind::ByArraySize(&[
-                ("t2", "t2_uc", 2),
-                ("t3", "t3_uc", 3),
-                ("t4", "t4_uc", 4),
-                ("t8", "t8_uc", 8),
-                ("t12", "t12_uc", 12),
-                ("t16", "t16_uc", 16),
+                ("t2", 2),
+                ("t3", 3),
+                ("t4", 4),
+                ("t8", 8),
+                ("t12", 12),
+                ("t16", 16),
             ]),
         }],
     },
@@ -97,10 +88,7 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
         source: include_str!("../../stdlib_replacements/src/sha256_compression.nr"),
         replacements: &[ReplacementSpec {
             lowlevel_name: "sha256_compression",
-            kind: ReplacementKind::Single {
-                constrained: "sha256_compression",
-                unconstrained: "sha256_compression_uc",
-            },
+            kind: ReplacementKind::Single("sha256_compression"),
         }],
     },
 ];
@@ -163,39 +151,29 @@ pub fn add_lowlevel_replacements(
         &(String, FuncId, noirc_errors::Location, noirc_frontend::Type),
     > = functions.iter().map(|f| (f.0.as_str(), f)).collect();
 
-    let queue =
-        |m: &mut Monomorphizer, name: &str| -> AstFuncId {
-            let (_, func_id, location, fn_type) = functions_by_name[name];
-            m.queue_function_with_bindings(
-                *func_id,
-                *location,
-                Default::default(),
-                fn_type.clone(),
-                Vec::new(),
-                None,
-            )
-        };
+    let queue = |m: &mut Monomorphizer, name: &str| -> AstFuncId {
+        let (_, func_id, location, fn_type) = functions_by_name[name];
+        m.queue_function_with_bindings(
+            *func_id,
+            *location,
+            Default::default(),
+            fn_type.clone(),
+            Vec::new(),
+            None,
+        )
+    };
 
     for spec in replacement.replacements {
         let lowlevel = match &spec.kind {
-            ReplacementKind::Single {
-                constrained,
-                unconstrained,
-            } => LowLevelReplacement::Single {
-                constrained: queue(monomorphizer, constrained),
-                unconstrained: queue(monomorphizer, unconstrained),
-            },
+            ReplacementKind::Single(name) => {
+                LowLevelReplacement::Single(queue(monomorphizer, name))
+            }
             ReplacementKind::ByArraySize(entries) => {
-                let mut c_map: HashMap<u32, AstFuncId> = HashMap::new();
-                let mut uc_map: HashMap<u32, AstFuncId> = HashMap::new();
-                for (c_name, uc_name, size) in *entries {
-                    c_map.insert(*size, queue(monomorphizer, c_name));
-                    uc_map.insert(*size, queue(monomorphizer, uc_name));
+                let mut map: HashMap<u32, AstFuncId> = HashMap::new();
+                for (name, size) in *entries {
+                    map.insert(*size, queue(monomorphizer, name));
                 }
-                LowLevelReplacement::ByArraySize {
-                    constrained: c_map,
-                    unconstrained: uc_map,
-                }
+                LowLevelReplacement::ByArraySize(map)
             }
         };
         lowlevel_replacements.insert(spec.lowlevel_name.to_string(), lowlevel);

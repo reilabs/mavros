@@ -18,22 +18,15 @@ use crate::compiler::ssa::{
 
 use super::type_converter::TypeConverter;
 
-/// A LowLevel function replacement.
-///
-/// Each entry holds both a constrained and an unconstrained monomorphized
-/// variant of the substitute. `convert_lowlevel_call` picks the right variant
-/// based on whether the caller is in constrained or unconstrained context, so
-/// R1CGen descends into the constraining body only when the caller actually
-/// wants constraints.
+/// A LowLevel function replacement: a single Noir function substitute, or a
+/// family of substitutes dispatched by array size. We only store one mono id
+/// per blackbox — mavros' SSA gen already produces both constrained and
+/// unconstrained SSA variants of every constrained Noir function, and the
+/// active `function_mapper` at the call site dispatches to the right one
+/// based on the caller's runtime context.
 pub enum LowLevelReplacement {
-    Single {
-        constrained: AstFuncId,
-        unconstrained: AstFuncId,
-    },
-    ByArraySize {
-        constrained: HashMap<u32, AstFuncId>,
-        unconstrained: HashMap<u32, AstFuncId>,
-    },
+    Single(AstFuncId),
+    ByArraySize(HashMap<u32, AstFuncId>),
 }
 
 /// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
@@ -1394,31 +1387,16 @@ impl<'a> ExpressionConverter<'a> {
             .get(name)
             .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name));
 
-        // Route to the constrained or unconstrained variant of the blackbox
-        // substitute depending on the current caller's context.
+        // The active function_mapper already routes to the right constrained/
+        // unconstrained SSA variant based on the caller's context, so we just
+        // pick the substitute's mono id (and the array size for the
+        // ByArraySize family) and let function_mapper do the dispatch.
         let replacement_id = match replacement {
-            LowLevelReplacement::Single {
-                constrained,
-                unconstrained,
-            } => {
-                if self.in_unconstrained {
-                    unconstrained
-                } else {
-                    constrained
-                }
-            }
-            LowLevelReplacement::ByArraySize {
-                constrained,
-                unconstrained,
-            } => {
+            LowLevelReplacement::Single(func_id) => func_id,
+            LowLevelReplacement::ByArraySize(size_map) => {
                 let array_size = match &call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n,
                     _ => panic!("{} expected array return type", name),
-                };
-                let size_map = if self.in_unconstrained {
-                    unconstrained
-                } else {
-                    constrained
                 };
                 size_map
                     .get(&array_size)

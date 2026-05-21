@@ -52,8 +52,7 @@ use crate::{
         untaint_control_flow::UntaintControlFlow,
     },
     lowlevel_replacement::{
-        REPLACEMENT_CRATES, add_lowlevel_replacements,
-        prepare_replacement_crate,
+        REPLACEMENT_CRATES, add_lowlevel_replacements, prepare_replacement_crate,
     },
 };
 

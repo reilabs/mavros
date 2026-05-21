@@ -274,13 +274,3 @@ pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
         wrapping_add_N([state[7], h]),
     ]
 }
-
-// Unconstrained-context entry point. mavros routes blackbox calls from
-// unconstrained code to this variant so R1CGen never descends into the
-// constraining body when the caller is unconstrained.
-pub unconstrained fn sha256_compression_uc(
-    msg_block: [u32; 16],
-    state: [u32; 8],
-) -> [u32; 8] {
-    sha256_compression(msg_block, state)
-}
