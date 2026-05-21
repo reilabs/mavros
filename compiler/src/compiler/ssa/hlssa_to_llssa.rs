@@ -423,7 +423,7 @@ fn lower_inner(
 ) -> LLSSA {
     let main_id = hlssa.get_main_id();
     let main_name = hlssa.get_main().get_name().to_string();
-    let mut llssa = LLSSA::with_main(main_name);
+    let mut llssa = LLSSA::with_main(main_name, ());
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
@@ -510,7 +510,7 @@ fn lower_function(
     let hl_entry_id = function.get_entry_id();
     let ll_entry_id = ll_func.get_entry_id();
     block_map.insert(hl_entry_id, ll_entry_id);
-    add_vm_parameter(&mut ll_func);
+    add_vm_parameter(&mut ll_func, llssa);
 
     // Create blocks for non-entry blocks
     for (block_id, _) in function.get_blocks() {
@@ -531,7 +531,10 @@ fn lower_function(
         let ll_block_id = block_map[block_id];
         for (param_id, param_type) in block.get_parameters() {
             let ll_type = lower_type(param_type);
-            let ll_param_id = ll_func.add_parameter(ll_block_id, ll_type);
+            let ll_param_id = llssa.fresh_value();
+            ll_func
+                .get_block_mut(ll_block_id)
+                .push_parameter(ll_param_id, ll_type);
             val_map.insert(*param_id, ll_param_id);
         }
     }
@@ -542,7 +545,7 @@ fn lower_function(
         let ll_block_id = block_map[&block_id];
 
         // Create a BlockEmitter for this block
-        let mut emitter = LLBlockEmitter::new(&mut ll_func, ll_block_id);
+        let mut emitter = LLBlockEmitter::new(&mut ll_func, llssa, ll_block_id);
 
         // Lower instructions
         for instruction in block.get_instructions() {
@@ -552,7 +555,6 @@ fn lower_function(
                 &mut val_map,
                 fn_type_info,
                 fn_map,
-                llssa,
                 drop_fns,
                 ad_fns,
                 lookup_fns,
@@ -576,15 +578,17 @@ fn lower_function(
     ll_func
 }
 
-fn new_ll_function(name: impl Into<String>) -> LLFunction {
+fn new_ll_function(llssa: &mut LLSSA, name: impl Into<String>) -> LLFunction {
     let mut func = LLFunction::empty(name.into());
-    add_vm_parameter(&mut func);
+    add_vm_parameter(&mut func, llssa);
     func
 }
 
-fn add_vm_parameter(func: &mut LLFunction) -> ValueId {
+fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
     let entry = func.get_entry_id();
-    func.add_parameter(entry, LLType::Ptr)
+    let id = llssa.fresh_value();
+    func.get_block_mut(entry).push_parameter(id, LLType::Ptr);
+    id
 }
 
 // =============================================================================
@@ -599,7 +603,6 @@ fn lower_instruction(
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     fn_map: &HashMap<FunctionId, FunctionId>,
-    llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
@@ -820,7 +823,6 @@ fn lower_instruction(
                 *array,
                 *index,
                 *value,
-                llssa,
                 drop_fns,
                 ad_fns,
             );
@@ -845,9 +847,9 @@ fn lower_instruction(
         } => {
             let val_type = fn_type_info.get_value_type(*value);
             if val_type.is_witness_of() {
-                lower_ad_rc_drop(e, val_map, *value, llssa, ad_fns);
+                lower_ad_rc_drop(e, val_map, *value, ad_fns);
             } else {
-                lower_rc_drop(e, val_map, fn_type_info, *value, llssa, drop_fns, ad_fns);
+                lower_rc_drop(e, val_map, fn_type_info, *value, drop_fns, ad_fns);
             }
         }
 
@@ -864,7 +866,7 @@ fn lower_instruction(
         } => {
             let ll_var = val_map[variable];
             let ll_sens = val_map[sensitivity];
-            let bump_fn = ad_fns.get_bump_fn(*matrix, llssa);
+            let bump_fn = ad_fns.get_bump_fn(*matrix, e.ssa);
             e.call(bump_fn, vec![ll_var, ll_sens], 0);
         }
 
@@ -1052,16 +1054,7 @@ fn lower_instruction(
         OpCode::Store { ptr, value } => {
             let ptr_type = fn_type_info.get_value_type(*ptr);
             let inner_type = ptr_type.get_pointed();
-            lower_ref_store(
-                e,
-                val_map,
-                *ptr,
-                *value,
-                &inner_type,
-                llssa,
-                drop_fns,
-                ad_fns,
-            );
+            lower_ref_store(e, val_map, *ptr, *value, &inner_type, drop_fns, ad_fns);
         }
 
         OpCode::Load { result, ptr } => {
@@ -1156,7 +1149,7 @@ fn lower_instruction(
             });
             let ll_type = lower_type(global_type);
             let ll_value = e.ll_load(r, ll_type);
-            let drop_fn_id = get_or_create_drop_fn(global_type, llssa, drop_fns, ad_fns);
+            let drop_fn_id = get_or_create_drop_fn(global_type, e.ssa, drop_fns, ad_fns);
             e.call(drop_fn_id, vec![ll_value], 0);
         }
 
@@ -1206,7 +1199,7 @@ fn lower_instruction(
             let key = val_map[&keys[0]];
             let result = val_map[&results[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_array_lookup_fn(arr_type, llssa);
+            let fn_id = lookup_fns.get_array_lookup_fn(arr_type, e.ssa);
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::Lookup {
@@ -1226,7 +1219,7 @@ fn lower_instruction(
             );
             let key = val_map[&keys[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_rngchk_8_fn(llssa);
+            let fn_id = lookup_fns.get_rngchk_8_fn(e.ssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::Lookup {
@@ -1244,7 +1237,7 @@ fn lower_instruction(
             let key = val_map[&keys[0]];
             let result = val_map[&results[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_spread_fn(*bits, llssa);
+            let fn_id = lookup_fns.get_spread_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, result, flag_val], 0);
         }
         OpCode::Lookup { .. } => {
@@ -1271,7 +1264,7 @@ fn lower_instruction(
             let key = val_map[&keys[0]];
             let result = val_map[&results[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_darray_call_fn(arr_type, llssa);
+            let fn_id = lookup_fns.get_darray_call_fn(arr_type, e.ssa);
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::DLookup {
@@ -1291,7 +1284,7 @@ fn lower_instruction(
             );
             let key = val_map[&keys[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_drngchk_8_call_fn(llssa);
+            let fn_id = lookup_fns.get_drngchk_8_call_fn(e.ssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::DLookup {
@@ -1309,7 +1302,7 @@ fn lower_instruction(
             let key = val_map[&keys[0]];
             let result = val_map[&results[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_dspread_call_fn(*bits, llssa);
+            let fn_id = lookup_fns.get_dspread_call_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, result, flag_val], 0);
         }
         OpCode::DLookup { .. } => {
@@ -1652,7 +1645,6 @@ fn lower_ref_store(
     ptr: ValueId,
     value: ValueId,
     inner_type: &HLType,
-    llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
 ) {
@@ -1663,7 +1655,7 @@ fn lower_ref_store(
     let slot = e.struct_field_ptr(ll_ptr, rc_struct, 1);
 
     if needs_drop(&inner_type.expr) {
-        let drop_fn = get_or_create_drop_fn(inner_type, llssa, drop_fns, ad_fns);
+        let drop_fn = get_or_create_drop_fn(inner_type, e.ssa, drop_fns, ad_fns);
         let old = e.ll_load(slot, LLType::Ptr);
         let null = e.null_ptr();
         let is_null = e.int_eq(old, null);
@@ -1742,7 +1734,6 @@ fn lower_array_set(
     array: ValueId,
     index: ValueId,
     value: ValueId,
-    llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
 ) {
@@ -1753,7 +1744,7 @@ fn lower_array_set(
     let elem_is_rc = needs_drop(&et.expr);
 
     let inner_drop_fn = if elem_is_rc {
-        Some(get_or_create_drop_fn(et, llssa, drop_fns, ad_fns))
+        Some(get_or_create_drop_fn(et, e.ssa, drop_fns, ad_fns))
     } else {
         None
     };
@@ -1896,12 +1887,11 @@ fn lower_rc_drop(
     val_map: &HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     value: ValueId,
-    llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
 ) {
     let arr_type = fn_type_info.get_value_type(value);
-    let drop_fn_id = get_or_create_drop_fn(arr_type, llssa, drop_fns, ad_fns);
+    let drop_fn_id = get_or_create_drop_fn(arr_type, e.ssa, drop_fns, ad_fns);
     let ll_arr = val_map[&value];
     e.call(drop_fn_id, vec![ll_arr], 0);
 }
@@ -2091,11 +2081,10 @@ fn lower_ad_rc_drop(
     e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     value: ValueId,
-    llssa: &mut LLSSA,
     ad_fns: &mut AdFunctions,
 ) {
     let ll_node = val_map[&value];
-    let drop_fn = ad_fns.get_drop_fn(llssa);
+    let drop_fn = ad_fns.get_drop_fn(e.ssa);
     e.call(drop_fn, vec![ll_node], 0);
 }
 
@@ -2114,7 +2103,7 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
     if let Some(bumps) = &ad_fns.bumps {
         for matrix in [DMatrix::A, DMatrix::B, DMatrix::C] {
             let id = bumps.get(matrix);
-            let func = generate_ad_bump_function(matrix);
+            let func = generate_ad_bump_function(llssa, matrix);
             let _old = llssa.take_function(id);
             llssa.put_function(id, func);
         }
@@ -2125,7 +2114,7 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
             "ICE: ad_drop allocated without bump functions. \
              This is a bug in AdFunctions — get_drop_fn must call ensure_bumps.",
         );
-        let func = generate_ad_drop_function(bumps, drop_id);
+        let func = generate_ad_drop_function(llssa, bumps, drop_id);
         let _old = llssa.take_function(drop_id);
         llssa.put_function(drop_id, func);
     }
@@ -2138,7 +2127,7 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
 ///   WITNESS:   ad_write_witness(matrix, node.index, amount)
 ///   SUM:       node.d{a,b,c} += amount  (field add)
 ///   MUL_CONST: node.d{a,b,c} += amount  (field add)
-fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
+fn generate_ad_bump_function(llssa: &mut LLSSA, matrix: DMatrix) -> LLFunction {
     let name = match matrix {
         DMatrix::A => "__ad_bump_da",
         DMatrix::B => "__ad_bump_db",
@@ -2150,10 +2139,10 @@ fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
         DMatrix::C => 6,
     };
 
-    let mut func = new_ll_function(name.to_string());
+    let mut func = new_ll_function(llssa, name.to_string());
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let node = e.add_parameter(LLType::Ptr);
     let amount = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
@@ -2237,8 +2226,12 @@ fn generate_ad_bump_function(matrix: DMatrix) -> LLFunction {
 ///   CONST/WITNESS: free
 ///   SUM: propagate da/db/dc to children, drop children, free
 ///   MUL_CONST: propagate da*coeff/db*coeff/dc*coeff to child, drop child, free
-fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFunction {
-    let mut func = new_ll_function("__ad_drop".to_string());
+fn generate_ad_drop_function(
+    llssa: &mut LLSSA,
+    bumps: &AdBumpIds,
+    ad_drop_id: FunctionId,
+) -> LLFunction {
+    let mut func = new_ll_function(llssa, "__ad_drop".to_string());
     let entry = func.get_entry_id();
 
     let field_type = LLType::Struct(LLStruct::field_elem());
@@ -2247,7 +2240,7 @@ fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFun
     let bump_db = bumps.db;
     let bump_dc = bumps.dc;
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let node = e.add_parameter(LLType::Ptr);
 
     // Decrement RC
@@ -2364,11 +2357,13 @@ fn generate_ad_drop_function(bumps: &AdBumpIds, ad_drop_id: FunctionId) -> LLFun
 fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     for entry in drop_fns {
         let func = match &entry.ty.expr {
-            HLTypeExpr::Array(..) => generate_drop_function_for_array(&entry.ty, drop_fns),
+            HLTypeExpr::Array(..) => generate_drop_function_for_array(llssa, &entry.ty, drop_fns),
             HLTypeExpr::Tuple(elements) => {
-                generate_drop_function_for_tuple(elements, &entry.ty, drop_fns)
+                generate_drop_function_for_tuple(llssa, elements, &entry.ty, drop_fns)
             }
-            HLTypeExpr::Ref(inner) => generate_drop_function_for_ref(inner, &entry.ty, drop_fns),
+            HLTypeExpr::Ref(inner) => {
+                generate_drop_function_for_ref(llssa, inner, &entry.ty, drop_fns)
+            }
             // WitnessOf points to ad_drop, whose body is generated by generate_all_ad_functions
             HLTypeExpr::WitnessOf(_) => continue,
             other => panic!("No drop function generator for type: {:?}", other),
@@ -2398,16 +2393,20 @@ fn needs_drop(expr: &HLTypeExpr) -> bool {
 ///         drop(ptr.data[i])
 ///       free(ptr)
 ///     return
-fn generate_drop_function_for_array(ty: &HLType, drop_fns: &[DropFnEntry]) -> LLFunction {
+fn generate_drop_function_for_array(
+    llssa: &mut LLSSA,
+    ty: &HLType,
+    drop_fns: &[DropFnEntry],
+) -> LLFunction {
     let (et, count) = array_info(ty);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);
 
-    let mut func = new_ll_function(format!("drop_{}", ty));
+    let mut func = new_ll_function(llssa, format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
 
     let ptr = e.add_parameter(LLType::Ptr);
 
@@ -2465,16 +2464,17 @@ fn generate_drop_function_for_array(ty: &HLType, drop_fns: &[DropFnEntry]) -> LL
 ///       free(ptr)
 ///     return
 fn generate_drop_function_for_tuple(
+    llssa: &mut LLSSA,
     element_types: &[HLType],
     ty: &HLType,
     drop_fns: &[DropFnEntry],
 ) -> LLFunction {
     let rc_struct = rc_tuple_struct(element_types);
 
-    let mut func = new_ll_function(format!("drop_{}", ty));
+    let mut func = new_ll_function(llssa, format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let ptr = e.add_parameter(LLType::Ptr);
 
     // Decrement RC
@@ -2532,6 +2532,7 @@ fn generate_drop_function_for_tuple(
 ///       free(ptr)
 ///     return
 fn generate_drop_function_for_ref(
+    llssa: &mut LLSSA,
     inner_type: &HLType,
     ty: &HLType,
     drop_fns: &[DropFnEntry],
@@ -2539,10 +2540,10 @@ fn generate_drop_function_for_ref(
     let rc_struct = rc_ref_cell_struct(inner_type);
     let inner_is_rc = needs_drop(&inner_type.expr);
 
-    let mut func = new_ll_function(format!("drop_{}", ty));
+    let mut func = new_ll_function(llssa, format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let ptr = e.add_parameter(LLType::Ptr);
 
     let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
@@ -2658,7 +2659,7 @@ fn generate_all_lookup_functions(
         let table_idx_global = lookup_fns
             .rngchk_8_table_idx_global
             .expect("rangecheck-8 helper registered without internal table-id global");
-        let func = generate_rngchk_8_function(table_idx_global);
+        let func = generate_rngchk_8_function(llssa, table_idx_global);
         llssa.put_function(id, func);
     }
 
@@ -2668,12 +2669,12 @@ fn generate_all_lookup_functions(
             .get(bits)
             .copied()
             .expect("spread helper registered without internal table-id global");
-        let func = generate_spread_lookup_function(*bits, table_idx_global);
+        let func = generate_spread_lookup_function(llssa, *bits, table_idx_global);
         llssa.put_function(*id, func);
     }
 
     for entry in &lookup_fns.array {
-        let func = generate_array_lookup_function(&entry.ty);
+        let func = generate_array_lookup_function(llssa, &entry.ty);
         llssa.put_function(entry.fn_id, func);
     }
 
@@ -2686,6 +2687,7 @@ fn generate_all_lookup_functions(
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
         let call_fn = generate_drngchk_8_ad_call(
+            llssa,
             inv_cnst_off_global,
             witness_layout,
             constraints_layout,
@@ -2707,6 +2709,7 @@ fn generate_all_lookup_functions(
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
         let call_fn = generate_dspread_ad_call(
+            llssa,
             *bits,
             inv_cnst_off_global,
             witness_layout,
@@ -2724,6 +2727,7 @@ fn generate_all_lookup_functions(
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
         let call_fn = generate_darray_ad_call(
+            llssa,
             &entry.ty,
             witness_layout,
             constraints_layout,
@@ -3116,15 +3120,15 @@ fn ad_bump_lookup_elem_db(
     }
 }
 
-fn generate_array_lookup_function(array_type: &HLType) -> LLFunction {
+fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLFunction {
     let (elem_type, count) = array_info(array_type);
     let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
     let elem_struct = elem_struct(elem_type);
-    let mut func = new_ll_function(format!("__array_lookup_{}", array_type));
+    let mut func = new_ll_function(llssa, format!("__array_lookup_{}", array_type));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let array = e.add_parameter(LLType::Ptr);
     let key_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
@@ -3188,7 +3192,11 @@ fn generate_array_lookup_function(array_type: &HLType) -> LLFunction {
     func
 }
 
-fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunction {
+fn generate_spread_lookup_function(
+    llssa: &mut LLSSA,
+    bits: u8,
+    table_idx_global: usize,
+) -> LLFunction {
     assert!(
         bits <= 16,
         "Spread lookup helper currently supports bit-widths up to 16, got {}",
@@ -3196,10 +3204,10 @@ fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunct
     );
     let lookup = LookupTableSpec::spread(bits);
     let length = lookup.length;
-    let mut func = new_ll_function(format!("__spread_{}_lookup", bits));
+    let mut func = new_ll_function(llssa, format!("__spread_{}_lookup", bits));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let key_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
@@ -3288,12 +3296,12 @@ fn generate_spread_lookup_function(bits: u8, table_idx_global: usize) -> LLFunct
 /// Phase 2 — which runs on the host after WASM returns — fixes the raw-u64
 /// multiplicity slots into Montgomery form and materializes the per-slot
 /// inverses + sum constraint.
-fn generate_rngchk_8_function(table_idx_global: usize) -> LLFunction {
+fn generate_rngchk_8_function(llssa: &mut LLSSA, table_idx_global: usize) -> LLFunction {
     let lookup = LookupTableSpec::rangecheck8();
-    let mut func = new_ll_function("__rngchk_8".to_string());
+    let mut func = new_ll_function(llssa, "__rngchk_8".to_string());
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
@@ -3635,6 +3643,7 @@ fn emit_array_ad_init_body(
 }
 
 fn generate_darray_ad_call(
+    llssa: &mut LLSSA,
     array_type: &HLType,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
@@ -3644,10 +3653,10 @@ fn generate_darray_ad_call(
     let (elem_type, count) = array_info(array_type);
     let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
-    let mut func = new_ll_function(format!("__darray_lookup_{}_ad_call", array_type));
+    let mut func = new_ll_function(llssa, format!("__darray_lookup_{}_ad_call", array_type));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let array = e.add_parameter(LLType::Ptr);
     let key_ptr = e.add_parameter(LLType::Ptr);
     let result_ptr = e.add_parameter(LLType::Ptr);
@@ -3695,6 +3704,7 @@ fn generate_darray_ad_call(
 }
 
 fn generate_dspread_ad_call(
+    llssa: &mut LLSSA,
     bits: u8,
     inv_cnst_off_global: usize,
     witness_layout: WitnessLayout,
@@ -3704,10 +3714,10 @@ fn generate_dspread_ad_call(
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
     let lookup = LookupTableSpec::spread(bits);
-    let mut func = new_ll_function(format!("__dspread_{}_ad_call", bits));
+    let mut func = new_ll_function(llssa, format!("__dspread_{}_ad_call", bits));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let key_ptr = e.add_parameter(LLType::Ptr);
     let result_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
@@ -3771,16 +3781,17 @@ fn generate_dspread_ad_call(
 /// branch reads the table region's start from runtime cursors rather than
 /// baking `tables_data_start` constants.
 fn generate_drngchk_8_ad_call(
+    llssa: &mut LLSSA,
     inv_cnst_off_global: usize,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     bump_db_fn: FunctionId,
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
-    let mut func = new_ll_function("__drngchk_8_ad_call".to_string());
+    let mut func = new_ll_function(llssa, "__drngchk_8_ad_call".to_string());
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, entry);
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let val_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
 

@@ -48,12 +48,26 @@ struct Val(ValueId);
 
 struct SpecializationState {
     function: HLFunction,
+    /// Transient counter for `ValueId`s allocated during specialization. Starts at the SSA's
+    /// `value_num_bound` and is reconciled back into the SSA only if specialization is accepted.
+    transient_counter: u64,
     const_vals: HashMap<ValueId, ConstVal>,
+}
+
+impl SpecializationState {
+    fn add_entry_parameter(&mut self, ty: Type) -> ValueId {
+        let id = self.fresh_value();
+        let entry = self.function.get_entry_id();
+        self.function.get_block_mut(entry).push_parameter(id, ty);
+        id
+    }
 }
 
 impl HLEmitter for SpecializationState {
     fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
+        let id = ValueId(self.transient_counter);
+        self.transient_counter += 1;
+        id
     }
 
     fn emit(&mut self, op: OpCode) {
@@ -804,6 +818,7 @@ impl Specializer {
 
         let mut state = SpecializationState {
             function: HLFunction::empty(name),
+            transient_counter: ssa.value_num_bound() as u64,
             const_vals: HashMap::new(),
         };
 
@@ -824,9 +839,7 @@ impl Specializer {
                     return;
                 }
                 ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
-                    call_params.push(Val(state
-                        .function
-                        .add_parameter(state.function.get_entry_id(), param.clone())));
+                    call_params.push(Val(state.add_entry_parameter(param.clone())));
                 }
                 ValueSignature::Field(f) => {
                     let val = state.field_const(*f);
@@ -871,6 +884,7 @@ impl Specializer {
 
         if savings_to_code_ratio > self.savings_to_code_ratio {
             info!(message = %"Specialization accepted", code_bloat = code_bloat,  savings_to_code_ratio = savings_to_code_ratio, threshold_ratio = self.savings_to_code_ratio);
+            ssa.reserve_values_up_to(state.transient_counter);
             let original_fn = ssa.take_function(signature.get_fun_id());
             let new_fn_id = ssa.add_function("".to_string());
             let new_original_id = ssa.add_function("".to_string()); // Temporary
@@ -879,6 +893,7 @@ impl Specializer {
             let original_returns = original_fn.get_returns().to_vec();
 
             let dispatcher = self.build_dispatcher_for(
+                ssa,
                 original_params,
                 original_returns,
                 &signature,
@@ -897,6 +912,7 @@ impl Specializer {
 
     fn build_dispatcher_for(
         &self,
+        ssa: &mut HLSSA,
         params: Vec<Type>,
         returns: Vec<Type>,
         signature: &FunctionSignature,
@@ -907,7 +923,7 @@ impl Specializer {
         let mut dispatcher = HLFunction::empty(fn_name);
         let entry_block = dispatcher.get_entry_id();
 
-        let mut b = HLFunctionBuilder::new(&mut dispatcher);
+        let mut b = HLFunctionBuilder::new(&mut dispatcher, ssa);
 
         let mut dispatcher_params = vec![];
         {

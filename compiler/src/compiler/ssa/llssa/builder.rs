@@ -1,8 +1,8 @@
 use crate::compiler::ssa::{
     FunctionId, ValueId,
-    builder::{BlockEmitter, FunctionBuilder, InstrBuilder},
+    builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::DMatrix,
-    llssa::{FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, Type},
+    llssa::{Constants, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, Type},
 };
 
 // ---------------------------------------------------------------------------
@@ -387,9 +387,10 @@ fn ad_out_field(matrix: DMatrix) -> usize {
 // Type aliases
 // ---------------------------------------------------------------------------
 
-pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, Type>;
-pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, Type>;
-pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type>;
+pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, Type, Constants>;
+pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, Type, Constants>;
+pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type, Constants>;
+pub type LLSSABuilder<'a> = SSABuilder<'a, LLOp, Type, Constants>;
 
 // ---------------------------------------------------------------------------
 // LLEmitter impls
@@ -397,7 +398,7 @@ pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type>;
 
 impl LLEmitter for LLInstrBuilder<'_> {
     fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
+        self.ssa.fresh_value()
     }
 
     fn emit_ll(&mut self, op: LLOp) {
@@ -416,7 +417,7 @@ impl LLEmitter for LLInstrBuilder<'_> {
 
 impl LLEmitter for LLBlockEmitter<'_> {
     fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
+        self.ssa.fresh_value()
     }
 
     fn emit_ll(&mut self, op: LLOp) {

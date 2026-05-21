@@ -243,6 +243,7 @@ impl UntaintControlFlow {
                 self.run_function(
                     function_id,
                     &mut function,
+                    &mut ssa,
                     function_wt,
                     &flow_analysis,
                     func_type_info,
@@ -259,6 +260,7 @@ impl UntaintControlFlow {
         &mut self,
         function_id: FunctionId,
         function: &mut HLFunction,
+        ssa: &mut HLSSA,
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
         type_info: Option<&FunctionTypeInfo>,
@@ -266,7 +268,12 @@ impl UntaintControlFlow {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
-            Some(function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))))
+            let entry_id = function.get_entry_id();
+            let id = ssa.fresh_value();
+            function
+                .get_block_mut(entry_id)
+                .push_parameter(id, Type::witness_of(Type::u(1)));
+            Some(id)
         } else {
             None
         };
@@ -291,6 +298,7 @@ impl UntaintControlFlow {
             self.process_block(
                 block_id,
                 function,
+                ssa,
                 cfg,
                 function_wt,
                 &mut block_taint_vars,
@@ -305,6 +313,7 @@ impl UntaintControlFlow {
         &self,
         block_id: BlockId,
         function: &mut HLFunction,
+        ssa: &mut HLSSA,
         cfg: &CFG,
         function_wt: &FunctionWitnessType,
         block_taint_vars: &mut HashMap<BlockId, Option<ValueId>>,
@@ -322,6 +331,7 @@ impl UntaintControlFlow {
             self.process_instruction(
                 instruction,
                 function,
+                ssa,
                 type_info,
                 block_taint,
                 &mut new_instructions,
@@ -340,7 +350,7 @@ impl UntaintControlFlow {
                     WitnessType::Witness => {
                         let child_block_taint = match block_taint {
                             Some(tnt) => {
-                                let result_val = function.fresh_value();
+                                let result_val = ssa.fresh_value();
                                 new_instructions.push(OpCode::BinaryArithOp {
                                     kind: BinaryArithOpKind::And,
                                     result: result_val,
@@ -425,7 +435,8 @@ impl UntaintControlFlow {
                             if !args_passed_from_lhs.is_empty() {
                                 let mut instrs = Vec::new();
                                 {
-                                    let mut builder = HLInstrBuilder::new(function, &mut instrs);
+                                    let mut builder =
+                                        HLInstrBuilder::new(function, ssa, &mut instrs);
                                     for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
                                         args_passed_from_lhs
                                             .iter()
@@ -462,7 +473,7 @@ impl UntaintControlFlow {
                 if let (Some(ti), Some(param_types)) = (type_info, block_param_types.get(&target)) {
                     let mut cast_instrs = Vec::new();
                     let new_args: Vec<_> = {
-                        let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                         args.iter()
                             .zip(param_types.iter())
                             .map(|(arg, expected_type)| {
@@ -480,7 +491,7 @@ impl UntaintControlFlow {
                 if let Some(ti) = type_info {
                     let mut cast_instrs = Vec::new();
                     let new_values: Vec<_> = {
-                        let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                         values
                             .iter()
                             .zip(return_types.iter())
@@ -507,6 +518,7 @@ impl UntaintControlFlow {
         &self,
         instruction: OpCode,
         function: &mut HLFunction,
+        ssa: &mut HLSSA,
         type_info: Option<&FunctionTypeInfo>,
         block_taint: Option<ValueId>,
         new_instructions: &mut Vec<OpCode>,
@@ -539,7 +551,7 @@ impl UntaintControlFlow {
                 if let Some(ti) = type_info {
                     let mut cast_instrs = Vec::new();
                     let new_args: Vec<_> = {
-                        let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                         args.into_iter()
                             .map(|arg| {
                                 let arg_type = ti.get_value_type(arg);
@@ -587,7 +599,7 @@ impl UntaintControlFlow {
                 let target_elem_type = tp.clone();
                 let mut cast_instrs = Vec::new();
                 let new_vs: Vec<_> = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     vs.iter()
                         .map(|v| convert_if_needed(*v, &target_elem_type, ti, &mut builder))
                         .collect()
@@ -618,7 +630,7 @@ impl UntaintControlFlow {
                 let target_elem_type = tp.clone();
                 let mut cast_instrs = Vec::new();
                 let new_element = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     convert_if_needed(element, &target_elem_type, ti, &mut builder)
                 };
                 for instr in cast_instrs {
@@ -652,7 +664,7 @@ impl UntaintControlFlow {
                 };
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     let ca = convert_if_needed(array, result_type, ti, &mut builder);
                     let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
                     (ca, cv)
@@ -686,7 +698,7 @@ impl UntaintControlFlow {
                 };
                 let mut cast_instrs = Vec::new();
                 let new_values: Vec<_> = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     values
                         .iter()
                         .map(|v| convert_if_needed(*v, &expected_elem_type, ti, &mut builder))
@@ -713,7 +725,7 @@ impl UntaintControlFlow {
                 let target_type = ptr_type.get_pointed();
                 let mut cast_instrs = Vec::new();
                 let converted = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     convert_if_needed(value, &target_type, ti, &mut builder)
                 };
                 for instr in cast_instrs {
@@ -741,7 +753,7 @@ impl UntaintControlFlow {
                 let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
                 let mut cast_instrs = Vec::new();
                 let (new_if_t, new_if_f) = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     let t = convert_if_needed(if_t, &target_type, ti, &mut builder);
                     let f = convert_if_needed(if_f, &target_type, ti, &mut builder);
                     (t, f)

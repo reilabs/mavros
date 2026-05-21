@@ -9,7 +9,7 @@ pub mod llssa;
 pub mod traits;
 
 use itertools::Itertools;
-use std::{collections::HashMap, vec};
+use std::{collections::HashMap, fmt::Debug, vec};
 
 pub use id::{BlockId, FunctionId, ValueId};
 pub use traits::{Instruction, SSAAnotator, SSAType};
@@ -19,8 +19,13 @@ pub use traits::{Instruction, SSAAnotator, SSAType};
 
 /// The SSA structure used by the Mavros compiler, providing a generic IR that can be tailored with
 /// custom instructions and types.
+///
+/// - `Op` is the type of instructions in the SSA, allowing customization of the instruction set
+///   over which the IR is operating.
+/// - `Ty` is the type system for the SSA, describing the valid types and their interactions.
+/// - `Cn` is the type of the constant storage for the SSA, providing an arbitrary interface.
 #[derive(Clone)]
-pub struct SSA<Op: Instruction, Ty: SSAType> {
+pub struct SSA<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
     /// A mapping from function identifiers to true functions contained in the SSA.
     functions: HashMap<FunctionId, Function<Op, Ty>>,
 
@@ -42,10 +47,16 @@ pub struct SSA<Op: Instruction, Ty: SSAType> {
 
     /// A monotonic counter for function identifiers, used to ensure uniqueness.
     next_function_id: u64,
+
+    /// A monotonic counter for `ValueId`s, globally unique within this SSA.
+    next_value_id: u64,
+
+    /// Side-table holding constant data for the SSA.
+    constants: Cn,
 }
 
-impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
-    pub fn with_main(name: String) -> Self {
+impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
+    pub fn with_main(name: String, constants: Cn) -> Self {
         let main_function = Function::<Op, Ty>::empty(name);
         let main_id = FunctionId(0);
         let mut functions = HashMap::new();
@@ -57,12 +68,20 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
             globals_deinit_fn: None,
             main_id,
             next_function_id: 1,
+            next_value_id: 0,
+            constants,
         }
     }
 }
 
-impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
-    pub fn prepare_rebuild(self) -> (SSA<Op, Ty>, HashMap<FunctionId, Function<Op, Ty>>, Vec<Ty>) {
+impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
+    pub fn prepare_rebuild(
+        self,
+    ) -> (
+        SSA<Op, Ty, Cn>,
+        HashMap<FunctionId, Function<Op, Ty>>,
+        Vec<Ty>,
+    ) {
         (
             SSA {
                 functions: HashMap::new(),
@@ -71,6 +90,8 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
                 globals_deinit_fn: self.globals_deinit_fn,
                 main_id: self.main_id,
                 next_function_id: self.next_function_id,
+                next_value_id: self.next_value_id,
+                constants: self.constants,
             },
             self.functions,
             self.global_types,
@@ -128,6 +149,27 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
         new_id
     }
 
+    /// Allocate a fresh `ValueId` from the SSA-wide counter.
+    pub fn fresh_value(&mut self) -> ValueId {
+        let value_id = ValueId(self.next_value_id);
+        self.next_value_id += 1;
+        value_id
+    }
+
+    /// Upper bound on `ValueId`s issued so far. Useful for sizing dense per-value tables.
+    pub fn value_num_bound(&self) -> usize {
+        self.next_value_id as usize
+    }
+
+    /// Advance the value counter to `end` if it is currently lower. Used by passes that
+    /// allocate `ValueId`s into a transient buffer (see e.g. the specializer) and want to
+    /// reconcile the buffer's IDs back into the SSA.
+    pub fn reserve_values_up_to(&mut self, end: u64) {
+        if end > self.next_value_id {
+            self.next_value_id = end;
+        }
+    }
+
     pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function<Op, Ty>)> {
         self.functions.iter()
     }
@@ -169,9 +211,17 @@ impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
     pub fn get_globals_deinit_fn(&self) -> Option<FunctionId> {
         self.globals_deinit_fn
     }
+
+    pub fn const_storage(&self) -> &Cn {
+        &self.constants
+    }
+
+    pub fn const_storage_mut(&mut self) -> &mut Cn {
+        &mut self.constants
+    }
 }
 
-impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug> SSA<Op, Ty, C> {
     pub fn to_string(&self, value_annotator: &dyn SSAAnotator) -> String {
         let func_name = |id: FunctionId| self.get_function(id).get_name().to_string();
         self.functions
@@ -193,7 +243,6 @@ pub struct Function<Op: Instruction, Ty: SSAType> {
     name: String,
     returns: Vec<Ty>,
     next_block: u64,
-    next_value: u64,
 }
 
 impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
@@ -234,7 +283,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
             name,
             next_block: 1,
             returns: Vec::new(),
-            next_value: 0,
         }
     }
 
@@ -246,7 +294,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
                 next_block: self.next_block,
                 name: self.name,
                 returns: vec![],
-                next_value: self.next_value,
             },
             self.blocks,
             self.returns,
@@ -259,10 +306,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
 
     pub fn set_name(&mut self, name: String) {
         self.name = name;
-    }
-
-    pub fn get_var_num_bound(&self) -> usize {
-        self.next_value as usize
     }
 
     pub fn get_entry_mut(&mut self) -> &mut Block<Op, Ty> {
@@ -348,17 +391,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         self.blocks.iter()
     }
 
-    pub fn add_parameter(&mut self, block_id: BlockId, typ: Ty) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .parameters
-            .push((value_id, typ));
-        value_id
-    }
-
     pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block<Op, Ty>)> {
         self.blocks.iter_mut()
     }
@@ -369,12 +401,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
 
     pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block<Op, Ty>>) {
         self.blocks = blocks;
-    }
-
-    pub fn fresh_value(&mut self) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        value_id
     }
 
     pub fn take_returns(&mut self) -> Vec<Ty> {

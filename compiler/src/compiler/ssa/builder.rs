@@ -1,18 +1,28 @@
-use crate::compiler::ssa::{Block, BlockId, Function, Instruction, SSAType, Terminator, ValueId};
+use std::fmt::Debug;
+
+use crate::compiler::ssa::{
+    Block, BlockId, Function, FunctionId, Instruction, SSA, SSAType, Terminator, ValueId,
+};
 
 // ---------------------------------------------------------------------------
 // InstrBuilder — lightweight instruction emitter
 // ---------------------------------------------------------------------------
 
-pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType> {
+pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
     pub function: &'a mut Function<Op, Ty>,
+    pub ssa: &'a mut SSA<Op, Ty, Cn>,
     pub instructions: &'a mut Vec<Op>,
 }
 
-impl<'a, Op: Instruction, Ty: SSAType> InstrBuilder<'a, Op, Ty> {
-    pub fn new(function: &'a mut Function<Op, Ty>, instructions: &'a mut Vec<Op>) -> Self {
+impl<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> InstrBuilder<'a, Op, Ty, Cn> {
+    pub fn new(
+        function: &'a mut Function<Op, Ty>,
+        ssa: &'a mut SSA<Op, Ty, Cn>,
+        instructions: &'a mut Vec<Op>,
+    ) -> Self {
         Self {
             function,
+            ssa,
             instructions,
         }
     }
@@ -27,23 +37,24 @@ impl<'a, Op: Instruction, Ty: SSAType> InstrBuilder<'a, Op, Ty> {
 // FunctionBuilder — function-level coordinator (no current_block)
 // ---------------------------------------------------------------------------
 
-pub struct FunctionBuilder<'a, Op: Instruction, Ty: SSAType> {
+pub struct FunctionBuilder<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
     pub function: &'a mut Function<Op, Ty>,
+    pub ssa: &'a mut SSA<Op, Ty, Cn>,
 }
 
-impl<'a, Op: Instruction, Ty: SSAType> FunctionBuilder<'a, Op, Ty> {
-    pub fn new(function: &'a mut Function<Op, Ty>) -> Self {
-        Self { function }
+impl<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> FunctionBuilder<'a, Op, Ty, Cn> {
+    pub fn new(function: &'a mut Function<Op, Ty>, ssa: &'a mut SSA<Op, Ty, Cn>) -> Self {
+        Self { function, ssa }
     }
 
-    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_, Op, Ty>)) -> BlockId {
-        let (id, mut emitter) = BlockEmitter::from_new_block(self.function);
+    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_, Op, Ty, Cn>)) -> BlockId {
+        let (id, mut emitter) = BlockEmitter::from_new_block(self.function, self.ssa);
         f(&mut emitter);
         id
     }
 
     pub fn fresh_value(&mut self) -> ValueId {
-        self.function.fresh_value()
+        self.ssa.fresh_value()
     }
 
     /// Escape hatch for direct function access.
@@ -51,9 +62,14 @@ impl<'a, Op: Instruction, Ty: SSAType> FunctionBuilder<'a, Op, Ty> {
         self.function
     }
 
+    /// Escape hatch for direct SSA access.
+    pub fn ssa(&mut self) -> &mut SSA<Op, Ty, Cn> {
+        self.ssa
+    }
+
     /// Get a BlockEmitter for a specific block.
-    pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty> {
-        BlockEmitter::new(self.function, id)
+    pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty, Cn> {
+        BlockEmitter::new(self.function, self.ssa, id)
     }
 }
 
@@ -64,25 +80,31 @@ impl<'a, Op: Instruction, Ty: SSAType> FunctionBuilder<'a, Op, Ty> {
 /// Holds the current block *taken out* of the function, so `emit()` is a
 /// direct `Vec::push` with no HashMap lookup.  The block is put back into the
 /// function on `seal_and_switch` or `Drop`.
-pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType> {
+pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
     pub function: &'a mut Function<Op, Ty>,
+    pub ssa: &'a mut SSA<Op, Ty, Cn>,
     pub(crate) block_id: BlockId,
     pub(crate) block: Block<Op, Ty>,
 }
 
-impl<Op: Instruction, Ty: SSAType> Drop for BlockEmitter<'_, Op, Ty> {
+impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> Drop for BlockEmitter<'_, Op, Ty, Cn> {
     fn drop(&mut self) {
         let block = std::mem::replace(&mut self.block, Block::empty());
         self.function.put_block(self.block_id, block);
     }
 }
 
-impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
+impl<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> BlockEmitter<'a, Op, Ty, Cn> {
     /// Create an emitter for an existing block (takes it out of the function).
-    pub fn new(function: &'a mut Function<Op, Ty>, block_id: BlockId) -> Self {
+    pub fn new(
+        function: &'a mut Function<Op, Ty>,
+        ssa: &'a mut SSA<Op, Ty, Cn>,
+        block_id: BlockId,
+    ) -> Self {
         let block = function.take_block(block_id);
         Self {
             function,
+            ssa,
             block_id,
             block,
         }
@@ -90,12 +112,16 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
 
     /// Create an emitter for a fresh block (not yet in the function).
     /// The block is inserted into the function on drop.
-    pub(crate) fn from_new_block(function: &'a mut Function<Op, Ty>) -> (BlockId, Self) {
+    pub(crate) fn from_new_block(
+        function: &'a mut Function<Op, Ty>,
+        ssa: &'a mut SSA<Op, Ty, Cn>,
+    ) -> (BlockId, Self) {
         let (block_id, block) = function.next_virtual_block();
         (
             block_id,
             Self {
                 function,
+                ssa,
                 block_id,
                 block,
             },
@@ -111,7 +137,7 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
     }
 
     pub fn add_parameter(&mut self, typ: Ty) -> ValueId {
-        let v = self.function.fresh_value();
+        let v = self.ssa.fresh_value();
         self.block.push_parameter(v, typ);
         v
     }
@@ -162,7 +188,7 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
     pub fn build_loop(
         &mut self,
         params: Vec<(ValueId, Ty)>,
-        header: impl FnOnce(&mut InstrBuilder<'_, Op, Ty>, &[ValueId]) -> ValueId,
+        header: impl FnOnce(&mut InstrBuilder<'_, Op, Ty, Cn>, &[ValueId]) -> ValueId,
         body: impl FnOnce(&mut Self, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Create blocks
@@ -177,7 +203,7 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         // Build header parameters
         let mut param_ids = vec![];
         for _ in 0..params.len() {
-            let v = self.function.fresh_value();
+            let v = self.ssa.fresh_value();
             param_ids.push(v);
         }
         let header_params: Vec<_> = param_ids
@@ -192,7 +218,7 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         // Call header closure to emit condition into a temporary instruction buffer
         let mut header_instructions = vec![];
         let cond = {
-            let mut b = InstrBuilder::new(self.function, &mut header_instructions);
+            let mut b = InstrBuilder::new(self.function, self.ssa, &mut header_instructions);
             header(&mut b, &param_ids)
         };
         self.function
@@ -233,7 +259,7 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
     ) -> Vec<ValueId> {
         let results: Vec<_> = result_types
             .into_iter()
-            .map(|ty| (self.function.fresh_value(), ty))
+            .map(|ty| (self.ssa.fresh_value(), ty))
             .collect();
         let merge_params: Vec<_> = results.iter().map(|(v, _)| *v).collect();
         self.build_if_else_into(cond, results, then_branch, else_branch);
@@ -270,5 +296,138 @@ impl<'a, Op: Instruction, Ty: SSAType> BlockEmitter<'a, Op, Ty> {
         // Build else branch
         let else_results = else_branch(self);
         self.seal_and_switch(Terminator::Jmp(merge_blk, else_results), merge_blk);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSABuilder — top-level coordinator that owns `&mut SSA` and dispenses
+//              function builders via closure-based scopes.
+// ---------------------------------------------------------------------------
+
+pub struct SSABuilder<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
+    ssa: &'a mut SSA<Op, Ty, Cn>,
+}
+
+impl<'a, Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSABuilder<'a, Op, Ty, Cn> {
+    pub fn new(ssa: &'a mut SSA<Op, Ty, Cn>) -> Self {
+        Self { ssa }
+    }
+
+    /// Build a fresh function from scratch, inserting it into the SSA on
+    /// closure return. The function being built is held by a local variable
+    /// (NOT in `ssa.functions`) for the closure's lifetime, so the builder
+    /// can hand out `&mut Function` and `&mut SSA` without aliasing.
+    pub fn add_function<R>(
+        &mut self,
+        name: String,
+        body: impl FnOnce(&mut FunctionBuilder<'_, Op, Ty, Cn>) -> R,
+    ) -> (FunctionId, R) {
+        let mut function = Function::<Op, Ty>::empty(name);
+        let result = {
+            let mut fb = FunctionBuilder::new(&mut function, self.ssa);
+            body(&mut fb)
+        };
+        let id = self.ssa.insert_function(function);
+        (id, result)
+    }
+
+    /// Edit an existing function: take it out of `ssa.functions`, hand it
+    /// to the closure as a `FunctionBuilder`, put it back on return.
+    ///
+    /// Panics if `fid` does not exist or has already been taken out
+    /// (re-entrant `modify_function` for the same `fid`).
+    pub fn modify_function<R>(
+        &mut self,
+        fid: FunctionId,
+        body: impl FnOnce(&mut FunctionBuilder<'_, Op, Ty, Cn>) -> R,
+    ) -> R {
+        let mut function = self.ssa.take_function(fid);
+        let result = {
+            let mut fb = FunctionBuilder::new(&mut function, self.ssa);
+            body(&mut fb)
+        };
+        self.ssa.put_function(fid, function);
+        result
+    }
+
+    /// Convenience: add a parameter to a specific block of a specific function
+    /// without spelling out the `modify_function` closure.
+    pub fn add_block_parameter(&mut self, fid: FunctionId, blk: BlockId, ty: Ty) -> ValueId {
+        self.modify_function(fid, |fb| fb.block(blk).add_parameter(ty))
+    }
+
+    /// Allocate a fresh `ValueId` from the SSA-wide counter.
+    pub fn fresh_value(&mut self) -> ValueId {
+        self.ssa.fresh_value()
+    }
+
+    /// Escape hatch for direct SSA access.
+    pub fn ssa(&mut self) -> &mut SSA<Op, Ty, Cn> {
+        self.ssa
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::compiler::ssa::hlssa::builder::HLSSABuilder;
+    use crate::compiler::ssa::hlssa::{Constants, HLSSA};
+
+    /// `ValueId`s issued inside two different functions must not collide:
+    /// the counter lives on the SSA, not the function.
+    #[test]
+    fn global_value_ids_are_unique_across_functions() {
+        let mut ssa = HLSSA::with_main("main".to_string(), Constants::default());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let main_id = sb.ssa().get_main_id();
+        let other_id = sb.ssa().add_function("other".to_string());
+
+        let v_main = sb.modify_function(main_id, |fb| fb.fresh_value());
+        let v_other = sb.modify_function(other_id, |fb| fb.fresh_value());
+
+        assert_ne!(v_main, v_other);
+    }
+
+    /// `prepare_rebuild` forwards the SSA-wide counter, so allocations after
+    /// rebuild continue from where the original counter left off.
+    #[test]
+    fn prepare_rebuild_preserves_value_counter() {
+        let mut ssa = HLSSA::with_main("main".to_string(), Constants::default());
+        let _v0 = ssa.fresh_value();
+        let _v1 = ssa.fresh_value();
+        let _v2 = ssa.fresh_value();
+        let bound_before = ssa.value_num_bound();
+
+        let (mut rebuilt, _functions, _globals) = ssa.prepare_rebuild();
+        assert_eq!(rebuilt.value_num_bound(), bound_before);
+
+        let next = rebuilt.fresh_value();
+        assert_eq!(next.0 as usize, bound_before);
+    }
+
+    /// An empty `modify_function` closure must leave the SSA structurally
+    /// unchanged: function count, counter, and the surviving function map
+    /// all preserved.
+    #[test]
+    fn modify_function_noop_roundtrip() {
+        let mut ssa = HLSSA::with_main("main".to_string(), Constants::default());
+        let main_id = ssa.get_main_id();
+        let _ = ssa.add_function("other".to_string());
+
+        // Allocate some values so the counter is non-zero.
+        let _v0 = ssa.fresh_value();
+        let _v1 = ssa.fresh_value();
+
+        let function_ids_before: Vec<_> = ssa.get_function_ids().collect();
+        let counter_before = ssa.value_num_bound();
+
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        for fid in &function_ids_before {
+            sb.modify_function(*fid, |_fb| {});
+        }
+
+        assert_eq!(ssa.value_num_bound(), counter_before);
+        let function_ids_after: Vec<_> = ssa.get_function_ids().collect();
+        assert_eq!(function_ids_after.len(), function_ids_before.len());
+        assert!(ssa.get_function(main_id).get_blocks().count() > 0);
     }
 }
