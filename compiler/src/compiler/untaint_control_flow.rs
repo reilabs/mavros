@@ -908,6 +908,11 @@ fn emit_strip_witness(
             }
             builder.mk_tuple(converted_elems, tgt_fields.clone())
         }
+        (TypeExpr::Ref(src_inner), TypeExpr::Ref(tgt_inner)) => {
+            let loaded = builder.load(value);
+            let stripped = emit_strip_witness(loaded, src_inner, tgt_inner, builder);
+            builder.alloc((**tgt_inner).clone(), stripped)
+        }
         _ => panic!(
             "emit_strip_witness: unsupported conversion {:?} -> {:?}",
             source_type, target_type
