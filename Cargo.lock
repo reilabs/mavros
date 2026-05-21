@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "acir"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir_field",
  "base64 0.22.1",
@@ -20,17 +20,16 @@ dependencies = [
  "serde-big-array",
  "strum",
  "strum_macros",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "acir_field"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "ark-bn254",
  "ark-ff",
- "ark-std",
  "cfg-if",
  "hex",
  "num-bigint",
@@ -39,23 +38,24 @@ dependencies = [
 
 [[package]]
 name = "acvm"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir",
  "acvm_blackbox_solver",
  "brillig_vm",
  "indexmap 2.14.0",
+ "itertools 0.14.0",
  "rustc-hash",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
 [[package]]
 name = "acvm_blackbox_solver"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir",
  "aes",
@@ -67,7 +67,7 @@ dependencies = [
  "log",
  "p256",
  "sha2 0.11.0",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -262,7 +262,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62945a2f7e6de02a31fe400aa489f0e0f5b2502e69f95f853adb82a96c7a6b60"
 dependencies = [
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -275,7 +275,7 @@ dependencies = [
  "num-traits",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -326,7 +326,7 @@ checksum = "213888f660fddcca0d257e88e54ac05bca01885f258ccdf695bafd77031bb69d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -359,7 +359,7 @@ checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -391,12 +391,6 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
-
-[[package]]
-name = "binary-merge"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "597bb81c80a54b6a4381b23faba8d7774b144c94cbd1d6fe3f1329bd776554ab"
 
 [[package]]
 name = "bincode"
@@ -495,8 +489,8 @@ dependencies = [
 
 [[package]]
 name = "bn254_blackbox_solver"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir",
  "acvm_blackbox_solver",
@@ -505,6 +499,7 @@ dependencies = [
  "ark-ff",
  "ark-grumpkin",
  "hex",
+ "itertools 0.14.0",
 ]
 
 [[package]]
@@ -519,23 +514,25 @@ dependencies = [
 
 [[package]]
 name = "brillig"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir_field",
+ "itertools 0.14.0",
  "serde",
 ]
 
 [[package]]
 name = "brillig_vm"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir",
  "acvm_blackbox_solver",
+ "itertools 0.14.0",
  "num-bigint",
  "num-traits",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -651,6 +648,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chacha20"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -702,10 +710,10 @@ version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
 dependencies = [
- "heck 0.5.0",
+ "heck",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -731,11 +739,11 @@ dependencies = [
 
 [[package]]
 name = "codespan"
-version = "0.11.1"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3362992a0d9f1dd7c3d0e89e0ab2bb540b7a95fea8cd798090e758fda2899b5e"
+checksum = "583f52b0658b321b25fd6b209b6c76cf058f433071297de64e5980c3d9aad937"
 dependencies = [
- "codespan-reporting",
+ "codespan-reporting 0.13.1",
  "serde",
 ]
 
@@ -744,6 +752,16 @@ name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3538270d33cc669650c4b093848450d380def10c331d38c768e34cac80576e6e"
+dependencies = [
+ "termcolor",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "codespan-reporting"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
@@ -1086,7 +1104,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "strsim",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1097,7 +1115,7 @@ checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
 dependencies = [
  "darling_core",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1202,7 +1220,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1256,7 +1274,7 @@ dependencies = [
  "enum-ordinalize",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1325,7 +1343,7 @@ checksum = "8ca9601fb2d62598ee17836250842873a413586e5d7ed88b356e38ddbb0ec631"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1401,11 +1419,12 @@ checksum = "8ce81f49ae8a0482e4c55ea62ebbd7e5a686af544c00b9d090bba3ff9be97b3d"
 
 [[package]]
 name = "fm"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
- "codespan-reporting",
+ "codespan-reporting 0.11.1",
  "iter-extended",
+ "itertools 0.14.0",
  "serde",
 ]
 
@@ -1464,7 +1483,7 @@ checksum = "1a5c6c585bc94aaf2c7b51dd4c2ba22680844aba4c687be581871a6f518c5742"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1646,12 +1665,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "heck"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "heck"
@@ -1907,7 +1920,7 @@ checksum = "6cfe97ee860815a90ed17e09639513269e39420a7440f3f4c996f238c514cf8d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -1921,15 +1934,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inplace-vec-builder"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf64c2edc8226891a71f127587a2861b132d2b942310843814d5001d99a1d307"
-dependencies = [
- "smallvec",
-]
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1937,8 +1941,8 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "iter-extended"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 
 [[package]]
 name = "itertools"
@@ -2023,18 +2027,18 @@ dependencies = [
 
 [[package]]
 name = "jsonrpsee"
-version = "0.25.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fba77a59c4c644fd48732367624d1bcf6f409f9c9a286fbc71d2f1fc0b2ea16"
+checksum = "3f3f48dc3e6b8bd21e15436c1ddd0bc22a6a54e8ec46fedd6adf3425f396ec6a"
 dependencies = [
  "jsonrpsee-core",
 ]
 
 [[package]]
 name = "jsonrpsee-core"
-version = "0.25.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "693c93cbb7db25f4108ed121304b671a36002c2db67dff2ee4391a688c738547"
+checksum = "316c96719901f05d1137f19ba598b5fe9c9bc39f4335f67f6be8613921946480"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2051,9 +2055,9 @@ dependencies = [
 
 [[package]]
 name = "jsonrpsee-types"
-version = "0.25.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66df7256371c45621b3b7d2fb23aea923d577616b9c0e9c0b950a6ea5c2be0ca"
+checksum = "bc88ff4688e43cc3fa9883a8a95c6fa27aa2e76c96e610b737b6554d650d7fd5"
 dependencies = [
  "http",
  "serde",
@@ -2076,11 +2080,12 @@ dependencies = [
 
 [[package]]
 name = "keccak"
-version = "0.2.0-rc.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d546793a04a1d3049bd192856f804cfe96356e2cf36b54b4e575155babe9f41"
+checksum = "9e24a010dd405bd7ed803e5253182815b41bf2e6a80cc3bfc066658e03a198aa"
 dependencies = [
- "cpufeatures 0.2.17",
+ "cfg-if",
+ "cpufeatures 0.3.0",
 ]
 
 [[package]]
@@ -2196,6 +2201,7 @@ dependencies = [
 name = "mavros-compiler"
 version = "0.1.0"
 dependencies = [
+ "acvm",
  "anyhow",
  "ark-bn254",
  "ark-ff",
@@ -2236,7 +2242,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "stringcase",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -2288,8 +2294,8 @@ dependencies = [
 
 [[package]]
 name = "nargo"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "brillig",
@@ -2307,15 +2313,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
  "walkdir",
 ]
 
 [[package]]
 name = "nargo_toml"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "dirs",
  "fm",
@@ -2325,26 +2331,27 @@ dependencies = [
  "noirc_frontend",
  "semver",
  "serde",
- "thiserror 1.0.69",
- "toml 0.7.8",
+ "thiserror 2.0.18",
+ "toml",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "noir_greybox_fuzzer"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "build-data",
  "fm",
+ "itertools 0.14.0",
  "noirc_abi",
  "noirc_artifacts",
  "num-traits",
  "proptest",
- "rand 0.9.4",
- "rand_xorshift",
+ "rand 0.10.1",
+ "rand_xorshift 0.5.0",
  "rayon",
  "sha256",
  "termcolor",
@@ -2353,34 +2360,35 @@ dependencies = [
 
 [[package]]
 name = "noirc_abi"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "iter-extended",
+ "itertools 0.14.0",
  "noirc_printable_type",
  "num-bigint",
  "num-traits",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "toml 0.7.8",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]
 name = "noirc_arena"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 
 [[package]]
 name = "noirc_artifacts"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acir",
  "acvm",
  "base64 0.22.1",
- "codespan-reporting",
+ "codespan-reporting 0.11.1",
  "flate2",
  "fm",
  "noirc_abi",
@@ -2388,14 +2396,14 @@ dependencies = [
  "noirc_printable_type",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
 [[package]]
 name = "noirc_driver"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "build-data",
@@ -2414,20 +2422,21 @@ dependencies = [
 
 [[package]]
 name = "noirc_errors"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
- "codespan-reporting",
+ "codespan-reporting 0.11.1",
  "fm",
  "noirc_span",
+ "rangemap",
  "rustc-hash",
  "serde",
 ]
 
 [[package]]
 name = "noirc_evaluator"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "bn254_blackbox_solver",
@@ -2437,6 +2446,7 @@ dependencies = [
  "im",
  "indexmap 2.14.0",
  "iter-extended",
+ "itertools 0.14.0",
  "noirc_artifacts",
  "noirc_errors",
  "noirc_frontend",
@@ -2452,15 +2462,14 @@ dependencies = [
  "serde_json",
  "serde_with",
  "smallvec",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
- "vec-collections",
 ]
 
 [[package]]
 name = "noirc_frontend"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "bn254_blackbox_solver",
@@ -2468,6 +2477,7 @@ dependencies = [
  "fm",
  "im",
  "iter-extended",
+ "itertools 0.14.0",
  "noirc_arena",
  "noirc_artifacts",
  "noirc_errors",
@@ -2483,25 +2493,26 @@ dependencies = [
  "smol_str",
  "strum",
  "strum_macros",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
 [[package]]
 name = "noirc_printable_type"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "acvm",
  "iter-extended",
+ "itertools 0.14.0",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "noirc_span"
-version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+version = "1.0.0-beta.20"
+source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.20#b4236c1957d0c26cb65d82adc9e5447b6ff1d629"
 dependencies = [
  "codespan",
  "serde",
@@ -2569,7 +2580,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -2703,7 +2714,7 @@ checksum = "a990e22f43e84855daf260dded30524ef4a9021cc7541c26540500a50b624389"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -2830,7 +2841,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -2886,7 +2897,7 @@ dependencies = [
  "num-traits",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
- "rand_xorshift",
+ "rand_xorshift 0.4.0",
  "regex-syntax",
  "unarray",
 ]
@@ -2955,6 +2966,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+dependencies = [
+ "chacha20",
+ "getrandom 0.4.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3005,6 +3027,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -3081,7 +3112,7 @@ checksum = "b7186006dcb21920990093f30e3dea63b7d6e977bf1256be20c3563a5db070da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -3170,7 +3201,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rust-embed-utils",
- "syn 2.0.117",
+ "syn",
  "walkdir",
 ]
 
@@ -3404,7 +3435,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -3458,7 +3489,7 @@ dependencies = [
  "darling",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -3571,12 +3602,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sorted-iter"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bceb57dc07c92cdae60f5b27b3fa92ecaaa42fe36c55e22dbfb0b44893e0b1f7"
-
-[[package]]
 name = "spki"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3612,21 +3637,20 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.24.1"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "063e6045c0e62079840579a7e47a355ae92f60eb74daaf156fb1e84ba164e63f"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 
 [[package]]
 name = "strum_macros"
-version = "0.24.3"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e385be0d24f186b4ce2f9982191e7101bb737312ad61c1f2f984f34bcf85d59"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
- "heck 0.4.1",
+ "heck",
  "proc-macro2",
  "quote",
- "rustversion",
- "syn 1.0.109",
+ "syn",
 ]
 
 [[package]]
@@ -3634,17 +3658,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "syn"
-version = "1.0.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
 
 [[package]]
 name = "syn"
@@ -3665,7 +3678,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -3722,7 +3735,7 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -3733,7 +3746,7 @@ checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -3812,18 +3825,6 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd79e69d3b627db300ff956027cc6c3798cef26d22526befdfcd12feeb6d2257"
-dependencies = [
- "serde",
- "serde_spanned",
- "toml_datetime 0.6.11",
- "toml_edit 0.19.15",
-]
-
-[[package]]
-name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
@@ -3850,19 +3851,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "toml_edit"
-version = "0.19.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b5bb770da30e5cbfde35a2d7b9b8a2c4b8ef89548a7a6aeab5c9a576e3e7421"
-dependencies = [
- "indexmap 2.14.0",
- "serde",
- "serde_spanned",
- "toml_datetime 0.6.11",
- "winnow 0.5.40",
 ]
 
 [[package]]
@@ -3947,7 +3935,7 @@ checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -4009,7 +3997,7 @@ checksum = "70977707304198400eb4835a78f6a9f928bf41bba420deb8fdb175cd965d77a7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -4095,21 +4083,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
-name = "vec-collections"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c9965c8f2ffed1dbcd16cafe18a009642f540fa22661c6cfd6309ddb02e4982"
-dependencies = [
- "binary-merge",
- "inplace-vec-builder",
- "lazy_static",
- "num-traits",
- "serde",
- "smallvec",
- "sorted-iter",
-]
-
-[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4181,7 +4154,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
  "wasm-bindgen-shared",
 ]
 
@@ -4365,7 +4338,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "sha2 0.10.9",
- "toml 0.8.23",
+ "toml",
  "windows-sys 0.59.0",
  "zstd",
 ]
@@ -4379,7 +4352,7 @@ dependencies = [
  "anyhow",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
  "wasmtime-component-util",
  "wasmtime-wit-bindgen",
  "wit-parser 0.226.0",
@@ -4506,7 +4479,7 @@ checksum = "5732a5c86efce7bca121a61d8c07875f6b85c1607aa86753b40f7f8bd9d3a780"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -4533,7 +4506,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "505c13fa0cac6c43e805347acf1e916c8de54e3790f2c22873c5692964b09b62"
 dependencies = [
  "anyhow",
- "heck 0.5.0",
+ "heck",
  "indexmap 2.14.0",
  "wit-parser 0.226.0",
 ]
@@ -4646,7 +4619,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -4657,7 +4630,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -4768,15 +4741,6 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "0.5.40"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f593a95398737aeed53e489c785df13f3618e41dbcd6718c6addbf1395aa6876"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "winnow"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
@@ -4824,7 +4788,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc"
 dependencies = [
  "anyhow",
- "heck 0.5.0",
+ "heck",
  "wit-parser 0.244.0",
 ]
 
@@ -4835,10 +4799,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21"
 dependencies = [
  "anyhow",
- "heck 0.5.0",
+ "heck",
  "indexmap 2.14.0",
  "prettyplease",
- "syn 2.0.117",
+ "syn",
  "wasm-metadata",
  "wit-bindgen-core",
  "wit-component",
@@ -4854,7 +4818,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
  "wit-bindgen-core",
  "wit-bindgen-rust",
 ]
@@ -4950,7 +4914,7 @@ checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
  "synstructure",
 ]
 
@@ -4971,7 +4935,7 @@ checksum = "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -4991,7 +4955,7 @@ checksum = "11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
  "synstructure",
 ]
 
@@ -5012,7 +4976,7 @@ checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]
@@ -5045,7 +5009,7 @@ checksum = "625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use acvm::AcirField;
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
     Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If, Index,
@@ -482,7 +483,7 @@ impl<'a> ExpressionConverter<'a> {
                             .bindings
                             .get(local_id)
                             .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
-                        (ptr, ident.typ.clone(), vec![])
+                        (ptr, (*ident.typ).clone(), vec![])
                     } else {
                         panic!("Cannot assign to immutable local variable: {}", ident.name)
                     }
@@ -944,31 +945,30 @@ impl<'a> ExpressionConverter<'a> {
                 let value = if *bv { 1 } else { 0 };
                 Some(self.get_or_create_const(b, ConstValue::U(1, value)))
             }
-            Literal::Integer(signed_field, typ, _location) => {
+            Literal::Integer(field_element, typ, _location) => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
 
                 match typ {
                     AstType::Field => {
                         // Convert SignedField to ark_bn254::Fr directly (both backed by same type)
-                        let field_element = signed_field.to_field_element();
-                        let field_val = field_element.into_repr();
+                        let field_val = (*field_element).into_repr();
                         Some(self.get_or_create_const(b, ConstValue::Field(field_val)))
                     }
                     AstType::Integer(signedness, bit_size) => {
                         use noirc_frontend::shared::Signedness;
                         let bits: usize = bit_size.bit_size() as usize;
                         if *signedness == Signedness::Signed {
-                            let signed_val = signed_field.to_i128();
+                            let signed_val = field_element.to_i128();
                             let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
                             Some(self.get_or_create_const(b, ConstValue::I(bits, twos_complement)))
                         } else {
                             // Get the value as u128
-                            let value = signed_field.to_u128();
+                            let value = field_element.to_u128();
                             Some(self.get_or_create_const(b, ConstValue::U(bits, value)))
                         }
                     }
                     AstType::Bool => {
-                        let value = signed_field.to_u128();
+                        let value = field_element.to_u128();
                         Some(self.get_or_create_const(b, ConstValue::U(1, value)))
                     }
                     _ => panic!("Unexpected type for integer literal: {:?}", typ),
@@ -1301,8 +1301,8 @@ impl<'a> ExpressionConverter<'a> {
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let bit_size = match &call.arguments[1] {
                     Expression::Literal(
-                        noirc_frontend::monomorphization::ast::Literal::Integer(sf, _, _),
-                    ) => sf.to_u128() as usize,
+                        noirc_frontend::monomorphization::ast::Literal::Integer(f, _, _),
+                    ) => f.to_u128() as usize,
                     other => panic!(
                         "apply_range_constraint bit_size must be a constant, got {:?}",
                         other
@@ -1475,10 +1475,10 @@ impl<'a> ExpressionConverter<'a> {
     fn extract_const_u32(expr: &Expression) -> u32 {
         match expr {
             Expression::Literal(noirc_frontend::monomorphization::ast::Literal::Integer(
-                signed_field,
+                field_element,
                 _typ,
                 _location,
-            )) => signed_field.to_u128() as u32,
+            )) => field_element.to_u128() as u32,
             _ => panic!("Expected a constant integer argument, got {:?}", expr),
         }
     }
