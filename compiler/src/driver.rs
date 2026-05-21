@@ -138,16 +138,15 @@ impl Driver {
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
 
-        // Queue all lowlevel replacements RIGHT AFTER compile_main (before
-        // draining the queue). At this point `in_unconstrained_function` is
-        // still the value compile_main set it to for `main`, which for a
-        // constrained main is `false`. That lets `pub fn` blackbox substitutes
-        // get a constrained specialization even when user code reaches the
-        // blackbox only from unconstrained call paths (e.g. through an `if
-        // is_unconstrained()` branch). The `_uc` source variant gets its
-        // correct unconstrained flag from its own `unconstrained fn`
-        // declaration, so both variants end up properly labelled.
-        // Unused replacements get DCE'd later.
+        // Queue blackbox replacements RIGHT AFTER `compile_main`, before
+        // draining the queue. At this point `in_unconstrained_function` is
+        // whatever `compile_main` set for `main` (false for `fn main`), which
+        // is what we need: each `pub fn` substitute gets monomorphized as
+        // constrained even when the user code only reaches the blackbox
+        // through an unconstrained path (e.g. `if is_unconstrained()`).
+        // mavros' SSA gen then produces both SSA variants for each one and the
+        // active `function_mapper` dispatches per call site. Unused
+        // replacements get DCE'd later.
         let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
         for (replacement, functions) in &prepared_replacements {
             add_lowlevel_replacements(

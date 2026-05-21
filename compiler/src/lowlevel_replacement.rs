@@ -1,9 +1,8 @@
-use std::{collections::HashMap, collections::HashSet, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use noirc_frontend::hir::Context;
 use noirc_frontend::monomorphization::Monomorphizer;
-use noirc_frontend::monomorphization::ast::{Definition, Expression, FuncId as AstFuncId};
-use noirc_frontend::monomorphization::visitor::visit_expr;
+use noirc_frontend::monomorphization::ast::FuncId as AstFuncId;
 use noirc_frontend::node_interner::FuncId;
 
 use crate::compiler::lowering::LowLevelReplacement;
@@ -40,29 +39,6 @@ impl ReplacementCrate {
             })
             .collect()
     }
-
-    pub fn lowlevel_names(&self) -> Vec<&str> {
-        self.replacements
-            .iter()
-            .map(|spec| spec.lowlevel_name)
-            .collect()
-    }
-}
-
-/// Scan the monomorphizer's finished functions to find which LowLevel intrinsics are actually used.
-pub fn find_needed_lowlevels(monomorphizer: &Monomorphizer) -> HashSet<String> {
-    let mut needed = HashSet::new();
-    for func in monomorphizer.finished_functions().values() {
-        visit_expr(&func.body, &mut |expr| {
-            if let Expression::Ident(ident) = expr {
-                if let Definition::LowLevel(name) = &ident.definition {
-                    needed.insert(name.clone());
-                }
-            }
-            true
-        });
-    }
-    needed
 }
 
 pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
