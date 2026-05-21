@@ -29,17 +29,6 @@ use crate::compiler::{
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive};
 
-fn leaf_scalar_count(t: &Type) -> usize {
-    match &t.expr {
-        TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
-        TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
-            panic!("leaf_scalar_count: unsupported type {}", t)
-        }
-    }
-}
-
 /// Number of bits needed to represent every value in the interval as a
 /// non-negative integer. Returns `None` if the interval may contain a negative
 /// value or has no upper bound.
@@ -727,12 +716,15 @@ impl ExplicitWitness {
                 let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
                 let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
                 assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(instruction);
-                } else {
-                    let flag = b.field_const(Field::from(1));
-                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag, None);
-                }
+                assert!(
+                    !idx_taint,
+                    "witness-indexed ArrayGet should be lowered by LowerWitnessArrayOps"
+                );
+                b.push(OpCode::ArrayGet {
+                    result,
+                    array: arr,
+                    index: idx,
+                });
             }
             OpCode::ArraySet {
                 result,
@@ -743,11 +735,16 @@ impl ExplicitWitness {
                 let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
                 let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
                 assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(instruction);
-                } else {
-                    self.gen_witness_array_set(b, function_type_info, arr, idx, value, result);
-                }
+                assert!(
+                    !idx_taint,
+                    "witness-indexed ArraySet should be lowered by LowerWitnessArrayOps"
+                );
+                b.push(OpCode::ArraySet {
+                    result,
+                    array: arr,
+                    index: idx,
+                    value,
+                });
             }
             OpCode::SlicePush {
                 dir: _,
@@ -1564,20 +1561,18 @@ impl ExplicitWitness {
                 let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
                 let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
                 assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(inner);
-                } else {
-                    let flag = self.ensure_field(b, function_type_info, condition);
-                    self.gen_witness_array_get(
-                        b,
-                        function_type_info,
-                        arr,
-                        idx,
+                assert!(
+                    !idx_taint,
+                    "witness-indexed guarded ArrayGet should be lowered by LowerWitnessArrayOps"
+                );
+                b.push(OpCode::Guard {
+                    condition,
+                    inner: Box::new(OpCode::ArrayGet {
                         result,
-                        flag,
-                        Some(condition),
-                    );
-                }
+                        array: arr,
+                        index: idx,
+                    }),
+                });
             }
             OpCode::ArraySet { .. } => {
                 panic!("ArraySet inside Guard not supported yet: {:?}", inner);
@@ -2647,303 +2642,6 @@ impl ExplicitWitness {
         b.lookup_spread(8, byte_wit, spread_wit, flag);
 
         (byte_wit, spread_wit)
-    }
-
-    /// Lower a witness-indexed ArrayGet into a hint + lookup constraint.
-    /// `flag` is the lookup flag: `1` unconditionally, or the guard condition.
-    fn gen_witness_array_get(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        arr: ValueId,
-        idx: ValueId,
-        result: ValueId,
-        flag: ValueId,
-        cond: Option<ValueId>,
-    ) {
-        let result_type_full = function_type_info.get_value_type(result).clone();
-        let result_type = result_type_full.strip_all_witness();
-        let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
-
-        let pure_idx = b.value_of(idx);
-
-        if matches!(&result_type.expr, TypeExpr::Array(..)) {
-            let idx_field = b.cast_to_field(idx);
-            let inner_hint = b.fresh_value();
-            let inner = OpCode::ArrayGet {
-                result: inner_hint,
-                array: arr,
-                index: pure_idx,
-            };
-            if let Some(cond) = cond {
-                b.push(OpCode::Guard {
-                    condition: cond,
-                    inner: Box::new(inner),
-                });
-            } else {
-                b.push(inner);
-            }
-            let outer_stride = leaf_scalar_count(&result_type);
-            let stride_const = b.field_const(Field::from(outer_stride as u128));
-            let base_key = b.mul(idx_field, stride_const);
-            self.gen_witness_array_get_multidim(
-                b,
-                arr,
-                base_key,
-                inner_hint,
-                &arr_elem_type,
-                &result_type_full,
-                0u128,
-                Some(result),
-                flag,
-            );
-            return;
-        }
-
-        let back_cast_target = match &result_type.expr {
-            TypeExpr::U(s) => CastTarget::U(*s),
-            TypeExpr::I(s) => CastTarget::I(*s),
-            TypeExpr::Field => CastTarget::Field,
-            TypeExpr::WitnessOf(_) => CastTarget::Field,
-            TypeExpr::Slice(_) => {
-                todo!("slice types in witnessed array reads")
-            }
-            TypeExpr::Ref(_) => {
-                todo!("ref types in witnessed array reads")
-            }
-            TypeExpr::Tuple(_elements) => {
-                todo!("Tuples not supported yet")
-            }
-            TypeExpr::Array(_, _) => unreachable!("handled above"),
-            TypeExpr::Function => {
-                panic!("Function type not expected in witnessed array reads")
-            }
-        };
-
-        let hint = b.fresh_value();
-        let inner = OpCode::ArrayGet {
-            result: hint,
-            array: arr,
-            index: pure_idx,
-        };
-        if let Some(cond) = cond {
-            b.push(OpCode::Guard {
-                condition: cond,
-                inner: Box::new(inner),
-            });
-        } else {
-            b.push(inner);
-        }
-        let mut r_pure_val = hint;
-
-        if arr_elem_type.is_witness_of() {
-            r_pure_val = b.value_of(r_pure_val);
-        }
-
-        let idx_field = b.cast_to_field(idx);
-        let r_wit_field = b.cast_to_field(r_pure_val);
-        let r_wit = b.write_witness(r_wit_field);
-        b.push(OpCode::Cast {
-            result,
-            value: r_wit,
-            target: back_cast_target,
-        });
-        b.lookup_arr(arr, idx_field, r_wit, flag);
-    }
-
-    fn gen_witness_array_set(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        arr: ValueId,
-        idx: ValueId,
-        value: ValueId,
-        result: ValueId,
-    ) {
-        let arr_type = function_type_info.get_value_type(arr).clone();
-        let (length, seq_type) = match &arr_type.strip_witness().expr {
-            TypeExpr::Array(_, n) => (*n, SequenceTargetType::Array(*n)),
-            TypeExpr::Slice(_) => {
-                panic!("Witness-indexed write into a Slice is not supported")
-            }
-            other => panic!("ArraySet on non-array type: {:?}", other),
-        };
-
-        let idx_type = function_type_info.get_value_type(idx);
-        let idx_bits = match idx_type.strip_witness().expr {
-            TypeExpr::U(n) => n,
-            _ => panic!(
-                "ArraySet index must be unsigned integer, got {:?}",
-                idx_type
-            ),
-        };
-
-        let result_elem_type = match &function_type_info
-            .get_value_type(result)
-            .strip_witness()
-            .expr
-        {
-            TypeExpr::Array(elem, _) => elem.as_ref().clone(),
-            other => panic!("ArraySet result must be array type, got {:?}", other),
-        };
-        let result_elem_back_cast = match &result_elem_type.strip_witness().expr {
-            TypeExpr::Field => None,
-            TypeExpr::U(s) => Some((CastTarget::U(*s), *s)),
-            TypeExpr::I(s) => Some((CastTarget::I(*s), *s)),
-            other => panic!(
-                "ArraySet with witness idx: unsupported element type {:?}",
-                other
-            ),
-        };
-
-        let idx_field = b.cast_to_field(idx);
-        let idx_pure = b.value_of(idx);
-
-        let value_type = function_type_info.get_value_type(value);
-        let value_field = if value_type.strip_witness().is_field() {
-            value
-        } else {
-            b.cast_to_field(value)
-        };
-
-        let one_field = b.field_const(Field::ONE);
-        let zero_field = b.field_const(Field::ZERO);
-        let flag_one = one_field;
-
-        let mut new_elems: Vec<ValueId> = Vec::with_capacity(length);
-        for i in 0..length {
-            let i_const_idx = b.u_const(idx_bits, i as u128);
-            let i_const_field = b.field_const(Field::from(i as u128));
-
-            let diff = b.sub(idx_field, i_const_field);
-            let diff_pure = b.value_of(diff);
-            let inv_hint = b.div(one_field, diff_pure);
-            let inv_wit = b.write_witness(inv_hint);
-            let eq_hint_u1 = b.eq(idx_pure, i_const_idx);
-            let eq_hint_field = b.cast_to_field(eq_hint_u1);
-            let eq_wit = b.write_witness(eq_hint_field);
-            let one_minus_eq = b.sub(one_field, eq_wit);
-            b.constrain(diff, inv_wit, one_minus_eq);
-            b.constrain(diff, eq_wit, zero_field);
-
-            let arr_i = b.array_get(arr, i_const_idx);
-            let arr_i_field = b.cast_to_field(arr_i);
-
-            let diff_val = b.sub(value_field, arr_i_field);
-            let diff_val_pure = b.value_of(diff_val);
-            let eq_pure = b.value_of(eq_wit);
-            let prod_hint = b.mul(eq_pure, diff_val_pure);
-            let prod_wit = b.write_witness(prod_hint);
-            b.constrain(eq_wit, diff_val, prod_wit);
-            let new_i_field = b.add(arr_i_field, prod_wit);
-
-            let new_i = if let Some((target, bits)) = result_elem_back_cast {
-                self.gen_witness_rangecheck_bits(b, new_i_field, bits, flag_one);
-                b.cast_to(target, new_i_field)
-            } else {
-                new_i_field
-            };
-            new_elems.push(new_i);
-        }
-
-        b.push(OpCode::MkSeq {
-            result,
-            elems: new_elems,
-            seq_type,
-            elem_type: result_elem_type,
-        });
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn gen_witness_array_get_multidim(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        arr: ValueId,
-        base_key: ValueId,
-        hint: ValueId,
-        arr_elem_type: &Type,
-        target_type: &Type,
-        leaf_offset: u128,
-        result_override: Option<ValueId>,
-        flag: ValueId,
-    ) -> ValueId {
-        let stripped = target_type.strip_all_witness();
-        match &stripped.expr {
-            TypeExpr::Array(inner_stripped, n) => {
-                assert!(
-                    !target_type.is_witness_of(),
-                    "ICE: multidimensional witness array read produced WitnessOf at the array container level — \
-                     the leaf-tinting rules in witness_type_inference and analysis/types must \
-                     push WitnessOf into scalar leaves instead. target_type = {target_type}"
-                );
-                let inner_target = target_type.get_array_element();
-                let inner_arr_type = arr_elem_type.get_array_element();
-                let inner_leaves = leaf_scalar_count(inner_stripped.as_ref()) as u128;
-                let mut elems = Vec::with_capacity(*n);
-                for i in 0..*n {
-                    let i_const = b.u_const(32, i as u128);
-                    let child_hint = b.array_get(hint, i_const);
-                    let child_offset = leaf_offset + (i as u128) * inner_leaves;
-                    let child = self.gen_witness_array_get_multidim(
-                        b,
-                        arr,
-                        base_key,
-                        child_hint,
-                        &inner_arr_type,
-                        &inner_target,
-                        child_offset,
-                        None,
-                        flag,
-                    );
-                    elems.push(child);
-                }
-                let id = result_override.unwrap_or_else(|| b.fresh_value());
-                b.push(OpCode::MkSeq {
-                    result: id,
-                    elems,
-                    seq_type: SequenceTargetType::Array(*n),
-                    elem_type: inner_target,
-                });
-                id
-            }
-            TypeExpr::Slice(_) => {
-                panic!("multidimensional witness array read: slice element types not supported")
-            }
-            TypeExpr::Tuple(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
-                panic!(
-                    "multidimensional witness array read: unsupported element type {}",
-                    target_type
-                )
-            }
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
-                let leaf_pure = if arr_elem_type.is_witness_of() {
-                    b.value_of(hint)
-                } else {
-                    hint
-                };
-                let leaf_field = b.cast_to_field(leaf_pure);
-                let leaf_wit = b.write_witness(leaf_field);
-                let offset_const = b.field_const(Field::from(leaf_offset));
-                let flat_key = b.add(base_key, offset_const);
-                b.lookup_arr(arr, flat_key, leaf_wit, flag);
-                let cast_target = match &stripped.expr {
-                    TypeExpr::U(s) => CastTarget::U(*s),
-                    TypeExpr::I(s) => CastTarget::I(*s),
-                    TypeExpr::Field => CastTarget::Field,
-                    _ => unreachable!(),
-                };
-                let id = result_override.unwrap_or_else(|| b.fresh_value());
-                b.push(OpCode::Cast {
-                    result: id,
-                    value: leaf_wit,
-                    target: cast_target,
-                });
-                id
-            }
-            TypeExpr::WitnessOf(_) => {
-                unreachable!("strip_all_witness should remove all WitnessOf wrappers")
-            }
-        }
     }
 
     fn ensure_field(
