@@ -69,24 +69,47 @@ impl LowerWitnessArrayOps {
         function_type_info: &FunctionTypeInfo,
         instruction: OpCode,
     ) {
-        match instruction {
+        if let OpCode::Guard { condition, inner } = instruction {
+            self.process_array_op(b, function_type_info, Some(condition), *inner);
+        } else {
+            self.process_array_op(b, function_type_info, None, instruction);
+        }
+    }
+
+    fn process_array_op(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &FunctionTypeInfo,
+        guard: Option<ValueId>,
+        op: OpCode,
+    ) {
+        match op {
             OpCode::ArrayGet {
                 result,
                 array: arr,
                 index: idx,
             } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(OpCode::ArrayGet {
+                if self.has_witness_index(function_type_info, arr, idx) {
+                    let flag = self.lookup_flag(b, function_type_info, guard);
+                    self.gen_witness_array_get(
+                        b,
+                        function_type_info,
+                        arr,
+                        idx,
                         result,
-                        array: arr,
-                        index: idx,
-                    });
+                        flag,
+                        guard,
+                    );
                 } else {
-                    let flag = b.field_const(Field::ONE);
-                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag, None);
+                    self.emit_guarded(
+                        b,
+                        guard,
+                        OpCode::ArrayGet {
+                            result,
+                            array: arr,
+                            index: idx,
+                        },
+                    );
                 }
             }
             OpCode::ArraySet {
@@ -95,72 +118,62 @@ impl LowerWitnessArrayOps {
                 index: idx,
                 value,
             } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                if !idx_taint {
+                if guard.is_some() {
+                    panic!(
+                        "ArraySet inside Guard not supported yet: {:?}",
+                        OpCode::ArraySet {
+                            result,
+                            array: arr,
+                            index: idx,
+                            value,
+                        }
+                    );
+                }
+                if self.has_witness_index(function_type_info, arr, idx) {
+                    self.gen_witness_array_set(b, function_type_info, arr, idx, value, result);
+                } else {
                     b.push(OpCode::ArraySet {
                         result,
                         array: arr,
                         index: idx,
                         value,
                     });
-                } else {
-                    self.gen_witness_array_set(b, function_type_info, arr, idx, value, result);
                 }
             }
-            OpCode::Guard { condition, inner } => {
-                self.process_guard(b, function_type_info, condition, *inner);
-            }
-            _ => b.push(instruction),
+            _ => self.emit_guarded(b, guard, op),
         }
     }
 
-    fn process_guard(
+    fn has_witness_index(
+        &self,
+        function_type_info: &FunctionTypeInfo,
+        arr: ValueId,
+        idx: ValueId,
+    ) -> bool {
+        assert!(!function_type_info.get_value_type(arr).is_witness_of());
+        function_type_info.get_value_type(idx).is_witness_of()
+    }
+
+    fn emit_guarded(&self, b: &mut HLInstrBuilder<'_>, guard: Option<ValueId>, op: OpCode) {
+        if let Some(condition) = guard {
+            b.push(OpCode::Guard {
+                condition,
+                inner: Box::new(op),
+            });
+        } else {
+            b.push(op);
+        }
+    }
+
+    fn lookup_flag(
         &self,
         b: &mut HLInstrBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
-        condition: ValueId,
-        inner: OpCode,
-    ) {
-        match inner {
-            OpCode::ArrayGet {
-                result,
-                array: arr,
-                index: idx,
-            } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(OpCode::Guard {
-                        condition,
-                        inner: Box::new(OpCode::ArrayGet {
-                            result,
-                            array: arr,
-                            index: idx,
-                        }),
-                    });
-                } else {
-                    let flag = self.ensure_field(b, function_type_info, condition);
-                    self.gen_witness_array_get(
-                        b,
-                        function_type_info,
-                        arr,
-                        idx,
-                        result,
-                        flag,
-                        Some(condition),
-                    );
-                }
-            }
-            OpCode::ArraySet { .. } => {
-                panic!("ArraySet inside Guard not supported yet: {:?}", inner);
-            }
-            _ => b.push(OpCode::Guard {
-                condition,
-                inner: Box::new(inner),
-            }),
+        guard: Option<ValueId>,
+    ) -> ValueId {
+        match guard {
+            Some(condition) => self.ensure_field(b, function_type_info, condition),
+            None => b.field_const(Field::ONE),
         }
     }
 
@@ -184,20 +197,7 @@ impl LowerWitnessArrayOps {
 
         if matches!(&result_type.expr, TypeExpr::Array(..)) {
             let idx_field = b.cast_to_field(idx);
-            let inner_hint = b.fresh_value();
-            let inner = OpCode::ArrayGet {
-                result: inner_hint,
-                array: arr,
-                index: pure_idx,
-            };
-            if let Some(cond) = cond {
-                b.push(OpCode::Guard {
-                    condition: cond,
-                    inner: Box::new(inner),
-                });
-            } else {
-                b.push(inner);
-            }
+            let inner_hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
             let outer_stride = leaf_scalar_count(&result_type);
             let stride_const = b.field_const(Field::from(outer_stride as u128));
             let base_key = b.mul(idx_field, stride_const);
@@ -235,20 +235,7 @@ impl LowerWitnessArrayOps {
             }
         };
 
-        let hint = b.fresh_value();
-        let inner = OpCode::ArrayGet {
-            result: hint,
-            array: arr,
-            index: pure_idx,
-        };
-        if let Some(cond) = cond {
-            b.push(OpCode::Guard {
-                condition: cond,
-                inner: Box::new(inner),
-            });
-        } else {
-            b.push(inner);
-        }
+        let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
         let mut r_pure_val = hint;
 
         if arr_elem_type.is_witness_of() {
@@ -264,6 +251,26 @@ impl LowerWitnessArrayOps {
             target: back_cast_target,
         });
         b.lookup_arr(arr, idx_field, r_wit, flag);
+    }
+
+    fn emit_array_get_hint(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        arr: ValueId,
+        pure_idx: ValueId,
+        guard: Option<ValueId>,
+    ) -> ValueId {
+        let hint = b.fresh_value();
+        self.emit_guarded(
+            b,
+            guard,
+            OpCode::ArrayGet {
+                result: hint,
+                array: arr,
+                index: pure_idx,
+            },
+        );
+        hint
     }
 
     fn gen_witness_array_set(

@@ -199,6 +199,8 @@ impl ExplicitWitness {
                 }
             }
             OpCode::Alloc { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
             | OpCode::Call { .. }
             | OpCode::Constrain { .. }
             | OpCode::WriteWitness { .. }
@@ -707,44 +709,6 @@ impl ExplicitWitness {
                 sensitivity: _,
             } => {
                 panic!("ICE: should not be present at this stage");
-            }
-            OpCode::ArrayGet {
-                result,
-                array: arr,
-                index: idx,
-            } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                assert!(
-                    !idx_taint,
-                    "witness-indexed ArrayGet should be lowered by LowerWitnessArrayOps"
-                );
-                b.push(OpCode::ArrayGet {
-                    result,
-                    array: arr,
-                    index: idx,
-                });
-            }
-            OpCode::ArraySet {
-                result,
-                array: arr,
-                index: idx,
-                value,
-            } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                assert!(
-                    !idx_taint,
-                    "witness-indexed ArraySet should be lowered by LowerWitnessArrayOps"
-                );
-                b.push(OpCode::ArraySet {
-                    result,
-                    array: arr,
-                    index: idx,
-                    value,
-                });
             }
             OpCode::SlicePush {
                 dir: _,
@@ -1553,30 +1517,6 @@ impl ExplicitWitness {
                 // Pure data construction/access — no constraints. Emit unconditionally.
                 b.push(inner);
             }
-            OpCode::ArrayGet {
-                result,
-                array: arr,
-                index: idx,
-            } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                assert!(
-                    !idx_taint,
-                    "witness-indexed guarded ArrayGet should be lowered by LowerWitnessArrayOps"
-                );
-                b.push(OpCode::Guard {
-                    condition,
-                    inner: Box::new(OpCode::ArrayGet {
-                        result,
-                        array: arr,
-                        index: idx,
-                    }),
-                });
-            }
-            OpCode::ArraySet { .. } => {
-                panic!("ArraySet inside Guard not supported yet: {:?}", inner);
-            }
             OpCode::WriteWitness {
                 result,
                 value,
@@ -1597,9 +1537,10 @@ impl ExplicitWitness {
                 let cond_field = self.ensure_field(b, function_type_info, condition);
                 self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
             }
-            inner => {
-                panic!("unrecognized op inside Guard: {:?}", inner);
-            }
+            inner => b.push(OpCode::Guard {
+                condition,
+                inner: Box::new(inner),
+            }),
         }
     }
 
