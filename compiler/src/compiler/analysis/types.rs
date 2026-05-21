@@ -68,9 +68,11 @@ impl Types {
             .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
             .collect::<HashMap<_, _>>();
 
+        let const_types = const_type_seed(ssa);
+
         for (function_id, function) in ssa.iter_functions() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let function_info = self.run_function(function, &function_types, cfg);
+            let function_info = self.run_function(function, &function_types, &const_types, cfg);
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
@@ -144,10 +146,11 @@ impl Types {
         &self,
         function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+        const_types: &HashMap<ValueId, Type>,
         cfg: &CFG,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
-            values: HashMap::new(),
+            values: const_types.clone(),
         };
 
         for block_id in cfg.get_domination_pre_order() {
@@ -666,16 +669,6 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
-            OpCode::Const { result, value } => {
-                let ty = match value {
-                    ConstValue::U(size, _) => Type::u(*size),
-                    ConstValue::I(size, _) => Type::i(*size),
-                    ConstValue::Field(_) => Type::field(),
-                    ConstValue::FnPtr(_) => Type::function(),
-                };
-                function_info.values.insert(*result, ty);
-                Ok(())
-            }
             OpCode::Spread { result, value, .. } => {
                 let value_type = function_info
                     .values
@@ -703,6 +696,23 @@ impl Types {
             OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),
         }
     }
+}
+
+/// Build a `ValueId -> Type` map covering every constant in the SSA's side-table, ready to be
+/// cloned into each function's local type-info to seed constant references.
+pub fn const_type_seed(ssa: &HLSSA) -> HashMap<ValueId, Type> {
+    ssa.const_storage()
+        .iter()
+        .map(|(id, cv)| {
+            let ty = match cv {
+                ConstValue::U(size, _) => Type::u(*size),
+                ConstValue::I(size, _) => Type::i(*size),
+                ConstValue::Field(_) => Type::field(),
+                ConstValue::FnPtr(_) => Type::function(),
+            };
+            (*id, ty)
+        })
+        .collect()
 }
 
 use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};

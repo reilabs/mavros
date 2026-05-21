@@ -8,12 +8,13 @@ use std::collections::HashMap;
 
 use crate::compiler::ssa::{
     BlockId, FunctionId, Instruction, ValueId,
-    hlssa::{HLFunction, HLSSA, OpCode, Type},
+    hlssa::{ConstValue, Constants, HLFunction, HLSSA, OpCode, Type},
 };
 
 pub enum ValueDefinition {
     Param(BlockId, usize, Type),
     Instruction(BlockId, usize, OpCode),
+    Const(ConstValue),
 }
 
 pub struct FunctionValueDefinitions {
@@ -35,8 +36,12 @@ impl FunctionValueDefinitions {
         self.definitions.insert(value_id, definition);
     }
 
-    pub fn from_ssa(ssa: &HLFunction) -> Self {
+    pub fn from_ssa(ssa: &HLFunction, constants: &Constants) -> Self {
         let mut definitions = Self::new();
+
+        for (id, cv) in constants.iter() {
+            definitions.insert(*id, ValueDefinition::Const(cv.clone()));
+        }
 
         for (block_id, block) in ssa.get_blocks() {
             for (i, (val, typ)) in block.get_parameters().enumerate() {
@@ -70,11 +75,13 @@ impl ValueDefinitions {
 
     pub fn from_ssa(ssa: &HLSSA) -> Self {
         let mut definitions = Self::new();
+        let constants = ssa.const_storage();
 
         for (function_id, function) in ssa.iter_functions() {
-            definitions
-                .functions
-                .insert(*function_id, FunctionValueDefinitions::from_ssa(function));
+            definitions.functions.insert(
+                *function_id,
+                FunctionValueDefinitions::from_ssa(function, constants),
+            );
         }
 
         definitions

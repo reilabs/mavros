@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
     ssa::{
-        BlockId, FunctionId, Terminator, ValueId,
+        BlockId, FunctionId, Instruction, Terminator, ValueId,
         hlssa::{
             CallTarget, ConstValue, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLEmitter, HLSSABuilder},
@@ -47,23 +47,9 @@ type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
 fn run_defunctionalize(ssa: &mut HLSSA) {
     // Check if there are any FnPtrs at all
     let has_fn_ptrs = ssa
-        .get_function_ids()
-        .collect::<Vec<_>>()
+        .const_storage()
         .iter()
-        .any(|fid| {
-            let func = ssa.get_function(*fid);
-            func.get_blocks().any(|(_, block)| {
-                block.get_instructions().any(|i| {
-                    matches!(
-                        i,
-                        OpCode::Const {
-                            value: ConstValue::FnPtr(_),
-                            ..
-                        }
-                    )
-                })
-            })
-        });
+        .any(|(_, cv)| matches!(cv, ConstValue::FnPtr(_)));
     if !has_fn_ptrs {
         return;
     }
@@ -126,21 +112,57 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 3: Transformation
 
-    // 3a. Replace FnPtrConst → UConst(32, ...) in all functions
-    let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
-    for fid in &func_ids {
-        let func = ssa.get_function_mut(*fid);
-        for (_, block) in func.get_blocks_mut() {
-            for instruction in block.get_instructions_mut() {
-                if let OpCode::Const {
-                    result,
-                    value: ConstValue::FnPtr(fn_id),
-                } = instruction
-                {
-                    *instruction = OpCode::Const {
-                        result: *result,
-                        value: ConstValue::U(32, fn_id.0 as u128),
+    // 3a. Replace each `FnPtr(fn_id)` constant with `U(32, fn_id.0)`. The constant ValueId for
+    // the `U32` form may already exist (or may be freshly allocated by intern_const), so build a
+    // remap from old FnPtr ValueIds to the new U32 ValueIds and apply it to every operand.
+    let fn_ptr_consts: Vec<(ValueId, FunctionId)> = ssa
+        .const_storage()
+        .iter()
+        .filter_map(|(id, cv)| match cv {
+            ConstValue::FnPtr(fn_id) => Some((*id, *fn_id)),
+            _ => None,
+        })
+        .collect();
+    let mut const_remap: HashMap<ValueId, ValueId> = HashMap::new();
+    for (old_id, fn_id) in fn_ptr_consts.iter().copied() {
+        // Remove the FnPtr entry so the new U32 entry can claim a fresh ValueId (or alias an
+        // existing one) without violating the bimap's bijection invariant.
+        ssa.const_storage_mut().remove_by_left(&old_id);
+        let new_id = ssa.intern_const(ConstValue::U(32, fn_id.0 as u128));
+        if new_id != old_id {
+            const_remap.insert(old_id, new_id);
+        }
+    }
+    if !const_remap.is_empty() {
+        let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+        for fid in &func_ids {
+            let func = ssa.get_function_mut(*fid);
+            for (_, block) in func.get_blocks_mut() {
+                for instruction in block.get_instructions_mut() {
+                    for input in instruction.get_inputs_mut() {
+                        if let Some(new) = const_remap.get(input) {
+                            *input = *new;
+                        }
+                    }
+                }
+                if let Some(term) = block.get_terminator().cloned() {
+                    let new_term = match term {
+                        Terminator::Jmp(b, args) => Terminator::Jmp(
+                            b,
+                            args.into_iter()
+                                .map(|v| const_remap.get(&v).copied().unwrap_or(v))
+                                .collect(),
+                        ),
+                        Terminator::JmpIf(c, t, f) => {
+                            Terminator::JmpIf(const_remap.get(&c).copied().unwrap_or(c), t, f)
+                        }
+                        Terminator::Return(vals) => Terminator::Return(
+                            vals.into_iter()
+                                .map(|v| const_remap.get(&v).copied().unwrap_or(v))
+                                .collect(),
+                        ),
                     };
+                    block.set_terminator(new_term);
                 }
             }
         }
@@ -291,19 +313,19 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         }
     }
 
-    // Seed from FnPtr consts
+    // Seed from FnPtr consts. Constants live SSA-globally now, so seed every (fid, value_id)
+    // pair — over-seeding is harmless (unused entries never propagate).
+    let fn_ptr_consts: Vec<(ValueId, FunctionId)> = ssa
+        .const_storage()
+        .iter()
+        .filter_map(|(id, cv)| match cv {
+            ConstValue::FnPtr(fn_id) => Some((*id, *fn_id)),
+            _ => None,
+        })
+        .collect();
     for &fid in &func_ids {
-        let func = ssa.get_function(fid);
-        for (_, block) in func.get_blocks() {
-            for instruction in block.get_instructions() {
-                if let OpCode::Const {
-                    result,
-                    value: ConstValue::FnPtr(fn_id),
-                } = instruction
-                {
-                    reaching.entry((fid, *result)).or_default().insert(*fn_id);
-                }
-            }
+        for (value_id, fn_id) in &fn_ptr_consts {
+            reaching.entry((fid, *value_id)).or_default().insert(*fn_id);
         }
     }
 

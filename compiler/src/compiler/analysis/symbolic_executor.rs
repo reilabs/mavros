@@ -12,11 +12,25 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, Instruction, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget, OpCode, Radix,
-            RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, Endianness, HLSSA, LookupTarget,
+            OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
         },
     },
 };
+
+/// Build the value-typed representation of a single `ConstValue`, used to pre-seed `scope` with
+/// every entry in `ssa.const_storage()` before symbolic execution starts.
+fn materialise_const<V, Ctx>(value: &ConstValue, ctx: &mut Ctx) -> V
+where
+    V: Value<Ctx>,
+{
+    match value {
+        ConstValue::U(size, val) => V::of_u(*size, *val, ctx),
+        ConstValue::I(size, val) => V::of_i(*size, *val, ctx),
+        ConstValue::Field(val) => V::of_field(*val, ctx),
+        ConstValue::FnPtr(_) => todo!("FnPtrConst in symbolic executor"),
+    }
+}
 
 pub trait Value<Context>
 where
@@ -154,7 +168,21 @@ impl SymbolicExecutor {
     {
         let mut globals: Vec<Option<V>> = vec![None; ssa.num_globals()];
 
-        self.run_fn(ssa, type_info, entry_point, params, &mut globals, context);
+        let const_values: HashMap<ValueId, V> = ssa
+            .const_storage()
+            .iter()
+            .map(|(id, cv)| (*id, materialise_const::<V, Ctx>(cv, context)))
+            .collect();
+
+        self.run_fn(
+            ssa,
+            type_info,
+            entry_point,
+            params,
+            &mut globals,
+            &const_values,
+            context,
+        );
     }
 
     #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
@@ -165,6 +193,7 @@ impl SymbolicExecutor {
         fn_id: FunctionId,
         mut inputs: Vec<V>,
         globals: &mut Vec<Option<V>>,
+        const_values: &HashMap<ValueId, V>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
@@ -174,7 +203,7 @@ impl SymbolicExecutor {
         let fn_body = ssa.get_function(fn_id);
         let fn_type_info = type_info.get_function(fn_id);
         let entry = fn_body.get_entry();
-        let mut scope: HashMap<ValueId, V> = HashMap::new();
+        let mut scope: HashMap<ValueId, V> = const_values.clone();
 
         let call_result = ctx.on_call(
             fn_id,
@@ -345,7 +374,15 @@ impl SymbolicExecutor {
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally
-                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx)
+                            self.run_fn(
+                                ssa,
+                                type_info,
+                                *function_id,
+                                params,
+                                globals,
+                                const_values,
+                                ctx,
+                            )
                         };
                         for (i, val) in returns.iter().enumerate() {
                             scope.insert(*val, outputs[i].clone());
@@ -627,20 +664,6 @@ impl SymbolicExecutor {
                         let val = scope[value].clone();
                         scope.insert(*result, val.value_of(ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Const { result, value } => match value {
-                        crate::compiler::ssa::hlssa::ConstValue::U(size, val) => {
-                            scope.insert(*result, V::of_u(*size, *val, ctx));
-                        }
-                        crate::compiler::ssa::hlssa::ConstValue::I(size, val) => {
-                            scope.insert(*result, V::of_i(*size, *val, ctx));
-                        }
-                        crate::compiler::ssa::hlssa::ConstValue::Field(val) => {
-                            scope.insert(*result, V::of_field(*val, ctx));
-                        }
-                        crate::compiler::ssa::hlssa::ConstValue::FnPtr(_) => {
-                            todo!("FnPtrConst in symbolic executor");
-                        }
-                    },
                     crate::compiler::ssa::hlssa::OpCode::Guard { condition, inner } => {
                         let condition_val = &scope[condition];
                         let inputs: Vec<&V> = inner.get_inputs().map(|id| &scope[id]).collect();

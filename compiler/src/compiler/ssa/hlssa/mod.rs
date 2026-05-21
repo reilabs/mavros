@@ -6,7 +6,9 @@ pub mod type_system;
 use itertools::Itertools;
 use std::fmt::Display;
 
-use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+use crate::compiler::ssa::{
+    Block, ConstantsDisplay, Function, FunctionId, Instruction, SSA, ValueId,
+};
 pub use type_system::{Type, TypeExpr};
 
 // HLSSA
@@ -17,16 +19,59 @@ pub type HLSSA = SSA<OpCode, Type, Constants>;
 
 impl HLSSA {
     pub fn new() -> Self {
-        Self::with_main("main".to_string(), ())
+        Self::with_main("main".to_string(), Constants::default())
+    }
+
+    /// Returns the canonical `ValueId` for `value`, allocating a fresh one and recording it in the
+    /// constants table if `value` has not been interned yet. Otherwise returns the existing id.
+    pub fn intern_const(&mut self, value: ConstValue) -> ValueId {
+        if let Some(&id) = self.const_storage().get_by_right(&value) {
+            return id;
+        }
+        let id = self.fresh_value();
+        self.const_storage_mut().insert(id, value);
+        id
+    }
+
+    /// Look up a constant by `ValueId`. Returns `None` if `id` is not a constant.
+    pub fn get_const(&self, id: ValueId) -> Option<&ConstValue> {
+        self.const_storage().get_by_left(&id)
     }
 }
 
 // CONSTANT STORAGE
 // ================================================================================================
 
-/// Constant storage for the high-level SSA. Currently a placeholder while constants still live
-/// inline as `OpCode::Const` instructions.
-pub type Constants = ();
+/// Constant storage for the high-level SSA: a bidirectional map between `ValueId` and `ConstValue`,
+/// enforcing one canonical `ValueId` per distinct constant value.
+pub type Constants = bimap::BiHashMap<ValueId, ConstValue>;
+
+/// Render a single `ConstValue` as the right-hand-side of a constants-table entry, matching the
+/// syntax previously used for the `OpCode::Const` instruction.
+pub fn display_const(value: &ConstValue, func_name: &dyn Fn(FunctionId) -> String) -> String {
+    match value {
+        ConstValue::U(size, val) => format!("u_const({}, {})", size, val),
+        ConstValue::I(size, val) => format!("i_const({}, {})", size, val),
+        ConstValue::Field(val) => format!("field_const({})", val),
+        ConstValue::FnPtr(fn_id) => {
+            format!("fn_ptr_const({}@{})", func_name(*fn_id), fn_id.0)
+        }
+    }
+}
+
+impl ConstantsDisplay for Constants {
+    fn display_constants(&self, func_name: &dyn Fn(FunctionId) -> String) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let entries = self
+            .iter()
+            .sorted_by_key(|(id, _)| id.0)
+            .map(|(id, cv)| format!("  v{} = {}", id.0, display_const(cv, func_name)))
+            .join("\n");
+        format!("constants:\n{}", entries)
+    }
+}
 
 // HLSSA OPCODES
 // ================================================================================================
@@ -228,10 +273,6 @@ pub enum OpCode {
     },
     DropGlobal {
         global: usize,
-    },
-    Const {
-        result: ValueId,
-        value: ConstValue,
     },
     Spread {
         result: ValueId,
@@ -724,43 +765,6 @@ impl Instruction for OpCode {
             OpCode::DropGlobal { global } => {
                 format!("drop_global({})", global)
             }
-            OpCode::Const { result, value } => match value {
-                ConstValue::U(size, val) => {
-                    format!(
-                        "v{}{} = u_const({}, {})",
-                        result.0,
-                        annotate_value(*result),
-                        size,
-                        val
-                    )
-                }
-                ConstValue::I(size, val) => {
-                    format!(
-                        "v{}{} = i_const({}, {})",
-                        result.0,
-                        annotate_value(*result),
-                        size,
-                        val
-                    )
-                }
-                ConstValue::Field(val) => {
-                    format!(
-                        "v{}{} = field_const({})",
-                        result.0,
-                        annotate_value(*result),
-                        val
-                    )
-                }
-                ConstValue::FnPtr(fn_id) => {
-                    format!(
-                        "v{}{} = fn_ptr_const({}@{})",
-                        result.0,
-                        annotate_value(*result),
-                        func_name(*fn_id),
-                        fn_id.0
-                    )
-                }
-            },
             OpCode::Spread {
                 result,
                 value,
@@ -808,8 +812,7 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ }
-            | Self::Const { .. } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -1027,7 +1030,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc { result: r, .. }
             | Self::FreshWitness { result: r, .. }
-            | Self::Const { result: r, .. }
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
@@ -1084,7 +1086,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc { result: r, .. }
             | Self::FreshWitness { result: r, .. }
-            | Self::Const { result: r, .. }
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
@@ -1147,8 +1148,7 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ }
-            | Self::Const { .. } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -1374,8 +1374,7 @@ impl Instruction for OpCode {
                 result: r,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: r }
-            | Self::Const { result: r, .. } => vec![r].into_iter(),
+            | Self::NextDCoeff { result: r } => vec![r].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: a,

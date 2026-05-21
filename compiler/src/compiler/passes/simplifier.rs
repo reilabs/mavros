@@ -8,7 +8,7 @@ use num_traits::{One, Zero};
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, Types},
+        types::{FunctionTypeInfo, Types, const_type_seed},
         value_definitions::{FunctionValueDefinitions, ValueDefinition},
     },
     pass_manager::{AnalysisId, AnalysisStore, Pass},
@@ -81,9 +81,13 @@ impl Simplifier {
             let cfg = flow.get_function_cfg(function_id);
             sb.modify_function(function_id, |fb| {
                 for _ in 0..self.max_iterations {
-                    // Recompute locally so newly emitted opcodes (the Const+Cast
-                    // pair from `materialize_const`) appear with the right types.
-                    let fti = Types::new().run_function(fb.function, &function_types, cfg);
+                    // `materialize_const` may intern fresh constants into `fb.ssa`, so refresh the
+                    // seed every iteration; otherwise newly-interned ValueIds would be absent from
+                    // the type map and `Types::run_function` would panic on the next instruction
+                    // that uses them.
+                    let const_types = const_type_seed(fb.ssa);
+                    let fti =
+                        Types::new().run_function(fb.function, &function_types, &const_types, cfg);
                     if !self.run_function(fb, &fti) {
                         break;
                     }
@@ -98,7 +102,9 @@ impl Simplifier {
         fb: &mut HLFunctionBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
     ) -> bool {
-        let definitions = FunctionValueDefinitions::from_ssa(fb.function);
+        let mut definitions =
+            FunctionValueDefinitions::from_ssa(fb.function, fb.ssa.const_storage());
+        let mut consts_len = fb.ssa.const_storage().len();
         let mut aliases = ValueReplacements::new();
         let mut changed = false;
 
@@ -113,6 +119,20 @@ impl Simplifier {
 
                 let rewrite =
                     self.try_algebraic(&instruction, &definitions, function_type_info, fb);
+
+                // `materialize_const` may have just interned a fresh constant into `fb.ssa`. If
+                // we don't refresh `definitions`, a later `get_definition` lookup of an operand
+                // that the alias map redirected to that new constant will panic. We patch the
+                // new entries into `definitions` directly — rebuilding via `from_ssa` here
+                // would lose Param/Instruction entries, since `take_blocks` (above) has already
+                // detached every block from `fb.function`.
+                let new_consts_len = fb.ssa.const_storage().len();
+                if new_consts_len > consts_len {
+                    for (id, cv) in fb.ssa.const_storage().iter() {
+                        definitions.insert(*id, ValueDefinition::Const(cv.clone()));
+                    }
+                    consts_len = new_consts_len;
+                }
 
                 match rewrite {
                     Some(Rewrite::Alias { result, target }) => {
@@ -446,18 +466,18 @@ fn materialize_const(
     let ty = types.get_value_type(result).clone();
     let inner = ty.strip_witness();
     let value = pure_value(&inner.expr)?;
+    let const_id = fb.ssa.intern_const(value);
     if ty.is_witness_of() {
-        let tmp = fb.fresh_value();
-        Some(Rewrite::Replace(vec![
-            OpCode::Const { result: tmp, value },
-            OpCode::Cast {
-                result,
-                value: tmp,
-                target: CastTarget::WitnessOf,
-            },
-        ]))
+        Some(Rewrite::Replace(vec![OpCode::Cast {
+            result,
+            value: const_id,
+            target: CastTarget::WitnessOf,
+        }]))
     } else {
-        Some(Rewrite::Replace(vec![OpCode::Const { result, value }]))
+        Some(Rewrite::Alias {
+            result,
+            target: const_id,
+        })
     }
 }
 
@@ -488,8 +508,7 @@ fn materialize_one(
 }
 
 fn is_zero(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
-    let def = defs.get_definition(v);
-    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
+    if let ValueDefinition::Const(value) = defs.get_definition(v) {
         match value {
             ConstValue::U(_, 0) | ConstValue::I(_, 0) => true,
             ConstValue::Field(f) => f.is_zero(),
@@ -501,8 +520,7 @@ fn is_zero(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
 }
 
 fn is_one(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
-    let def = defs.get_definition(v);
-    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
+    if let ValueDefinition::Const(value) = defs.get_definition(v) {
         match value {
             ConstValue::U(_, 1) | ConstValue::I(_, 1) => true,
             ConstValue::Field(f) => f.is_one(),

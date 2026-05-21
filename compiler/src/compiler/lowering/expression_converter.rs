@@ -11,7 +11,7 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::ssa::{
     BlockId, FunctionId, ValueId,
     hlssa::{
-        CastTarget, ConstValue, Endianness, OpCode, Radix, SequenceTargetType, Type,
+        CastTarget, ConstValue, Endianness, Radix, SequenceTargetType, Type,
         builder::{HLEmitter, HLFunctionBuilder},
     },
 };
@@ -61,8 +61,6 @@ pub struct ExpressionConverter<'a> {
     in_unconstrained: bool,
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
-    /// Dedup cache for constants
-    const_cache: HashMap<ConstValue, ValueId>,
     /// Maps LowLevel function name to its replacement
     lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
     /// Current block being emitted into
@@ -88,7 +86,6 @@ impl<'a> ExpressionConverter<'a> {
             in_unconstrained,
             global_slots,
             lowlevel_replacements,
-            const_cache: HashMap::new(),
             current_block: entry_block,
         }
     }
@@ -98,17 +95,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn get_or_create_const(&mut self, b: &mut HLFunctionBuilder<'_>, cv: ConstValue) -> ValueId {
-        if let Some(&vid) = self.const_cache.get(&cv) {
-            return vid;
-        }
-        let vid = b.fresh_value();
-        let entry = b.function().get_entry_id();
-        b.block(entry).emit(OpCode::Const {
-            result: vid,
-            value: cv.clone(),
-        });
-        self.const_cache.insert(cv, vid);
-        vid
+        b.ssa.intern_const(cv)
     }
 
     /// Bind an immutable local variable to a value

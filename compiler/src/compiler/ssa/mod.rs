@@ -12,7 +12,7 @@ use itertools::Itertools;
 use std::{collections::HashMap, fmt::Debug, vec};
 
 pub use id::{BlockId, FunctionId, ValueId};
-pub use traits::{Instruction, SSAAnotator, SSAType};
+pub use traits::{ConstantsDisplay, Instruction, SSAAnotator, SSAType};
 
 // SSA
 // ================================================================================================
@@ -221,14 +221,21 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
     }
 }
 
-impl<Op: Instruction, Ty: SSAType, C: Clone + Debug> SSA<Op, Ty, C> {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + ConstantsDisplay> SSA<Op, Ty, C> {
     pub fn to_string(&self, value_annotator: &dyn SSAAnotator) -> String {
         let func_name = |id: FunctionId| self.get_function(id).get_name().to_string();
-        self.functions
+        let consts = self.constants.display_constants(&func_name);
+        let functions = self
+            .functions
             .iter()
             .sorted_by_key(|(fn_id, _)| fn_id.0)
             .map(|(fn_id, func)| func.to_string(&func_name, *fn_id, value_annotator))
-            .join("\n\n")
+            .join("\n\n");
+        if consts.is_empty() {
+            functions
+        } else {
+            format!("{}\n\n{}", consts, functions)
+        }
     }
 }
 

@@ -369,6 +369,20 @@ fn field_to_bigint(f: &Field) -> BigInt {
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }
 
+/// Map a `ConstValue` to the tightest interval that captures its numeric value (or `top` for
+/// function pointers, which carry no numeric meaning). Used to seed range analysis for every
+/// constant ValueId in the SSA before per-function transfer kicks in.
+fn compute_const_value_interval(value: &ConstValue) -> IntInterval {
+    match value {
+        ConstValue::U(_, v) => IntInterval::singleton(*v),
+        ConstValue::I(bits, encoded) => {
+            IntInterval::singleton(signed_const_to_bigint(*bits, *encoded))
+        }
+        ConstValue::Field(f) => IntInterval::singleton(field_to_bigint(f)),
+        ConstValue::FnPtr(_) => IntInterval::top(),
+    }
+}
+
 pub struct FunctionValueRanges {
     values: HashMap<ValueId, IntInterval>,
 }
@@ -415,10 +429,15 @@ impl ValueRangeAnalysis {
         let mut result = ValueRanges {
             functions: HashMap::new(),
         };
+        let const_ranges: HashMap<ValueId, IntInterval> = ssa
+            .const_storage()
+            .iter()
+            .map(|(id, cv)| (*id, compute_const_value_interval(cv)))
+            .collect();
         for (function_id, function) in ssa.iter_functions() {
             let func_cfg = cfg.get_function_cfg(*function_id);
             let func_types = types.get_function(*function_id);
-            let function_ranges = self.run_function(function, func_cfg, func_types);
+            let function_ranges = self.run_function(function, func_cfg, func_types, &const_ranges);
             result.functions.insert(*function_id, function_ranges);
         }
         result
@@ -430,8 +449,9 @@ impl ValueRangeAnalysis {
         function: &HLFunction,
         cfg: &CFG,
         types: &FunctionTypeInfo,
+        const_ranges: &HashMap<ValueId, IntInterval>,
     ) -> FunctionValueRanges {
-        let mut bounds: HashMap<ValueId, IntInterval> = HashMap::new();
+        let mut bounds: HashMap<ValueId, IntInterval> = const_ranges.clone();
 
         // Initial state: every value's bound is its declared type's full range.
         // Iteration only narrows from there.
@@ -525,18 +545,6 @@ impl ValueRangeAnalysis {
         };
 
         match instr {
-            OpCode::Const { result, value } => {
-                let r = match value {
-                    ConstValue::U(_, v) => IntInterval::singleton(*v),
-                    ConstValue::I(bits, encoded) => {
-                        IntInterval::singleton(signed_const_to_bigint(*bits, *encoded))
-                    }
-                    ConstValue::Field(f) => IntInterval::singleton(field_to_bigint(f)),
-                    ConstValue::FnPtr(_) => IntInterval::top(),
-                };
-                Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
-            }
-
             OpCode::Cast {
                 result,
                 value,

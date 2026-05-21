@@ -12,7 +12,7 @@ use crate::{
         },
         codegen::bytecode::layout::{FrameLayouter, GlobalFrameLayouter, StructLayoutInterner},
         ssa::{
-            BlockId, FunctionId, Terminator,
+            BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
                 self, BinaryArithOpKind, CmpKind, DMatrix, Endianness, HLBlock, HLFunction, HLSSA,
                 LookupTarget, Radix, RefCountOp, Type, TypeExpr,
@@ -36,6 +36,7 @@ impl CodeGen {
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
         let mut struct_interner = StructLayoutInterner::new();
+        let constants = ssa.const_storage();
 
         let function = ssa.get_main();
         let function = self.run_function(
@@ -44,6 +45,7 @@ impl CodeGen {
             type_info.get_function(ssa.get_main_id()),
             &global_layouter,
             &mut struct_interner,
+            constants,
         );
 
         let mut functions = vec![function];
@@ -63,6 +65,7 @@ impl CodeGen {
                 type_info.get_function(*function_id),
                 &global_layouter,
                 &mut struct_interner,
+                constants,
             );
             function_ids.insert(*function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
@@ -103,6 +106,7 @@ impl CodeGen {
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
         struct_interner: &mut StructLayoutInterner,
+        constants: &hlssa::Constants,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
@@ -112,6 +116,11 @@ impl CodeGen {
         for (param, tp) in entry.get_parameters() {
             layouter.alloc_value(*param, tp);
         }
+
+        // Pre-emit MovConst for every HL constant referenced by this function. Constants now
+        // live in `ssa.const_storage()` rather than as `OpCode::Const` instructions, so the
+        // backend must materialise their frame slots up-front.
+        emit_function_constants(function, constants, type_info, &mut layouter, &mut emitter);
 
         self.run_block_body(
             function,
@@ -1160,26 +1169,6 @@ impl CodeGen {
                         size: global_layouter.get_size(global_idx),
                     });
                 }
-                hlssa::OpCode::Const { result, value } => match value {
-                    hlssa::ConstValue::U(size, val) | hlssa::ConstValue::I(size, val) => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res: layouter.alloc_u64(*result, *size),
-                            val: *val as u64,
-                        });
-                    }
-                    hlssa::ConstValue::Field(val) => {
-                        let start = layouter.alloc_field(*result);
-                        for i in 0..bytecode::FELT_LIMBS {
-                            emitter.push_op(bytecode::OpCode::MovConst {
-                                res: start.offset(i as isize),
-                                val: val.0.0[i],
-                            })
-                        }
-                    }
-                    hlssa::ConstValue::FnPtr(_) => {
-                        panic!("FnPtr constants not supported in codegen");
-                    }
-                },
                 hlssa::OpCode::Alloc { result, elem_type } => {
                     let res = layouter.alloc_ptr(*result);
                     let elem_size = layouter.type_size(elem_type);
@@ -1248,6 +1237,78 @@ impl CodeGen {
                     offset += size as isize;
                 }
                 emitter.push_op(bytecode::OpCode::Ret {});
+            }
+        }
+    }
+}
+
+/// Pre-emit `MovConst` bytecode for every HL constant referenced by `function`, allocating its
+/// frame slot via `layouter` so subsequent instructions can look up the slot through `get_value`.
+fn emit_function_constants(
+    function: &HLFunction,
+    constants: &hlssa::Constants,
+    type_info: &FunctionTypeInfo,
+    layouter: &mut FrameLayouter,
+    emitter: &mut EmitterState,
+) {
+    use crate::compiler::ssa::Instruction;
+
+    let mut used: std::collections::BTreeSet<ValueId> = std::collections::BTreeSet::new();
+    for (_, block) in function.get_blocks() {
+        for instr in block.get_instructions() {
+            for input in instr.get_inputs() {
+                if constants.contains_left(input) {
+                    used.insert(*input);
+                }
+            }
+        }
+        match block.get_terminator() {
+            Some(Terminator::Jmp(_, args)) => {
+                for v in args {
+                    if constants.contains_left(v) {
+                        used.insert(*v);
+                    }
+                }
+            }
+            Some(Terminator::JmpIf(cond, _, _)) => {
+                if constants.contains_left(cond) {
+                    used.insert(*cond);
+                }
+            }
+            Some(Terminator::Return(vals)) => {
+                for v in vals {
+                    if constants.contains_left(v) {
+                        used.insert(*v);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    for id in used {
+        let cv = constants.get_by_left(&id).expect("constant present");
+        match cv {
+            hlssa::ConstValue::U(size, val) | hlssa::ConstValue::I(size, val) => {
+                // `type_info` covers every value defined inside the function, plus the seed
+                // entries we added for constants. Either source gives the same size.
+                let _ = type_info; // explicit no-op: layout is determined by `*size` alone here.
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res: layouter.alloc_u64(id, *size),
+                    val: *val as u64,
+                });
+            }
+            hlssa::ConstValue::Field(val) => {
+                let start = layouter.alloc_field(id);
+                for i in 0..bytecode::FELT_LIMBS {
+                    emitter.push_op(bytecode::OpCode::MovConst {
+                        res: start.offset(i as isize),
+                        val: val.0.0[i],
+                    });
+                }
+            }
+            hlssa::ConstValue::FnPtr(_) => {
+                panic!("FnPtr constants not supported in codegen");
             }
         }
     }

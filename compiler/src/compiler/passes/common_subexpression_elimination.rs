@@ -406,9 +406,33 @@ impl CSE {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+        // Constants live SSA-globally; build the per-ValueId Expr seed once and reuse across
+        // functions. Each function-level `gather_expressions` clones this into its local table.
+        let const_exprs: HashMap<ValueId, Expr> = ssa
+            .const_storage()
+            .iter()
+            .filter_map(|(id, cv)| match cv {
+                ConstValue::U(size, val) => Some((
+                    *id,
+                    Expr::UConst {
+                        bits: *size,
+                        value: *val,
+                    },
+                )),
+                ConstValue::I(size, val) => Some((
+                    *id,
+                    Expr::IConst {
+                        bits: *size,
+                        value: *val,
+                    },
+                )),
+                ConstValue::Field(val) => Some((*id, Expr::fconst(*val))),
+                ConstValue::FnPtr(_) => None,
+            })
+            .collect();
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let (exprs, assertions) = self.gather_expressions(function, cfg);
+            let (exprs, assertions) = self.gather_expressions(function, cfg, &const_exprs);
             let mut value_replacements = ValueReplacements::new();
             for (_, occurrences) in exprs {
                 if occurrences.len() <= 1 {
@@ -540,13 +564,14 @@ impl CSE {
         &self,
         ssa: &HLFunction,
         cfg: &CFG,
+        const_exprs: &HashMap<ValueId, Expr>,
     ) -> (
         HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
         HashMap<Assertion, Vec<(BlockId, usize)>>,
     ) {
         let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::new();
-        let mut exprs = HashMap::<ValueId, Expr>::new();
+        let mut exprs = const_exprs.clone();
 
         fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
             exprs
@@ -1017,42 +1042,6 @@ impl CSE {
                             *r,
                         ));
                     }
-                    OpCode::Const {
-                        result: r,
-                        value: cv,
-                    } => match cv {
-                        ConstValue::U(size, val) => {
-                            let expr = Expr::UConst {
-                                bits: *size,
-                                value: *val,
-                            };
-                            exprs.insert(*r, expr.clone());
-                            result
-                                .entry(expr)
-                                .or_default()
-                                .push((block_id, instruction_idx, *r));
-                        }
-                        ConstValue::I(size, val) => {
-                            let expr = Expr::IConst {
-                                bits: *size,
-                                value: *val,
-                            };
-                            exprs.insert(*r, expr.clone());
-                            result
-                                .entry(expr)
-                                .or_default()
-                                .push((block_id, instruction_idx, *r));
-                        }
-                        ConstValue::Field(val) => {
-                            let expr = Expr::fconst(*val);
-                            exprs.insert(*r, expr.clone());
-                            result
-                                .entry(expr)
-                                .or_default()
-                                .push((block_id, instruction_idx, *r));
-                        }
-                        ConstValue::FnPtr(_) => {}
-                    },
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }

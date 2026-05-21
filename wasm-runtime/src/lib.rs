@@ -1,3 +1,4 @@
+#![cfg(target_arch = "wasm32")]
 //! Runtime Library for Mavros WASM
 //!
 //! Provides BN254 field arithmetic and heap allocation called by

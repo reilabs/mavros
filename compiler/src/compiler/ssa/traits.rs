@@ -41,3 +41,16 @@ pub trait Instruction: Clone + Debug + 'static {
 
 /// The type of values in a given SSA.
 pub trait SSAType: Clone + Debug + Display + PartialEq + Eq + 'static {}
+
+/// Render the constant-storage side-table of an SSA as a string section, prepended to the SSA
+/// dump produced by `SSA::to_string`. Implementations should return the empty string when there
+/// are no constants (or when the IR has no constants concept).
+pub trait ConstantsDisplay {
+    fn display_constants(&self, func_name: &dyn Fn(FunctionId) -> String) -> String;
+}
+
+impl ConstantsDisplay for () {
+    fn display_constants(&self, _: &dyn Fn(FunctionId) -> String) -> String {
+        String::new()
+    }
+}

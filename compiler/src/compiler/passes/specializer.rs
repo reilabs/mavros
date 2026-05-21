@@ -21,8 +21,8 @@ use crate::compiler::{
     ssa::{
         FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLFunction, HLSSA, OpCode, Radix,
-            RefCountOp, SequenceTargetType, Type,
+            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, Constants, Endianness, HLFunction,
+            HLSSA, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
             builder::{HLEmitter, HLFunctionBuilder},
         },
     },
@@ -47,11 +47,29 @@ enum ConstVal {
 struct Val(ValueId);
 
 struct SpecializationState {
+    /// The function being specialized.
     function: HLFunction,
-    /// Transient counter for `ValueId`s allocated during specialization. Starts at the SSA's
-    /// `value_num_bound` and is reconciled back into the SSA only if specialization is accepted.
+
+    /// Transient counter for `ValueId`s allocated during specialization.
+    ///
+    /// This starts at the SSA's `value_num_bound` and is reconciled back into the SSA _only_ if
+    /// specialization is accepted.
     transient_counter: u64,
+
+    /// Storage for known constant values for use in constant folding.
     const_vals: HashMap<ValueId, ConstVal>,
+
+    /// Snapshot of the main SSA's constants table, used to dedup against constants that already
+    /// exist before specialization began.
+    ///
+    /// Cloned because `SymbolicExecutor::run` only gives us `&HLSSA`, ruling out a live borrow into
+    /// the main table.
+    main_constants_snapshot: Constants,
+
+    /// Constants newly created during specialization.
+    ///
+    /// Merged back into the main SSA _only_ if the specialization is accepted.
+    transient_constants: Constants,
 }
 
 impl SpecializationState {
@@ -73,6 +91,18 @@ impl HLEmitter for SpecializationState {
     fn emit(&mut self, op: OpCode) {
         let entry = self.function.get_entry_id();
         self.function.get_block_mut(entry).push_instruction(op);
+    }
+
+    fn intern_const(&mut self, value: ConstValue) -> ValueId {
+        if let Some(&id) = self.main_constants_snapshot.get_by_right(&value) {
+            return id;
+        }
+        if let Some(&id) = self.transient_constants.get_by_right(&value) {
+            return id;
+        }
+        let id = self.fresh_value();
+        self.transient_constants.insert(id, value);
+        id
     }
 }
 
@@ -820,6 +850,8 @@ impl Specializer {
             function: HLFunction::empty(name),
             transient_counter: ssa.value_num_bound() as u64,
             const_vals: HashMap::new(),
+            main_constants_snapshot: ssa.const_storage().clone(),
+            transient_constants: Constants::default(),
         };
 
         let mut call_params: Vec<Val> = vec![];
@@ -887,6 +919,12 @@ impl Specializer {
         if savings_to_code_ratio > self.savings_to_code_ratio {
             info!(message = %"Specialization accepted", code_bloat = code_bloat,  savings_to_code_ratio = savings_to_code_ratio, threshold_ratio = self.savings_to_code_ratio);
             ssa.reserve_values_up_to(state.transient_counter);
+            // Merge transient constants into the main SSA. Each entry was deduped against the
+            // pre-specialization snapshot, so its ConstValue is unique relative to main; just
+            // insert under the transient ValueId.
+            for (id, cv) in state.transient_constants.iter() {
+                ssa.const_storage_mut().insert(*id, cv.clone());
+            }
             let original_fn = ssa.take_function(signature.get_fun_id());
             let new_fn_id = ssa.add_function("".to_string());
             let new_original_id = ssa.add_function("".to_string()); // Temporary

@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::compiler::ssa::{
-    DefaultSSAAnnotator, Instruction, SSA, SSAType,
+    ConstantsDisplay, DefaultSSAAnnotator, Instruction, SSA, SSAType,
     hlssa::{Constants, OpCode, Type},
 };
 
@@ -229,7 +229,9 @@ pub struct PassManager<
     phase_label: String,
 }
 
-impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static> PassManager<Op, Ty, C> {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + ConstantsDisplay + 'static>
+    PassManager<Op, Ty, C>
+{
     pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass<Op, Ty, C>>>) -> Self {
         Self {
             passes,

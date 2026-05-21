@@ -15,6 +15,10 @@ pub trait HLEmitter {
     fn fresh_value(&mut self) -> ValueId;
     fn emit(&mut self, op: OpCode);
 
+    /// Return the canonical `ValueId` for `value`, allocating + recording it in the SSA's
+    /// constants table if not already present.
+    fn intern_const(&mut self, value: ConstValue) -> ValueId;
+
     // -- Arithmetic --
 
     fn add(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
@@ -233,30 +237,15 @@ pub trait HLEmitter {
     // -- Constants --
 
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::Field(value),
-        });
-        r
+        self.intern_const(ConstValue::Field(value))
     }
 
     fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::U(bits, value),
-        });
-        r
+        self.intern_const(ConstValue::U(bits, value))
     }
 
     fn i_const(&mut self, bits: usize, value: u128) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::I(bits, value),
-        });
-        r
+        self.intern_const(ConstValue::I(bits, value))
     }
 
     // -- Witness --
@@ -638,6 +627,10 @@ impl HLEmitter for HLInstrBuilder<'_> {
     fn emit(&mut self, op: OpCode) {
         self.instructions.push(op);
     }
+
+    fn intern_const(&mut self, value: ConstValue) -> ValueId {
+        self.ssa.intern_const(value)
+    }
 }
 
 impl HLEmitter for HLBlockEmitter<'_> {
@@ -647,6 +640,10 @@ impl HLEmitter for HLBlockEmitter<'_> {
 
     fn emit(&mut self, op: OpCode) {
         self.block.push_instruction(op);
+    }
+
+    fn intern_const(&mut self, value: ConstValue) -> ValueId {
+        self.ssa.intern_const(value)
     }
 }
 

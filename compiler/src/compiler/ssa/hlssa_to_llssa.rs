@@ -1,4 +1,4 @@
-//! HLSSA -> LLSSA lowering pass
+//! HLSSA -> LLSSA lowering passhlssa_to
 //!
 //! Translates the high-level SSA (with abstract Field/U types and a separate
 //! constant map) into low-level SSA (explicit integer widths, field-as-struct,
@@ -21,8 +21,8 @@ use crate::compiler::analysis::{
 use super::{
     BlockId, FunctionId, Terminator, ValueId,
     hlssa::{
-        BinaryArithOpKind, CmpKind, DMatrix, HLFunction, HLSSA, Type as HLType,
-        TypeExpr as HLTypeExpr,
+        BinaryArithOpKind, CmpKind, ConstValue, Constants, DMatrix, HLFunction, HLSSA,
+        Type as HLType, TypeExpr as HLTypeExpr,
     },
     llssa::{
         FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
@@ -461,6 +461,7 @@ fn lower_inner(
             &mut ad_fns,
             &mut lookup_fns,
             &hlssa_global_types,
+            hlssa.const_storage(),
         );
 
         let _old = llssa.take_function(ll_fn_id);
@@ -502,6 +503,7 @@ fn lower_function(
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
+    hl_constants: &Constants,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -538,6 +540,22 @@ fn lower_function(
             val_map.insert(*param_id, ll_param_id);
         }
     }
+
+    // Pre-emit every HL constant the function references into its entry block, so they dominate
+    // every later use. Constants are sourced from the SSA-level constants table — no per-instr
+    // lowering of `OpCode::Const` is needed because that opcode no longer exists.
+    //
+    // This is very much a temporary hack brought on by this commit being a step on the way to the
+    // new constant infrastructure. It should no longer be needed once we have properly constant
+    // constants, but that is coming later in this chain of work.
+    emit_function_constants(
+        function,
+        hl_constants,
+        &mut ll_func,
+        llssa,
+        ll_entry_id,
+        &mut val_map,
+    );
 
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
@@ -591,6 +609,81 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
     id
 }
 
+/// Pre-emit every HL constant *referenced* by `function` into `entry_block` of `ll_func`, and
+/// register the HL→LL ValueId mapping in `val_map`. Only constants used by the function are
+/// emitted, to avoid spamming each LL function with unrelated SSA-global constants.
+fn emit_function_constants(
+    function: &HLFunction,
+    hl_constants: &Constants,
+    ll_func: &mut LLFunction,
+    llssa: &mut LLSSA,
+    entry_block: BlockId,
+    val_map: &mut HashMap<ValueId, ValueId>,
+) {
+    use crate::compiler::ssa::Instruction;
+
+    // Discover which constant ValueIds are referenced by this function.
+    let mut used: std::collections::BTreeSet<ValueId> = std::collections::BTreeSet::new();
+    for (_, block) in function.get_blocks() {
+        for instr in block.get_instructions() {
+            for input in instr.get_inputs() {
+                if hl_constants.contains_left(input) {
+                    used.insert(*input);
+                }
+            }
+        }
+        match block.get_terminator() {
+            Some(Terminator::Jmp(_, args)) => {
+                for v in args {
+                    if hl_constants.contains_left(v) {
+                        used.insert(*v);
+                    }
+                }
+            }
+            Some(Terminator::JmpIf(cond, _, _)) => {
+                if hl_constants.contains_left(cond) {
+                    used.insert(*cond);
+                }
+            }
+            Some(Terminator::Return(vals)) => {
+                for v in vals {
+                    if hl_constants.contains_left(v) {
+                        used.insert(*v);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    if used.is_empty() {
+        return;
+    }
+
+    let mut emitter = LLBlockEmitter::new(ll_func, llssa, entry_block);
+    for hl_id in used {
+        let cv = hl_constants.get_by_left(&hl_id).expect("constant present");
+        let ll_id = match cv {
+            ConstValue::U(bits, val) | ConstValue::I(bits, val) => {
+                emitter.int_const(*bits as u32, *val as u64)
+            }
+            ConstValue::Field(fr) => {
+                let field_struct = LLStruct::field_elem();
+                let limbs = fr.0.0;
+                let l0 = emitter.int_const(64, limbs[0]);
+                let l1 = emitter.int_const(64, limbs[1]);
+                let l2 = emitter.int_const(64, limbs[2]);
+                let l3 = emitter.int_const(64, limbs[3]);
+                emitter.mk_struct(field_struct, vec![l0, l1, l2, l3])
+            }
+            ConstValue::FnPtr(_) => {
+                panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
+            }
+        };
+        val_map.insert(hl_id, ll_id);
+    }
+}
+
 // =============================================================================
 // Instruction lowering
 // =============================================================================
@@ -609,7 +702,7 @@ fn lower_instruction(
     hlssa_global_types: &[HLType],
 ) {
     use crate::compiler::ssa::hlssa::{
-        CallTarget, CastTarget, ConstValue, OpCode, Radix, RefCountOp, SequenceTargetType,
+        CallTarget, CastTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
     };
 
     match instruction {
@@ -760,26 +853,6 @@ fn lower_instruction(
             let ll_result = e.select(ll_cond, ll_if_t, ll_if_f);
             val_map.insert(*result, ll_result);
         }
-
-        OpCode::Const { result, value } => match value {
-            ConstValue::U(bits, val) | ConstValue::I(bits, val) => {
-                let ll_val = e.int_const(*bits as u32, *val as u64);
-                val_map.insert(*result, ll_val);
-            }
-            ConstValue::Field(fr) => {
-                let field_struct = LLStruct::field_elem();
-                let limbs = fr.0.0;
-                let l0 = e.int_const(64, limbs[0]);
-                let l1 = e.int_const(64, limbs[1]);
-                let l2 = e.int_const(64, limbs[2]);
-                let l3 = e.int_const(64, limbs[3]);
-                let mk = e.mk_struct(field_struct, vec![l0, l1, l2, l3]);
-                val_map.insert(*result, mk);
-            }
-            ConstValue::FnPtr(_) => {
-                panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
-            }
-        },
 
         // -- Array operations --
         OpCode::MkSeq {

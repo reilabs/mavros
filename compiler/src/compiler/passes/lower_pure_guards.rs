@@ -261,8 +261,7 @@ impl LowerPureGuards {
             }
 
             // -- Pure computation, no constraints, can't fail → unwrap --
-            OpCode::Const { .. }
-            | OpCode::Cmp { .. }
+            OpCode::Cmp { .. }
             | OpCode::Not { .. }
             | OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor,

@@ -293,8 +293,12 @@ impl WitnessTypeInference {
         let entry_id = func.get_entry_id();
         let block_queue: Vec<BlockId> = cfg.get_blocks_bfs().collect();
 
-        // Inner state
-        let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
+        // Inner state — seed with the SSA's constants table; every constant is `Pure`.
+        let mut value_wt: HashMap<ValueId, WitnessShape> = ssa
+            .const_storage()
+            .iter()
+            .map(|(id, _)| (*id, WitnessShape::Scalar(WitnessType::Pure)))
+            .collect();
         let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
         let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::new();
 
@@ -841,9 +845,6 @@ impl WitnessTypeInference {
                 | OpCode::Todo { .. }
                 | OpCode::ValueOf { .. } => {
                     panic!("Should not be present at this stage {:?}", instruction);
-                }
-                OpCode::Const { result, .. } => {
-                    value_wt.insert(*result, WitnessShape::Scalar(WitnessType::Pure));
                 }
                 OpCode::Guard { .. } => {
                     panic!("ICE: Guard should not be present during witness type inference");
