@@ -104,10 +104,6 @@ impl LowerGuards {
                             continue_block,
                         );
                     } else {
-                        // Guard wrapping a value-producing op: lower to an
-                        // if-else, with the merge-block phi reusing the
-                        // original result id so downstream uses stay wired.
-                        // The skip branch produces a zero default.
                         Self::lower_guard_with_result(
                             &mut emitter,
                             condition,
@@ -156,12 +152,6 @@ impl LowerGuards {
         }
     }
 
-    /// Lower `Guard(cond, op -> result)` to
-    ///   if cond { result = op } else { result = default(type) }
-    /// via `build_if_else_into`, which takes the original result id as the
-    /// merge-block phi parameter. The exec branch calls the matching builder
-    /// method so the inner op gets a fresh result id and is forwarded to the
-    /// phi via the Jmp args.
     fn lower_guard_with_result(
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -176,7 +166,19 @@ impl LowerGuards {
         emitter.build_if_else_into(
             condition,
             result_pairs.clone(),
-            |e| Self::emit_inner_fresh(e, &inner),
+            |e| {
+                let mut inner_fresh = inner.clone();
+                let fresh_results: Vec<_> = inner_fresh
+                    .get_results_mut()
+                    .map(|result| {
+                        let fresh = e.fresh_value();
+                        *result = fresh;
+                        fresh
+                    })
+                    .collect();
+                e.emit(inner_fresh);
+                fresh_results
+            },
             |e| {
                 result_pairs
                     .iter()
@@ -186,23 +188,6 @@ impl LowerGuards {
         );
     }
 
-    /// Emit `inner` with fresh result ids and return those ids (for use as
-    /// the merge-block Jmp args). Only the opcodes that explicit_witness
-    /// actually wraps in Guards-with-results need to be handled here.
-    fn emit_inner_fresh(emitter: &mut HLBlockEmitter<'_>, inner: &OpCode) -> Vec<ValueId> {
-        match inner {
-            OpCode::ArrayGet { array, index, .. } => {
-                vec![emitter.array_get(*array, *index)]
-            }
-            other => panic!(
-                "LowerGuards: Guard with result around unsupported op {:?}",
-                other
-            ),
-        }
-    }
-
-    /// Synthesize a zero-valued instance of the given type, used as the
-    /// `else`-branch value when a Guard with a result is skipped.
     fn default_value(emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
         match &ty.expr {
             TypeExpr::Field => emitter.field_const(Field::from(0u64)),

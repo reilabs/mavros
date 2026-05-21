@@ -48,21 +48,12 @@ impl ScalarKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
-    U {
-        bits_size: usize,
-        value: u128,
-    },
-    I {
-        bits_size: usize,
-        value: u128,
-    },
+    U { bits_size: usize, value: u128 },
+    I { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
     Unknown(ScalarKind),
-    /// A slice whose length and contents are both unknown. Distinct from
-    /// `Array(vec![])` (an empty slice of length zero) and from `Unknown(_)`
-    /// (a scalar of unknown value).
     UnknownSlice,
     WitnessOf(Box<ValueSignature>),
     Tuple(Vec<ValueSignature>),
@@ -125,9 +116,6 @@ pub enum Value {
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
-    /// A slice whose length and contents are both unknown. Distinct from
-    /// `Array(vec![])` (an empty slice of length zero) and from `Unknown(_)`
-    /// (a scalar of unknown value).
     UnknownSlice,
     WitnessOf(Box<Value>),
     Tuple(Vec<Value>),
@@ -173,12 +161,6 @@ impl Value {
         }
     }
 
-    /// Construct a structurally-correct `Unknown` value for a given type.
-    /// Scalar types collapse to `Value::Unknown`; composite types retain their
-    /// shape with unknown leaves. Used when the symbolic executor needs a
-    /// placeholder value (e.g. the result of a witness-indexed array read) but
-    /// must preserve the IR's expectation that the value is, say, an array of
-    /// arrays rather than a flat scalar.
     fn unknown_from_type(tp: &Type) -> Value {
         match &tp.expr {
             TypeExpr::Field => Value::Unknown(ScalarKind::Field),

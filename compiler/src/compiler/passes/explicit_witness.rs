@@ -29,8 +29,6 @@ use crate::compiler::{
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive};
 
-/// Number of scalar leaves contained in a (possibly nested) type. Used to
-/// compute the flat lookup-table stride for witness-indexed multidimensional-array reads.
 fn leaf_scalar_count(t: &Type) -> usize {
     match &t.expr {
         TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
@@ -1039,11 +1037,6 @@ impl ExplicitWitness {
                     }
                     let constrain_one = b.field_const(Field::from(1));
                     b.constrain(current_sum, constrain_one, value);
-                    // The caller's SSA type for this ToRadix is `Array<u8, count>`;
-                    // store byte-sized elements so the array layout matches what
-                    // downstream `array_get`s read. The witness `byte_wit` values
-                    // are `WitnessOf(Field)`, so cast each to `WitnessOf(U(8))`
-                    // (a 1-cell value carrying the byte) before the MkSeq.
                     let byte_elems: Vec<ValueId> = witnesses
                         .iter()
                         .map(|&w| b.cast_to(CastTarget::U(8), w))
@@ -1453,7 +1446,14 @@ impl ExplicitWitness {
                         if l_taint || r_taint {
                             let cond_field = self.ensure_field(b, function_type_info, condition);
                             self.gen_witness_field_div_guarded(
-                                b, l, r, l_taint, r_taint, cond_field, res,
+                                b,
+                                l,
+                                r,
+                                l_taint,
+                                r_taint,
+                                function_type_info.get_value_type(condition).is_witness_of(),
+                                cond_field,
+                                res,
                             );
                         } else {
                             b.push(inner);
@@ -1587,12 +1587,6 @@ impl ExplicitWitness {
                 value,
                 pinned,
             } => {
-                // Witness tape positions are static, so we always emit a write.
-                // When `condition` is true the value reaches the tape as-is; when
-                // it's false the resulting witness slot is unconstrained — every
-                // user of `result` lives inside the same Guard (or downstream
-                // Guards), so its read is also flagged off and the slot's value
-                // doesn't matter.
                 b.push(OpCode::WriteWitness {
                     result,
                     value,
@@ -1600,10 +1594,6 @@ impl ExplicitWitness {
                 });
             }
             OpCode::Rangecheck { value, max_bits } => {
-                // Guard(cond, Rangecheck(witness_value, max_bits)) → witness
-                // rangecheck gadget gated by `cond`. The pure-value case is
-                // lowered earlier by `lower_pure_guards` (as `if v >= 2^max
-                // { assert(!cond) }`), so it doesn't reach this branch.
                 assert!(
                     function_type_info.get_value_type(value).is_witness_of(),
                     "pure Rangecheck inside Guard should have been lowered by \
@@ -2422,12 +2412,6 @@ impl ExplicitWitness {
         }
     }
 
-    /// Field division inside a guard. Unlike [`gen_witness_field_div`], the
-    /// `q * b = a` constraint is multiplied through by `cond_field` so it
-    /// becomes `q * (b * cond) = a * cond`. When `cond = 1` it reduces to
-    /// `q * b = a`; when `cond = 0` it collapses to `0 = 0`, which lets a
-    /// witness divisor that happens to be zero on the inactive branch
-    /// satisfy the system (the unguarded form would be unsatisfiable).
     fn gen_witness_field_div_guarded(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2435,14 +2419,11 @@ impl ExplicitWitness {
         divisor: ValueId,
         l_taint: bool,
         r_taint: bool,
+        cond_taint: bool,
         cond_field: ValueId,
         result: ValueId,
     ) {
         if l_taint && !r_taint {
-            // Divisor is pure: `lower_pure_guards` has already rejected a
-            // zero pure divisor under an active guard, so the pass-through
-            // is safe — it's a linear op when the divisor is a constant or
-            // pure runtime value known to be non-zero on the active branch.
             b.push(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Div,
                 result,
@@ -2460,9 +2441,16 @@ impl ExplicitWitness {
             value: q_hint_field,
             pinned: false,
         });
-        let a_gated = b.mul(a, cond_field);
-        let b_gated = b.mul(divisor, cond_field);
-        b.constrain(result, b_gated, a_gated);
+        let a_gated = if l_taint && cond_taint {
+            let cond_pure = b.value_of(cond_field);
+            let a_gated_hint = b.mul(a_pure, cond_pure);
+            let a_gated_wit = b.write_witness(a_gated_hint);
+            b.constrain(a, cond_field, a_gated_wit);
+            a_gated_wit
+        } else {
+            b.mul(a, cond_field)
+        };
+        b.constrain(result, divisor, a_gated);
     }
 
     /// Multi-bit witness And/Or/Xor via spread tables.
@@ -2663,12 +2651,6 @@ impl ExplicitWitness {
 
     /// Lower a witness-indexed ArrayGet into a hint + lookup constraint.
     /// `flag` is the lookup flag: `1` unconditionally, or the guard condition.
-    ///
-    /// For scalar element types this emits a single `write_witness` + `lookup_arr`.
-    /// For multi-dimensional array elements the array is hint-reconstructed
-    /// element-by-element: each scalar leaf is written as a witness and then
-    /// constrained via a lookup into the original array's flattened lookup
-    /// table at offset `idx * stride + leaf_offset`.
     fn gen_witness_array_get(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2683,27 +2665,24 @@ impl ExplicitWitness {
         let result_type = result_type_full.strip_all_witness();
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
-        // Hint-side `array_get` would panic on zero-length arrays or
-        // out-of-bounds reads; gate it on `do_hint = cond && in_bounds` and
-        // wrap it in a Guard so the array_get only fires when safe. A later
-        // pass lowers the Guard into control flow (witgen) or DCEs it once
-        // the hint chain dies after WitnessWriteToFresh (R1CS).
-        let do_hint = self.compute_do_hint(b, function_type_info, arr, idx, cond);
         let pure_idx = b.value_of(idx);
 
-        // Multidimensional-array case: hint the entire slice, then constrain each leaf with a
-        // lookup at a computed flat offset.
         if matches!(&result_type.expr, TypeExpr::Array(..)) {
             let idx_field = b.cast_to_field(idx);
             let inner_hint = b.fresh_value();
-            b.push(OpCode::Guard {
-                condition: do_hint,
-                inner: Box::new(OpCode::ArrayGet {
-                    result: inner_hint,
-                    array: arr,
-                    index: pure_idx,
-                }),
-            });
+            let inner = OpCode::ArrayGet {
+                result: inner_hint,
+                array: arr,
+                index: pure_idx,
+            };
+            if let Some(cond) = cond {
+                b.push(OpCode::Guard {
+                    condition: cond,
+                    inner: Box::new(inner),
+                });
+            } else {
+                b.push(inner);
+            }
             let outer_stride = leaf_scalar_count(&result_type);
             let stride_const = b.field_const(Field::from(outer_stride as u128));
             let base_key = b.mul(idx_field, stride_const);
@@ -2742,14 +2721,19 @@ impl ExplicitWitness {
         };
 
         let hint = b.fresh_value();
-        b.push(OpCode::Guard {
-            condition: do_hint,
-            inner: Box::new(OpCode::ArrayGet {
-                result: hint,
-                array: arr,
-                index: pure_idx,
-            }),
-        });
+        let inner = OpCode::ArrayGet {
+            result: hint,
+            array: arr,
+            index: pure_idx,
+        };
+        if let Some(cond) = cond {
+            b.push(OpCode::Guard {
+                condition: cond,
+                inner: Box::new(inner),
+            });
+        } else {
+            b.push(inner);
+        }
         let mut r_pure_val = hint;
 
         if arr_elem_type.is_witness_of() {
@@ -2767,55 +2751,6 @@ impl ExplicitWitness {
         b.lookup_arr(arr, idx_field, r_wit, flag);
     }
 
-    /// Compute `do_hint = pure_cond AND in_bounds` where `pure_cond` is the
-    /// pure-U(1) hint of the surrounding guard (or constant 1 when there is
-    /// no surrounding guard), and `in_bounds = pure_idx < len`. The Guard
-    /// wrapping the hint-side `array_get` is driven by this flag.
-    fn compute_do_hint(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        arr: ValueId,
-        idx: ValueId,
-        cond: Option<ValueId>,
-    ) -> ValueId {
-        let arr_ty = function_type_info.get_value_type(arr);
-        let idx_bits = match function_type_info.get_value_type(idx).strip_witness().expr {
-            TypeExpr::U(n) => n,
-            other => panic!("compute_do_hint: non-uint index type {:?}", other),
-        };
-        let len_val = match &arr_ty.strip_witness().expr {
-            TypeExpr::Array(_, n) => b.u_const(idx_bits, *n as u128),
-            TypeExpr::Slice(_) => {
-                let len32 = b.slice_len(arr);
-                if idx_bits == 32 {
-                    len32
-                } else {
-                    b.cast_to(CastTarget::U(idx_bits), len32)
-                }
-            }
-            other => panic!("compute_do_hint on non-seq type: {:?}", other),
-        };
-        let pure_idx = b.value_of(idx);
-        let in_bounds = b.lt(pure_idx, len_val);
-        match cond {
-            None => in_bounds,
-            Some(c) => {
-                let c_pure = if function_type_info.get_value_type(c).is_witness_of() {
-                    b.value_of(c)
-                } else {
-                    c
-                };
-                b.and(c_pure, in_bounds)
-            }
-        }
-    }
-
-    /// Lower `arr[idx] = value` where `idx` is witness-tainted by expanding to
-    /// a per-position conditional update. For each position `i ∈ 0..N`:
-    ///   - emit an equality gadget producing a 0/1 witness `eq_i = (idx == i)`,
-    ///   - compute `new_i = arr[i] + eq_i * (value - arr[i])`,
-    /// then `MkSeq` the new elements into the result array. Costs O(N).
     fn gen_witness_array_set(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2880,9 +2815,6 @@ impl ExplicitWitness {
             let i_const_idx = b.u_const(idx_bits, i as u128);
             let i_const_field = b.field_const(Field::from(i as u128));
 
-            // Equality gadget: eq_wit ∈ {0, 1} with eq_wit = 1 iff idx == i.
-            // (idx - i) * inv = 1 - eq_wit
-            // (idx - i) * eq_wit = 0
             let diff = b.sub(idx_field, i_const_field);
             let diff_pure = b.value_of(diff);
             let inv_hint = b.div(one_field, diff_pure);
@@ -2894,15 +2826,9 @@ impl ExplicitWitness {
             b.constrain(diff, inv_wit, one_minus_eq);
             b.constrain(diff, eq_wit, zero_field);
 
-            // arr[i] for the pure (compile-time) index i.
             let arr_i = b.array_get(arr, i_const_idx);
             let arr_i_field = b.cast_to_field(arr_i);
 
-            // new_i_field = arr_i_field + eq_wit * (value_field - arr_i_field).
-            // eq_wit is a witness, the diff may be pure or witness. In either
-            // case we materialize the product as a fresh witness with the
-            // multiplicative constraint, which is sound when the diff is pure
-            // (degenerate witness * const) and necessary when it is witness.
             let diff_val = b.sub(value_field, arr_i_field);
             let diff_val_pure = b.value_of(diff_val);
             let eq_pure = b.value_of(eq_wit);
@@ -2911,10 +2837,6 @@ impl ExplicitWitness {
             b.constrain(eq_wit, diff_val, prod_wit);
             let new_i_field = b.add(arr_i_field, prod_wit);
 
-            // Cast back to the array element type. The value is constrained to
-            // equal either `arr[i]` or `value` (both rangechecked at their
-            // origin), so the value fits — but the verifier needs a rangecheck
-            // to accept the truncating cast.
             let new_i = if let Some((target, bits)) = result_elem_back_cast {
                 self.gen_witness_rangecheck_bits(b, new_i_field, bits, flag_one);
                 b.cast_to(target, new_i_field)
@@ -2932,16 +2854,6 @@ impl ExplicitWitness {
         });
     }
 
-    /// Recursive helper for [`gen_witness_array_get`] in the multidimensional case. Walks the
-    /// target type tree, allocating intermediate `MkSeq` per non-leaf level and
-    /// emitting per-leaf `write_witness` + `lookup_arr` constraints.
-    ///
-    /// `arr_elem_type` is the original (possibly WitnessOf-leaved) type of the
-    /// current `hint` slice; used only to decide whether to unwrap a hint leaf.
-    /// `target_type` is the inferred type of the value being produced.
-    /// `leaf_offset` is the running flat-table offset for the current subtree.
-    /// `result_override`, when `Some`, becomes the id of the outermost `MkSeq`
-    /// or leaf `Cast`, so the caller can pre-allocate the final result id.
     #[allow(clippy::too_many_arguments)]
     fn gen_witness_array_get_multidim(
         &self,

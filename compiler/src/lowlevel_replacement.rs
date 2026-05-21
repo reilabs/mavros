@@ -9,9 +9,7 @@ use crate::compiler::lowering::LowLevelReplacement;
 use crate::driver::Error;
 
 pub enum ReplacementKind {
-    /// A single Noir function that substitutes for the blackbox intrinsic.
     Single(&'static str),
-    /// Family of replacements dispatched by array size.
     ByArraySize(&'static [(&'static str, u32)]),
 }
 

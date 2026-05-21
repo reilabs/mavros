@@ -1080,6 +1080,63 @@ impl Instruction for OpCode {
         }
     }
 
+    fn get_results_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        match self {
+            Self::Alloc { result: r, .. }
+            | Self::FreshWitness { result: r, .. }
+            | Self::Const { result: r, .. }
+            | Self::Cmp { result: r, .. }
+            | Self::BinaryArithOp { result: r, .. }
+            | Self::ArrayGet { result: r, .. }
+            | Self::ArraySet { result: r, .. }
+            | Self::SlicePush { result: r, .. }
+            | Self::SliceLen { result: r, .. }
+            | Self::Load { result: r, ptr: _ }
+            | Self::MkSeq { result: r, .. }
+            | Self::MkRepeated { result: r, .. }
+            | Self::Select { result: r, .. }
+            | Self::Cast { result: r, .. }
+            | Self::Truncate { result: r, .. }
+            | Self::SExt { result: r, .. }
+            | Self::MulConst { result: r, .. }
+            | Self::NextDCoeff { result: r }
+            | Self::TupleProj { result: r, .. }
+            | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
+            Self::WriteWitness { result: r, .. } => {
+                let ret_vec = r.iter_mut().collect::<Vec<_>>();
+                ret_vec.into_iter()
+            }
+            Self::Call { results: r, .. } => r.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::Constrain { .. }
+            | Self::BumpD { .. }
+            | Self::MemOp { .. }
+            | Self::Store { .. }
+            | Self::Assert { .. }
+            | Self::AssertCmp { .. }
+            | Self::AssertR1C { a: _, b: _, c: _ }
+            | Self::Rangecheck { .. } => vec![].into_iter(),
+            Self::Not { result: r, .. }
+            | Self::ValueOf { result: r, .. }
+            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Unspread {
+                result_odd,
+                result_even,
+                ..
+            } => vec![result_odd, result_even].into_iter(),
+            Self::ToBits { result: r, .. } => vec![r].into_iter(),
+            Self::ToRadix { result: r, .. } => vec![r].into_iter(),
+            Self::ReadGlobal { result: r, .. } => vec![r].into_iter(),
+            Self::Lookup { .. } | Self::DLookup { .. } => vec![].into_iter(),
+            Self::Todo { results, .. } => {
+                let ret_vec: Vec<&mut ValueId> = results.iter_mut().collect();
+                ret_vec.into_iter()
+            }
+            Self::InitGlobal { .. } => vec![].into_iter(),
+            Self::DropGlobal { global: _ } => vec![].into_iter(),
+            Self::Guard { inner, .. } => inner.get_results_mut().collect::<Vec<_>>().into_iter(),
+        }
+    }
+
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             Self::Alloc {

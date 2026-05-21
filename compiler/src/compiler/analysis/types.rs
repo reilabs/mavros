@@ -14,11 +14,6 @@ use crate::compiler::{
     },
 };
 
-/// Wrap every scalar leaf of `t` in `WitnessOf`, leaving Array/Slice/Tuple/Ref
-/// containers untouched. Existing WitnessOf wrappers are preserved (no double
-/// wrapping). Used to type multidimensional-array reads with a witness index:
-/// the witness taint reaches each leaf rather than stacking at the outer
-/// container.
 fn push_witness_of_to_leaves(t: Type) -> Type {
     match t.expr {
         TypeExpr::WitnessOf(_) => t,
@@ -311,10 +306,6 @@ impl Types {
                 })?;
 
                 let element_type = array_type.get_array_element();
-                // A witness index makes every scalar leaf of the read result a
-                // witness — for nested arrays the WitnessOf wrapper is pushed
-                // down to each leaf, not stacked at the outer container, so
-                // downstream multidimensional-array lookup lowering can see leaf-level witnesses.
                 let result_type = if index_type.is_witness_of() {
                     push_witness_of_to_leaves(element_type)
                 } else {

@@ -50,14 +50,6 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
     }
 }
 
-/// Invoke `f(leaf_index, leaf_ptr)` on every scalar leaf of an array
-/// (possibly nested), in row-major order, and return the total leaf count.
-///
-/// `stride` describes the per-leaf element width for primitive (Field/Word)
-/// arrays. For boxed arrays the recursion descends into each cell; if a cell's
-/// inner value is itself an array, the recursion continues; otherwise the cell
-/// pointer is the leaf (e.g., a witness/AD value, accessed by dereferencing
-/// the cell to get the BoxedValue handle, as `lookup_elem_bump_db` does).
 unsafe fn for_each_array_leaf<F: FnMut(usize, *mut u64)>(
     array: BoxedValue,
     stride: usize,
@@ -1373,10 +1365,6 @@ mod def {
         let table_idx = unsafe { *table_id_ptr };
 
         let table_idx = if table_idx == u64::MAX {
-            // First lookup on this array: create a new table.
-            // Nested arrays are flattened row-major; the walk visits every
-            // scalar leaf in row-major order, so `length` is the total leaf
-            // count regardless of nesting depth.
             let (cnst_off, wit_off, mult_wit) = unsafe {
                 (
                     vm.data.as_forward.elem_inverses_constraint_section_offset,
@@ -1385,8 +1373,6 @@ mod def {
                 )
             };
 
-            // Dump array element values into the x-slots (even offsets) of the
-            // table section as we walk the leaves; no intermediate buffer.
             let length = unsafe {
                 for_each_array_leaf(array, stride, |i, elem_ptr| {
                     let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind);
@@ -1558,59 +1544,44 @@ mod def {
         let table_idx = unsafe { *table_id_ptr };
 
         let table_idx = if table_idx == u64::MAX {
-            // First AD call on this array: create table and process table constraints.
-            // Nested arrays are flattened row-major; the walk visits each scalar
-            // leaf in order and returns the total leaf count.
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
             let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
 
-            // Per-leaf constraint contributions (everything that doesn't depend
-            // on `sum_coeff`, which we can't read until we know `length`).
             let length =
                 unsafe {
                     for_each_array_leaf(array, stride, |i, elem_ptr| {
-                        // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
                         let x_coeff =
                             *vm.data.as_ad.ad_coeffs.offset(
                                 inverses_constraint_section_offset as isize + 2 * i as isize,
                             );
-                        // da[beta] += x_coeff (A entry: (beta, 1))
                         *vm.data
                             .as_ad
                             .out_da
                             .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
-                        // db[v_i] += x_coeff (B entry: element value)
                         lookup_elem_bump_db(elem_ptr, elem_kind, x_coeff, vm);
-                        // dc[x_wit] -= x_coeff (C entry: (x, -1))
                         *vm.data
                             .as_ad
                             .out_dc
                             .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
                             x_coeff;
 
-                        // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
                         let y_coeff = *vm.data.as_ad.ad_coeffs.offset(
                             inverses_constraint_section_offset as isize + 2 * i as isize + 1,
                         );
-                        // dA[y_witness] += y_coeff
                         *vm.data.as_ad.out_da.offset(
                             inverses_witness_section_offset as isize + 2 * i as isize + 1,
                         ) += y_coeff;
-                        // dB[alpha] += y_coeff
                         *vm.data
                             .as_ad
                             .out_db
                             .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
-                        // dB -= y_coeff * i (constant part)
                         *vm.data.as_ad.out_db -= y_coeff * Field::from(i as u64);
-                        // dB[x_witness] -= y_coeff (x_i appears negated in B)
                         *vm.data
                             .as_ad
                             .out_db
                             .add(inverses_witness_section_offset + 2 * i) -= y_coeff;
-                        // dC[mult_witness] += y_coeff
                         *vm.data.as_ad.out_dc.add(multiplicities_wit_offset + i) += y_coeff;
                     })
                 };
@@ -1622,9 +1593,6 @@ mod def {
                     .offset(inverses_constraint_section_offset as isize + 2 * length as isize)
             };
 
-            // Sum constraint: y_i goes into A position. This write depends on
-            // sum_coeff (which depends on length) but otherwise only on `i`, so
-            // it lives outside the per-leaf walk.
             for i in 0..length {
                 unsafe {
                     *vm.data
@@ -1651,9 +1619,7 @@ mod def {
             vm.tables.push(table_info);
             unsafe {
                 vm.data.as_ad.current_wit_multiplicities_off += length;
-                // 2 witness slots per element (x and y)
                 vm.data.as_ad.current_wit_tables_off += 2 * length;
-                // 2 constraints per element + 1 sum constraint
                 vm.data.as_ad.current_cnst_tables_off += 2 * length + 1;
             }
 

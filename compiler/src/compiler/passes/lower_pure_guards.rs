@@ -151,19 +151,12 @@ impl LowerPureGuards {
                 });
             }
 
-            // -- Rangecheck: lower with OOB check if input is pure.
-            // An unconditional rangecheck on a pure value would still fire
-            // (and panic the VM / fail the proof) when the surrounding guard
-            // is inactive. Translate to `if v >= 2^max_bits { assert(!cond) }`
-            // so the failure is gated on the guard.
             OpCode::Rangecheck { value, max_bits }
                 if !type_info.get_value_type(value).is_witness_of() =>
             {
                 self.lower_rangecheck_guard(emitter, condition, value, max_bits, type_info);
             }
             OpCode::Rangecheck { .. } => {
-                // Witness value: keep as Guard, ExplicitWitness gates the
-                // gadget with the guard condition as the lookup flag.
                 emitter.emit(OpCode::Guard {
                     condition,
                     inner: Box::new(inner),
@@ -378,12 +371,6 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
-        // For unsigned Add/Sub we can detect overflow with a post-result
-        // comparison and skip the widening cast. (Modular wrap is what
-        // produces the result, so e.g. `a + b` overflows iff the wrapped
-        // result is below `a`.) Mul still needs the widening since there's
-        // no symmetric post-result trick. For signed, the sign-XOR rules
-        // work but aren't implemented yet.
         if !signed && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
             self.lower_unsigned_add_sub_guard(
                 emitter,
@@ -464,11 +451,6 @@ impl LowerPureGuards {
         );
     }
 
-    /// Lower `Guard(cond, (Add|Sub)(lhs, rhs))` for unsigned types without
-    /// widening. The native op already produces the modular-wrapped result;
-    /// overflow shows up as a post-result comparison:
-    ///   Add: overflow iff `result < lhs` (wrap brings it below an operand).
-    ///   Sub: underflow iff `result > lhs` (wrap brings it above the minuend).
     fn lower_unsigned_add_sub_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -599,14 +581,6 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) -> ValueId {
-        // Detect overflow without widening: shift left in the native bit width
-        // (which wraps modulo 2^bits) and verify `(lhs << rhs) >> rhs == lhs`.
-        // If any high bits were lost the round-trip fails. Works for both
-        // unsigned (logical shifts) and signed (arithmetic shift right
-        // restores the sign extension on a non-overflowing value).
-        //
-        // `emit_invalid_shift_cond` has already filtered out `rhs >= bits`, so
-        // both shifts here have a valid shift amount.
         let result_type = if signed {
             Type {
                 expr: TypeExpr::I(bits),

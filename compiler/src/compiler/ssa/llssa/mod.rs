@@ -282,6 +282,41 @@ impl Instruction for LLOp {
         }
     }
 
+    fn get_results_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        match self {
+            LLOp::IntConst { result, .. }
+            | LLOp::NullPtr { result }
+            | LLOp::IntArith { result, .. }
+            | LLOp::Not { result, .. }
+            | LLOp::Spread { result, .. }
+            | LLOp::IntCmp { result, .. }
+            | LLOp::Truncate { result, .. }
+            | LLOp::ZExt { result, .. }
+            | LLOp::FieldArith { result, .. }
+            | LLOp::FieldNeg { result, .. }
+            | LLOp::FieldEq { result, .. }
+            | LLOp::FieldToLimbs { result, .. }
+            | LLOp::FieldFromLimbs { result, .. }
+            | LLOp::MkStruct { result, .. }
+            | LLOp::ExtractField { result, .. }
+            | LLOp::HeapAlloc { result, .. }
+            | LLOp::Load { result, .. }
+            | LLOp::StructFieldPtr { result, .. }
+            | LLOp::ArrayElemPtr { result, .. }
+            | LLOp::Select { result, .. }
+            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            LLOp::Call { results, .. } => results.iter_mut().collect::<Vec<_>>().into_iter(),
+            LLOp::Unspread {
+                result_odd,
+                result_even,
+                ..
+            } => vec![result_odd, result_even].into_iter(),
+            LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
+        }
+    }
+
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             // No inputs

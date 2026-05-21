@@ -286,10 +286,6 @@ impl Value {
     }
 }
 
-/// Flatten the contents of an array into a row-major Vec of LCs for use as
-/// a lookup table. Nested arrays are recursively flattened so the resulting
-/// table is a single 1D sequence of scalar leaves, matching the flat-index
-/// scheme that the witness-indexed multidimensional-array read uses.
 fn flatten_array_into_table(arr: &ArrayData, out: &mut Vec<LC>) {
     for elem in arr.data.iter() {
         match elem {
