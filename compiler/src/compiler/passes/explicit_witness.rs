@@ -10,17 +10,19 @@ use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::flow_analysis::FlowAnalysis,
     analysis::{
+        flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
     },
-    block_builder::{HLEmitter, HLInstrBuilder},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
-        OpCode, Radix, SeqType, ValueId,
+        BlockId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
+            OpCode, Radix, SequenceTargetType, Type, TypeExpr,
+            builder::{HLEmitter, HLInstrBuilder},
+        },
     },
 };
 
@@ -1044,7 +1046,7 @@ impl ExplicitWitness {
                     b.push(OpCode::MkSeq {
                         result,
                         elems: byte_elems,
-                        seq_type: SeqType::Array(count),
+                        seq_type: SequenceTargetType::Array(count),
                         elem_type: Type::witness_of(Type::u(8)),
                     });
                 }
@@ -2711,7 +2713,7 @@ impl ExplicitWitness {
     ) {
         let arr_type = function_type_info.get_value_type(arr).clone();
         let (length, seq_type) = match &arr_type.strip_witness().expr {
-            TypeExpr::Array(_, n) => (*n, SeqType::Array(*n)),
+            TypeExpr::Array(_, n) => (*n, SequenceTargetType::Array(*n)),
             TypeExpr::Slice(_) => {
                 panic!("Witness-indexed write into a Slice is not supported")
             }
@@ -2873,7 +2875,7 @@ impl ExplicitWitness {
                 b.push(OpCode::MkSeq {
                     result: id,
                     elems,
-                    seq_type: SeqType::Array(*n),
+                    seq_type: SequenceTargetType::Array(*n),
                     elem_type: inner_target,
                 });
                 id

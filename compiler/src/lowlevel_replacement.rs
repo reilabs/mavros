@@ -6,7 +6,7 @@ use noirc_frontend::monomorphization::ast::{Definition, Expression, FuncId as As
 use noirc_frontend::monomorphization::visitor::visit_expr;
 use noirc_frontend::node_interner::FuncId;
 
-use crate::compiler::ssa_gen::LowLevelReplacement;
+use crate::compiler::lowering::LowLevelReplacement;
 use crate::driver::Error;
 
 pub enum ReplacementKind {

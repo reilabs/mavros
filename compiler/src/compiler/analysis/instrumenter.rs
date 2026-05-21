@@ -13,13 +13,18 @@ use tracing::instrument;
 
 use crate::compiler::{
     Field,
-    analysis::types::TypeInfo,
-    ir::r#type::{Type, TypeExpr},
-    ssa::{
-        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
-        MemOp, Radix, SeqType, SliceOpDir,
+    analysis::{
+        symbolic_executor::{self, SymbolicExecutor},
+        types::TypeInfo,
     },
-    symbolic_executor::{self, SymbolicExecutor},
+    ssa::{
+        FunctionId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, Radix, RefCountOp,
+            SequenceTargetType, SliceOpDir, Type, TypeExpr,
+        },
+    },
+    util::{spread_bits, unspread_bits},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -242,7 +247,7 @@ impl Value {
     fn binary_arith_op(
         &self,
         b: &Value,
-        binary_arith_op_kind: &crate::compiler::ssa::BinaryArithOpKind,
+        binary_arith_op_kind: &crate::compiler::ssa::hlssa::BinaryArithOpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match binary_arith_op_kind {
@@ -729,7 +734,7 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got u{}",
                     bits
                 );
-                Value::U(bits * 2, ssa_mod::spread_bits(*v, *bits))
+                Value::U(bits * 2, spread_bits(*v, *bits))
             }
             Value::I(bits, v) => {
                 assert!(
@@ -737,7 +742,7 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got i{}",
                     bits
                 );
-                Value::I(bits * 2, ssa_mod::spread_bits(*v, *bits))
+                Value::I(bits * 2, spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
             Value::WitnessOf(inner) => {
@@ -775,7 +780,7 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got u{}",
                     bits
                 );
-                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
+                let (odd_val, even_val) = unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
             }
@@ -785,7 +790,7 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got i{}",
                     bits
                 );
-                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
+                let (odd_val, even_val) = unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::I(half_bits, odd_val), Value::I(half_bits, even_val))
             }
@@ -833,7 +838,7 @@ impl Value {
 
     fn cast_op(
         &self,
-        cast_target: &crate::compiler::ssa::CastTarget,
+        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match (self, cast_target) {
@@ -881,7 +886,7 @@ impl Value {
         }
     }
 
-    fn to_bits(&self, endianness: &crate::compiler::ssa::Endianness, size: usize) -> Value {
+    fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {
@@ -923,7 +928,7 @@ impl Value {
     fn to_radix(
         &self,
         radix: &Radix<Value>,
-        _endianness: &crate::compiler::ssa::Endianness,
+        _endianness: &crate::compiler::ssa::hlssa::Endianness,
         size: usize,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
@@ -1123,7 +1128,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn cast(
         &self,
-        cast_target: &crate::compiler::ssa::CastTarget,
+        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
         _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
@@ -1199,7 +1204,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn mk_array(
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
-        _seq_type: SeqType,
+        _seq_type: SequenceTargetType,
         _elem_type: &Type,
     ) -> SpecSplitValue {
         let (uns, spec) = values
@@ -1493,7 +1498,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
+    fn mem_op(&self, _kind: RefCountOp, _ctx: &mut CostAnalysis) {}
 
     fn spread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> Self {
         Self {
@@ -1808,7 +1813,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
 
     fn on_guard(
         &mut self,
-        inner: &crate::compiler::ssa::OpCode,
+        inner: &crate::compiler::ssa::hlssa::OpCode,
         _condition: &SpecSplitValue,
         inputs: Vec<&SpecSplitValue>,
         result_types: Vec<&Type>,
@@ -1828,7 +1833,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
 
         // Nuke ptr contents for effectful ptr ops
-        if let crate::compiler::ssa::OpCode::Store { .. } = inner {
+        if let crate::compiler::ssa::hlssa::OpCode::Store { .. } = inner {
             // First input is the ptr
             if let Some(ptr_val) = inputs.first() {
                 if let Value::Pointer(p) = &ptr_val.unspecialized {

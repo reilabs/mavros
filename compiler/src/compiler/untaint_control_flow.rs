@@ -5,16 +5,20 @@ use std::collections::HashMap;
 use tracing::{Level, instrument};
 
 use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    analysis::types::{FunctionTypeInfo, Types},
-    block_builder::{HLEmitter, HLInstrBuilder},
-    ir::r#type::{Type, TypeExpr},
-    ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, FunctionId, HLBlock, HLFunction, HLSSA, OpCode,
-        SeqType, Terminator, ValueId,
+    analysis::{
+        flow_analysis::{CFG, FlowAnalysis},
+        types::{FunctionTypeInfo, Types},
+        witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
+        witness_type_inference::WitnessTypeInference,
     },
-    witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
-    witness_type_inference::WitnessTypeInference,
+    ssa::{
+        BlockId, FunctionId, Terminator, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, OpCode, SequenceTargetType,
+            Type, TypeExpr,
+            builder::{HLEmitter, HLInstrBuilder},
+        },
+    },
 };
 
 pub struct UntaintControlFlow {}
@@ -879,7 +883,11 @@ fn emit_unrolled_array_conversion(
         let converted = emit_value_conversion(elem, src_elem_type, tgt_elem_type, builder);
         elems.push(converted);
     }
-    builder.mk_seq(elems, SeqType::Array(size), tgt_elem_type.clone())
+    builder.mk_seq(
+        elems,
+        SequenceTargetType::Array(size),
+        tgt_elem_type.clone(),
+    )
 }
 
 /// Recursively strip WitnessOf from a value (for unconstrained call args).
@@ -907,7 +915,11 @@ fn emit_strip_witness(
                 let converted = emit_strip_witness(elem, src_inner, tgt_inner, builder);
                 elems.push(converted);
             }
-            builder.mk_seq(elems, SeqType::Array(*src_size), *tgt_inner.clone())
+            builder.mk_seq(
+                elems,
+                SequenceTargetType::Array(*src_size),
+                *tgt_inner.clone(),
+            )
         }
         // Tuple: decompose, per-field recursive, recompose
         (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
@@ -977,7 +989,7 @@ fn emit_merge_select(
             builder.push(OpCode::MkSeq {
                 result,
                 elems,
-                seq_type: SeqType::Array(*size),
+                seq_type: SequenceTargetType::Array(*size),
                 elem_type: *result_elem_type.clone(),
             });
             result

@@ -12,10 +12,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
-    block_builder::{HLEmitter, HLFunctionBuilder},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
-    ssa::{BlockId, CallTarget, ConstValue, FunctionId, HLSSA, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, FunctionId, Terminator, ValueId,
+        hlssa::{
+            CallTarget, ConstValue, HLSSA, OpCode, Type, TypeExpr,
+            builder::{HLEmitter, HLFunctionBuilder},
+        },
+    },
 };
 
 pub struct Defunctionalize {}

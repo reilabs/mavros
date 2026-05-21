@@ -8,11 +8,15 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
-    analysis::types::{FunctionTypeInfo, TypeInfo},
-    ir::r#type::TypeExpr,
+    analysis::{
+        flow_analysis::FlowAnalysis,
+        types::{FunctionTypeInfo, TypeInfo},
+    },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BinaryArithOpKind, CmpKind, HLSSA, Instruction, OpCode, ValueId},
+    ssa::{
+        Instruction, ValueId,
+        hlssa::{BinaryArithOpKind, CmpKind, HLSSA, OpCode, TypeExpr},
+    },
 };
 
 pub struct SimplifyAsserts {}

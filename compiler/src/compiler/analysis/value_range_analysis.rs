@@ -10,13 +10,16 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     Field,
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    analysis::types::{FunctionTypeInfo, TypeInfo},
-    ir::r#type::{Type, TypeExpr},
+    analysis::{
+        flow_analysis::{CFG, FlowAnalysis},
+        types::{FunctionTypeInfo, TypeInfo},
+    },
     pass_manager::{Analysis, AnalysisId, AnalysisStore},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA,
-        Instruction, OpCode, Terminator, ValueId,
+        BlockId, FunctionId, Instruction, Terminator, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+        },
     },
 };
 

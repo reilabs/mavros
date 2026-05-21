@@ -8,10 +8,12 @@ use noirc_frontend::monomorphization::ast::{
     LValue, Let, LocalId, While,
 };
 
-use crate::compiler::block_builder::{HLEmitter, HLFunctionBuilder};
-use crate::compiler::ir::r#type::Type;
 use crate::compiler::ssa::{
-    BlockId, CastTarget, ConstValue, Endianness, FunctionId, OpCode, Radix, SeqType, ValueId,
+    BlockId, FunctionId, ValueId,
+    hlssa::{
+        CastTarget, ConstValue, Endianness, OpCode, Radix, SequenceTargetType, Type,
+        builder::{HLEmitter, HLFunctionBuilder},
+    },
 };
 
 use super::type_converter::TypeConverter;
@@ -1008,9 +1010,9 @@ impl<'a> ExpressionConverter<'a> {
                 let element_val = self.convert_expression(element, b).unwrap();
                 let len = *length as usize;
                 let seq_type = if *is_vector {
-                    SeqType::Slice
+                    SequenceTargetType::Slice
                 } else {
-                    SeqType::Array(len)
+                    SequenceTargetType::Array(len)
                 };
                 let elem_type = self.type_converter.convert_type(elem_ast_type);
                 let result =
@@ -1026,9 +1028,11 @@ impl<'a> ExpressionConverter<'a> {
                     .bytes()
                     .map(|byte| self.get_or_create_const(b, ConstValue::U(8, byte as u128)))
                     .collect();
-                let arr = b
-                    .block(self.current_block)
-                    .mk_seq(elems, SeqType::Array(len), elem_type);
+                let arr = b.block(self.current_block).mk_seq(
+                    elems,
+                    SequenceTargetType::Array(len),
+                    elem_type,
+                );
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -1049,7 +1053,7 @@ impl<'a> ExpressionConverter<'a> {
                 let cp_len = codepoints.len();
                 let cp_array = b.block(self.current_block).mk_seq(
                     codepoints,
-                    SeqType::Array(cp_len),
+                    SequenceTargetType::Array(cp_len),
                     Type::u(32),
                 );
 
@@ -1099,8 +1103,8 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         let seq_type = match arr_len {
-            Some(len) => SeqType::Array(len as usize),
-            None => SeqType::Slice,
+            Some(len) => SequenceTargetType::Array(len as usize),
+            None => SequenceTargetType::Slice,
         };
         let elem_type = self.type_converter.convert_type(elem_ast_type);
 

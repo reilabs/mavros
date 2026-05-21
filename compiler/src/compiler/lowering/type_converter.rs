@@ -1,9 +1,9 @@
 //! Converts monomorphized AST types to mavros SSA types.
 
-use noirc_frontend::monomorphization::ast::Type as AstType;
+use noirc_frontend::monomorphization::ast::Type as NoirType;
 use noirc_frontend::shared::Signedness;
 
-use crate::compiler::ir::r#type::Type;
+use crate::compiler::ssa::hlssa::Type;
 
 /// Converts AST types to SSA types.
 pub struct TypeConverter;
@@ -14,50 +14,50 @@ impl TypeConverter {
     }
 
     /// Convert a monomorphized AST type to an SSA type.
-    pub fn convert_type(&self, ast_type: &AstType) -> Type {
+    pub fn convert_type(&self, ast_type: &NoirType) -> Type {
         match ast_type {
-            AstType::Field => Type::field(),
-            AstType::Bool => Type::bool(),
-            AstType::Integer(signedness, bit_size) => match signedness {
+            NoirType::Field => Type::field(),
+            NoirType::Bool => Type::bool(),
+            NoirType::Integer(signedness, bit_size) => match signedness {
                 Signedness::Unsigned => Type::u(bit_size.bit_size() as usize),
                 Signedness::Signed => Type::i(bit_size.bit_size() as usize),
             },
-            AstType::Unit => {
+            NoirType::Unit => {
                 // Unit type is represented as an empty tuple
                 Type::tuple_of(vec![])
             }
-            AstType::Array(len, elem_type) => {
+            NoirType::Array(len, elem_type) => {
                 let elem = self.convert_type(elem_type);
                 elem.array_of(*len as usize)
             }
-            AstType::Vector(elem_type) => {
+            NoirType::Vector(elem_type) => {
                 let elem = self.convert_type(elem_type);
                 elem.slice_of()
             }
-            AstType::Tuple(types) => {
+            NoirType::Tuple(types) => {
                 let converted: Vec<Type> = types.iter().map(|t| self.convert_type(t)).collect();
                 Type::tuple_of(converted)
             }
-            AstType::Reference(inner, _mutable) => {
+            NoirType::Reference(inner, _mutable) => {
                 let inner_type = self.convert_type(inner);
                 inner_type.ref_of()
             }
             // We defunctionalize as soon as possible, so we can simply throw this information away.
-            AstType::Function(_, _, _, _) => Type::function(),
-            AstType::String(len) => {
+            NoirType::Function(_, _, _, _) => Type::function(),
+            NoirType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
                 Type::u(8).array_of(*len as usize)
             }
-            AstType::FmtString(len, captures_type) => {
+            NoirType::FmtString(len, captures_type) => {
                 // fmtstr<N, T>: N is codepoint count, represented as
                 // Tuple(Array(U(32), N), ...T_fields)
                 let codepoints_array = Type::u(32).array_of(*len as usize);
                 let capture_fields = match captures_type.as_ref() {
-                    AstType::Tuple(fields) => fields
+                    NoirType::Tuple(fields) => fields
                         .iter()
                         .map(|t| self.convert_type(t))
                         .collect::<Vec<_>>(),
-                    AstType::Unit => vec![],
+                    NoirType::Unit => vec![],
                     other => vec![self.convert_type(other)],
                 };
                 let mut all_fields = vec![codepoints_array];

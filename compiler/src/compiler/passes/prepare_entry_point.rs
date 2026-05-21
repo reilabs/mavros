@@ -19,13 +19,15 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    block_builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BlockId, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
-        SeqType, ValueId,
+        BlockId, FunctionId, ValueId,
+        hlssa::{
+            CallTarget, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, SequenceTargetType,
+            Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
+        },
     },
 };
 
@@ -622,10 +624,15 @@ impl PrepareEntryPoint {
 
     fn emit_default_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
         if size == 0 {
-            return e.mk_seq(Vec::new(), SeqType::Array(0), inner.clone());
+            return e.mk_seq(Vec::new(), SequenceTargetType::Array(0), inner.clone());
         }
         let default_elem = Self::emit_default_value(e, inner);
-        e.mk_repeated(default_elem, SeqType::Array(size), size, inner.clone())
+        e.mk_repeated(
+            default_elem,
+            SequenceTargetType::Array(size),
+            size,
+            inner.clone(),
+        )
     }
 
     fn emit_reconstruct_child_input_array(
@@ -640,7 +647,7 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, index)
             })
             .collect();
-        e.mk_seq(fields, SeqType::Array(len), Type::field())
+        e.mk_seq(fields, SequenceTargetType::Array(len), Type::field())
     }
 
     fn emit_reconstruct_child_input_array_at_index(
@@ -667,7 +674,7 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, field_index)
             })
             .collect();
-        e.mk_seq(fields, SeqType::Array(width), Type::field())
+        e.mk_seq(fields, SequenceTargetType::Array(width), Type::field())
     }
 
     fn reconstruct_param(
@@ -696,7 +703,7 @@ impl PrepareEntryPoint {
                 new_instructions.push(OpCode::MkSeq {
                     result: input_array,
                     elems: fields,
-                    seq_type: SeqType::Array(input_len),
+                    seq_type: SequenceTargetType::Array(input_len),
                     elem_type: Type::field(),
                 });
                 let fn_id = Self::find_reconstruct_fn(typ, reconstruct_fns);

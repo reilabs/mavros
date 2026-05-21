@@ -1,67 +1,19 @@
-//! The definition for the generic SSA structure used as the backend for both the HLSSA and LLSSA
-//! variants used by the compiler.
+//! The high-level SSA representation used in the compiler and its associated types.
 
-use crate::compiler::ir::r#type::{SSAType, Type};
+pub mod builder;
+pub mod type_system;
+
 use itertools::Itertools;
-use std::{collections::HashMap, fmt::Display, vec};
+use std::fmt::Display;
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct ValueId(pub u64);
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct BlockId(pub u64);
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct FunctionId(pub u64);
+use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+pub use type_system::{Type, TypeExpr};
 
-pub trait SsaAnnotator {
-    fn annotate_value(&self, _function_id: FunctionId, _value_id: ValueId) -> String {
-        "".to_string()
-    }
-    fn annotate_function(&self, _function_id: FunctionId) -> String {
-        "".to_string()
-    }
-    fn annotate_block(&self, _function_id: FunctionId, _block_id: BlockId) -> String {
-        "".to_string()
-    }
-}
+// HLSSA
+// ================================================================================================
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct DefaultSsaAnnotator;
-impl SsaAnnotator for DefaultSsaAnnotator {}
-
-pub trait Instruction: Clone + std::fmt::Debug + 'static {
-    fn get_inputs(&self) -> impl Iterator<Item = &ValueId>;
-    fn get_results(&self) -> impl Iterator<Item = &ValueId>;
-    fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
-    fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
-
-    /// Static call targets for building call graphs.
-    fn get_static_call_targets(&self) -> Vec<FunctionId>;
-
-    /// Display an instruction. Takes closures for function name resolution
-    /// and value annotation (so the trait doesn't depend on SSA).
-    fn display_instruction(
-        &self,
-        func_name: &dyn Fn(FunctionId) -> String,
-        annotate_value: &dyn Fn(ValueId) -> String,
-    ) -> String;
-}
-
-#[derive(Clone)]
-pub struct SSA<Op: Instruction, Ty: SSAType> {
-    functions: HashMap<FunctionId, Function<Op, Ty>>,
-    /// Type of each global slot (indexed by slot number)
-    global_types: Vec<Ty>,
-    /// Function that initializes all globals (emits InitGlobal opcodes)
-    globals_init_fn: Option<FunctionId>,
-    /// Function that drops all globals (emits DropGlobal opcodes)
-    globals_deinit_fn: Option<FunctionId>,
-    main_id: FunctionId,
-    next_function_id: u64,
-}
-
+/// The high-level SSA is designed for domain-level analysis without concretizing runtime details.
 pub type HLSSA = SSA<OpCode, Type>;
-pub type HLFunction = Function<OpCode, Type>;
-pub type HLBlock = Block<OpCode, Type>;
 
 impl HLSSA {
     pub fn new() -> Self {
@@ -69,651 +21,10 @@ impl HLSSA {
     }
 }
 
-impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
-    pub fn with_main(name: String) -> Self {
-        let main_function = Function::<Op, Ty>::empty(name);
-        let main_id = FunctionId(0);
-        let mut functions = HashMap::new();
-        functions.insert(main_id, main_function);
-        SSA {
-            functions,
-            global_types: Vec::new(),
-            globals_init_fn: None,
-            globals_deinit_fn: None,
-            main_id,
-            next_function_id: 1,
-        }
-    }
-}
+// HLSSA OPCODES
+// ================================================================================================
 
-impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
-    pub fn prepare_rebuild(self) -> (SSA<Op, Ty>, HashMap<FunctionId, Function<Op, Ty>>, Vec<Ty>) {
-        (
-            SSA {
-                functions: HashMap::new(),
-                global_types: Vec::new(),
-                globals_init_fn: self.globals_init_fn,
-                globals_deinit_fn: self.globals_deinit_fn,
-                main_id: self.main_id,
-                next_function_id: self.next_function_id,
-            },
-            self.functions,
-            self.global_types,
-        )
-    }
-
-    pub fn insert_function(&mut self, function: Function<Op, Ty>) -> FunctionId {
-        let new_id = FunctionId(self.next_function_id);
-        self.next_function_id += 1;
-        self.functions.insert(new_id, function);
-        new_id
-    }
-
-    pub fn set_entry_point(&mut self, id: FunctionId) {
-        self.main_id = id;
-    }
-
-    pub fn get_main_id(&self) -> FunctionId {
-        self.main_id
-    }
-
-    pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
-        self.functions
-            .get_mut(&self.main_id)
-            .expect("Main function should exist")
-    }
-
-    pub fn get_main(&self) -> &Function<Op, Ty> {
-        self.functions
-            .get(&self.main_id)
-            .expect("Main function should exist")
-    }
-
-    pub fn get_function(&self, id: FunctionId) -> &Function<Op, Ty> {
-        self.functions.get(&id).expect("Function should exist")
-    }
-
-    pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function<Op, Ty> {
-        self.functions.get_mut(&id).expect("Function should exist")
-    }
-
-    pub fn take_function(&mut self, id: FunctionId) -> Function<Op, Ty> {
-        self.functions.remove(&id).expect("Function should exist")
-    }
-
-    pub fn put_function(&mut self, id: FunctionId, function: Function<Op, Ty>) {
-        self.functions.insert(id, function);
-    }
-
-    pub fn add_function(&mut self, name: String) -> FunctionId {
-        let new_id = FunctionId(self.next_function_id);
-        self.next_function_id += 1;
-        let function = Function::<Op, Ty>::empty(name);
-        self.functions.insert(new_id, function);
-        new_id
-    }
-
-    pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function<Op, Ty>)> {
-        self.functions.iter()
-    }
-
-    pub fn iter_functions_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (&FunctionId, &mut Function<Op, Ty>)> {
-        self.functions.iter_mut()
-    }
-
-    pub fn get_function_ids(&self) -> impl Iterator<Item = FunctionId> {
-        self.functions.keys().copied()
-    }
-
-    pub fn set_global_types(&mut self, types: Vec<Ty>) {
-        self.global_types = types;
-    }
-
-    pub fn get_global_types(&self) -> &[Ty] {
-        &self.global_types
-    }
-
-    pub fn num_globals(&self) -> usize {
-        self.global_types.len()
-    }
-
-    pub fn set_globals_init_fn(&mut self, id: FunctionId) {
-        self.globals_init_fn = Some(id);
-    }
-
-    pub fn set_globals_deinit_fn(&mut self, id: FunctionId) {
-        self.globals_deinit_fn = Some(id);
-    }
-
-    pub fn get_globals_init_fn(&self) -> Option<FunctionId> {
-        self.globals_init_fn
-    }
-
-    pub fn get_globals_deinit_fn(&self) -> Option<FunctionId> {
-        self.globals_deinit_fn
-    }
-}
-
-impl<Op: Instruction, Ty: SSAType> SSA<Op, Ty> {
-    pub fn to_string(&self, value_annotator: &dyn SsaAnnotator) -> String {
-        let func_name = |id: FunctionId| self.get_function(id).get_name().to_string();
-        self.functions
-            .iter()
-            .sorted_by_key(|(fn_id, _)| fn_id.0)
-            .map(|(fn_id, func)| func.to_string(&func_name, *fn_id, value_annotator))
-            .join("\n\n")
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum CallTarget {
-    Static(FunctionId),
-    Dynamic(ValueId),
-}
-
-#[derive(Clone)]
-pub struct Function<Op: Instruction, Ty: SSAType> {
-    entry_block: BlockId,
-    blocks: HashMap<BlockId, Block<Op, Ty>>,
-    name: String,
-    returns: Vec<Ty>,
-    next_block: u64,
-    next_value: u64,
-}
-
-impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
-    pub fn to_string(
-        &self,
-        func_name: &dyn Fn(FunctionId) -> String,
-        id: FunctionId,
-        value_annotator: &dyn SsaAnnotator,
-    ) -> String {
-        let header = format!(
-            "fn {}@{}(block {}) -> {} [{}] {{",
-            self.name,
-            id.0,
-            self.entry_block.0,
-            self.returns.iter().map(|t| format!("{}", t)).join(", "),
-            value_annotator.annotate_function(id)
-        );
-        let blocks = self
-            .blocks
-            .iter()
-            .sorted_by_key(|(bid, _)| bid.0)
-            .map(|(bid, block)| block.to_string(func_name, id, *bid, value_annotator))
-            .join("\n");
-        let footer = "}".to_string();
-        format!("{}\n{}\n{}", header, blocks, footer)
-    }
-}
-
-impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
-    pub fn empty(name: String) -> Self {
-        let entry = Block::empty();
-        let entry_id = BlockId(0);
-        let mut blocks = HashMap::new();
-        blocks.insert(entry_id, entry);
-        Function {
-            entry_block: BlockId(0),
-            blocks,
-            name,
-            next_block: 1,
-            returns: Vec::new(),
-            next_value: 0,
-        }
-    }
-
-    pub fn prepare_rebuild(self) -> (Function<Op, Ty>, HashMap<BlockId, Block<Op, Ty>>, Vec<Ty>) {
-        (
-            Function {
-                entry_block: self.entry_block,
-                blocks: HashMap::new(),
-                next_block: self.next_block,
-                name: self.name,
-                returns: vec![],
-                next_value: self.next_value,
-            },
-            self.blocks,
-            self.returns,
-        )
-    }
-
-    pub fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    pub fn get_var_num_bound(&self) -> usize {
-        self.next_value as usize
-    }
-
-    pub fn get_entry_mut(&mut self) -> &mut Block<Op, Ty> {
-        self.blocks
-            .get_mut(&self.entry_block)
-            .expect("Entry block should exist")
-    }
-
-    pub fn get_entry(&self) -> &Block<Op, Ty> {
-        self.blocks
-            .get(&self.entry_block)
-            .expect("Entry block should exist")
-    }
-
-    pub fn get_entry_id(&self) -> BlockId {
-        self.entry_block
-    }
-
-    pub fn get_block(&self, id: BlockId) -> &Block<Op, Ty> {
-        self.blocks.get(&id).expect("Block should exist")
-    }
-
-    pub fn get_block_mut(&mut self, id: BlockId) -> &mut Block<Op, Ty> {
-        self.blocks.get_mut(&id).expect("Block should exist")
-    }
-
-    pub fn take_block(&mut self, id: BlockId) -> Block<Op, Ty> {
-        self.blocks.remove(&id).expect("Block should exist")
-    }
-
-    pub fn put_block(&mut self, id: BlockId, block: Block<Op, Ty>) {
-        self.blocks.insert(id, block);
-    }
-
-    pub fn add_block(&mut self) -> BlockId {
-        let (id, _) = self.add_block_mut();
-        id
-    }
-
-    pub fn add_block_mut(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
-        let new_id = BlockId(self.next_block);
-        self.next_block += 1;
-        self.blocks.insert(new_id, Block::empty());
-        (new_id, self.blocks.get_mut(&new_id).unwrap())
-    }
-
-    pub fn block_is_terminated(&self, block_id: BlockId) -> bool {
-        self.blocks
-            .get(&block_id)
-            .unwrap()
-            .get_terminator()
-            .is_some()
-    }
-
-    pub fn next_virtual_block(&mut self) -> (BlockId, Block<Op, Ty>) {
-        let new_id = BlockId(self.next_block);
-        self.next_block += 1;
-        let block = Block::empty();
-        (new_id, block)
-    }
-
-    pub fn add_return_type(&mut self, typ: Ty) {
-        self.returns.push(typ);
-    }
-
-    pub fn get_param_types(&self) -> Vec<Ty> {
-        self.get_entry()
-            .parameters
-            .iter()
-            .map(|(_, typ)| typ.clone())
-            .collect()
-    }
-
-    pub fn iter_returns_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
-        self.returns.iter_mut()
-    }
-
-    pub fn get_returns(&self) -> &[Ty] {
-        &self.returns
-    }
-
-    pub fn get_blocks(&self) -> impl Iterator<Item = (&BlockId, &Block<Op, Ty>)> {
-        self.blocks.iter()
-    }
-
-    pub fn add_parameter(&mut self, block_id: BlockId, typ: Ty) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .parameters
-            .push((value_id, typ));
-        value_id
-    }
-
-    pub fn get_blocks_mut(&mut self) -> impl Iterator<Item = (&BlockId, &mut Block<Op, Ty>)> {
-        self.blocks.iter_mut()
-    }
-
-    pub fn take_blocks(&mut self) -> HashMap<BlockId, Block<Op, Ty>> {
-        std::mem::take(&mut self.blocks)
-    }
-
-    pub fn put_blocks(&mut self, blocks: HashMap<BlockId, Block<Op, Ty>>) {
-        self.blocks = blocks;
-    }
-
-    pub fn fresh_value(&mut self) -> ValueId {
-        let value_id = ValueId(self.next_value);
-        self.next_value += 1;
-        value_id
-    }
-
-    pub fn take_returns(&mut self) -> Vec<Ty> {
-        std::mem::take(&mut self.returns)
-    }
-
-    pub fn code_size(&self) -> usize {
-        self.blocks
-            .values()
-            .map(|b| {
-                b.instructions
-                    .iter()
-                    .map(|i| i.get_inputs().count() + 1)
-                    .sum::<usize>()
-            })
-            .sum()
-    }
-
-    pub fn terminate_block_with_jmp_if(
-        &mut self,
-        block_id: BlockId,
-        condition: ValueId,
-        then_destination: BlockId,
-        else_destination: BlockId,
-    ) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .set_terminator(Terminator::JmpIf(
-                condition,
-                then_destination,
-                else_destination,
-            ));
-    }
-
-    pub fn terminate_block_with_return(&mut self, block_id: BlockId, return_values: Vec<ValueId>) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .set_terminator(Terminator::Return(return_values));
-    }
-
-    pub fn terminate_block_with_jmp(
-        &mut self,
-        block_id: BlockId,
-        destination: BlockId,
-        arguments: Vec<ValueId>,
-    ) {
-        self.blocks
-            .get_mut(&block_id)
-            .unwrap()
-            .set_terminator(Terminator::Jmp(destination, arguments));
-    }
-}
-
-#[derive(Clone)]
-pub struct Block<Op: Instruction, Ty: SSAType> {
-    parameters: Vec<(ValueId, Ty)>,
-    instructions: Vec<Op>,
-    terminator: Option<Terminator>,
-}
-
-impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
-    pub fn to_string(
-        &self,
-        func_name: &dyn Fn(FunctionId) -> String,
-        func_id: FunctionId,
-        id: BlockId,
-        value_annotator: &dyn SsaAnnotator,
-    ) -> String {
-        let params = self
-            .parameters
-            .iter()
-            .map(|v| {
-                let annotation = value_annotator.annotate_value(func_id, v.0);
-                let annotation = if annotation.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" [{annotation}]")
-                };
-                format!("v{} : {}{annotation}", v.0.0, v.1)
-            })
-            .join(", ");
-        let annotate_value = |value: ValueId| -> String {
-            let annotation = value_annotator.annotate_value(func_id, value);
-            if annotation.is_empty() {
-                "".to_string()
-            } else {
-                format!("[{annotation}]")
-            }
-        };
-        let instructions = self
-            .instructions
-            .iter()
-            .map(|i| format!("    {}", i.display_instruction(func_name, &annotate_value)))
-            .join("\n");
-        let terminator = match &self.terminator {
-            Some(t) => format!("    {}", t.to_string()),
-            None => "".to_string(),
-        };
-        let block_annotation = value_annotator.annotate_block(func_id, id);
-        let block_annotation = if block_annotation.is_empty() {
-            "".to_string()
-        } else {
-            format!(" [{}]", block_annotation)
-        };
-        format!(
-            "  block_{}({}){} {{\n{}\n{}\n  }}",
-            id.0, params, block_annotation, instructions, terminator
-        )
-    }
-}
-
-impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
-    pub fn empty() -> Self {
-        Block {
-            parameters: Vec::new(),
-            instructions: Vec::new(),
-            terminator: None,
-        }
-    }
-
-    pub fn take_instructions(&mut self) -> Vec<Op> {
-        std::mem::take(&mut self.instructions)
-    }
-
-    pub fn put_instructions(&mut self, instructions: Vec<Op>) {
-        self.instructions = instructions;
-    }
-
-    pub fn push_instruction(&mut self, instruction: Op) {
-        self.instructions.push(instruction);
-    }
-
-    pub fn set_terminator(&mut self, terminator: Terminator) {
-        self.terminator = Some(terminator);
-    }
-
-    pub fn get_parameters(&self) -> impl Iterator<Item = &(ValueId, Ty)> {
-        self.parameters.iter()
-    }
-
-    pub fn get_parameters_mut(&mut self) -> impl Iterator<Item = &mut (ValueId, Ty)> {
-        self.parameters.iter_mut()
-    }
-
-    pub fn take_parameters(&mut self) -> Vec<(ValueId, Ty)> {
-        std::mem::take(&mut self.parameters)
-    }
-
-    pub fn put_parameters(&mut self, parameters: Vec<(ValueId, Ty)>) {
-        self.parameters = parameters;
-    }
-
-    pub fn push_parameter(&mut self, value_id: ValueId, typ: Ty) {
-        self.parameters.push((value_id, typ));
-    }
-
-    pub fn get_parameter_values(&self) -> impl Iterator<Item = &ValueId> {
-        self.parameters.iter().map(|(id, _)| id)
-    }
-
-    pub fn get_instruction(&self, i: usize) -> &Op {
-        &self.instructions[i]
-    }
-
-    pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &Op> {
-        self.instructions.iter()
-    }
-
-    pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut Op> {
-        self.instructions.iter_mut()
-    }
-
-    pub fn get_terminator(&self) -> Option<&Terminator> {
-        self.terminator.as_ref()
-    }
-
-    pub fn get_terminator_mut(&mut self) -> &mut Terminator {
-        self.terminator.as_mut().unwrap()
-    }
-
-    pub fn take_terminator(&mut self) -> Option<Terminator> {
-        std::mem::take(&mut self.terminator)
-    }
-
-    pub fn has_parameters(&self) -> bool {
-        self.parameters.len() > 0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinaryArithOpKind {
-    Add,
-    Mul,
-    Div,
-    Sub,
-    And,
-    Or,
-    Xor,
-    Shl,
-    Shr,
-    Mod,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum CmpKind {
-    Lt,
-    Eq,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum SeqType {
-    Array(usize),
-    Slice,
-    Tuple,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CastTarget {
-    Field,
-    U(usize),
-    I(usize),
-    WitnessOf,
-    Nop,
-    ArrayToSlice,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Endianness {
-    Big,
-    Little,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SliceOpDir {
-    Front,
-    Back,
-}
-
-impl Display for CastTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CastTarget::Field => write!(f, "Field"),
-            CastTarget::U(size) => write!(f, "u{}", size),
-            CastTarget::I(size) => write!(f, "i{}", size),
-            CastTarget::WitnessOf => write!(f, "WitnessOf"),
-            CastTarget::Nop => write!(f, "Nop"),
-            CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
-        }
-    }
-}
-
-impl Display for Endianness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Endianness::Big => write!(f, "big"),
-            Endianness::Little => write!(f, "little"),
-        }
-    }
-}
-
-impl Display for SeqType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SeqType::Array(len) => write!(f, "Array[{}]", len),
-            SeqType::Slice => write!(f, "Slice"),
-            SeqType::Tuple => write!(f, "Tuple"),
-        }
-    }
-}
-
-impl SeqType {
-    pub fn of(&self, t: Type) -> Type {
-        match self {
-            SeqType::Array(len) => t.array_of(*len),
-            SeqType::Slice => t.slice_of(),
-            SeqType::Tuple => panic!("Tuple type requires multiple element types"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum MemOp {
-    /// A reference count increment operation, bumping by the provided amount.
-    Bump(usize),
-
-    /// A reference count decrement operation (always by one).
-    Drop,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum DMatrix {
-    A,
-    B,
-    C,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum LookupTarget<V> {
-    Rangecheck(u8),
-    DynRangecheck(V),
-    Array(V),
-    Spread(u8),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Radix<V> {
-    Bytes,
-    Dyn(V),
-}
-
+/// The high-level opcodes for use with the high-level SSA.
 #[derive(Debug, Clone)]
 pub enum OpCode {
     Cmp {
@@ -752,13 +63,13 @@ pub enum OpCode {
     MkSeq {
         result: ValueId,
         elems: Vec<ValueId>,
-        seq_type: SeqType,
+        seq_type: SequenceTargetType,
         elem_type: Type,
     },
     MkRepeated {
         result: ValueId,
         element: ValueId,
-        seq_type: SeqType,
+        seq_type: SequenceTargetType,
         count: usize,
         elem_type: Type,
     },
@@ -834,7 +145,7 @@ pub enum OpCode {
         count: usize,
     },
     MemOp {
-        kind: MemOp,
+        kind: RefCountOp,
         value: ValueId,
     },
     ValueOf {
@@ -932,14 +243,6 @@ pub enum OpCode {
         condition: ValueId,
         inner: Box<OpCode>,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ConstValue {
-    U(usize, u128),
-    I(usize, u128),
-    Field(ark_bn254::Fr),
-    FnPtr(FunctionId),
 }
 
 impl Instruction for OpCode {
@@ -1342,8 +645,8 @@ impl Instruction for OpCode {
             }
             OpCode::MemOp { kind, value } => {
                 let name = match kind {
-                    MemOp::Bump(n) => format!("inc_rc[+{}]", n),
-                    MemOp::Drop => "drop".to_string(),
+                    RefCountOp::Bump(n) => format!("inc_rc[+{}]", n),
+                    RefCountOp::Drop => "drop".to_string(),
                 };
                 format!("{}(v{})", name, value.0)
             }
@@ -2238,79 +1541,179 @@ impl Instruction for OpCode {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Terminator {
-    Jmp(BlockId, Vec<ValueId>),
-    JmpIf(ValueId, BlockId, BlockId),
-    Return(Vec<ValueId>),
+// HLSSA TYPE ALIASES
+// ================================================================================================
+
+pub type HLFunction = Function<OpCode, Type>;
+pub type HLBlock = Block<OpCode, Type>;
+
+// CALL TARGET
+// ================================================================================================
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CallTarget {
+    Static(FunctionId),
+    Dynamic(ValueId),
 }
 
-impl Terminator {
-    pub fn to_string(&self) -> String {
+// BINARY ARITH OPERATION KIND
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryArithOpKind {
+    Add,
+    Mul,
+    Div,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    Mod,
+}
+
+// COMPARISON KIND
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub enum CmpKind {
+    Lt,
+    Eq,
+}
+
+// SEQUENCE TYPE
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub enum SequenceTargetType {
+    Array(usize),
+    Slice,
+    Tuple,
+}
+
+impl SequenceTargetType {
+    pub fn of(&self, t: Type) -> Type {
         match self {
-            Terminator::Jmp(block_id, args) => {
-                let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
-                format!("jmp block_{}({})", block_id.0, args_str)
-            }
-            Terminator::JmpIf(cond, true_block, false_block) => {
-                format!(
-                    "jmp_if v{} to block_{}, else to block_{}",
-                    cond.0, true_block.0, false_block.0
-                )
-            }
-            Terminator::Return(values) => {
-                let values_str = values.iter().map(|v| format!("v{}", v.0)).join(", ");
-                format!("return {}", values_str)
-            }
+            SequenceTargetType::Array(len) => t.array_of(*len),
+            SequenceTargetType::Slice => t.slice_of(),
+            SequenceTargetType::Tuple => panic!("Tuple type requires multiple element types"),
         }
     }
 }
 
-pub fn spread_bits(v: u128, bits: usize) -> u128 {
-    assert!(
-        bits <= 64,
-        "spread_bits only supports widths up to 64, got {bits}"
-    );
-
-    let mut x = v;
-    x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128;
-    x = (x | (x << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333u128;
-    x = (x | (x << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555u128;
-    x
-}
-
-pub fn unspread_bits(v: u128, bits: usize) -> (u128, u128) {
-    assert!(
-        bits <= 128 && bits % 2 == 0,
-        "unspread_bits expects an even width up to 128, got {bits}"
-    );
-
-    fn compact_bits(mut x: u128) -> u128 {
-        x &= 0x5555_5555_5555_5555_5555_5555_5555_5555u128;
-        x = (x | (x >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333u128;
-        x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128;
-        x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128;
-        x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128;
-        x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128;
-        x = (x | (x >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFFu128;
-        x
+impl Display for SequenceTargetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SequenceTargetType::Array(len) => write!(f, "Array[{}]", len),
+            SequenceTargetType::Slice => write!(f, "Slice"),
+            SequenceTargetType::Tuple => write!(f, "Tuple"),
+        }
     }
-
-    let even = compact_bits(v);
-    let odd = compact_bits(v >> 1);
-    (odd, even)
 }
 
-/// Extract odd/even bit streams from a 64-bit spread value.
-pub fn unspread_u64(v: u64) -> (u32, u32) {
-    let (odd, even) = unspread_bits(v as u128, 64);
-    (odd as u32, even as u32)
+// CAST TARGET
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CastTarget {
+    Field,
+    U(usize),
+    I(usize),
+    WitnessOf,
+    Nop,
+    ArrayToSlice,
 }
 
-/// Compute spread of a 32-bit value: interleave zero bits between each bit.
-pub fn spread_u64(v: u32) -> u64 {
-    spread_bits(v as u128, 32) as u64
+impl Display for CastTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CastTarget::Field => write!(f, "Field"),
+            CastTarget::U(size) => write!(f, "u{}", size),
+            CastTarget::I(size) => write!(f, "i{}", size),
+            CastTarget::WitnessOf => write!(f, "WitnessOf"),
+            CastTarget::Nop => write!(f, "Nop"),
+            CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
+        }
+    }
+}
+
+// ENDIANNESS
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Endianness {
+    Big,
+    Little,
+}
+
+impl Display for Endianness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Endianness::Big => write!(f, "big"),
+            Endianness::Little => write!(f, "little"),
+        }
+    }
+}
+
+// SLICE OPERAND DIRECTION
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceOpDir {
+    Front,
+    Back,
+}
+
+// CONST VALUES
+// ================================================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConstValue {
+    U(usize, u128),
+    I(usize, u128),
+    Field(ark_bn254::Fr),
+    FnPtr(FunctionId),
+}
+
+// REFERENCE COUNTING OPS
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub enum RefCountOp {
+    /// A reference count increment operation, bumping by the provided amount.
+    Bump(usize),
+
+    /// A reference count decrement operation (always by one).
+    Drop,
+}
+
+// R1CS MATRICES
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub enum DMatrix {
+    A,
+    B,
+    C,
+}
+
+// LOOKUP TARGET
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub enum LookupTarget<V> {
+    Rangecheck(u8),
+    DynRangecheck(V),
+    Array(V),
+    Spread(u8),
+}
+
+// RADIX
+// ================================================================================================
+
+#[derive(Debug, Clone, Copy)]
+pub enum Radix<V> {
+    Bytes,
+    Dyn(V),
 }

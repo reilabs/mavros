@@ -12,32 +12,43 @@ use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::block_builder::{HLEmitter, HLFunctionBuilder};
-use crate::compiler::ssa::{FunctionId, HLFunction, HLSSA};
+use crate::compiler::ssa::{
+    FunctionId,
+    hlssa::{
+        HLFunction, HLSSA,
+        builder::{HLEmitter, HLFunctionBuilder},
+    },
+};
 
 use expression_converter::ExpressionConverter;
 pub use expression_converter::LowLevelReplacement;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
-pub struct SsaConverter {
-    /// Maps AST function IDs to SSA function IDs (constrained context)
+pub struct SSAConverter {
+    /// Maps AST function IDs to SSA function IDs (constrained context).
     constrained_mapper: HashMap<AstFuncId, FunctionId>,
+
     /// Maps AST function IDs to SSA function IDs (unconstrained context).
-    /// For natively unconstrained functions, same ID as constrained_mapper.
-    /// For constrained functions, points to a separate unconstrained variant.
+    ///
+    /// For natively unconstrained functions, it will yield the same ID as constrained_mapper. For
+    /// constrained functions, it points to a separate unconstrained variant.
     unconstrained_mapper: HashMap<AstFuncId, FunctionId>,
-    /// Set of AST function IDs that are natively unconstrained
+
+    /// Set of AST function IDs that are natively unconstrained.
     natively_unconstrained: HashSet<AstFuncId>,
-    /// Maps GlobalId to global slot index
+
+    /// Maps GlobalId to global slot index.
     global_slots: HashMap<GlobalId, usize>,
-    /// Type converter
+
+    /// Utility for converting between types.
     type_converter: TypeConverter,
-    /// Maps LowLevel function name to its replacement
+
+    /// Maps a given low-level function name to its replacement
     lowlevel_replacements: HashMap<String, LowLevelReplacement>,
 }
 
-impl SsaConverter {
+impl SSAConverter {
     pub fn new(lowlevel_replacements: HashMap<String, LowLevelReplacement>) -> Self {
         Self {
             constrained_mapper: HashMap::new(),
@@ -210,7 +221,7 @@ impl SsaConverter {
             in_stack.insert(gid);
             let (_name, _typ, init_expr) = &program.globals[&gid];
             let mut deps = Vec::new();
-            SsaConverter::collect_global_deps(init_expr, &mut deps);
+            SSAConverter::collect_global_deps(init_expr, &mut deps);
             for dep in deps {
                 topo_visit(dep, program, visited, in_stack, ordered);
             }
@@ -350,7 +361,7 @@ impl HLSSA {
         program: &Program,
         lowlevel_replacements: HashMap<String, LowLevelReplacement>,
     ) -> (HLSSA, bool) {
-        let mut converter = SsaConverter::new(lowlevel_replacements);
+        let mut converter = SSAConverter::new(lowlevel_replacements);
         converter.convert_program(program)
     }
 }
