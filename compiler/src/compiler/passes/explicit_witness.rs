@@ -1283,7 +1283,8 @@ impl ExplicitWitness {
                 let l_type = function_type_info.get_value_type(l);
                 match l_type.strip_witness().expr {
                     TypeExpr::U(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let arith_result = match kind {
@@ -1299,7 +1300,8 @@ impl ExplicitWitness {
                         });
                     }
                     TypeExpr::I(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let l_range = function_value_ranges.get(l);
@@ -1326,7 +1328,8 @@ impl ExplicitWitness {
                 let l_type = function_type_info.get_value_type(l);
                 match l_type.strip_witness().expr {
                     TypeExpr::U(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let arith_result = if l_taint && r_taint {
@@ -1347,7 +1350,8 @@ impl ExplicitWitness {
                         });
                     }
                     TypeExpr::I(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let l_range = function_value_ranges.get(l);
@@ -1387,7 +1391,8 @@ impl ExplicitWitness {
                 match l_type.strip_witness().expr {
                     TypeExpr::I(_) => panic!("Signed div/mod not yet implemented"),
                     TypeExpr::U(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_divmod(
@@ -1405,7 +1410,10 @@ impl ExplicitWitness {
                             "Modulo is not defined on field elements"
                         );
                         if l_taint || r_taint {
-                            let cond_field = self.ensure_field(b, function_type_info, condition);
+                            let cond_field = b.ensure_field(
+                                condition,
+                                function_type_info.get_value_type(condition),
+                            );
                             self.gen_witness_field_div_guarded(
                                 b,
                                 l,
@@ -1449,7 +1457,8 @@ impl ExplicitWitness {
                         kind, l_type
                     ),
                 };
-                let cond_field = self.ensure_field(b, function_type_info, condition);
+                let cond_field =
+                    b.ensure_field(condition, function_type_info.get_value_type(condition));
                 let one_u = b.u_const(bits, 1);
                 let factor = b.fresh_value();
                 b.push(OpCode::BinaryArithOp {
@@ -1534,7 +1543,8 @@ impl ExplicitWitness {
                     "pure Rangecheck inside Guard should have been lowered by \
                      lower_pure_guards"
                 );
-                let cond_field = self.ensure_field(b, function_type_info, condition);
+                let cond_field =
+                    b.ensure_field(condition, function_type_info.get_value_type(condition));
                 self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
             }
             inner => b.push(OpCode::Guard {
@@ -2583,22 +2593,5 @@ impl ExplicitWitness {
         b.lookup_spread(8, byte_wit, spread_wit, flag);
 
         (byte_wit, spread_wit)
-    }
-
-    fn ensure_field(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        value: ValueId,
-    ) -> ValueId {
-        if function_type_info
-            .get_value_type(value)
-            .strip_witness()
-            .is_field()
-        {
-            value
-        } else {
-            b.cast_to_field(value)
-        }
     }
 }

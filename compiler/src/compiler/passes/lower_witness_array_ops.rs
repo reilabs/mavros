@@ -172,7 +172,9 @@ impl LowerWitnessArrayOps {
         guard: Option<ValueId>,
     ) -> ValueId {
         match guard {
-            Some(condition) => self.ensure_field(b, function_type_info, condition),
+            Some(condition) => {
+                b.ensure_field(condition, function_type_info.get_value_type(condition))
+            }
             None => b.field_const(Field::ONE),
         }
     }
@@ -440,23 +442,6 @@ impl LowerWitnessArrayOps {
             TypeExpr::WitnessOf(_) => {
                 unreachable!("strip_all_witness should remove all WitnessOf wrappers")
             }
-        }
-    }
-
-    fn ensure_field(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        value: ValueId,
-    ) -> ValueId {
-        if function_type_info
-            .get_value_type(value)
-            .strip_witness()
-            .is_field()
-        {
-            value
-        } else {
-            b.cast_to_field(value)
         }
     }
 }

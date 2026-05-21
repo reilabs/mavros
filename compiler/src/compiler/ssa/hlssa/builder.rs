@@ -180,6 +180,14 @@ pub trait HLEmitter {
         r
     }
 
+    fn ensure_field(&mut self, value: ValueId, ty: &Type) -> ValueId {
+        if ty.strip_witness().is_field() {
+            value
+        } else {
+            self.cast_to_field(value)
+        }
+    }
+
     fn cast_to(&mut self, target: CastTarget, value: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::Cast {
