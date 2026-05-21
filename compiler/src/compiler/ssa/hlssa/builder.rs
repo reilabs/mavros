@@ -3,7 +3,7 @@ use crate::compiler::ssa::{
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::{
         BinaryArithOpKind, CallTarget, CastTarget, CmpKind, ConstValue, Constants, Endianness,
-        LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type,
+        LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
     },
 };
 
@@ -178,6 +178,14 @@ pub trait HLEmitter {
             target: CastTarget::Field,
         });
         r
+    }
+
+    fn ensure_field(&mut self, value: ValueId, ty: &Type) -> ValueId {
+        if ty.strip_witness().is_field() {
+            value
+        } else {
+            self.cast_to_field(value)
+        }
     }
 
     fn cast_to(&mut self, target: CastTarget, value: ValueId) -> ValueId {
@@ -643,6 +651,60 @@ impl HLEmitter for HLBlockEmitter<'_> {
 }
 
 impl HLBlockEmitter<'_> {
+    fn default_value(&mut self, typ: &Type) -> ValueId {
+        match &typ.expr {
+            TypeExpr::Field => self.field_const(ark_bn254::Fr::from(0)),
+            TypeExpr::U(size) => self.u_const(*size, 0),
+            TypeExpr::I(size) => self.i_const(*size, 0),
+            TypeExpr::WitnessOf(inner) => {
+                let inner_default = self.default_value(inner);
+                self.cast_to_witness_of(inner_default)
+            }
+            TypeExpr::Array(inner, size) => self.default_array(inner, *size),
+            TypeExpr::Tuple(element_types) => {
+                let elems = element_types
+                    .iter()
+                    .map(|elem_type| self.default_value(elem_type))
+                    .collect();
+                self.mk_tuple(elems, element_types.clone())
+            }
+            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
+                panic!("cannot build a default value for type {}", typ)
+            }
+        }
+    }
+
+    fn default_array(&mut self, elem_type: &Type, len: usize) -> ValueId {
+        if len == 0 {
+            return self.mk_seq(Vec::new(), SequenceTargetType::Array(0), elem_type.clone());
+        }
+        let elem = self.default_value(elem_type);
+        self.mk_repeated(elem, SequenceTargetType::Array(len), len, elem_type.clone())
+    }
+
+    /// Build an array with an SSA counted loop.
+    ///
+    /// `body` receives the current `u32` index and must return the value to store at that index.
+    pub fn build_array_loop(
+        &mut self,
+        len: usize,
+        elem_type: Type,
+        body: impl FnOnce(&mut Self, ValueId) -> ValueId,
+    ) -> ValueId {
+        let initial = self.default_array(&elem_type, len);
+        if len == 0 {
+            return initial;
+        }
+        let array_type = elem_type.clone().array_of(len);
+        let results =
+            self.build_counted_loop(len, vec![(initial, array_type)], |emitter, index, accs| {
+                let value = body(emitter, index);
+                let updated = emitter.array_set(accs[0], index, value);
+                vec![updated]
+            });
+        results[0]
+    }
+
     /// Build a counted loop: `for i in 0..len { body(i, accumulators) -> updated_accumulators }`
     ///
     /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`),

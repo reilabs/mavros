@@ -7,6 +7,7 @@ pub mod explicit_witness;
 pub mod fix_double_jumps;
 pub mod lower_guards;
 pub mod lower_pure_guards;
+pub mod lower_witness_array_ops;
 pub mod mem2reg;
 pub mod prepare_entry_point;
 pub mod rc_insertion;
