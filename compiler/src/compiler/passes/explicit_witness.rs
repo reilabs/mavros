@@ -17,8 +17,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget, OpCode,
-            Radix, SequenceTargetType, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget, OpCode, Radix,
+            SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
@@ -132,8 +132,7 @@ impl ExplicitWitness {
             let function_type_info = type_info.get_function(function_id);
             let function_value_ranges = value_ranges.get_function(function_id);
             sb.modify_function(function_id, |fb| {
-                let block_ids: Vec<_> =
-                    fb.function.get_blocks().map(|(bid, _)| *bid).collect();
+                let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
                 for block_id in block_ids {
                     let (instructions, terminator) = {
                         let mut block = fb.function.take_block(block_id);
@@ -737,14 +736,7 @@ impl ExplicitWitness {
                     b.emit(instruction);
                 } else {
                     let flag = b.field_const(Field::from(1));
-                    self.gen_witness_array_get(
-                        b,
-                        function_type_info,
-                        arr,
-                        idx,
-                        result,
-                        flag,
-                    );
+                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
                 }
             }
             OpCode::ArraySet {
@@ -1462,8 +1454,7 @@ impl ExplicitWitness {
                             "Modulo is not defined on field elements"
                         );
                         if l_taint || r_taint {
-                            let cond_field =
-                                self.ensure_field(b, function_type_info, condition);
+                            let cond_field = self.ensure_field(b, function_type_info, condition);
                             self.gen_witness_field_div_guarded(
                                 b, l, r, l_taint, r_taint, cond_field, res,
                             );
@@ -1580,14 +1571,7 @@ impl ExplicitWitness {
                     b.emit(inner);
                 } else {
                     let flag = self.ensure_field(b, function_type_info, condition);
-                    self.gen_witness_array_get(
-                        b,
-                        function_type_info,
-                        arr,
-                        idx,
-                        result,
-                        flag,
-                    );
+                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
                 }
             }
             OpCode::ArraySet { .. } => {
