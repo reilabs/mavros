@@ -572,9 +572,8 @@ impl WitnessTypeInference {
                     if let Some(origin_id) = origin {
                         let current_inner = alloc_inner.get(&origin_id).unwrap().clone();
                         // Join stored value into alloc inner;
-                        // cfg_witness contributes to toplevel of what's stored
-                        let store_wt =
-                            val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
+                        // cfg_witness is pushed down to leaves
+                        let store_wt = val_wt.with_witness_in_leaves(block_cw);
                         // The alloc's elem_type may not match the actual stored value's
                         let new_inner = current_inner.join(&store_wt);
                         alloc_inner.insert(origin_id, new_inner);
