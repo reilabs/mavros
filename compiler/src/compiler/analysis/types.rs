@@ -8,8 +8,10 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
-    ir::r#type::{Type, TypeExpr},
-    ssa::{CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, ValueId},
+    ssa::{
+        FunctionId, ValueId,
+        hlssa::{CallTarget, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+    },
 };
 
 pub struct TypeInfo {
@@ -461,9 +463,7 @@ impl Types {
                     }
                     CastTarget::Nop => value_type.clone(),
                     CastTarget::ArrayToSlice => match &value_type.expr {
-                        crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {
-                            elem.as_ref().clone().slice_of()
-                        }
+                        TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
                         _ => panic!("ArrayToSlice cast on non-array type"),
                     },
                     CastTarget::WitnessOf => Type::witness_of(value_type.clone()),

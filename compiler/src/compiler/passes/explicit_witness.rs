@@ -10,17 +10,19 @@ use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::flow_analysis::FlowAnalysis,
     analysis::{
+        flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
     },
-    block_builder::{HLEmitter, HLInstrBuilder},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
-        OpCode, Radix, SeqType, ValueId,
+        BlockId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
+            OpCode, Radix, SequenceTargetType, Type, TypeExpr,
+            builder::{HLEmitter, HLInstrBuilder},
+        },
     },
 };
 
@@ -1019,7 +1021,7 @@ impl ExplicitWitness {
                     b.push(OpCode::MkSeq {
                         result,
                         elems: witnesses,
-                        seq_type: SeqType::Array(count),
+                        seq_type: SequenceTargetType::Array(count),
                         elem_type: Type::witness_of(Type::field()),
                     });
                 }

@@ -3,10 +3,9 @@
 //! in this portion of the pipeline.
 
 use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
-    analysis::types::TypeInfo,
+    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{HLSSA, OpCode},
+    ssa::hlssa::{HLSSA, OpCode},
 };
 
 pub struct WitnessWriteToFresh {}

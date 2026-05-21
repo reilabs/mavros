@@ -6,17 +6,19 @@ use std::collections::HashMap;
 use num_traits::{One, Zero};
 
 use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
     analysis::{
+        flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, Types},
         value_definitions::{FunctionValueDefinitions, ValueDefinition},
     },
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BinaryArithOpKind, CastTarget, CmpKind, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
-        ValueId,
+        FunctionId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, HLFunction, HLSSA, OpCode, Type,
+            TypeExpr,
+        },
     },
 };
 

@@ -8,7 +8,10 @@ use tracing::{Level, instrument, trace};
 
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BlockId, FunctionId, HLFunction, HLSSA, Instruction, Terminator, ValueId},
+    ssa::{
+        BlockId, FunctionId, Instruction, Terminator, ValueId,
+        hlssa::{HLFunction, HLSSA},
+    },
 };
 
 pub enum InstructionPosition {

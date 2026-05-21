@@ -5,8 +5,10 @@ use std::{
     path::PathBuf,
 };
 
-use crate::compiler::ir::r#type::{SSAType, Type};
-use crate::compiler::ssa::{DefaultSsaAnnotator, Instruction, OpCode, SSA};
+use crate::compiler::ssa::{
+    DefaultSSAAnnotator, Instruction, SSA, SSAType,
+    hlssa::{OpCode, Type},
+};
 
 // ---------------------------------------------------------------------------
 // AnalysisId — a Copy handle carrying function pointers
@@ -281,7 +283,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
                     debug_output_dir
                         .join(format!("before_pass_{}_{}", pass_index, pass_name))
                         .join("code.txt"),
-                    format!("{}", ssa.to_string(&DefaultSsaAnnotator)),
+                    format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
                 )
                 .unwrap();
             }
@@ -308,7 +310,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
             }
             fs::write(
                 debug_output_dir.join("final_result").join("code.txt"),
-                format!("{}", ssa.to_string(&DefaultSsaAnnotator)),
+                format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
             )
             .unwrap();
         }

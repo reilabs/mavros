@@ -24,12 +24,13 @@
 
 use crate::compiler::{
     analysis::types::TypeInfo,
-    block_builder::{HLBlockEmitter, HLEmitter},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, HLFunction, HLSSA, Instruction, OpCode,
-        ValueId,
+        BlockId, Instruction, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
     },
 };
 
@@ -384,7 +385,11 @@ impl LowerPureGuards {
             let min_val = emitter.i_const(wide_bits, (-(1i128 << (bits - 1))) as u128);
             let max_val = emitter.i_const(wide_bits, 1u128 << (bits - 1));
             let too_low = emitter.lt(wide_result, min_val);
-            let too_high = emitter.cmp(max_val, wide_result, crate::compiler::ssa::CmpKind::Lt);
+            let too_high = emitter.cmp(
+                max_val,
+                wide_result,
+                crate::compiler::ssa::hlssa::CmpKind::Lt,
+            );
             emitter.or(too_low, too_high)
         } else {
             // Unsigned: check result >= 2^bits

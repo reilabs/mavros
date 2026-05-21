@@ -1,3 +1,5 @@
+//! The driver API for the compilation pipeline.
+
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -14,9 +16,14 @@ use crate::{
     Project,
     compiler::{
         Field,
-        analysis::flow_analysis::FlowAnalysis,
-        analysis::types::Types,
-        codegen::CodeGen,
+        analysis::{
+            flow_analysis::FlowAnalysis, types::Types, witness_type_inference::WitnessTypeInference,
+        },
+        codegen::{
+            bytecode::CodeGen,
+            hlssa_to_r1cs::{R1CGen, R1CS},
+        },
+        lowering::LowLevelReplacement,
         pass_manager::PassManager,
         passes::{
             common_subexpression_elimination::CSE,
@@ -41,11 +48,8 @@ use crate::{
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
-        r1cs_gen::{R1CGen, R1CS},
-        ssa::{DefaultSsaAnnotator, HLSSA},
-        ssa_gen::LowLevelReplacement,
+        ssa::{DefaultSSAAnnotator, hlssa::HLSSA},
         untaint_control_flow::UntaintControlFlow,
-        witness_type_inference::WitnessTypeInference,
     },
     lowlevel_replacement::{
         REPLACEMENT_CRATES, add_lowlevel_replacements, find_needed_lowlevels,
@@ -174,7 +178,7 @@ impl Driver {
             self.initial_ssa
                 .as_ref()
                 .unwrap()
-                .to_string(&DefaultSsaAnnotator),
+                .to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -247,7 +251,7 @@ impl Driver {
             self.monomorphized_ssa
                 .as_ref()
                 .unwrap()
-                .to_string(&DefaultSsaAnnotator),
+                .to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -446,8 +450,8 @@ impl Driver {
         r1cs: &R1CS,
         wasm_config: Option<std::path::PathBuf>,
     ) -> Result<Option<String>, Error> {
-        use crate::compiler::hlssa_to_llssa;
-        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
+        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
+        use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
@@ -461,7 +465,7 @@ impl Driver {
         fs::write(
             self.get_debug_output_dir()
                 .join("hlssa_before_lowering.txt"),
-            ssa.to_string(&DefaultSsaAnnotator),
+            ssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -477,7 +481,7 @@ impl Driver {
         // Dump LLSSA after lowering
         fs::write(
             self.get_debug_output_dir().join("llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSsaAnnotator),
+            llssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -512,8 +516,8 @@ impl Driver {
         wasm_path: std::path::PathBuf,
         r1cs: &R1CS,
     ) -> Result<(), Error> {
-        use crate::compiler::hlssa_to_llssa;
-        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
+        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
+        use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
@@ -540,7 +544,7 @@ impl Driver {
         fs::write(
             self.get_debug_output_dir()
                 .join("ad_hlssa_before_lowering.txt"),
-            ssa.to_string(&DefaultSsaAnnotator),
+            ssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -557,7 +561,7 @@ impl Driver {
         fs::write(
             self.get_debug_output_dir()
                 .join("ad_llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSsaAnnotator),
+            llssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 

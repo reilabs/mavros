@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::HLSSA,
+    ssa::hlssa::HLSSA,
 };
 
 pub struct RemoveUnreachableFunctions {}

@@ -4,7 +4,10 @@ use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BlockId, ConstValue, HLSSA, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, Terminator, ValueId,
+        hlssa::{ConstValue, HLSSA, OpCode},
+    },
 };
 
 pub struct ConditionPropagation {}

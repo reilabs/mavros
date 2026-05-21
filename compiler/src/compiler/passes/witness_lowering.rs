@@ -4,13 +4,16 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
-    analysis::types::TypeInfo,
-    block_builder::{HLBlockEmitter, HLEmitter},
-    ir::r#type::{Type, TypeExpr},
+    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{BinaryArithOpKind, BlockId, DMatrix, OpCode, SeqType, Terminator, ValueId},
+    ssa::{
+        BlockId, Terminator, ValueId,
+        hlssa::{
+            BinaryArithOpKind, DMatrix, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
+    },
 };
 
 pub struct WitnessLowering {}
@@ -24,7 +27,7 @@ impl Pass for WitnessLowering {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut crate::compiler::ssa::HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         self.do_run(ssa, store.get::<TypeInfo>(), store.get::<FlowAnalysis>());
     }
 }
@@ -36,7 +39,7 @@ impl WitnessLowering {
 
     pub fn do_run(
         &self,
-        ssa: &mut crate::compiler::ssa::HLSSA,
+        ssa: &mut HLSSA,
         type_info: &crate::compiler::analysis::types::TypeInfo,
         flow_analysis: &FlowAnalysis,
     ) {
@@ -87,7 +90,10 @@ impl WitnessLowering {
                         } => {
                             let v_type = type_info.get_value_type(v);
                             if v_type.is_witness_of()
-                                && matches!(target, crate::compiler::ssa::CastTarget::WitnessOf)
+                                && matches!(
+                                    target,
+                                    crate::compiler::ssa::hlssa::CastTarget::WitnessOf
+                                )
                             {
                                 // Already WitnessOf — don't double-wrap
                                 replacements.insert(r, v);
@@ -584,12 +590,12 @@ impl WitnessLowering {
         b: &mut impl HLEmitter,
     ) -> ValueId {
         if array_len == 0 {
-            return b.mk_seq(Vec::new(), SeqType::Array(0), elem_type.clone());
+            return b.mk_seq(Vec::new(), SequenceTargetType::Array(0), elem_type.clone());
         }
         let dummy_elem = self.create_dummy_value(elem_type, b);
         b.mk_repeated(
             dummy_elem,
-            SeqType::Array(array_len),
+            SequenceTargetType::Array(array_len),
             array_len,
             elem_type.clone(),
         )

@@ -6,7 +6,7 @@ use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{HLSSA, OpCode},
+    ssa::hlssa::{HLSSA, OpCode},
 };
 
 pub struct WitnessWriteToVoid {}

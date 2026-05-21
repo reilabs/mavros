@@ -14,16 +14,19 @@ use crate::compiler::{
     Field,
     analysis::{
         instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
+        symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    block_builder::{HLEmitter, HLFunctionBuilder},
-    ir::r#type::Type,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId,
-        HLFunction, HLSSA, MemOp, OpCode, Radix, SeqType, ValueId,
+        FunctionId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLFunction, HLSSA, OpCode, Radix,
+            RefCountOp, SequenceTargetType, Type,
+            builder::{HLEmitter, HLFunctionBuilder},
+        },
     },
-    symbolic_executor::{self, SymbolicExecutor},
+    util::{spread_bits, unspread_bits},
 };
 
 pub struct Specializer {
@@ -71,7 +74,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::CmpKind::Lt);
+                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::hlssa::CmpKind::Lt);
                 Self(res)
             }
             _ => todo!(),
@@ -89,7 +92,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::CmpKind::Lt);
+                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::hlssa::CmpKind::Lt);
                 Self(res)
             }
             _ => todo!(),
@@ -107,7 +110,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::CmpKind::Eq);
+                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::hlssa::CmpKind::Eq);
                 Self(res)
             }
             _ => todo!(),
@@ -117,8 +120,8 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     fn arith(
         &self,
         b: &Self,
-        binary_arith_op_kind: crate::compiler::ssa::BinaryArithOpKind,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        binary_arith_op_kind: crate::compiler::ssa::hlssa::BinaryArithOpKind,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let a_const = ctx.const_vals.get(&self.0).cloned();
@@ -286,12 +289,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
-    fn array_get(
-        &self,
-        index: &Self,
-        _out_type: &crate::compiler::ir::r#type::Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
+    fn array_get(&self, index: &Self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let index_const = ctx.const_vals.get(&index.0).cloned();
         match (a_const, index_const) {
@@ -324,12 +322,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         }
     }
 
-    fn tuple_get(
-        &self,
-        index: usize,
-        _out_type: &crate::compiler::ir::r#type::Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
+    fn tuple_get(&self, index: usize, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
         let a_const = ctx.const_vals.get(&self.0);
         match a_const {
             Some(ConstVal::Tuple(a)) => {
@@ -344,7 +337,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         &self,
         _index: &Self,
         _value: &Self,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        _out_type: &Type,
         _ctx: &mut SpecializationState,
     ) -> Self {
         todo!()
@@ -354,7 +347,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         &self,
         from: usize,
         to: usize,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let self_const = ctx.const_vals.get(&self.0).cloned();
@@ -383,7 +376,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         &self,
         from: usize,
         to: usize,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let self_const = ctx.const_vals.get(&self.0).cloned();
@@ -409,8 +402,8 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 
     fn cast(
         &self,
-        cast_target: &crate::compiler::ssa::CastTarget,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let self_const = ctx.const_vals.get(&self.0).cloned();
@@ -462,7 +455,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         &self,
         endianness: Endianness,
         size: usize,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let val = ctx.to_bits(self.0, endianness, size);
@@ -471,11 +464,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         Self(val)
     }
 
-    fn not(
-        &self,
-        _out_type: &crate::compiler::ir::r#type::Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
+    fn not(&self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
         let const_val = ctx.const_vals.get(&self.0).cloned();
         match const_val {
             Some(ConstVal::U(s, v)) => {
@@ -513,7 +502,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut SpecializationState,
-        seq_type: SeqType,
+        seq_type: SequenceTargetType,
         elem_type: &Type,
     ) -> Self {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
@@ -538,11 +527,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         ctx.store(self.0, val.0);
     }
 
-    fn ptr_read(
-        &self,
-        _out_type: &crate::compiler::ir::r#type::Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
+    fn ptr_read(&self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
         let val = ctx.load(self.0);
         Self(val)
     }
@@ -559,7 +544,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         &self,
         if_t: &Self,
         if_f: &Self,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let self_const = ctx.const_vals.get(&self.0);
@@ -577,18 +562,11 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         }
     }
 
-    fn write_witness(
-        &self,
-        _tp: Option<&crate::compiler::ir::r#type::Type>,
-        _ctx: &mut SpecializationState,
-    ) -> Self {
+    fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut SpecializationState) -> Self {
         todo!()
     }
 
-    fn fresh_witness(
-        _result_type: &crate::compiler::ir::r#type::Type,
-        _ctx: &mut SpecializationState,
-    ) -> Self {
+    fn fresh_witness(_result_type: &Type, _ctx: &mut SpecializationState) -> Self {
         todo!()
     }
 
@@ -597,7 +575,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         Self(res)
     }
 
-    fn mem_op(&self, kind: MemOp, ctx: &mut SpecializationState) {
+    fn mem_op(&self, kind: RefCountOp, ctx: &mut SpecializationState) {
         HLEmitter::mem_op(ctx, self.0, kind);
     }
 
@@ -614,7 +592,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     "Spread only supports integer widths up to 64 bits, got u{}",
                     b
                 );
-                Self::of_u(b * 2, ssa_mod::spread_bits(*v, *b), ctx)
+                Self::of_u(b * 2, spread_bits(*v, *b), ctx)
             }
             Some(ConstVal::I(b, v)) => {
                 assert!(
@@ -622,7 +600,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     "Spread only supports integer widths up to 64 bits, got i{}",
                     b
                 );
-                Self::of_i(b * 2, ssa_mod::spread_bits(*v, *b), ctx)
+                Self::of_i(b * 2, spread_bits(*v, *b), ctx)
             }
             _ => {
                 let res = HLEmitter::spread(ctx, self.0, bits);
@@ -641,7 +619,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     b
                 );
                 let half_bits = b / 2;
-                let (odd, even) = ssa_mod::unspread_bits(*v, *b);
+                let (odd, even) = unspread_bits(*v, *b);
                 (
                     Self::of_u(half_bits, odd, ctx),
                     Self::of_u(half_bits, even, ctx),
@@ -654,7 +632,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                     b
                 );
                 let half_bits = b / 2;
-                let (odd, even) = ssa_mod::unspread_bits(*v, *b);
+                let (odd, even) = unspread_bits(*v, *b);
                 (
                     Self::of_i(half_bits, odd, ctx),
                     Self::of_i(half_bits, even, ctx),
@@ -672,7 +650,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         radix: &Radix<Self>,
         endianness: Endianness,
         size: usize,
-        _out_type: &crate::compiler::ir::r#type::Type,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
         let cst_val = ctx.const_vals.get(&self.0);
@@ -693,10 +671,10 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 impl symbolic_executor::Context<Val> for SpecializationState {
     fn on_call(
         &mut self,
-        func: crate::compiler::ssa::FunctionId,
+        func: FunctionId,
         params: &mut [Val],
-        _param_types: &[&crate::compiler::ir::r#type::Type],
-        result_types: &[crate::compiler::ir::r#type::Type],
+        _param_types: &[&Type],
+        result_types: &[Type],
         unconstrained: bool,
     ) -> Option<Vec<Val>> {
         if unconstrained {
@@ -709,11 +687,7 @@ impl symbolic_executor::Context<Val> for SpecializationState {
         None
     }
 
-    fn on_return(
-        &mut self,
-        returns: &mut [Val],
-        _return_types: &[crate::compiler::ir::r#type::Type],
-    ) {
+    fn on_return(&mut self, returns: &mut [Val], _return_types: &[Type]) {
         self.function.terminate_block_with_return(
             self.function.get_entry_id(),
             returns.iter().map(|v| v.0).collect(),
@@ -724,15 +698,11 @@ impl symbolic_executor::Context<Val> for SpecializationState {
         &mut self,
         _target: crate::compiler::ssa::BlockId,
         _params: &mut [Val],
-        _param_types: &[&crate::compiler::ir::r#type::Type],
+        _param_types: &[&Type],
     ) {
     }
 
-    fn todo(
-        &mut self,
-        payload: &str,
-        _result_types: &[crate::compiler::ir::r#type::Type],
-    ) -> Vec<Val> {
+    fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
     }
 
@@ -750,10 +720,10 @@ impl symbolic_executor::Context<Val> for SpecializationState {
 
     fn on_guard(
         &mut self,
-        inner: &crate::compiler::ssa::OpCode,
+        inner: &crate::compiler::ssa::hlssa::OpCode,
         condition: &Val,
         inputs: Vec<&Val>,
-        _result_types: Vec<&crate::compiler::ir::r#type::Type>,
+        _result_types: Vec<&Type>,
     ) -> Vec<Val> {
         use crate::compiler::ssa::Instruction;
         // Build a mapping from old ValueIds to new ValueIds

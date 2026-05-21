@@ -13,9 +13,11 @@ use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::passes::fix_double_jumps::ValueReplacements;
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLFunction, HLSSA, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, Terminator, ValueId,
+        hlssa::{HLFunction, HLSSA, OpCode, Type, TypeExpr},
+    },
 };
 
 pub struct Mem2Reg {}

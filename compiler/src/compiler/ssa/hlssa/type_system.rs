@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Display, Formatter};
 
+use crate::compiler::ssa::SSAType;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
     Field,
@@ -450,7 +452,6 @@ impl Type {
     }
 }
 
-pub trait SSAType: Clone + std::fmt::Debug + std::fmt::Display + PartialEq + Eq + 'static {}
 impl SSAType for Type {}
 
 #[cfg(test)]
