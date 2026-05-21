@@ -18,12 +18,7 @@ use crate::compiler::ssa::{
 
 use super::type_converter::TypeConverter;
 
-/// A LowLevel function replacement: a single Noir function substitute, or a
-/// family of substitutes dispatched by array size. We only store one mono id
-/// per blackbox — mavros' SSA gen already produces both constrained and
-/// unconstrained SSA variants of every constrained Noir function, and the
-/// active `function_mapper` at the call site dispatches to the right one
-/// based on the caller's runtime context.
+/// A LowLevel function replacement: either a single function or a family dispatched by array size.
 pub enum LowLevelReplacement {
     Single(AstFuncId),
     ByArraySize(HashMap<u32, AstFuncId>),
@@ -1387,10 +1382,6 @@ impl<'a> ExpressionConverter<'a> {
             .get(name)
             .unwrap_or_else(|| panic!("LowLevel function '{}' has no replacement", name));
 
-        // The active function_mapper already routes to the right constrained/
-        // unconstrained SSA variant based on the caller's context, so we just
-        // pick the substitute's mono id (and the array size for the
-        // ByArraySize family) and let function_mapper do the dispatch.
         let replacement_id = match replacement {
             LowLevelReplacement::Single(func_id) => func_id,
             LowLevelReplacement::ByArraySize(size_map) => {

@@ -172,9 +172,10 @@ impl Value {
                 Value::WitnessOf(Box::new(Value::unknown_from_type(inner)))
             }
             TypeExpr::Array(elem, n) => {
-                Value::Array((0..*n).map(|_| Value::unknown_from_type(elem)).collect())
+                let elem_unknown = Value::unknown_from_type(elem);
+                Value::Array(vec![elem_unknown; *n])
             }
-            TypeExpr::Slice(_) => Value::Array(Vec::new()),
+            TypeExpr::Slice(_) => Value::Unknown(ScalarKind::Field),
             TypeExpr::Tuple(elems) => {
                 Value::Tuple(elems.iter().map(Value::unknown_from_type).collect())
             }

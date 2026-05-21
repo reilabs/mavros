@@ -629,7 +629,8 @@ impl WitnessTypeInference {
                     let elem_wt = arr_wt.child_witness_type().unwrap();
                     // For witness-indexed reads the witness-ness must reach the
                     // scalar leaves of the element, not just the outer container,
-                    // so that ND-array reads correctly mark each leaf as a witness.
+                    // so that multidimensional-array reads correctly mark each
+                    // leaf as a witness.
                     let pushed_info = arr_wt.toplevel_info().join(idx_wt.toplevel_info());
                     let result_wt = elem_wt.with_witness_in_leaves(pushed_info);
                     value_wt.insert(*r, result_wt);

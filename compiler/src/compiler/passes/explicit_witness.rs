@@ -30,7 +30,7 @@ use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive};
 
 /// Number of scalar leaves contained in a (possibly nested) type. Used to
-/// compute the flat lookup-table stride for witness-indexed ND-array reads.
+/// compute the flat lookup-table stride for witness-indexed multidimensional-array reads.
 fn leaf_scalar_count(t: &Type) -> usize {
     match &t.expr {
         TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
@@ -2636,7 +2636,7 @@ impl ExplicitWitness {
         let safe_hint_idx =
             |b: &mut HLInstrBuilder<'_>| self.clamped_hint_index(b, function_type_info, arr, idx);
 
-        // ND-array case: hint the entire slice, then constrain each leaf with a
+        // Multidimensional-array case: hint the entire slice, then constrain each leaf with a
         // lookup at a computed flat offset.
         if matches!(&result_type.expr, TypeExpr::Array(..)) {
             let safe_idx = safe_hint_idx(b);
@@ -2645,7 +2645,7 @@ impl ExplicitWitness {
             let outer_stride = leaf_scalar_count(&result_type);
             let stride_const = b.field_const(Field::from(outer_stride as u128));
             let base_key = b.mul(idx_field, stride_const);
-            self.gen_witness_array_get_nd(
+            self.gen_witness_array_get_multidim(
                 b,
                 arr,
                 base_key,
@@ -2818,7 +2818,7 @@ impl ExplicitWitness {
         });
     }
 
-    /// Recursive helper for [`gen_witness_array_get`] in the ND case. Walks the
+    /// Recursive helper for [`gen_witness_array_get`] in the multidimensional case. Walks the
     /// target type tree, allocating intermediate `MkSeq` per non-leaf level and
     /// emitting per-leaf `write_witness` + `lookup_arr` constraints.
     ///
@@ -2829,7 +2829,7 @@ impl ExplicitWitness {
     /// `result_override`, when `Some`, becomes the id of the outermost `MkSeq`
     /// or leaf `Cast`, so the caller can pre-allocate the final result id.
     #[allow(clippy::too_many_arguments)]
-    fn gen_witness_array_get_nd(
+    fn gen_witness_array_get_multidim(
         &self,
         b: &mut HLInstrBuilder<'_>,
         arr: ValueId,
@@ -2846,7 +2846,7 @@ impl ExplicitWitness {
             TypeExpr::Array(inner_stripped, n) => {
                 assert!(
                     !target_type.is_witness_of(),
-                    "ICE: ND witness array read produced WitnessOf at the array container level — \
+                    "ICE: multidimensional witness array read produced WitnessOf at the array container level — \
                      the leaf-tinting rules in witness_type_inference and analysis/types must \
                      push WitnessOf into scalar leaves instead. target_type = {target_type}"
                 );
@@ -2858,7 +2858,7 @@ impl ExplicitWitness {
                     let i_const = b.u_const(32, i as u128);
                     let child_hint = b.array_get(hint, i_const);
                     let child_offset = leaf_offset + (i as u128) * inner_leaves;
-                    let child = self.gen_witness_array_get_nd(
+                    let child = self.gen_witness_array_get_multidim(
                         b,
                         arr,
                         base_key,
@@ -2881,11 +2881,11 @@ impl ExplicitWitness {
                 id
             }
             TypeExpr::Slice(_) => {
-                panic!("ND witness array read: slice element types not supported")
+                panic!("multidimensional witness array read: slice element types not supported")
             }
             TypeExpr::Tuple(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
                 panic!(
-                    "ND witness array read: unsupported element type {}",
+                    "multidimensional witness array read: unsupported element type {}",
                     target_type
                 )
             }
