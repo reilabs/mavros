@@ -208,44 +208,25 @@ impl LowerWitnessArrayOps {
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
         let pure_idx = b.value_of(idx);
-
-        if matches!(&result_type.expr, TypeExpr::Array(..)) {
-            let idx_field = b.cast_to_field(idx);
-            let inner_hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
-            let outer_stride = leaf_scalar_count(&result_type);
-            let stride_const = b.field_const(Field::from(outer_stride as u128));
-            let base_key = b.mul(idx_field, stride_const);
-            self.gen_witness_array_get_multidim(
-                b,
-                arr,
-                base_key,
-                inner_hint,
-                &arr_elem_type,
-                &result_type_full,
-                Some(result),
-                flag,
-            );
-            return;
-        }
-
-        let back_cast_target = scalar_cast_target(&result_type, "witnessed array read");
-
         let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
-        let mut r_pure_val = hint;
-
-        if arr_elem_type.is_witness_of() {
-            r_pure_val = b.value_of(r_pure_val);
-        }
-
         let idx_field = b.cast_to_field(idx);
-        let r_wit_field = b.cast_to_field(r_pure_val);
-        let r_wit = b.write_witness(r_wit_field);
-        b.emit(OpCode::Cast {
-            result,
-            value: r_wit,
-            target: back_cast_target,
-        });
-        b.lookup_arr(arr, idx_field, r_wit, flag);
+        let stride = leaf_scalar_count(&result_type);
+        let base_key = if stride == 1 {
+            idx_field
+        } else {
+            let stride_const = b.field_const(Field::from(stride as u128));
+            b.mul(idx_field, stride_const)
+        };
+        self.gen_witness_array_get_from_hint(
+            b,
+            arr,
+            base_key,
+            hint,
+            &arr_elem_type,
+            &result_type_full,
+            Some(result),
+            flag,
+        );
     }
 
     fn emit_array_get_hint(
@@ -282,8 +263,8 @@ impl LowerWitnessArrayOps {
         let result_elem_type = result_type.get_array_element();
         let result_elem_back_cast = match &result_elem_type.strip_witness().expr {
             TypeExpr::Field => None,
-            TypeExpr::U(s) => Some((CastTarget::U(*s), *s)),
-            TypeExpr::I(s) => Some((CastTarget::I(*s), *s)),
+            TypeExpr::U(s) => Some(CastTarget::U(*s)),
+            TypeExpr::I(s) => Some(CastTarget::I(*s)),
             other => panic!(
                 "ArraySet with witness idx: unsupported element type {:?}",
                 other
@@ -305,8 +286,7 @@ impl LowerWitnessArrayOps {
             let arr_i_field = b.cast_to_field(arr_i);
 
             let new_i_field = b.select(eq, value_field, arr_i_field);
-            if let Some((target, bits)) = result_elem_back_cast {
-                b.rangecheck(new_i_field, bits);
+            if let Some(target) = result_elem_back_cast {
                 b.cast_to(target, new_i_field)
             } else {
                 new_i_field
@@ -320,7 +300,7 @@ impl LowerWitnessArrayOps {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gen_witness_array_get_multidim(
+    fn gen_witness_array_get_from_hint(
         &self,
         b: &mut HLBlockEmitter<'_>,
         arr: ValueId,
@@ -347,7 +327,7 @@ impl LowerWitnessArrayOps {
                     let stride_const = b.field_const(Field::from(inner_leaves));
                     let child_offset = b.mul(i_field, stride_const);
                     let child_base_key = b.add(base_key, child_offset);
-                    self.gen_witness_array_get_multidim(
+                    self.gen_witness_array_get_from_hint(
                         b,
                         arr,
                         child_base_key,
@@ -387,12 +367,7 @@ impl LowerWitnessArrayOps {
                 let leaf_field = b.cast_to_field(leaf_pure);
                 let leaf_wit = b.write_witness(leaf_field);
                 b.lookup_arr(arr, base_key, leaf_wit, flag);
-                let cast_target = match &stripped.expr {
-                    TypeExpr::U(s) => CastTarget::U(*s),
-                    TypeExpr::I(s) => CastTarget::I(*s),
-                    TypeExpr::Field => CastTarget::Field,
-                    _ => unreachable!(),
-                };
+                let cast_target = scalar_cast_target(&stripped, "witnessed array read");
                 let id = result_override.unwrap_or_else(|| b.fresh_value());
                 b.emit(OpCode::Cast {
                     result: id,
