@@ -823,7 +823,9 @@ impl Specializer {
                     info!("TODO: Aborting specialization on an array value");
                     return;
                 }
-                ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
+                ValueSignature::Unknown(_)
+                | ValueSignature::UnknownSlice
+                | ValueSignature::WitnessOf(_) => {
                     call_params.push(Val(state
                         .function
                         .add_parameter(state.function.get_entry_id(), param.clone())));
@@ -935,7 +937,9 @@ impl Specializer {
                     ValueSignature::Array(_) => {
                         todo!();
                     }
-                    ValueSignature::Unknown(_) | ValueSignature::WitnessOf(_) => {
+                    ValueSignature::Unknown(_)
+                    | ValueSignature::UnknownSlice
+                    | ValueSignature::WitnessOf(_) => {
                         specialized_params.push(*pval);
                     }
                     ValueSignature::Field(v) => {

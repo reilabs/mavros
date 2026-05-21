@@ -48,12 +48,22 @@ impl ScalarKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
-    U { bits_size: usize, value: u128 },
-    I { bits_size: usize, value: u128 },
+    U {
+        bits_size: usize,
+        value: u128,
+    },
+    I {
+        bits_size: usize,
+        value: u128,
+    },
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
     Unknown(ScalarKind),
+    /// A slice whose length and contents are both unknown. Distinct from
+    /// `Array(vec![])` (an empty slice of length zero) and from `Unknown(_)`
+    /// (a scalar of unknown value).
+    UnknownSlice,
     WitnessOf(Box<ValueSignature>),
     Tuple(Vec<ValueSignature>),
 }
@@ -69,6 +79,7 @@ impl ValueSignature {
             }
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
             ValueSignature::Unknown(kind) => Value::Unknown(*kind),
+            ValueSignature::UnknownSlice => Value::UnknownSlice,
             ValueSignature::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.to_value())),
             ValueSignature::Tuple(elements) => {
                 Value::Tuple(elements.iter().map(|e| e.to_value()).collect())
@@ -92,6 +103,7 @@ impl ValueSignature {
             }
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
             ValueSignature::Unknown(_) => "?".to_string(),
+            ValueSignature::UnknownSlice => "?slice".to_string(),
             ValueSignature::WitnessOf(inner) => format!("W({})", inner.pretty_print(full)),
             ValueSignature::Tuple(elements) => {
                 if full {
@@ -113,6 +125,10 @@ pub enum Value {
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
+    /// A slice whose length and contents are both unknown. Distinct from
+    /// `Array(vec![])` (an empty slice of length zero) and from `Unknown(_)`
+    /// (a scalar of unknown value).
+    UnknownSlice,
     WitnessOf(Box<Value>),
     Tuple(Vec<Value>),
 }
@@ -175,7 +191,7 @@ impl Value {
                 let elem_unknown = Value::unknown_from_type(elem);
                 Value::Array(vec![elem_unknown; *n])
             }
-            TypeExpr::Slice(_) => Value::Unknown(ScalarKind::Field),
+            TypeExpr::Slice(_) => Value::UnknownSlice,
             TypeExpr::Tuple(elems) => {
                 Value::Tuple(elems.iter().map(Value::unknown_from_type).collect())
             }
@@ -504,7 +520,7 @@ impl Value {
             Value::WitnessOf(inner) => {
                 inner.forget_concrete();
             }
-            Value::Unknown(_) => {}
+            Value::Unknown(_) | Value::UnknownSlice => {}
             Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in vals {
@@ -527,7 +543,7 @@ impl Value {
             Value::U(s, _) => *self = Value::Unknown(ScalarKind::U(*s)),
             Value::I(s, _) => *self = Value::Unknown(ScalarKind::I(*s)),
             Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
-            Value::Unknown(_) => {}
+            Value::Unknown(_) | Value::UnknownSlice => {}
             Value::WitnessOf(inner) => {
                 inner.forget_concrete();
             }
@@ -550,6 +566,7 @@ impl Value {
     fn make_unspecialized_sig(&self) -> ValueSignature {
         match self {
             Value::Unknown(kind) => ValueSignature::Unknown(*kind),
+            Value::UnknownSlice => ValueSignature::UnknownSlice,
             Value::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
@@ -607,7 +624,7 @@ impl Value {
     }
 
     fn array_get(&self, index: &Value, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
-        if matches!(self, Value::Unknown(_)) {
+        if matches!(self, Value::Unknown(_) | Value::UnknownSlice) {
             return Value::unknown_from_type(tp);
         }
 
@@ -626,7 +643,7 @@ impl Value {
                 instrumenter.record_lookups(vals.len(), 1, 1);
                 Value::unknown_from_type(tp)
             }
-            (Value::Unknown(_), _) => Value::unknown_from_type(tp),
+            (Value::Unknown(_) | Value::UnknownSlice, _) => Value::unknown_from_type(tp),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
@@ -673,6 +690,7 @@ impl Value {
                 let new_vals = vals.iter().map(|_| value.clone()).collect();
                 Value::Array(new_vals)
             }
+            (Value::UnknownSlice, _, _) => Value::UnknownSlice,
             _ => panic!(
                 "Cannot set array element of {:?} with index {:?} to {:?}",
                 self, index, value
@@ -1781,6 +1799,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
                 Value::Array(new_values)
             }
+            Value::UnknownSlice => Value::UnknownSlice,
             _ => panic!("Cannot push to {:?}", slice.unspecialized),
         };
         let new_spec = match &slice.specialized {
@@ -1789,6 +1808,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
                 Value::Array(new_values)
             }
+            Value::UnknownSlice => Value::UnknownSlice,
             _ => panic!("Cannot push to {:?}", slice.specialized),
         };
         SpecSplitValue {
@@ -1800,10 +1820,12 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
             Value::Array(values) => Value::U(32, values.len() as u128),
+            Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.unspecialized),
         };
         let spec = match &slice.specialized {
             Value::Array(values) => Value::U(32, values.len() as u128),
+            Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.specialized),
         };
         SpecSplitValue {
