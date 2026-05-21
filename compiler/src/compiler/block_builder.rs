@@ -706,6 +706,12 @@ pub trait LLEmitter {
         self.int_cmp(IntCmpOp::Eq, a, b)
     }
 
+    fn is_null(&mut self, ptr: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::IsNull { result: r, ptr });
+        r
+    }
+
     fn int_ult(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.int_cmp(IntCmpOp::ULt, a, b)
     }

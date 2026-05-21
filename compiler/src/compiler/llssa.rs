@@ -452,6 +452,12 @@ pub enum LLOp {
         b: ValueId,
     },
 
+    // ── Pointer null check ──────────────────────────────────────────────
+    IsNull {
+        result: ValueId,
+        ptr: ValueId,
+    },
+
     // ── Width conversion ────────────────────────────────────────────────
     Truncate {
         result: ValueId,
@@ -585,7 +591,7 @@ impl Instruction for LLOp {
 
             LLOp::Truncate { value, .. } | LLOp::ZExt { value, .. } => vec![value].into_iter(),
 
-            LLOp::Free { ptr } => vec![ptr].into_iter(),
+            LLOp::Free { ptr } | LLOp::IsNull { ptr, .. } => vec![ptr].into_iter(),
 
             // Binary
             LLOp::IntArith { a, b, .. }
@@ -631,6 +637,7 @@ impl Instruction for LLOp {
             | LLOp::Not { result, .. }
             | LLOp::Spread { result, .. }
             | LLOp::IntCmp { result, .. }
+            | LLOp::IsNull { result, .. }
             | LLOp::Truncate { result, .. }
             | LLOp::ZExt { result, .. }
             | LLOp::FieldArith { result, .. }
@@ -679,7 +686,7 @@ impl Instruction for LLOp {
 
             LLOp::Truncate { value, .. } | LLOp::ZExt { value, .. } => vec![value].into_iter(),
 
-            LLOp::Free { ptr } => vec![ptr].into_iter(),
+            LLOp::Free { ptr } | LLOp::IsNull { ptr, .. } => vec![ptr].into_iter(),
 
             // Binary
             LLOp::IntArith { a, b, .. }
@@ -761,6 +768,7 @@ impl Instruction for LLOp {
             LLOp::Free { ptr } => vec![ptr].into_iter(),
             LLOp::Store { ptr, value } => vec![ptr, value].into_iter(),
             LLOp::Load { result, ptr, .. } => vec![result, ptr].into_iter(),
+            LLOp::IsNull { result, ptr } => vec![result, ptr].into_iter(),
 
             LLOp::MkStruct { result, fields, .. } => {
                 let mut v = vec![result];
@@ -861,6 +869,9 @@ impl Instruction for LLOp {
             }
             LLOp::IntCmp { kind, result, a, b } => {
                 format!("{} = icmp.{} {}, {}", v(*result), kind, vr(*a), vr(*b))
+            }
+            LLOp::IsNull { result, ptr } => {
+                format!("{} = is_null {}", v(*result), vr(*ptr))
             }
             LLOp::Truncate {
                 result,
