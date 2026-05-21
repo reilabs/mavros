@@ -1365,6 +1365,7 @@ mod def {
         let table_idx = unsafe { *table_id_ptr };
 
         let table_idx = if table_idx == u64::MAX {
+            // First lookup on this array: create a new table
             let (cnst_off, wit_off, mult_wit) = unsafe {
                 (
                     vm.data.as_forward.elem_inverses_constraint_section_offset,
@@ -1373,9 +1374,11 @@ mod def {
                 )
             };
 
+            // Dump array element values into the x-slots (even offsets) of the table section
             let length = unsafe {
                 for_each_array_leaf(array, stride, |i, elem_ptr| {
                     let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind);
+                    // Write it into the x-slot (even offset: 2*i) of the constraint section
                     *vm.data.as_forward.out_a_base.add(cnst_off + 2 * i) = elem_field;
                 })
             };
@@ -1544,6 +1547,7 @@ mod def {
         let table_idx = unsafe { *table_id_ptr };
 
         let table_idx = if table_idx == u64::MAX {
+            // First AD call on this array: create table and process table constraints
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
@@ -1552,36 +1556,46 @@ mod def {
             let length =
                 unsafe {
                     for_each_array_leaf(array, stride, |i, elem_ptr| {
+                        // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
                         let x_coeff =
                             *vm.data.as_ad.ad_coeffs.offset(
                                 inverses_constraint_section_offset as isize + 2 * i as isize,
                             );
+                        // da[beta] += x_coeff (A entry: (beta, 1))
                         *vm.data
                             .as_ad
                             .out_da
                             .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
+                        // db[v_i] += x_coeff (B entry: element value)
                         lookup_elem_bump_db(elem_ptr, elem_kind, x_coeff, vm);
+                        // dc[x_wit] -= x_coeff (C entry: (x, -1))
                         *vm.data
                             .as_ad
                             .out_dc
                             .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
                             x_coeff;
 
+                        // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
                         let y_coeff = *vm.data.as_ad.ad_coeffs.offset(
                             inverses_constraint_section_offset as isize + 2 * i as isize + 1,
                         );
+                        // dA[y_witness] += y_coeff
                         *vm.data.as_ad.out_da.offset(
                             inverses_witness_section_offset as isize + 2 * i as isize + 1,
                         ) += y_coeff;
+                        // dB[alpha] += y_coeff
                         *vm.data
                             .as_ad
                             .out_db
                             .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
+                        // dB -= y_coeff * i (constant part)
                         *vm.data.as_ad.out_db -= y_coeff * Field::from(i as u64);
+                        // dB[x_witness] -= y_coeff (x_i appears negated in B)
                         *vm.data
                             .as_ad
                             .out_db
                             .add(inverses_witness_section_offset + 2 * i) -= y_coeff;
+                        // dC[mult_witness] += y_coeff
                         *vm.data.as_ad.out_dc.add(multiplicities_wit_offset + i) += y_coeff;
                     })
                 };
@@ -1593,6 +1607,7 @@ mod def {
                     .offset(inverses_constraint_section_offset as isize + 2 * length as isize)
             };
 
+            // Sum constraint: y_i goes into A position
             for i in 0..length {
                 unsafe {
                     *vm.data
