@@ -733,7 +733,7 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let flag = b.field_const(Field::from(1));
-                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
+                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag, None);
                 }
             }
             OpCode::ArraySet {
@@ -1568,7 +1568,15 @@ impl ExplicitWitness {
                     b.push(inner);
                 } else {
                     let flag = self.ensure_field(b, function_type_info, condition);
-                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
+                    self.gen_witness_array_get(
+                        b,
+                        function_type_info,
+                        arr,
+                        idx,
+                        result,
+                        flag,
+                        Some(condition),
+                    );
                 }
             }
             OpCode::ArraySet { .. } => {
@@ -2669,28 +2677,33 @@ impl ExplicitWitness {
         idx: ValueId,
         result: ValueId,
         flag: ValueId,
+        cond: Option<ValueId>,
     ) {
         let result_type_full = function_type_info.get_value_type(result).clone();
         let result_type = result_type_full.strip_all_witness();
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
-        let safe_hint_idx =
-            |b: &mut HLInstrBuilder<'_>| self.clamped_hint_index(b, function_type_info, arr, idx);
+
+        // Hint-side `array_get` would panic on zero-length arrays or
+        // out-of-bounds reads; gate it on `do_hint = cond && in_bounds` and
+        // wrap it in a Guard so the array_get only fires when safe. A later
+        // pass lowers the Guard into control flow (witgen) or DCEs it once
+        // the hint chain dies after WitnessWriteToFresh (R1CS).
+        let do_hint = self.compute_do_hint(b, function_type_info, arr, idx, cond);
+        let pure_idx = b.value_of(idx);
 
         // Multidimensional-array case: hint the entire slice, then constrain each leaf with a
         // lookup at a computed flat offset.
         if matches!(&result_type.expr, TypeExpr::Array(..)) {
             let idx_field = b.cast_to_field(idx);
-            let inner_hint = if Self::array_is_empty(function_type_info, arr) {
-                // Zero-length array: no in-bounds index exists, so any
-                // hint-side `array_get` would panic. Synthesize a default
-                // slice; the constraint side `lookup_arr` still fires per
-                // leaf and will fail under an active flag (correctly so —
-                // the user accessed an empty array).
-                self.default_value(b, &arr_elem_type)
-            } else {
-                let safe_idx = safe_hint_idx(b);
-                b.array_get(arr, safe_idx)
-            };
+            let inner_hint = b.fresh_value();
+            b.push(OpCode::Guard {
+                condition: do_hint,
+                inner: Box::new(OpCode::ArrayGet {
+                    result: inner_hint,
+                    array: arr,
+                    index: pure_idx,
+                }),
+            });
             let outer_stride = leaf_scalar_count(&result_type);
             let stride_const = b.field_const(Field::from(outer_stride as u128));
             let base_key = b.mul(idx_field, stride_const);
@@ -2728,16 +2741,16 @@ impl ExplicitWitness {
             }
         };
 
-        let mut r_pure_val = if Self::array_is_empty(function_type_info, arr) {
-            // Zero-length array: synthesize a default leaf rather than
-            // hitting `array_get` (which would panic in the witgen VM).
-            // The `lookup_arr` below still constrains the proof side and
-            // fails under an active flag for the empty-array access.
-            self.default_value(b, &arr_elem_type)
-        } else {
-            let safe_idx = safe_hint_idx(b);
-            b.array_get(arr, safe_idx)
-        };
+        let hint = b.fresh_value();
+        b.push(OpCode::Guard {
+            condition: do_hint,
+            inner: Box::new(OpCode::ArrayGet {
+                result: hint,
+                array: arr,
+                index: pure_idx,
+            }),
+        });
+        let mut r_pure_val = hint;
 
         if arr_elem_type.is_witness_of() {
             r_pure_val = b.value_of(r_pure_val);
@@ -2754,42 +2767,47 @@ impl ExplicitWitness {
         b.lookup_arr(arr, idx_field, r_wit, flag);
     }
 
-    /// Whether the array's static type has length zero. Slices have a
-    /// runtime length and are conservatively treated as non-empty here.
-    fn array_is_empty(function_type_info: &FunctionTypeInfo, arr: ValueId) -> bool {
-        matches!(
-            &function_type_info.get_value_type(arr).strip_witness().expr,
-            TypeExpr::Array(_, 0)
-        )
-    }
-
-    /// Synthesize a default value of the given type for the empty-array
-    /// hint case of a witness-indexed array read. The constraint side
-    /// (`lookup_arr` with the guard flag) catches any genuine read of an
-    /// empty array under an active guard by failing the lookup; the value
-    /// here only needs to be well-typed for downstream witness lowering.
-    fn default_value(&self, b: &mut HLInstrBuilder<'_>, ty: &Type) -> ValueId {
-        match &ty.expr {
-            TypeExpr::Field => b.field_const(Field::ZERO),
-            TypeExpr::U(bits) => b.u_const(*bits, 0),
-            TypeExpr::I(bits) => b.i_const(*bits, 0),
-            TypeExpr::WitnessOf(inner) => {
-                let inner_val = self.default_value(b, inner);
-                b.cast_to_witness_of(inner_val)
+    /// Compute `do_hint = pure_cond AND in_bounds` where `pure_cond` is the
+    /// pure-U(1) hint of the surrounding guard (or constant 1 when there is
+    /// no surrounding guard), and `in_bounds = pure_idx < len`. The Guard
+    /// wrapping the hint-side `array_get` is driven by this flag.
+    fn compute_do_hint(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &FunctionTypeInfo,
+        arr: ValueId,
+        idx: ValueId,
+        cond: Option<ValueId>,
+    ) -> ValueId {
+        let arr_ty = function_type_info.get_value_type(arr);
+        let idx_bits = match function_type_info.get_value_type(idx).strip_witness().expr {
+            TypeExpr::U(n) => n,
+            other => panic!("compute_do_hint: non-uint index type {:?}", other),
+        };
+        let len_val = match &arr_ty.strip_witness().expr {
+            TypeExpr::Array(_, n) => b.u_const(idx_bits, *n as u128),
+            TypeExpr::Slice(_) => {
+                let len32 = b.slice_len(arr);
+                if idx_bits == 32 {
+                    len32
+                } else {
+                    b.cast_to(CastTarget::U(idx_bits), len32)
+                }
             }
-            TypeExpr::Array(elem, n) => {
-                let elem_default = self.default_value(b, elem);
-                b.mk_repeated(
-                    elem_default,
-                    SequenceTargetType::Array(*n),
-                    *n,
-                    (**elem).clone(),
-                )
+            other => panic!("compute_do_hint on non-seq type: {:?}", other),
+        };
+        let pure_idx = b.value_of(idx);
+        let in_bounds = b.lt(pure_idx, len_val);
+        match cond {
+            None => in_bounds,
+            Some(c) => {
+                let c_pure = if function_type_info.get_value_type(c).is_witness_of() {
+                    b.value_of(c)
+                } else {
+                    c
+                };
+                b.and(c_pure, in_bounds)
             }
-            other => panic!(
-                "ExplicitWitness: default_value cannot synthesize a value of type {:?}",
-                other
-            ),
         }
     }
 
@@ -3014,44 +3032,6 @@ impl ExplicitWitness {
                 unreachable!("strip_all_witness should remove all WitnessOf wrappers")
             }
         }
-    }
-
-    /// Index to use for the *hint-side* `array_get` inside a witness-indexed
-    /// lookup gadget: clamp `idx`'s pure value into `[0, len)` so the witgen
-    /// VM doesn't panic on out-of-bounds reads. The constraint side keeps the
-    /// original index — when the lookup's flag is off (the surrounding guard
-    /// is inactive), the witness value doesn't matter; when the flag is on,
-    /// the lookup enforces the right element, so a hint clamp can only ever
-    /// surface as a constraint failure downstream, never as an unsound proof.
-    /// The caller must check `array_is_empty` first; this helper assumes the
-    /// array has at least one element so the clamp lands on a valid slot.
-    fn clamped_hint_index(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        arr: ValueId,
-        idx: ValueId,
-    ) -> ValueId {
-        let arr_ty = function_type_info.get_value_type(arr);
-        let len = match &arr_ty.strip_witness().expr {
-            TypeExpr::Array(_, n) => *n,
-            TypeExpr::Slice(_) => {
-                // Slice length isn't known statically; fall back to the raw
-                // pure index. (We don't hit this path on any current test.)
-                return b.value_of(idx);
-            }
-            other => panic!("hint index on non-seq type: {:?}", other),
-        };
-        debug_assert!(len > 0, "clamped_hint_index called on a zero-length array");
-        let idx_bits = match function_type_info.get_value_type(idx).strip_witness().expr {
-            TypeExpr::U(n) => n,
-            other => panic!("hint index of non-uint type: {:?}", other),
-        };
-        let pure_idx = b.value_of(idx);
-        let len_const = b.u_const(idx_bits, len as u128);
-        let in_bounds = b.lt(pure_idx, len_const);
-        let zero = b.u_const(idx_bits, 0);
-        b.select(in_bounds, pure_idx, zero)
     }
 
     fn ensure_field(
