@@ -28,8 +28,8 @@ use crate::compiler::{
     ssa::{
         BlockId, Instruction, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, HLFunction, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter},
+            BinaryArithOpKind, CastTarget, CmpKind, HLSSA, OpCode, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
         },
     },
 };
@@ -61,40 +61,41 @@ impl LowerPureGuards {
 
     fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
+        let mut sb = HLSSABuilder::new(ssa);
         for function_id in &function_ids {
-            let mut function = ssa.take_function(*function_id);
             let func_types = type_info.get_function(*function_id);
-            self.run_function(&mut function, func_types);
-            ssa.put_function(*function_id, function);
+            sb.modify_function(*function_id, |fb| {
+                self.run_function(fb, func_types);
+            });
         }
     }
 
     fn run_function(
         &self,
-        function: &mut HLFunction,
+        fb: &mut HLFunctionBuilder<'_>,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
-        let block_ids: Vec<_> = function.get_blocks().map(|(bid, _)| *bid).collect();
+        let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
         for block_id in block_ids {
-            self.lower_block(function, block_id, type_info);
+            self.lower_block(fb, block_id, type_info);
         }
     }
 
     fn lower_block(
         &self,
-        function: &mut HLFunction,
+        fb: &mut HLFunctionBuilder<'_>,
         block_id: BlockId,
         type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
     ) {
         let (instructions, terminator) = {
-            let mut block = function.take_block(block_id);
+            let mut block = fb.function.take_block(block_id);
             let instructions = block.take_instructions();
             let terminator = block.take_terminator();
-            function.put_block(block_id, block);
+            fb.function.put_block(block_id, block);
             (instructions, terminator)
         };
 
-        let mut emitter = HLBlockEmitter::new(function, block_id);
+        let mut emitter = fb.block(block_id);
 
         for instruction in instructions {
             match instruction {

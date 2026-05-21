@@ -6,6 +6,7 @@ use petgraph::algo::dominators::{self, Dominators};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::{Bfs, DfsPostOrder, EdgeRef, Walker};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
 
@@ -398,10 +399,10 @@ impl CFG {
 }
 
 impl CFG {
-    pub fn generate_image<Op: Instruction, Ty: SSAType>(
+    pub fn generate_image<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
         &self,
         output_path: PathBuf,
-        ssa: &SSA<Op, Ty>,
+        ssa: &SSA<Op, Ty, C>,
         function: &crate::compiler::ssa::Function<Op, Ty>,
         func_id: FunctionId,
         label: String,
@@ -566,10 +567,10 @@ impl CallGraph {
 }
 
 impl CallGraph {
-    pub fn generate_image<Op: Instruction, Ty: SSAType>(
+    pub fn generate_image<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
         &self,
         output_path: PathBuf,
-        ssa: &SSA<Op, Ty>,
+        ssa: &SSA<Op, Ty, C>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use std::fs;
         use std::process::Command;
@@ -633,7 +634,9 @@ pub struct FlowAnalysis {
 }
 
 impl FlowAnalysis {
-    pub fn run<Op: Instruction, Ty: SSAType>(ssa: &SSA<Op, Ty>) -> Self {
+    pub fn run<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
+        ssa: &SSA<Op, Ty, C>,
+    ) -> Self {
         let mut call_graph = CallGraph::new();
         let mut function_cfgs = HashMap::new();
 
@@ -688,10 +691,10 @@ impl FlowAnalysis {
         &self.function_cfgs[&function_id]
     }
 
-    pub fn generate_images<Op: Instruction, Ty: SSAType>(
+    pub fn generate_images<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
         &self,
         debug_output_dir: PathBuf,
-        ssa: &SSA<Op, Ty>,
+        ssa: &SSA<Op, Ty, C>,
         phase_label: String,
     ) {
         if !debug_output_dir.exists() {
@@ -726,15 +729,17 @@ impl FlowAnalysis {
 use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
 
 impl FlowAnalysis {
-    /// HLSSA analysis id — inherent method so callers can write
-    /// `FlowAnalysis::id()` without disambiguating the generic impl.
+    /// Convenience inherent shim so callers can write `FlowAnalysis::id()`
+    /// without bringing the `Analysis` trait into scope.
     pub fn id() -> AnalysisId {
         <Self as Analysis>::id()
     }
 }
 
-impl<Op: Instruction, Ty: SSAType> Analysis<Op, Ty> for FlowAnalysis {
-    fn compute(ssa: &SSA<Op, Ty>, _store: &AnalysisStore) -> Self {
+impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug + 'static> Analysis<Op, Ty, Cn>
+    for FlowAnalysis
+{
+    fn compute(ssa: &SSA<Op, Ty, Cn>, _store: &AnalysisStore) -> Self {
         FlowAnalysis::run(ssa)
     }
 }

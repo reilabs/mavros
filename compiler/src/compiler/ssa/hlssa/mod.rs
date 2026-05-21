@@ -13,13 +13,20 @@ pub use type_system::{Type, TypeExpr};
 // ================================================================================================
 
 /// The high-level SSA is designed for domain-level analysis without concretizing runtime details.
-pub type HLSSA = SSA<OpCode, Type>;
+pub type HLSSA = SSA<OpCode, Type, Constants>;
 
 impl HLSSA {
     pub fn new() -> Self {
-        Self::with_main("main".to_string())
+        Self::with_main("main".to_string(), ())
     }
 }
+
+// CONSTANT STORAGE
+// ================================================================================================
+
+/// Constant storage for the high-level SSA. Currently a placeholder while constants still live
+/// inline as `OpCode::Const` instructions.
+pub type Constants = ();
 
 // HLSSA OPCODES
 // ================================================================================================
