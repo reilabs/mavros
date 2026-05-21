@@ -6,13 +6,14 @@
 //! - Select(cond, l, r) → JmpIf(cond, t_block, f_block) → merge with phi params
 
 use crate::compiler::{
+    Field,
     analysis::types::TypeInfo,
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BlockId, Instruction, Terminator,
+        BlockId, Instruction, Terminator, ValueId,
         hlssa::{
-            HLSSA, OpCode,
-            builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+            CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
         },
     },
 };
@@ -89,21 +90,28 @@ impl LowerGuards {
             match instruction {
                 OpCode::Guard { condition, inner } => {
                     let results: Vec<_> = inner.get_results().copied().collect();
-                    assert!(
-                        results.is_empty(),
-                        "ICE: Guard with results is not supported in LowerGuards"
-                    );
+                    if results.is_empty() {
+                        let (exec_block, _) = emitter.add_block();
+                        let (continue_block, _) = emitter.add_block();
 
-                    let (exec_block, _) = emitter.add_block();
-                    let (continue_block, _) = emitter.add_block();
-
-                    emitter.seal_and_switch(
-                        Terminator::JmpIf(condition, exec_block, continue_block),
-                        exec_block,
-                    );
-                    emitter.emit(*inner);
-                    emitter
-                        .seal_and_switch(Terminator::Jmp(continue_block, vec![]), continue_block);
+                        emitter.seal_and_switch(
+                            Terminator::JmpIf(condition, exec_block, continue_block),
+                            exec_block,
+                        );
+                        emitter.emit(*inner);
+                        emitter.seal_and_switch(
+                            Terminator::Jmp(continue_block, vec![]),
+                            continue_block,
+                        );
+                    } else {
+                        Self::lower_guard_with_result(
+                            &mut emitter,
+                            condition,
+                            *inner,
+                            &results,
+                            type_info,
+                        );
+                    }
                 }
                 OpCode::Select {
                     result,
@@ -141,6 +149,67 @@ impl LowerGuards {
         // Apply the original terminator to the final block
         if let Some(term) = terminator {
             emitter.set_terminator(term);
+        }
+    }
+
+    fn lower_guard_with_result(
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        inner: OpCode,
+        results: &[ValueId],
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+    ) {
+        let result_pairs: Vec<(ValueId, Type)> = results
+            .iter()
+            .map(|r| (*r, type_info.get_value_type(*r).clone()))
+            .collect();
+        emitter.build_if_else_into(
+            condition,
+            result_pairs.clone(),
+            |e| {
+                let mut inner_fresh = inner.clone();
+                let fresh_results: Vec<_> = inner_fresh
+                    .get_results_mut()
+                    .map(|result| {
+                        let fresh = e.fresh_value();
+                        *result = fresh;
+                        fresh
+                    })
+                    .collect();
+                e.emit(inner_fresh);
+                fresh_results
+            },
+            |e| {
+                result_pairs
+                    .iter()
+                    .map(|(_, ty)| Self::default_value(e, ty))
+                    .collect()
+            },
+        );
+    }
+
+    fn default_value(emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
+        match &ty.expr {
+            TypeExpr::Field => emitter.field_const(Field::from(0u64)),
+            TypeExpr::U(bits) => emitter.u_const(*bits, 0),
+            TypeExpr::I(bits) => emitter.i_const(*bits, 0),
+            TypeExpr::WitnessOf(inner) => {
+                let inner_val = Self::default_value(emitter, inner);
+                emitter.cast_to(CastTarget::WitnessOf, inner_val)
+            }
+            TypeExpr::Array(elem, n) => {
+                let elem_default = Self::default_value(emitter, elem);
+                emitter.mk_repeated(
+                    elem_default,
+                    SequenceTargetType::Array(*n),
+                    *n,
+                    (**elem).clone(),
+                )
+            }
+            other => panic!(
+                "LowerGuards: cannot synthesize default value for type {:?}",
+                other
+            ),
         }
     }
 }

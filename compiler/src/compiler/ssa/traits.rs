@@ -21,6 +21,7 @@ pub trait SSAAnotator: Debug {
 pub trait Instruction: Clone + Debug + 'static {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId>;
     fn get_results(&self) -> impl Iterator<Item = &ValueId>;
+    fn get_results_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
     fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId>;
 

@@ -348,7 +348,13 @@ impl UntaintControlFlow {
                         // (handled when those blocks are processed)
                     }
                     WitnessType::Witness => {
-                        let child_block_taint = match block_taint {
+                        // The then branch is taken when `cond` is true, the
+                        // else branch when it's false. Each branch must run
+                        // under a different guard, so compute both taints —
+                        // `parent_taint AND cond` for then, `parent_taint AND
+                        // NOT cond` for else — and assign per body block by
+                        // which branch dominates it.
+                        let then_taint = match block_taint {
                             Some(tnt) => {
                                 let result_val = ssa.fresh_value();
                                 new_instructions.push(OpCode::BinaryArithOp {
@@ -361,9 +367,41 @@ impl UntaintControlFlow {
                             }
                             None => cond,
                         };
+                        let not_cond = {
+                            let nv = ssa.fresh_value();
+                            new_instructions.push(OpCode::Not {
+                                result: nv,
+                                value: cond,
+                            });
+                            nv
+                        };
+                        let else_taint = match block_taint {
+                            Some(tnt) => {
+                                let result_val = ssa.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::And,
+                                    result: result_val,
+                                    lhs: tnt,
+                                    rhs: not_cond,
+                                });
+                                result_val
+                            }
+                            None => not_cond,
+                        };
                         let body = cfg.get_if_body(block_id);
-                        for block_id in body {
-                            block_taint_vars.insert(block_id, Some(child_block_taint));
+                        for body_bid in body {
+                            let taint = if cfg.dominates(if_true, body_bid) {
+                                then_taint
+                            } else if cfg.dominates(if_false, body_bid) {
+                                else_taint
+                            } else {
+                                panic!(
+                                    "untaint_cf: block {:?} in if-body is dominated by neither \
+                                     then-branch {:?} nor else-branch {:?}",
+                                    body_bid, if_true, if_false
+                                );
+                            };
+                            block_taint_vars.insert(body_bid, Some(taint));
                         }
 
                         let merge = cfg.get_merge_point(block_id);

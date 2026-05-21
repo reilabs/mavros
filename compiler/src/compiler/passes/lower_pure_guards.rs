@@ -142,10 +142,21 @@ impl LowerPureGuards {
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Constrain { .. }
-            | OpCode::Rangecheck { .. }
             | OpCode::MemOp { .. }
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. } => {
+                emitter.emit(OpCode::Guard {
+                    condition,
+                    inner: Box::new(inner),
+                });
+            }
+
+            OpCode::Rangecheck { value, max_bits }
+                if !type_info.get_value_type(value).is_witness_of() =>
+            {
+                self.lower_rangecheck_guard(emitter, condition, value, max_bits, type_info);
+            }
+            OpCode::Rangecheck { .. } => {
                 emitter.emit(OpCode::Guard {
                     condition,
                     inner: Box::new(inner),
@@ -360,6 +371,18 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
+        if !signed && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
+            self.lower_unsigned_add_sub_guard(
+                emitter,
+                condition,
+                kind,
+                original_result,
+                lhs,
+                rhs,
+                bits,
+            );
+            return;
+        }
         let wide_bits = wider_bits(bits);
 
         // Widen operands
@@ -424,6 +447,46 @@ impl LowerPureGuards {
                 e.cast_to(narrow_target, wide_result)
             },
             signed,
+            bits,
+        );
+    }
+
+    fn lower_unsigned_add_sub_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        kind: BinaryArithOpKind,
+        original_result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        let result_type = Type {
+            expr: TypeExpr::U(bits),
+        };
+
+        let native_result = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result: native_result,
+            lhs,
+            rhs,
+        });
+
+        let overflow = match kind {
+            BinaryArithOpKind::Add => emitter.lt(native_result, lhs),
+            BinaryArithOpKind::Sub => emitter.lt(lhs, native_result),
+            _ => unreachable!("lower_unsigned_add_sub_guard called for {:?}", kind),
+        };
+
+        self.emit_guarded_branch(
+            emitter,
+            condition,
+            overflow,
+            original_result,
+            &result_type,
+            |_| native_result,
+            false,
             bits,
         );
     }
@@ -518,23 +581,6 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) -> ValueId {
-        let wide_bits = wider_bits(bits);
-        let wide_target = if signed {
-            CastTarget::I(wide_bits)
-        } else {
-            CastTarget::U(wide_bits)
-        };
-        let lhs_wide = emitter.cast_to(wide_target, lhs);
-        let rhs_wide = emitter.cast_to(wide_target, rhs);
-        let wide_result = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shl,
-            result: wide_result,
-            lhs: lhs_wide,
-            rhs: rhs_wide,
-        });
-
-        let overflow = self.emit_overflow_cond(emitter, wide_result, bits, signed, wide_bits);
         let result_type = if signed {
             Type {
                 expr: TypeExpr::I(bits),
@@ -545,43 +591,30 @@ impl LowerPureGuards {
             }
         };
 
+        let shifted = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shl,
+            result: shifted,
+            lhs,
+            rhs,
+        });
+        let back = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shr,
+            result: back,
+            lhs: shifted,
+            rhs,
+        });
+        let identity_eq = emitter.eq(back, lhs);
+        let overflow = emitter.not(identity_eq);
+
         let result = emitter.build_if_else(
             overflow,
             vec![result_type],
             |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
-            |e| {
-                let narrow_target = if signed {
-                    CastTarget::I(bits)
-                } else {
-                    CastTarget::U(bits)
-                };
-                vec![e.cast_to(narrow_target, wide_result)]
-            },
+            |_| vec![shifted],
         );
         result[0]
-    }
-
-    fn emit_overflow_cond(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        wide_result: ValueId,
-        bits: usize,
-        signed: bool,
-        wide_bits: usize,
-    ) -> ValueId {
-        if signed {
-            // Signed: check result < -(2^(bits-1)) || result >= 2^(bits-1)
-            let min_val = emitter.i_const(wide_bits, (-(1i128 << (bits - 1))) as u128);
-            let max_val = emitter.i_const(wide_bits, 1u128 << (bits - 1));
-            let too_low = emitter.lt(wide_result, min_val);
-            let too_high = emitter.cmp(max_val, wide_result, CmpKind::Lt);
-            emitter.or(too_low, too_high)
-        } else {
-            // Unsigned: check result >= 2^bits
-            let max_val = emitter.u_const(wide_bits, 1u128 << bits);
-            let fits = emitter.lt(wide_result, max_val);
-            emitter.not(fits)
-        }
     }
 
     /// Lower `Guard(cond, div/mod(lhs, rhs) -> result)` for division by zero.
@@ -707,6 +740,63 @@ impl LowerPureGuards {
             },
             // In-bounds: do the get
             |e| vec![e.array_get(array, index)],
+        );
+    }
+
+    /// Lower `Guard(cond, Rangecheck(v, max_bits))` for a pure `v` into
+    /// `if v >= 2^max_bits { assert(cond == 0) }`. When the type bound on
+    /// `v` already implies the rangecheck holds, the lowering collapses to
+    /// a no-op.
+    fn lower_rangecheck_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        value: ValueId,
+        max_bits: usize,
+        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+    ) {
+        let val_type = type_info.get_value_type(value);
+        let val_bits = match &val_type.expr {
+            TypeExpr::U(n) | TypeExpr::I(n) => *n,
+            other => panic!(
+                "LowerPureGuards: pure rangecheck on unsupported type {:?}; \
+                 add a comparison strategy for this type",
+                other
+            ),
+        };
+        if val_bits <= max_bits {
+            return;
+        }
+        // The bytecode VM compares integers in u64 slots, so both the value
+        // and `1 << max_bits` must fit there.
+        assert!(
+            val_bits <= 64 && max_bits < 64,
+            "LowerPureGuards: pure rangecheck on {val_type} with max_bits = \
+             {max_bits} needs wider-than-u64 comparison; not yet supported"
+        );
+        let cmp_bits = val_bits.max(max_bits + 1);
+        let v_cmp = if val_bits == cmp_bits {
+            value
+        } else {
+            emitter.cast_to(CastTarget::U(cmp_bits), value)
+        };
+        let bound = emitter.u_const(cmp_bits, 1u128 << max_bits);
+        let in_range = emitter.lt(v_cmp, bound);
+        let oob = emitter.not(in_range);
+
+        emitter.build_if_else_into(
+            oob,
+            vec![],
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![]
+            },
+            |_| vec![],
         );
     }
 

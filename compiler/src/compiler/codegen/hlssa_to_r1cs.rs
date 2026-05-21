@@ -286,6 +286,15 @@ impl Value {
     }
 }
 
+fn flatten_array_into_table(arr: &ArrayData, out: &mut Vec<LC>) {
+    for elem in arr.data.iter() {
+        match elem {
+            Value::Array(inner) => flatten_array_into_table(&inner.borrow(), out),
+            _ => out.push(elem.expect_linear_combination()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LookupConstraint {
     pub table_id: usize,
@@ -410,12 +419,8 @@ impl symbolic_executor::Context<Value> for R1CGen {
             hlssa::LookupTarget::Array(arr) => {
                 let arr = arr.expect_array();
                 let table_id = if arr.borrow().table_id.is_none() {
-                    let elems = arr
-                        .borrow()
-                        .data
-                        .iter()
-                        .map(|e| e.expect_linear_combination())
-                        .collect();
+                    let mut elems = Vec::new();
+                    flatten_array_into_table(&arr.borrow(), &mut elems);
                     self.tables.push(Table::OfElems(elems));
                     let idx = self.tables.len() - 1;
                     arr.borrow_mut().table_id = Some(idx);

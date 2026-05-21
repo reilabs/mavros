@@ -627,12 +627,8 @@ impl WitnessTypeInference {
                     let arr_wt = value_wt.get(arr).unwrap();
                     let idx_wt = value_wt.get(idx).unwrap();
                     let elem_wt = arr_wt.child_witness_type().unwrap();
-                    let result_wt = elem_wt.with_toplevel_info(
-                        arr_wt
-                            .toplevel_info()
-                            .join(idx_wt.toplevel_info())
-                            .join(elem_wt.toplevel_info()),
-                    );
+                    let pushed_info = arr_wt.toplevel_info().join(idx_wt.toplevel_info());
+                    let result_wt = elem_wt.with_witness_in_leaves(pushed_info);
                     value_wt.insert(*r, result_wt);
                 }
                 OpCode::ArraySet {
