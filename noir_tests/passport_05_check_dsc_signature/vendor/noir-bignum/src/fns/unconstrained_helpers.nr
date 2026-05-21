@@ -185,7 +185,7 @@ pub(crate) unconstrained fn __sub_with_flags<let N: u32>(
  * @details maximum value = modulus^2 <<BARRETT_REDUCTION_OVERFLOW_BITS
  *          see __barrett_reduction for more details
  **/
-comptime global BARRETT_REDUCTION_OVERFLOW_BITS: u32 = 4;
+global BARRETT_REDUCTION_OVERFLOW_BITS: u32 = 4;
 
 pub(crate) unconstrained fn __barrett_reduction<let N: u32>(
     x: [u128; 2 * N],
