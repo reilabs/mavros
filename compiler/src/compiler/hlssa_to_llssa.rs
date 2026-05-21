@@ -1038,8 +1038,12 @@ fn lower_instruction(
             lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
         }
 
-        OpCode::Alloc { result, elem_type } => {
-            lower_alloc(e, val_map, *result, elem_type);
+        OpCode::Alloc {
+            result,
+            elem_type,
+            value,
+        } => {
+            lower_alloc(e, val_map, *result, elem_type, *value);
         }
 
         OpCode::Store { ptr, value } => {
@@ -1619,6 +1623,7 @@ fn lower_alloc(
     val_map: &mut HashMap<ValueId, ValueId>,
     result: ValueId,
     elem_type: &Type,
+    value: ValueId,
 ) {
     let rc_struct = rc_ref_cell_struct(elem_type);
 
@@ -1629,11 +1634,9 @@ fn lower_alloc(
     let one = e.int_const(64, 1);
     e.ll_store(rc_word, one);
 
-    if needs_drop(&elem_type.expr) {
-        let slot = e.struct_field_ptr(ptr, rc_struct, 1);
-        let null = e.null_ptr();
-        e.ll_store(slot, null);
-    }
+    let slot = e.struct_field_ptr(ptr, rc_struct, 1);
+    let ll_val = val_map[&value];
+    e.ll_store(slot, ll_val);
 
     val_map.insert(result, ptr);
 }

@@ -59,7 +59,7 @@ where
     fn of_field(f: Field, ctx: &mut Context) -> Self;
     fn mk_array(a: Vec<Self>, ctx: &mut Context, seq_type: SeqType, elem_type: &Type) -> Self;
     fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type]) -> Self;
-    fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
+    fn alloc(elem_type: &Type, value: &Self, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
@@ -283,8 +283,10 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::OpCode::Alloc {
                         result: r,
                         elem_type,
+                        value,
                     } => {
-                        scope[r.0 as usize] = Some(V::alloc(elem_type, ctx));
+                        let v = scope[value.0 as usize].as_ref().unwrap();
+                        scope[r.0 as usize] = Some(V::alloc(elem_type, v, ctx));
                     }
                     crate::compiler::ssa::OpCode::Store { ptr, value: val } => {
                         let ptr = scope[ptr.0 as usize].as_ref().unwrap();

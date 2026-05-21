@@ -765,6 +765,7 @@ pub enum OpCode {
     Alloc {
         result: ValueId,
         elem_type: Type,
+        value: ValueId,
     },
     Store {
         ptr: ValueId,
@@ -1009,7 +1010,14 @@ impl Instruction for OpCode {
             OpCode::Alloc {
                 result,
                 elem_type: typ,
-            } => format!("v{}{} = alloc({})", result.0, annotate_value(*result), typ),
+                value,
+            } => format!(
+                "v{}{} = alloc({}, v{})",
+                result.0,
+                annotate_value(*result),
+                typ,
+                value.0
+            ),
             OpCode::Store { ptr, value } => {
                 format!("*v{}{} = v{}", ptr.0, annotate_value(*ptr), value.0)
             }
@@ -1493,8 +1501,9 @@ impl Instruction for OpCode {
             Self::Alloc {
                 result: _,
                 elem_type: _,
-            }
-            | Self::FreshWitness {
+                value: v,
+            } => vec![v].into_iter(),
+            Self::FreshWitness {
                 result: _,
                 result_type: _,
             }
@@ -1775,8 +1784,9 @@ impl Instruction for OpCode {
             Self::Alloc {
                 result: _,
                 elem_type: _,
-            }
-            | Self::FreshWitness {
+                value: v,
+            } => vec![v].into_iter(),
+            Self::FreshWitness {
                 result: _,
                 result_type: _,
             }
@@ -2001,8 +2011,9 @@ impl Instruction for OpCode {
             Self::Alloc {
                 result: r,
                 elem_type: _,
-            }
-            | Self::MemOp { kind: _, value: r }
+                value: v,
+            } => vec![r, v].into_iter(),
+            Self::MemOp { kind: _, value: r }
             | Self::FreshWitness {
                 result: r,
                 result_type: _,

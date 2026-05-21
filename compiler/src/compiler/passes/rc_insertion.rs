@@ -397,14 +397,23 @@ impl RCInsertion {
                     OpCode::Alloc {
                         result,
                         elem_type: _,
+                        value,
                     } => {
-                        if self.needs_rc(type_info, result) && !currently_live.contains(result) {
+                        let value = *value;
+                        if !currently_live.contains(result) {
                             new_instructions.push(OpCode::MemOp {
                                 kind: MemOp::Drop,
                                 value: *result,
                             });
                         }
                         new_instructions.push(instruction);
+                        if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: MemOp::Bump(1),
+                                value,
+                            });
+                        }
+                        currently_live.insert(value);
                     }
                     OpCode::Store { ptr, value } => {
                         // In forward order: bump value if still live (aliased into cell),

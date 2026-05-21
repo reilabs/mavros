@@ -777,8 +777,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_tuple(elems)
     }
 
-    fn alloc(_elem_type: &Type, _ctx: &mut R1CGen) -> Self {
-        Value::Ptr(Rc::new(RefCell::new(Value::Invalid)))
+    fn alloc(_elem_type: &Type, value: &Self, _ctx: &mut R1CGen) -> Self {
+        Value::Ptr(Rc::new(RefCell::new(value.clone())))
     }
 
     fn ptr_write(&self, value: &Self, _ctx: &mut R1CGen) {

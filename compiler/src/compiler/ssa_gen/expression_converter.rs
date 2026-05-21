@@ -124,8 +124,7 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) {
         let mut e = b.block(self.current_block);
-        let ptr = e.alloc(typ);
-        e.store(ptr, value_id);
+        let ptr = e.alloc(typ, value_id);
         drop(e);
         self.bindings.insert(local_id, ptr);
         self.mutable_locals.insert(local_id);
@@ -316,8 +315,7 @@ impl<'a> ExpressionConverter<'a> {
                 .expect("Mutable let binding must have a typed expression");
             let typ = self.type_converter.convert_type(&ast_type);
             let mut e = b.block(self.current_block);
-            let ptr = e.alloc(typ);
-            e.store(ptr, value);
+            let ptr = e.alloc(typ, value);
             drop(e);
             self.bindings.insert(let_expr.id, ptr);
             self.mutable_locals.insert(let_expr.id);
@@ -800,8 +798,7 @@ impl<'a> ExpressionConverter<'a> {
                         .expect("Reference operand must have a type"),
                 );
                 let mut e = b.block(self.current_block);
-                let ptr = e.alloc(inner_type);
-                e.store(ptr, value);
+                let ptr = e.alloc(inner_type, value);
                 Some(ptr)
             }
             _ => {

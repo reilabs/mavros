@@ -324,6 +324,7 @@ impl WitnessTypeInference {
                 if let OpCode::Alloc {
                     result,
                     elem_type: tp,
+                    value: _,
                 } = instruction
                 {
                     alloc_inner.insert(*result, Self::construct_pure_witness_for_type(tp));
@@ -561,9 +562,17 @@ impl WitnessTypeInference {
                 OpCode::Alloc {
                     result: r,
                     elem_type: _tp,
+                    value,
                 } => {
-                    let inner = alloc_inner.get(r).unwrap().clone();
-                    value_wt.insert(*r, WitnessShape::Ref(WitnessType::Pure, Box::new(inner)));
+                    let val_wt = value_wt.get(value).unwrap();
+                    let init_wt = val_wt.with_witness_in_leaves(block_cw);
+                    let current_inner = alloc_inner.get(r).unwrap().clone();
+                    let new_inner = current_inner.join(&init_wt);
+                    alloc_inner.insert(*r, new_inner.clone());
+                    value_wt.insert(
+                        *r,
+                        WitnessShape::Ref(WitnessType::Pure, Box::new(new_inner)),
+                    );
                 }
                 OpCode::Store { ptr, value: v } => {
                     let val_wt = value_wt.get(v).unwrap();
