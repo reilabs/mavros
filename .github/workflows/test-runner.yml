@@ -28,9 +28,6 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Download Nix Dependencies
         run: nix develop
 
@@ -53,9 +50,6 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Download Nix Dependencies
         run: nix develop
@@ -98,20 +92,17 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      #- name: Cache Nix Store
-        #uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Download Nix Dependencies
         run: nix develop
 
-      #- name: Cache Cargo dependencies
-        #uses: actions/cache@v4
-        #with:
-          #path: |
-            #~/.cargo/registry
-            #target
-          #key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          #restore-keys: ${{ runner.os }}-cargo-
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build Test Runner
         run: make build-test-runner
