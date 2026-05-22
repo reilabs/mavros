@@ -102,38 +102,6 @@ impl Pass for ExplicitWitness {
     }
 }
 
-fn cast_target_for_type(ty: &Type) -> CastTarget {
-    match ty.strip_all_witness().expr {
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
-        TypeExpr::Field => CastTarget::Field,
-        other => panic!("Expected scalar type for witness cast, got {:?}", other),
-    }
-}
-
-fn push_cast_or_field_assign(
-    b: &mut HLInstrBuilder<'_>,
-    result: ValueId,
-    value: ValueId,
-    target: CastTarget,
-) {
-    if target == CastTarget::Field {
-        let zero = b.field_const(Field::ZERO);
-        b.push(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result,
-            lhs: value,
-            rhs: zero,
-        });
-    } else {
-        b.push(OpCode::Cast {
-            result,
-            value,
-            target,
-        });
-    }
-}
-
 impl ExplicitWitness {
     pub fn new() -> Self {
         Self {}
@@ -1002,11 +970,15 @@ impl ExplicitWitness {
                 bits,
             } => {
                 let is_witness = function_type_info.get_value_type(value).is_witness_of();
-                if !is_witness && bits < SPREAD_SPILL_THRESHOLD_BITS {
-                    b.push(instruction);
-                } else {
-                    self.lower_spread(b, function_type_info, result, value, bits, is_witness);
-                }
+                assert!(
+                    !is_witness,
+                    "witness Spread should have been lowered by lower_witness_spread_ops"
+                );
+                b.push(OpCode::Spread {
+                    result,
+                    value,
+                    bits,
+                });
             }
             OpCode::Unspread {
                 result_odd,
@@ -1017,7 +989,7 @@ impl ExplicitWitness {
                 let is_witness = function_type_info.get_value_type(value).is_witness_of();
                 assert!(
                     !is_witness,
-                    "witness Unspread should have been lowered by lower_witness_unspread"
+                    "witness Unspread should have been lowered by lower_witness_spread_ops"
                 );
                 b.push(OpCode::Unspread {
                     result_odd,
@@ -2290,41 +2262,6 @@ impl ExplicitWitness {
         b.constrain(result, divisor, a_gated);
     }
 
-    fn lower_spread(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        result: ValueId,
-        value: ValueId,
-        bits: u8,
-        is_witness: bool,
-    ) {
-        if bits < SPREAD_SPILL_THRESHOLD_BITS {
-            let one = b.field_const(Field::ONE);
-            let value_pure = if is_witness { b.value_of(value) } else { value };
-            let input_field = b.cast_to_field(value);
-            let spread_hint = b.spread(value_pure, bits);
-            let spread_hint_field = b.cast_to_field(spread_hint);
-            let spread_wit = b.write_witness(spread_hint_field);
-            b.lookup_spread(bits, input_field, spread_wit, one);
-            let result_target = cast_target_for_type(function_type_info.get_value_type(result));
-            push_cast_or_field_assign(b, result, spread_wit, result_target);
-            return;
-        }
-
-        let (reconstructed_value, reconstructed_spread) =
-            self.spill_spread(b, value, bits as usize, is_witness);
-        if is_witness {
-            let one = b.field_const(Field::ONE);
-            let zero = b.field_const(Field::ZERO);
-            let input_field = b.cast_to_field(value);
-            let diff = b.sub(reconstructed_value, input_field);
-            b.constrain(diff, one, zero);
-        }
-        let result_target = cast_target_for_type(function_type_info.get_value_type(result));
-        push_cast_or_field_assign(b, result, reconstructed_spread, result_target);
-    }
-
     fn lower_wide_spread_lookup(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -2403,55 +2340,6 @@ impl ExplicitWitness {
         };
         let key_diff = b.sub(reconstructed_key, key_field);
         b.constrain(key_diff, flag_field, zero);
-    }
-
-    fn spill_spread(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        bits: usize,
-        is_witness: bool,
-    ) -> (ValueId, ValueId) {
-        assert!(
-            bits <= 128,
-            "wide Spread spilling currently supports widths up to 128 bits, got {bits}"
-        );
-
-        let pure_value = if is_witness { b.value_of(value) } else { value };
-        let zero = b.field_const(Field::ZERO);
-        let one = b.field_const(Field::ONE);
-        let mut reconstructed_value = zero;
-        let mut reconstructed_spread = zero;
-        let mut offset = 0usize;
-
-        while offset < bits {
-            let chunk_bits = (bits - offset).min(8);
-            let chunk = extract_low_chunk(b, pure_value, bits, offset, chunk_bits);
-            let chunk_field = b.cast_to_field(chunk);
-            let (chunk_value, chunk_spread) = if is_witness {
-                let chunk_wit = b.write_witness(chunk_field);
-                let spread_hint = b.spread(chunk, chunk_bits as u8);
-                let spread_hint_field = b.cast_to_field(spread_hint);
-                let spread_wit = b.write_witness(spread_hint_field);
-                b.lookup_spread(chunk_bits as u8, chunk_wit, spread_wit, one);
-                (chunk_wit, spread_wit)
-            } else {
-                let spread = b.spread(chunk, chunk_bits as u8);
-                (chunk, b.cast_to_field(spread))
-            };
-
-            let value_shift = b.field_const(two_pow(offset));
-            let spread_shift = b.field_const(two_pow(offset * 2));
-            let chunk_value_field = b.cast_to_field(chunk_value);
-            let chunk_spread_field = b.cast_to_field(chunk_spread);
-            let shifted_value = b.mul(chunk_value_field, value_shift);
-            let shifted_spread = b.mul(chunk_spread_field, spread_shift);
-            reconstructed_value = b.add(reconstructed_value, shifted_value);
-            reconstructed_spread = b.add(reconstructed_spread, shifted_spread);
-            offset += chunk_bits;
-        }
-
-        (reconstructed_value, reconstructed_spread)
     }
 }
 

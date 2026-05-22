@@ -1,7 +1,7 @@
-//! Lowers witness-tainted `Unspread` into witness hints plus ordinary `Spread` operations.
+//! Lowers witness-tainted `Spread` and `Unspread` into witness hints plus spread lookups.
 //!
-//! The later `ExplicitWitness` pass lowers those `Spread` operations, including any wide word
-//! spilling needed by the backend. This keeps word splitting in one place.
+//! The later `ExplicitWitness` pass lowers wide spread lookups into word-sized lookups. This keeps
+//! word splitting in one place without making witness spread/unspread special there.
 
 use std::collections::HashMap;
 
@@ -23,11 +23,11 @@ use crate::compiler::{
     },
 };
 
-pub struct LowerWitnessUnspread {}
+pub struct LowerWitnessSpreadOps {}
 
-impl Pass for LowerWitnessUnspread {
+impl Pass for LowerWitnessSpreadOps {
     fn name(&self) -> &'static str {
-        "lower_witness_unspread"
+        "lower_witness_spread_ops"
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
@@ -43,7 +43,7 @@ impl Pass for LowerWitnessUnspread {
     }
 }
 
-impl LowerWitnessUnspread {
+impl LowerWitnessSpreadOps {
     pub fn new() -> Self {
         Self {}
     }
@@ -77,6 +77,21 @@ impl LowerWitnessUnspread {
         instruction: OpCode,
     ) {
         match instruction {
+            OpCode::Spread {
+                result,
+                value,
+                bits,
+            } => {
+                if function_type_info.get_value_type(value).is_witness_of() {
+                    self.lower_witness_spread(b, function_type_info, result, value, bits);
+                } else {
+                    b.push(OpCode::Spread {
+                        result,
+                        value,
+                        bits,
+                    });
+                }
+            }
             OpCode::Unspread {
                 result_odd,
                 result_even,
@@ -105,6 +120,22 @@ impl LowerWitnessUnspread {
         }
     }
 
+    fn lower_witness_spread(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &FunctionTypeInfo,
+        result: ValueId,
+        value: ValueId,
+        bits: u8,
+    ) {
+        let spread_wit = self.write_spread_witness_and_lookup(b, value, bits);
+        b.push(OpCode::Cast {
+            result,
+            value: spread_wit,
+            target: cast_target_for_type(function_type_info.get_value_type(result)),
+        });
+    }
+
     fn lower_witness_unspread(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -120,7 +151,7 @@ impl LowerWitnessUnspread {
         self.write_unspread_result(b, function_type_info, result_odd, odd_hint);
         self.write_unspread_result(b, function_type_info, result_even, even_hint);
 
-        let odd_spread = spread_as_field(b, result_odd, bits);
+        let odd_spread = self.write_spread_witness_and_lookup(b, result_odd, bits);
         let two = b.field_const(Field::from(2));
         let two_odd_spread = b.mul(two, odd_spread);
         let value_field = b.cast_to_field(value);
@@ -146,17 +177,31 @@ impl LowerWitnessUnspread {
             target: cast_target_for_type(function_type_info.get_value_type(result)),
         });
     }
+
+    fn write_spread_witness_and_lookup(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        bits: u8,
+    ) -> ValueId {
+        let value_pure = b.value_of(value);
+        let value_field = b.cast_to_field(value);
+        let spread_hint = b.spread(value_pure, bits);
+        let spread_hint_field = b.cast_to_field(spread_hint);
+        let spread_wit = b.write_witness(spread_hint_field);
+        let one = b.field_const(Field::ONE);
+        b.lookup_spread(bits, value_field, spread_wit, one);
+        spread_wit
+    }
 }
 
 fn cast_target_for_type(ty: &Type) -> CastTarget {
     match ty.strip_all_witness().expr {
         TypeExpr::U(bits) => CastTarget::U(bits),
         TypeExpr::I(bits) => CastTarget::I(bits),
-        other => panic!("Expected integer type for Unspread result, got {:?}", other),
+        other => panic!(
+            "Expected integer type for witness spread result, got {:?}",
+            other
+        ),
     }
-}
-
-fn spread_as_field(b: &mut HLInstrBuilder<'_>, value: ValueId, bits: u8) -> ValueId {
-    let spread = b.spread(value, bits);
-    b.cast_to_field(spread)
 }
