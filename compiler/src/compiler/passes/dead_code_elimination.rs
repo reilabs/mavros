@@ -12,8 +12,8 @@ use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BlockId, CallTarget, FunctionId, HLFunction, HLSSA, Instruction, OpCode, Terminator,
-        ValueId,
+        BlockId, FunctionId, Instruction, Terminator, ValueId,
+        hlssa::{CallTarget, HLFunction, HLSSA, OpCode},
     },
 };
 pub struct DCE {

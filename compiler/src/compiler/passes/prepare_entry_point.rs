@@ -19,13 +19,14 @@
 use std::collections::HashMap;
 
 use crate::compiler::{
-    block_builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BlockId, CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode,
-        SeqType, ValueId,
+        BlockId, FunctionId, ValueId,
+        hlssa::{
+            CallTarget, CastTarget, ConstValue, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+        },
     },
 };
 
@@ -75,10 +76,9 @@ impl PrepareEntryPoint {
         ssa.get_main_mut().set_name("original_main".to_string());
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
-        {
-            let wrapper = ssa.get_function_mut(wrapper_id);
-            let entry_block = wrapper.get_entry_id();
-            let mut b = HLFunctionBuilder::new(wrapper);
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(wrapper_id, |b| {
+            let entry_block = b.function.get_entry_id();
             let mut e = b.block(entry_block);
 
             let mut arg_values = Vec::new();
@@ -113,7 +113,7 @@ impl PrepareEntryPoint {
             }
 
             e.terminate_return(vec![]);
-        }
+        });
         ssa.set_entry_point(wrapper_id);
     }
 
@@ -151,61 +151,65 @@ impl PrepareEntryPoint {
     /// Insert pinned WriteWitness instructions in wrapper_main entry.
     /// The first write emits constant one for witness[0], then writes each entry param.
     fn insert_witness_writes(ssa: &mut HLSSA) {
-        let main = ssa.get_main_mut();
-        let entry_id = main.get_entry_id();
+        let main_id = ssa.get_main_id();
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry_id = fb.function.get_entry_id();
 
-        // Collect entry params
-        let params: Vec<(ValueId, Type)> = main
-            .get_entry()
-            .get_parameters()
-            .map(|(id, typ)| (*id, typ.clone()))
-            .collect();
+            // Collect entry params
+            let params: Vec<(ValueId, Type)> = fb
+                .function
+                .get_entry()
+                .get_parameters()
+                .map(|(id, typ)| (*id, typ.clone()))
+                .collect();
 
-        // witness[0] must be constant one, emitted by the program.
-        let witness_one_value = main.fresh_value();
-        let one_const_value = main.fresh_value();
-        let mut write_witness_instructions = vec![
-            OpCode::Const {
-                result: one_const_value,
-                value: ConstValue::Field(ark_bn254::Fr::from(1u64)),
-            },
-            OpCode::WriteWitness {
-                result: Some(witness_one_value),
-                value: one_const_value,
-                pinned: true,
-            },
-        ];
+            // witness[0] must be constant one, emitted by the program.
+            let witness_one_value = fb.ssa.fresh_value();
+            let one_const_value = fb.ssa.fresh_value();
+            let mut write_witness_instructions = vec![
+                OpCode::Const {
+                    result: one_const_value,
+                    value: ConstValue::Field(ark_bn254::Fr::from(1u64)),
+                },
+                OpCode::WriteWitness {
+                    result: Some(witness_one_value),
+                    value: one_const_value,
+                    pinned: true,
+                },
+            ];
 
-        // Create pinned WriteWitness for each param and build replacements.
-        // These must be pinned so they survive DCE even when their results become unused
-        // (e.g. when inter-procedural DCE prunes call args to original_main).
-        let mut replacements = ValueReplacements::new();
-        for (param_id, param_type) in &params {
-            if param_type.is_witness_of() {
-                panic!(
-                    "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main parameter reconstruction: {:?}",
-                    param_id.0, param_type
-                );
+            // Create pinned WriteWitness for each param and build replacements.
+            // These must be pinned so they survive DCE even when their results become unused
+            // (e.g. when inter-procedural DCE prunes call args to original_main).
+            let mut replacements = ValueReplacements::new();
+            for (param_id, param_type) in &params {
+                if param_type.is_witness_of() {
+                    panic!(
+                        "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main parameter reconstruction: {:?}",
+                        param_id.0, param_type
+                    );
+                }
+                let witness_val = fb.ssa.fresh_value();
+                write_witness_instructions.push(OpCode::WriteWitness {
+                    result: Some(witness_val),
+                    value: *param_id,
+                    pinned: true,
+                });
+                replacements.insert(*param_id, witness_val);
             }
-            let witness_val = main.fresh_value();
-            write_witness_instructions.push(OpCode::WriteWitness {
-                result: Some(witness_val),
-                value: *param_id,
-                pinned: true,
-            });
-            replacements.insert(*param_id, witness_val);
-        }
 
-        // Prepend WriteWitness instructions and apply replacements to existing instructions
-        let entry_block = main.get_block_mut(entry_id);
-        let old_instructions = entry_block.take_instructions();
-        let mut new_instructions = write_witness_instructions;
-        for mut instruction in old_instructions {
-            replacements.replace_instruction(&mut instruction);
-            new_instructions.push(instruction);
-        }
-        entry_block.put_instructions(new_instructions);
-        replacements.replace_terminator(entry_block.get_terminator_mut());
+            // Prepend WriteWitness instructions and apply replacements to existing instructions
+            let entry_block = fb.function.get_block_mut(entry_id);
+            let old_instructions = entry_block.take_instructions();
+            let mut new_instructions = write_witness_instructions;
+            for mut instruction in old_instructions {
+                replacements.replace_instruction(&mut instruction);
+                new_instructions.push(instruction);
+            }
+            entry_block.put_instructions(new_instructions);
+            replacements.replace_terminator(entry_block.get_terminator_mut());
+        });
     }
 
     /// Process unconstrained call results: flatten to Fields, WriteWitness,
@@ -240,63 +244,66 @@ impl PrepareEntryPoint {
 
         // Process each function/block: single pass over instructions, handling
         // all unconstrained calls inline so indices never go stale.
-        for &fid in &func_ids {
-            let block_ids: Vec<BlockId> = ssa
+        let mut sb = HLSSABuilder::new(ssa);
+        for fid in func_ids {
+            let block_ids: Vec<BlockId> = sb
+                .ssa()
                 .get_function(fid)
                 .get_blocks()
                 .map(|(id, _)| *id)
                 .collect();
-            for bid in block_ids {
-                let function = ssa.get_function_mut(fid);
-                let block = function.get_block_mut(bid);
-                let old_instructions = block.take_instructions();
+            sb.modify_function(fid, |fb| {
+                for bid in block_ids {
+                    let block = fb.function.get_block_mut(bid);
+                    let old_instructions = block.take_instructions();
 
-                let mut replacements = ValueReplacements::new();
-                let mut new_instructions = Vec::new();
+                    let mut replacements = ValueReplacements::new();
+                    let mut new_instructions = Vec::new();
 
-                for mut instr in old_instructions {
-                    replacements.replace_instruction(&mut instr);
+                    for mut instr in old_instructions {
+                        replacements.replace_instruction(&mut instr);
 
-                    let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
-                        unconstrained: true,
-                        results,
-                        function: CallTarget::Static(callee_id),
-                        ..
-                    } = &instr
-                    {
-                        callee_return_types
-                            .get(callee_id)
-                            .map(|rt| {
-                                results
-                                    .iter()
-                                    .zip(rt.iter())
-                                    .map(|(r, t)| (*r, t.clone()))
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        vec![]
-                    };
+                        let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
+                            unconstrained: true,
+                            results,
+                            function: CallTarget::Static(callee_id),
+                            ..
+                        } = &instr
+                        {
+                            callee_return_types
+                                .get(callee_id)
+                                .map(|rt| {
+                                    results
+                                        .iter()
+                                        .zip(rt.iter())
+                                        .map(|(r, t)| (*r, t.clone()))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
 
-                    new_instructions.push(instr);
+                        new_instructions.push(instr);
 
-                    for (result_vid, return_type) in call_results {
-                        let reconstructed = function.fresh_value();
-                        let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
-                        new_instructions.push(OpCode::Call {
-                            results: vec![reconstructed],
-                            function: CallTarget::Static(prepare_fn),
-                            args: vec![result_vid],
-                            unconstrained: false,
-                        });
-                        replacements.insert(result_vid, reconstructed);
+                        for (result_vid, return_type) in call_results {
+                            let reconstructed = fb.ssa.fresh_value();
+                            let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
+                            new_instructions.push(OpCode::Call {
+                                results: vec![reconstructed],
+                                function: CallTarget::Static(prepare_fn),
+                                args: vec![result_vid],
+                                unconstrained: false,
+                            });
+                            replacements.insert(result_vid, reconstructed);
+                        }
                     }
-                }
 
-                let block = function.get_block_mut(bid);
-                block.put_instructions(new_instructions);
-                replacements.replace_terminator(block.get_terminator_mut());
-            }
+                    let block = fb.function.get_block_mut(bid);
+                    block.put_instructions(new_instructions);
+                    replacements.replace_terminator(block.get_terminator_mut());
+                }
+            });
         }
     }
 
@@ -354,16 +361,15 @@ impl PrepareEntryPoint {
             _ => Vec::new(),
         };
 
-        {
-            let function = ssa.get_function_mut(fn_id);
-            function.add_return_type(typ.clone());
-            let entry_block = function.get_entry_id();
-            let mut b = HLFunctionBuilder::new(function);
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(fn_id, |b| {
+            b.function.add_return_type(typ.clone());
+            let entry_block = b.function.get_entry_id();
             let mut e = b.block(entry_block);
             let param = e.add_parameter(typ.clone());
             let result = Self::emit_prepare_body(&mut e, param, typ, &child_fns);
             e.terminate_return(vec![result]);
-        }
+        });
 
         fn_id
     }
@@ -442,24 +448,26 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
 
-        let function = ssa.get_main_mut();
+        let main_id = ssa.get_main_id();
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(main_id, |fb| {
+            let mut new_instructions = Vec::new();
+            let mut new_parameters = Vec::new();
 
-        let mut new_instructions = Vec::new();
-        let mut new_parameters = Vec::new();
+            for (value_id, typ) in params.iter() {
+                let (_, child_parameters, child_instructions) =
+                    Self::reconstruct_param(Some(*value_id), typ, fb.ssa, &reconstruct_fns);
+                new_parameters.extend(child_parameters);
+                new_instructions.extend(child_instructions);
+            }
 
-        for (value_id, typ) in params.iter() {
-            let (_, child_parameters, child_instructions) =
-                Self::reconstruct_param(Some(*value_id), typ, function, &reconstruct_fns);
-            new_parameters.extend(child_parameters);
-            new_instructions.extend(child_instructions);
-        }
+            let entry_id = fb.function.get_entry_id();
+            let entry_block = fb.function.get_block_mut(entry_id);
+            new_instructions.extend(entry_block.take_instructions());
 
-        let entry_id = function.get_entry_id();
-        let entry_block = function.get_block_mut(entry_id);
-        new_instructions.extend(entry_block.take_instructions());
-
-        entry_block.put_parameters(new_parameters);
-        entry_block.put_instructions(new_instructions);
+            entry_block.put_parameters(new_parameters);
+            entry_block.put_instructions(new_instructions);
+        });
     }
 
     fn find_reconstruct_fn(typ: &Type, reconstruct_fns: &[ReconstructFnEntry]) -> FunctionId {
@@ -503,18 +511,17 @@ impl PrepareEntryPoint {
             fn_id,
         });
 
-        {
-            let function = ssa.get_function_mut(fn_id);
-            function.add_return_type(typ.clone());
-            let entry_block = function.get_entry_id();
-            let mut b = HLFunctionBuilder::new(function);
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(fn_id, |b| {
+            b.function.add_return_type(typ.clone());
+            let entry_block = b.function.get_entry_id();
             let mut e = b.block(entry_block);
 
             let input_len = Self::flattened_field_count(typ);
             let input_array = e.add_parameter(Type::field().array_of(input_len));
             let result = Self::emit_reconstruct_body(&mut e, typ, input_array, reconstruct_fns);
             e.terminate_return(vec![result]);
-        }
+        });
 
         fn_id
     }
@@ -622,10 +629,15 @@ impl PrepareEntryPoint {
 
     fn emit_default_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
         if size == 0 {
-            return e.mk_seq(Vec::new(), SeqType::Array(0), inner.clone());
+            return e.mk_seq(Vec::new(), SequenceTargetType::Array(0), inner.clone());
         }
         let default_elem = Self::emit_default_value(e, inner);
-        e.mk_repeated(default_elem, SeqType::Array(size), size, inner.clone())
+        e.mk_repeated(
+            default_elem,
+            SequenceTargetType::Array(size),
+            size,
+            inner.clone(),
+        )
     }
 
     fn emit_reconstruct_child_input_array(
@@ -640,7 +652,7 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, index)
             })
             .collect();
-        e.mk_seq(fields, SeqType::Array(len), Type::field())
+        e.mk_seq(fields, SequenceTargetType::Array(len), Type::field())
     }
 
     fn emit_reconstruct_child_input_array_at_index(
@@ -667,19 +679,19 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, field_index)
             })
             .collect();
-        e.mk_seq(fields, SeqType::Array(width), Type::field())
+        e.mk_seq(fields, SequenceTargetType::Array(width), Type::field())
     }
 
     fn reconstruct_param(
         value_id: Option<ValueId>,
         typ: &Type,
-        function: &mut HLFunction,
+        ssa: &mut HLSSA,
         reconstruct_fns: &[ReconstructFnEntry],
     ) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
         let mut new_instructions = Vec::new();
         let mut new_parameters = Vec::new();
 
-        let value_id = value_id.unwrap_or_else(|| function.fresh_value());
+        let value_id = value_id.unwrap_or_else(|| ssa.fresh_value());
 
         match &typ.expr {
             TypeExpr::Field => new_parameters.push((value_id, typ.clone())),
@@ -687,16 +699,16 @@ impl PrepareEntryPoint {
                 let input_len = Self::flattened_field_count(typ);
                 let mut fields = Vec::with_capacity(input_len);
                 for _ in 0..input_len {
-                    let field_id = function.fresh_value();
+                    let field_id = ssa.fresh_value();
                     new_parameters.push((field_id, Type::field()));
                     fields.push(field_id);
                 }
 
-                let input_array = function.fresh_value();
+                let input_array = ssa.fresh_value();
                 new_instructions.push(OpCode::MkSeq {
                     result: input_array,
                     elems: fields,
-                    seq_type: SeqType::Array(input_len),
+                    seq_type: SequenceTargetType::Array(input_len),
                     elem_type: Type::field(),
                 });
                 let fn_id = Self::find_reconstruct_fn(typ, reconstruct_fns);

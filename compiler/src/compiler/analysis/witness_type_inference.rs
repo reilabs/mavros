@@ -1,14 +1,16 @@
 //! Performs whole program analysis to determine which values are potentially witness tainted, which
 //! are _only_ witnesses, and which are only non-witness values.
 
-use crate::compiler::analysis::flow_analysis;
-use crate::compiler::analysis::flow_analysis::FlowAnalysis;
-use crate::compiler::ir::r#type::{Type, TypeExpr};
-use crate::compiler::ssa::{
-    BlockId, CallTarget, FunctionId, HLSSA, OpCode, SsaAnnotator, Terminator, ValueId,
-};
-use crate::compiler::witness_info::{FunctionWitnessType, WitnessShape, WitnessType};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+use super::witness_info::{FunctionWitnessType, WitnessShape, WitnessType};
+use crate::compiler::{
+    analysis::flow_analysis::{self, FlowAnalysis},
+    ssa::{
+        BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
+        hlssa::{CallTarget, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+    },
+};
 
 // ---------------------------------------------------------------------------
 // Specialization key and value
@@ -52,7 +54,7 @@ struct CallSiteInfo {
 // Public API
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WitnessTypeInference {
     functions: HashMap<FunctionId, FunctionWitnessType>,
 }
@@ -281,7 +283,7 @@ impl WitnessTypeInference {
     // ---------------------------------------------------------------------------
 
     fn propagate_function(
-        func: &crate::compiler::ssa::HLFunction,
+        func: &HLFunction,
         cfg: &flow_analysis::CFG,
         arg_types: &[WitnessShape],
         cfg_witness: WitnessType,
@@ -449,7 +451,7 @@ impl WitnessTypeInference {
 
     /// Single forward pass over all blocks
     fn propagate_once(
-        func: &crate::compiler::ssa::HLFunction,
+        func: &HLFunction,
         cfg: &flow_analysis::CFG,
         block_queue: &[BlockId],
         _entry_id: BlockId,
@@ -519,7 +521,7 @@ impl WitnessTypeInference {
     /// Process all instructions in a single block, updating `value_wt` and
     /// `alloc_inner` according to each opcode's witness-type rules.
     fn propagate_block_instructions(
-        block: &crate::compiler::ssa::HLBlock,
+        block: &HLBlock,
         block_cw: WitnessType,
         value_wt: &mut HashMap<ValueId, WitnessShape>,
         alloc_inner: &mut HashMap<ValueId, WitnessShape>,
@@ -633,12 +635,8 @@ impl WitnessTypeInference {
                     let arr_wt = value_wt.get(arr).unwrap();
                     let idx_wt = value_wt.get(idx).unwrap();
                     let elem_wt = arr_wt.child_witness_type().unwrap();
-                    let result_wt = elem_wt.with_toplevel_info(
-                        arr_wt
-                            .toplevel_info()
-                            .join(idx_wt.toplevel_info())
-                            .join(elem_wt.toplevel_info()),
-                    );
+                    let pushed_info = arr_wt.toplevel_info().join(idx_wt.toplevel_info());
+                    let result_wt = elem_wt.with_witness_in_leaves(pushed_info);
                     value_wt.insert(*r, result_wt);
                 }
                 OpCode::ArraySet {
@@ -946,7 +944,7 @@ impl WitnessTypeInference {
     }
 }
 
-impl SsaAnnotator for WitnessTypeInference {
+impl SSAAnotator for WitnessTypeInference {
     fn annotate_value(&self, function_id: FunctionId, value_id: ValueId) -> String {
         let Some(function_wt) = self.functions.get(&function_id) else {
             return "".to_string();

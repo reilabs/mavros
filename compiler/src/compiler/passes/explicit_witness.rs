@@ -10,17 +10,19 @@ use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::flow_analysis::FlowAnalysis,
     analysis::{
+        flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
     },
-    block_builder::{HLEmitter, HLInstrBuilder},
-    ir::r#type::{Type, TypeExpr},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
-        OpCode, Radix, SeqType, ValueId,
+        BlockId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
+            OpCode, Radix, SequenceTargetType, Type, TypeExpr,
+            builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
+        },
     },
 };
 
@@ -113,25 +115,30 @@ impl ExplicitWitness {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo, value_ranges: &ValueRanges) {
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let function_type_info = type_info.get_function(*function_id);
-            let function_value_ranges = value_ranges.get_function(*function_id);
-            let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
-            for (bid, mut block) in function.take_blocks().into_iter() {
-                let mut new_instructions = Vec::new();
-                for instruction in block.take_instructions().into_iter() {
-                    let b = &mut HLInstrBuilder::new(function, &mut new_instructions);
-                    self.process_instruction(
-                        b,
-                        function_type_info,
-                        function_value_ranges,
-                        instruction,
-                    );
+        let fids: Vec<_> = ssa.get_function_ids().collect();
+        let mut sb = HLSSABuilder::new(ssa);
+        for function_id in fids {
+            let function_type_info = type_info.get_function(function_id);
+            let function_value_ranges = value_ranges.get_function(function_id);
+            sb.modify_function(function_id, |fb| {
+                let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
+                for (bid, mut block) in fb.function.take_blocks().into_iter() {
+                    let mut new_instructions = Vec::new();
+                    for instruction in block.take_instructions().into_iter() {
+                        let b =
+                            &mut HLInstrBuilder::new(fb.function, fb.ssa, &mut new_instructions);
+                        self.process_instruction(
+                            b,
+                            function_type_info,
+                            function_value_ranges,
+                            instruction,
+                        );
+                    }
+                    block.put_instructions(new_instructions);
+                    new_blocks.insert(bid, block);
                 }
-                block.put_instructions(new_instructions);
-                new_blocks.insert(bid, block);
-            }
-            function.put_blocks(new_blocks);
+                fb.function.put_blocks(new_blocks);
+            });
         }
     }
 
@@ -192,6 +199,8 @@ impl ExplicitWitness {
                 }
             }
             OpCode::Alloc { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
             | OpCode::Call { .. }
             | OpCode::Constrain { .. }
             | OpCode::WriteWitness { .. }
@@ -701,33 +710,6 @@ impl ExplicitWitness {
             } => {
                 panic!("ICE: should not be present at this stage");
             }
-            OpCode::ArrayGet {
-                result,
-                array: arr,
-                index: idx,
-            } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(instruction);
-                } else {
-                    let flag = b.field_const(Field::from(1));
-                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
-                }
-            }
-            OpCode::ArraySet {
-                result: _,
-                array: arr,
-                index: idx,
-                value: _,
-            } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                assert!(!idx_taint);
-                b.push(instruction);
-            }
             OpCode::SlicePush {
                 dir: _,
                 result: _,
@@ -1016,11 +998,15 @@ impl ExplicitWitness {
                     }
                     let constrain_one = b.field_const(Field::from(1));
                     b.constrain(current_sum, constrain_one, value);
+                    let byte_elems: Vec<ValueId> = witnesses
+                        .iter()
+                        .map(|&w| b.cast_to(CastTarget::U(8), w))
+                        .collect();
                     b.push(OpCode::MkSeq {
                         result,
-                        elems: witnesses,
-                        seq_type: SeqType::Array(count),
-                        elem_type: Type::witness_of(Type::field()),
+                        elems: byte_elems,
+                        seq_type: SequenceTargetType::Array(count),
+                        elem_type: Type::witness_of(Type::u(8)),
                     });
                 }
             }
@@ -1297,7 +1283,8 @@ impl ExplicitWitness {
                 let l_type = function_type_info.get_value_type(l);
                 match l_type.strip_witness().expr {
                     TypeExpr::U(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let arith_result = match kind {
@@ -1313,7 +1300,8 @@ impl ExplicitWitness {
                         });
                     }
                     TypeExpr::I(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let l_range = function_value_ranges.get(l);
@@ -1340,7 +1328,8 @@ impl ExplicitWitness {
                 let l_type = function_type_info.get_value_type(l);
                 match l_type.strip_witness().expr {
                     TypeExpr::U(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let arith_result = if l_taint && r_taint {
@@ -1361,7 +1350,8 @@ impl ExplicitWitness {
                         });
                     }
                     TypeExpr::I(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_field = b.cast_to_field(l);
                         let r_field = b.cast_to_field(r);
                         let l_range = function_value_ranges.get(l);
@@ -1401,7 +1391,8 @@ impl ExplicitWitness {
                 match l_type.strip_witness().expr {
                     TypeExpr::I(_) => panic!("Signed div/mod not yet implemented"),
                     TypeExpr::U(bits) if l_taint || r_taint => {
-                        let cond_field = self.ensure_field(b, function_type_info, condition);
+                        let cond_field =
+                            b.ensure_field(condition, function_type_info.get_value_type(condition));
                         let l_range = function_value_ranges.get(l);
                         let r_range = function_value_ranges.get(r);
                         self.gen_witness_divmod(
@@ -1419,12 +1410,111 @@ impl ExplicitWitness {
                             "Modulo is not defined on field elements"
                         );
                         if l_taint || r_taint {
-                            // Field div under guard with witnesses — not yet supported
-                            panic!("Guarded field division with witnesses not yet supported");
+                            let cond_field = b.ensure_field(
+                                condition,
+                                function_type_info.get_value_type(condition),
+                            );
+                            self.gen_witness_field_div_guarded(
+                                b,
+                                l,
+                                r,
+                                l_taint,
+                                r_taint,
+                                function_type_info.get_value_type(condition).is_witness_of(),
+                                cond_field,
+                                res,
+                            );
+                        } else {
+                            b.push(inner);
                         }
-                        b.push(inner);
                     }
                     _ => unreachable!("DivMod on non-numeric type: {:?}", l_type),
+                }
+            }
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                result: res,
+                lhs: l,
+                rhs: r,
+            } => {
+                let l_taint = function_type_info.get_value_type(l).is_witness_of();
+                let r_taint = function_type_info.get_value_type(r).is_witness_of();
+                if !l_taint && !r_taint {
+                    b.push(inner);
+                    return;
+                }
+                if r_taint {
+                    panic!(
+                        "Shift {:?} with witness shift amount is not supported",
+                        kind
+                    );
+                }
+                let l_type = function_type_info.get_value_type(l).strip_witness();
+                let bits = match l_type.expr {
+                    TypeExpr::U(n) => n,
+                    _ => panic!(
+                        "Shift {:?} on witness operand of non-unsigned-int type {:?}",
+                        kind, l_type
+                    ),
+                };
+                let cond_field =
+                    b.ensure_field(condition, function_type_info.get_value_type(condition));
+                let one_u = b.u_const(bits, 1);
+                let factor = b.fresh_value();
+                b.push(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Shl,
+                    result: factor,
+                    lhs: one_u,
+                    rhs: r,
+                });
+                match kind {
+                    BinaryArithOpKind::Shl => {
+                        // x << k  ==  (x * (1 << k)) truncated to `bits` bits.
+                        let l_field = b.cast_to_field(l);
+                        let factor_field = b.cast_to_field(factor);
+                        let arith_result = b.mul(l_field, factor_field);
+                        self.gen_witness_rangecheck_bits(b, arith_result, bits, cond_field);
+                        b.push(OpCode::Cast {
+                            result: res,
+                            value: arith_result,
+                            target: CastTarget::U(bits),
+                        });
+                    }
+                    BinaryArithOpKind::Shr => {
+                        // x >> k  ==  x / (1 << k)  (integer floor division).
+                        let l_range = function_value_ranges.get(l);
+                        let factor_range = function_value_ranges
+                            .try_get(r)
+                            .map(|r_range| {
+                                let lo = r_range.lo().and_then(|v| v.to_u32()).unwrap_or(0);
+                                let hi = r_range
+                                    .hi()
+                                    .and_then(|v| v.to_u32())
+                                    .unwrap_or(bits as u32 - 1)
+                                    .min(bits as u32 - 1);
+                                IntInterval::closed(BigInt::one() << lo, BigInt::one() << hi)
+                            })
+                            .unwrap_or_else(|| {
+                                IntInterval::closed(
+                                    BigInt::one(),
+                                    BigInt::one() << (bits as u32 - 1),
+                                )
+                            });
+                        self.gen_witness_divmod(
+                            b,
+                            l,
+                            factor,
+                            bits,
+                            BinaryArithOpKind::Div,
+                            cond_field,
+                            res,
+                            l_taint,
+                            false,
+                            &l_range,
+                            &factor_range,
+                        );
+                    }
+                    _ => unreachable!(),
                 }
             }
             OpCode::Cast { .. }
@@ -1436,38 +1526,31 @@ impl ExplicitWitness {
                 // Pure data construction/access — no constraints. Emit unconditionally.
                 b.push(inner);
             }
-            OpCode::ArrayGet {
+            OpCode::WriteWitness {
                 result,
-                array: arr,
-                index: idx,
+                value,
+                pinned,
             } => {
-                let arr_taint = function_type_info.get_value_type(arr).is_witness_of();
-                let idx_taint = function_type_info.get_value_type(idx).is_witness_of();
-                assert!(!arr_taint);
-                if !idx_taint {
-                    b.push(inner);
-                } else {
-                    let flag = self.ensure_field(b, function_type_info, condition);
-                    self.gen_witness_array_get(b, function_type_info, arr, idx, result, flag);
-                }
-            }
-            OpCode::ArraySet { .. } => {
-                panic!("ArraySet inside Guard not supported yet: {:?}", inner);
+                b.push(OpCode::WriteWitness {
+                    result,
+                    value,
+                    pinned,
+                });
             }
             OpCode::Rangecheck { value, max_bits } => {
-                // Guard(cond, Rangecheck(value, max_bits)) → conditional rangecheck
-                // The condition becomes the lookup flag
-                let cond_type = function_type_info.get_value_type(condition);
-                let cond_field = if cond_type.strip_witness().is_field() {
-                    condition
-                } else {
-                    b.cast_to_field(condition)
-                };
+                assert!(
+                    function_type_info.get_value_type(value).is_witness_of(),
+                    "pure Rangecheck inside Guard should have been lowered by \
+                     lower_pure_guards"
+                );
+                let cond_field =
+                    b.ensure_field(condition, function_type_info.get_value_type(condition));
                 self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
             }
-            inner => {
-                panic!("unrecognized op inside Guard: {:?}", inner);
-            }
+            inner => b.push(OpCode::Guard {
+                condition,
+                inner: Box::new(inner),
+            }),
         }
     }
 
@@ -1763,6 +1846,24 @@ impl ExplicitWitness {
             _ => panic!("ICE: rhs is not an integer type"),
         };
         let u1 = CastTarget::U(1);
+        // `b.lt` lowers to `lt_u64`/`lt_s64`, which read a single 64-bit frame
+        // cell. Field-typed operands would read a Montgomery limb instead of
+        // the value, so the comparison would be nonsense — reject those at the
+        // pass boundary rather than silently emitting broken code.
+        assert!(
+            !matches!(
+                function_type_info.get_value_type(lhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            "ICE: lower_witness_lt got Field-typed lhs; integer-typed operands required"
+        );
+        assert!(
+            !matches!(
+                function_type_info.get_value_type(rhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            "ICE: lower_witness_lt got Field-typed rhs; integer-typed operands required"
+        );
         let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
         let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
         let res_hint = b.lt(lhs_pure, rhs_pure);
@@ -2257,6 +2358,47 @@ impl ExplicitWitness {
         }
     }
 
+    fn gen_witness_field_div_guarded(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        a: ValueId,
+        divisor: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+        cond_taint: bool,
+        cond_field: ValueId,
+        result: ValueId,
+    ) {
+        if l_taint && !r_taint {
+            b.push(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Div,
+                result,
+                lhs: a,
+                rhs: divisor,
+            });
+            return;
+        }
+        let a_pure = if l_taint { b.value_of(a) } else { a };
+        let b_pure = b.value_of(divisor);
+        let q_hint = b.div(a_pure, b_pure);
+        let q_hint_field = b.cast_to_field(q_hint);
+        b.push(OpCode::WriteWitness {
+            result: Some(result),
+            value: q_hint_field,
+            pinned: false,
+        });
+        let a_gated = if l_taint && cond_taint {
+            let cond_pure = b.value_of(cond_field);
+            let a_gated_hint = b.mul(a_pure, cond_pure);
+            let a_gated_wit = b.write_witness(a_gated_hint);
+            b.constrain(a, cond_field, a_gated_wit);
+            a_gated_wit
+        } else {
+            b.mul(a, cond_field)
+        };
+        b.constrain(result, divisor, a_gated);
+    }
+
     /// Multi-bit witness And/Or/Xor via spread tables.
     ///
     /// Uses the identity: spread(a) + spread(b) = 2*spread(a&b) + spread(a^b)
@@ -2451,80 +2593,5 @@ impl ExplicitWitness {
         b.lookup_spread(8, byte_wit, spread_wit, flag);
 
         (byte_wit, spread_wit)
-    }
-
-    /// Lower a witness-indexed ArrayGet into a hint + lookup constraint.
-    /// `flag` is the lookup flag: `1` unconditionally, or the guard condition.
-    fn gen_witness_array_get(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        arr: ValueId,
-        idx: ValueId,
-        result: ValueId,
-        flag: ValueId,
-    ) {
-        let result_type = function_type_info
-            .get_value_type(result)
-            .strip_all_witness();
-        let back_cast_target = match &result_type.expr {
-            TypeExpr::U(s) => CastTarget::U(*s),
-            TypeExpr::I(s) => CastTarget::I(*s),
-            TypeExpr::Field => CastTarget::Field,
-            TypeExpr::WitnessOf(_) => CastTarget::Field,
-            TypeExpr::Array(_, _) => {
-                todo!("array types in witnessed array reads")
-            }
-            TypeExpr::Slice(_) => {
-                todo!("slice types in witnessed array reads")
-            }
-            TypeExpr::Ref(_) => {
-                todo!("ref types in witnessed array reads")
-            }
-            TypeExpr::Tuple(_elements) => {
-                todo!("Tuples not supported yet")
-            }
-            TypeExpr::Function => {
-                panic!("Function type not expected in witnessed array reads")
-            }
-        };
-
-        let pure_idx = b.value_of(idx);
-        let mut r_pure_val = b.array_get(arr, pure_idx);
-
-        let elem_is_witness = function_type_info
-            .get_value_type(arr)
-            .get_array_element()
-            .is_witness_of();
-        if elem_is_witness {
-            r_pure_val = b.value_of(r_pure_val);
-        }
-
-        let idx_field = b.cast_to_field(idx);
-        let r_wit_field = b.cast_to_field(r_pure_val);
-        let r_wit = b.write_witness(r_wit_field);
-        b.push(OpCode::Cast {
-            result,
-            value: r_wit,
-            target: back_cast_target,
-        });
-        b.lookup_arr(arr, idx_field, r_wit, flag);
-    }
-
-    fn ensure_field(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        value: ValueId,
-    ) -> ValueId {
-        if function_type_info
-            .get_value_type(value)
-            .strip_witness()
-            .is_field()
-        {
-            value
-        } else {
-            b.cast_to_field(value)
-        }
     }
 }

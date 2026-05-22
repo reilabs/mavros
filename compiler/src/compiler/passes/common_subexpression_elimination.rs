@@ -11,8 +11,11 @@ use std::{
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
-        OpCode, Radix, ValueId,
+        BlockId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
+            OpCode, Radix,
+        },
     },
 };
 use crate::compiler::{
@@ -937,7 +940,7 @@ impl CSE {
                             .push((block_id, instruction_idx));
                     }
                     OpCode::Lookup {
-                        target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
+                        target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
                         keys,
                         results: _,
                         flag,

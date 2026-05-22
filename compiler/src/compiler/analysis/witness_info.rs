@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::compiler::ssa::{BlockId, FunctionId, SsaAnnotator, ValueId};
+use crate::compiler::ssa::{BlockId, FunctionId, SSAAnotator, ValueId};
 use std::{collections::HashMap, fmt::Display};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
@@ -152,7 +152,7 @@ impl WitnessShape {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FunctionWitnessType {
     pub returns_witness: Vec<WitnessShape>,
     pub cfg_witness: WitnessInfo,
@@ -171,7 +171,7 @@ impl FunctionWitnessType {
     }
 }
 
-impl SsaAnnotator for FunctionWitnessType {
+impl SSAAnotator for FunctionWitnessType {
     fn annotate_value(&self, _: FunctionId, value_id: ValueId) -> String {
         let Some(wt) = self.value_witness_types.get(&value_id) else {
             return "".to_string();

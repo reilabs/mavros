@@ -6,7 +6,7 @@ use std::{
 use crate::{
     Project,
     abi_helpers::ordered_params_from_btreemap,
-    compiler::{Field, r1cs_gen::R1CS},
+    compiler::{Field, codegen::hlssa_to_r1cs::R1CS},
     driver::Driver,
     vm::interpreter,
 };

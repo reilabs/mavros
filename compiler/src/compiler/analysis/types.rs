@@ -8,9 +8,24 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
-    ir::r#type::{Type, TypeExpr},
-    ssa::{CallTarget, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA, OpCode, ValueId},
+    ssa::{
+        FunctionId, ValueId,
+        hlssa::{CallTarget, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+    },
 };
+
+fn push_witness_of_to_leaves(t: Type) -> Type {
+    match t.expr {
+        TypeExpr::WitnessOf(_) => t,
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => Type::witness_of(t),
+        TypeExpr::Array(inner, n) => push_witness_of_to_leaves(*inner).array_of(n),
+        TypeExpr::Slice(inner) => push_witness_of_to_leaves(*inner).slice_of(),
+        TypeExpr::Tuple(fields) => {
+            Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
+        }
+        TypeExpr::Ref(_) | TypeExpr::Function => Type::witness_of(t),
+    }
+}
 
 pub struct TypeInfo {
     functions: HashMap<FunctionId, FunctionTypeInfo>,
@@ -292,8 +307,8 @@ impl Types {
                 })?;
 
                 let element_type = array_type.get_array_element();
-                let result_type = if index_type.is_witness_of() && !element_type.is_witness_of() {
-                    Type::witness_of(element_type)
+                let result_type = if index_type.is_witness_of() {
+                    push_witness_of_to_leaves(element_type)
                 } else {
                     element_type
                 };
@@ -462,9 +477,7 @@ impl Types {
                     }
                     CastTarget::Nop => value_type.clone(),
                     CastTarget::ArrayToSlice => match &value_type.expr {
-                        crate::compiler::ir::r#type::TypeExpr::Array(elem, _len) => {
-                            elem.as_ref().clone().slice_of()
-                        }
+                        TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
                         _ => panic!("ArrayToSlice cast on non-array type"),
                     },
                     CastTarget::WitnessOf => Type::witness_of(value_type.clone()),

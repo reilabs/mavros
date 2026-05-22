@@ -1,12 +1,15 @@
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
+    fmt::Debug,
     fs,
     path::PathBuf,
 };
 
-use crate::compiler::ir::r#type::{SSAType, Type};
-use crate::compiler::ssa::{DefaultSsaAnnotator, Instruction, OpCode, SSA};
+use crate::compiler::ssa::{
+    DefaultSSAAnnotator, Instruction, SSA, SSAType,
+    hlssa::{Constants, OpCode, Type},
+};
 
 // ---------------------------------------------------------------------------
 // AnalysisId — a Copy handle carrying function pointers
@@ -21,18 +24,19 @@ pub struct AnalysisId {
 }
 
 impl AnalysisId {
-    pub fn of<A: Analysis<Op, Ty>, Op: Instruction, Ty: SSAType>() -> Self {
+    pub fn of<A: Analysis<Op, Ty, C>, Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>()
+    -> Self {
         Self {
             type_id: TypeId::of::<A>(),
             type_name: std::any::type_name::<A>(),
-            dependencies: <A as Analysis<Op, Ty>>::dependencies,
+            dependencies: <A as Analysis<Op, Ty, C>>::dependencies,
             compute_and_store: |ssa_any, store| {
                 if !store.contains_type(TypeId::of::<A>()) {
-                    let ssa: &SSA<Op, Ty> = ssa_any
-                        .downcast_ref::<SSA<Op, Ty>>()
+                    let ssa: &SSA<Op, Ty, C> = ssa_any
+                        .downcast_ref::<SSA<Op, Ty, C>>()
                         .expect("AnalysisId::compute_and_store: SSA downcast failed");
-                    let val = <A as Analysis<Op, Ty>>::compute(ssa, store);
-                    let dep_ids = <A as Analysis<Op, Ty>>::dependencies()
+                    let val = <A as Analysis<Op, Ty, C>>::compute(ssa, store);
+                    let dep_ids = <A as Analysis<Op, Ty, C>>::dependencies()
                         .iter()
                         .map(|d| d.type_id)
                         .collect();
@@ -66,12 +70,17 @@ impl std::fmt::Debug for AnalysisId {
 // Analysis trait
 // ---------------------------------------------------------------------------
 
-pub trait Analysis<Op: Instruction = OpCode, Ty: SSAType = Type>: Any + 'static {
+pub trait Analysis<
+    Op: Instruction = OpCode,
+    Ty: SSAType = Type,
+    C: Clone + Debug + 'static = Constants,
+>: Any + 'static
+{
     fn id() -> AnalysisId
     where
         Self: Sized,
     {
-        AnalysisId::of::<Self, Op, Ty>()
+        AnalysisId::of::<Self, Op, Ty, C>()
     }
 
     fn dependencies() -> Vec<AnalysisId>
@@ -81,7 +90,7 @@ pub trait Analysis<Op: Instruction = OpCode, Ty: SSAType = Type>: Any + 'static 
         vec![]
     }
 
-    fn compute(ssa: &SSA<Op, Ty>, store: &AnalysisStore) -> Self
+    fn compute(ssa: &SSA<Op, Ty, C>, store: &AnalysisStore) -> Self
     where
         Self: Sized;
 }
@@ -163,12 +172,13 @@ impl AnalysisStore {
 // Pass trait — parametric
 // ---------------------------------------------------------------------------
 
-pub trait Pass<Op: Instruction = OpCode, Ty: SSAType = Type> {
+pub trait Pass<Op: Instruction = OpCode, Ty: SSAType = Type, C: Clone + Debug + 'static = Constants>
+{
     fn name(&self) -> &'static str;
     fn needs(&self) -> Vec<AnalysisId> {
         vec![]
     }
-    fn run(&self, ssa: &mut SSA<Op, Ty>, store: &AnalysisStore);
+    fn run(&self, ssa: &mut SSA<Op, Ty, C>, store: &AnalysisStore);
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![]
     }
@@ -207,16 +217,20 @@ fn topo_sort(roots: Vec<AnalysisId>, store: &AnalysisStore) -> Vec<AnalysisId> {
 // PassManager — parametric
 // ---------------------------------------------------------------------------
 
-pub struct PassManager<Op: Instruction = OpCode, Ty: SSAType = Type> {
-    passes: Vec<Box<dyn Pass<Op, Ty>>>,
+pub struct PassManager<
+    Op: Instruction = OpCode,
+    Ty: SSAType = Type,
+    C: Clone + Debug + 'static = Constants,
+> {
+    passes: Vec<Box<dyn Pass<Op, Ty, C>>>,
     analyses: AnalysisStore,
     draw_cfg: bool,
     debug_output_dir: Option<PathBuf>,
     phase_label: String,
 }
 
-impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
-    pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass<Op, Ty>>>) -> Self {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static> PassManager<Op, Ty, C> {
+    pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass<Op, Ty, C>>>) -> Self {
         Self {
             passes,
             analyses: AnalysisStore::new(),
@@ -235,7 +249,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
     }
 
     #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
-    pub fn run(&mut self, ssa: &mut SSA<Op, Ty>) {
+    pub fn run(&mut self, ssa: &mut SSA<Op, Ty, C>) {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
                 fs::remove_dir_all(debug_output_dir).unwrap();
@@ -252,7 +266,12 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
     }
 
     #[tracing::instrument(skip_all, fields(pass = %pass.name()))]
-    fn run_pass(&mut self, ssa: &mut SSA<Op, Ty>, pass: &dyn Pass<Op, Ty>, pass_index: usize) {
+    fn run_pass(
+        &mut self,
+        ssa: &mut SSA<Op, Ty, C>,
+        pass: &dyn Pass<Op, Ty, C>,
+        pass_index: usize,
+    ) {
         // Ensure all needed analyses are computed (in dependency order)
         let ordered = topo_sort(pass.needs(), &self.analyses);
         for id in ordered {
@@ -264,7 +283,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
         self.analyses.apply_preserved(&pass.preserves());
     }
 
-    fn output_debug_info(&mut self, ssa: &SSA<Op, Ty>, pass_index: usize, pass_name: &str) {
+    fn output_debug_info(&mut self, ssa: &SSA<Op, Ty, C>, pass_index: usize, pass_name: &str) {
         use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 
         let Some(debug_output_dir) = &self.debug_output_dir else {
@@ -281,14 +300,14 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
                     debug_output_dir
                         .join(format!("before_pass_{}_{}", pass_index, pass_name))
                         .join("code.txt"),
-                    format!("{}", ssa.to_string(&DefaultSsaAnnotator)),
+                    format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
                 )
                 .unwrap();
             }
         }
     }
 
-    fn output_final_debug_info(&mut self, ssa: &mut SSA<Op, Ty>) {
+    fn output_final_debug_info(&mut self, ssa: &mut SSA<Op, Ty, C>) {
         use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 
         if self.analyses.try_get::<FlowAnalysis>().is_none() {
@@ -308,7 +327,7 @@ impl<Op: Instruction, Ty: SSAType> PassManager<Op, Ty> {
             }
             fs::write(
                 debug_output_dir.join("final_result").join("code.txt"),
-                format!("{}", ssa.to_string(&DefaultSsaAnnotator)),
+                format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
             )
             .unwrap();
         }

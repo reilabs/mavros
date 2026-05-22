@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::compiler::{
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLSSA, Terminator, ValueId},
+    ssa::{BlockId, Terminator, ValueId, hlssa::HLSSA},
 };
 
 pub struct DeduplicatePhis {}
