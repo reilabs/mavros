@@ -132,6 +132,11 @@ impl LowerWitnessBitwiseOps {
             "bitwise spread width too large for natural-width Spread lowering: {bits}"
         );
 
+        if bits == 1 {
+            self.lower_u1_bitwise(b, kind, result, lhs, rhs, lhs_witness, rhs_witness);
+            return;
+        }
+
         if bits == 64 {
             self.lower_binary_bitwise_u64(b, kind, result, lhs, rhs, lhs_witness, rhs_witness);
             return;
@@ -177,6 +182,75 @@ impl LowerWitnessBitwiseOps {
             result,
             value: result_word,
             target: CastTarget::U(bits as usize),
+        });
+    }
+
+    fn lower_u1_bitwise(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        lhs_witness: bool,
+        rhs_witness: bool,
+    ) {
+        let target = CastTarget::U(1);
+        let lhs_field = b.cast_to_field(lhs);
+        let rhs_field = b.cast_to_field(rhs);
+
+        let result_field = match kind {
+            BinaryArithOpKind::And => {
+                if lhs_witness && rhs_witness {
+                    let lhs_pure = b.value_of(lhs);
+                    let rhs_pure = b.value_of(rhs);
+                    let result_hint = b.and(lhs_pure, rhs_pure);
+                    let result_hint_field = b.cast_to_field(result_hint);
+                    let result_wit = b.write_witness(result_hint_field);
+                    b.constrain(lhs_field, rhs_field, result_wit);
+                    result_wit
+                } else {
+                    b.mul(lhs_field, rhs_field)
+                }
+            }
+            BinaryArithOpKind::Or => {
+                let sum = b.add(lhs_field, rhs_field);
+                if lhs_witness && rhs_witness {
+                    let lhs_pure = b.value_of(lhs_field);
+                    let rhs_pure = b.value_of(rhs_field);
+                    let product_hint = b.mul(lhs_pure, rhs_pure);
+                    let product_wit = b.write_witness(product_hint);
+                    b.constrain(lhs_field, rhs_field, product_wit);
+                    b.sub(sum, product_wit)
+                } else {
+                    let product = b.mul(lhs_field, rhs_field);
+                    b.sub(sum, product)
+                }
+            }
+            BinaryArithOpKind::Xor => {
+                let sum = b.add(lhs_field, rhs_field);
+                let two = b.field_const(Field::from(2));
+                if lhs_witness && rhs_witness {
+                    let lhs_pure = b.value_of(lhs_field);
+                    let rhs_pure = b.value_of(rhs_field);
+                    let product_hint = b.mul(lhs_pure, rhs_pure);
+                    let product_wit = b.write_witness(product_hint);
+                    b.constrain(lhs_field, rhs_field, product_wit);
+                    let two_product = b.mul(two, product_wit);
+                    b.sub(sum, two_product)
+                } else {
+                    let product = b.mul(lhs_field, rhs_field);
+                    let two_product = b.mul(two, product);
+                    b.sub(sum, two_product)
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        b.push(OpCode::Cast {
+            result,
+            value: result_field,
+            target,
         });
     }
 
