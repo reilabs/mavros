@@ -105,13 +105,10 @@ impl Types {
         }
     }
 
-    fn unspread_result_types(
-        value_type: &Type,
-        active_bits: usize,
-    ) -> Result<(Type, Type), String> {
+    fn unspread_result_types(value_type: &Type) -> Result<(Type, Type), String> {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => {
-                let (odd, even) = Self::unspread_result_types(inner, active_bits)?;
+                let (odd, even) = Self::unspread_result_types(inner)?;
                 Ok((Type::witness_of(odd), Type::witness_of(even)))
             }
             TypeExpr::U(bits) => {
@@ -134,7 +131,7 @@ impl Types {
                 let half_bits = bits / 2;
                 Ok((Type::i(half_bits), Type::i(half_bits)))
             }
-            TypeExpr::Field => Ok((Type::u(active_bits), Type::u(active_bits))),
+            TypeExpr::Field => Err("Unspread does not support field inputs".to_string()),
             _ => Err(format!(
                 "Unspread expects an integer input, got {}",
                 value_type
@@ -692,14 +689,13 @@ impl Types {
                 result_odd,
                 result_even,
                 value,
-                bits,
+                ..
             } => {
                 let value_type = function_info
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                let (odd_type, even_type) =
-                    Self::unspread_result_types(value_type, *bits as usize)?;
+                let (odd_type, even_type) = Self::unspread_result_types(value_type)?;
                 function_info.values.insert(*result_odd, odd_type);
                 function_info.values.insert(*result_even, even_type);
                 Ok(())

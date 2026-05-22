@@ -997,28 +997,17 @@ impl ExplicitWitness {
                 if !is_witness {
                     b.push(instruction);
                 } else {
-                    let value_type = function_type_info.get_value_type(value);
-                    let value_is_field = value_type.strip_witness().is_field();
                     let one = b.field_const(Field::ONE);
                     let two = b.field_const(Field::from(2));
                     let value_pure = b.value_of(value);
                     let value_field = b.cast_to_field(value);
-                    let hint_input = if value_is_field {
-                        assert!(
-                            bits <= 64,
-                            "field-backed Unspread only supports active widths up to 64 bits, got {bits}"
-                        );
-                        b.cast_to(CastTarget::U(bits as usize * 2), value_pure)
-                    } else {
-                        value_pure
-                    };
-                    let (odd_hint, even_hint) = b.unspread(hint_input, bits);
+                    let (odd_hint, even_hint) = b.unspread(value_pure, bits);
                     let odd_target =
                         cast_target_for_type(&function_type_info.get_value_type(result_odd));
                     let even_target =
                         cast_target_for_type(&function_type_info.get_value_type(result_even));
 
-                    if bits < SPREAD_SPILL_THRESHOLD_BITS || !value_is_field {
+                    if bits < SPREAD_SPILL_THRESHOLD_BITS {
                         let odd_field = b.cast_to_field(odd_hint);
                         let odd_wit = b.write_witness(odd_field);
                         let odd_spread_hint = b.spread(odd_hint, bits);

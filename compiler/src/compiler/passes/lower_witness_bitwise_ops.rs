@@ -147,6 +147,7 @@ impl LowerWitnessBitwiseOps {
         let lhs_spread = spread_as_field(b, lhs, bits);
         let rhs_spread = spread_as_field(b, rhs, bits);
         let input_spread_sum = b.add(lhs_spread, rhs_spread);
+        let input_spread_sum = b.cast_to(CastTarget::U(bits as usize * 2), input_spread_sum);
         let (and_wit, xor_wit) = b.unspread(input_spread_sum, bits);
 
         let result_word = match kind {
