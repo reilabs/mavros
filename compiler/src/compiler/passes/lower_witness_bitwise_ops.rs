@@ -144,32 +144,10 @@ impl LowerWitnessBitwiseOps {
 
         let bits = bits as u8;
 
-        let one = b.field_const(Field::ONE);
-        let zero = b.field_const(Field::ZERO);
-        let two = b.field_const(Field::from(2));
-
-        let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
-        let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-
-        let and_hint = b.and(lhs_pure, rhs_pure);
-        let xor_hint = b.xor(lhs_pure, rhs_pure);
-        let and_hint_field = b.cast_to_field(and_hint);
-        let xor_hint_field = b.cast_to_field(xor_hint);
-        let and_wit = b.write_witness(and_hint_field);
-        let xor_wit = b.write_witness(xor_hint_field);
-        let and_wit_int = b.cast_to(CastTarget::U(bits as usize), and_wit);
-        let xor_wit_int = b.cast_to(CastTarget::U(bits as usize), xor_wit);
-
         let lhs_spread = spread_as_field(b, lhs, bits);
         let rhs_spread = spread_as_field(b, rhs, bits);
-        let and_spread = spread_as_field(b, and_wit_int, bits);
-        let xor_spread = spread_as_field(b, xor_wit_int, bits);
-
         let input_spread_sum = b.add(lhs_spread, rhs_spread);
-        let two_and_spread = b.mul(two, and_spread);
-        let output_spread_sum = b.add(two_and_spread, xor_spread);
-        let spread_diff = b.sub(input_spread_sum, output_spread_sum);
-        b.constrain(spread_diff, one, zero);
+        let (and_wit, xor_wit) = b.unspread(input_spread_sum, bits);
 
         let result_word = match kind {
             BinaryArithOpKind::And => and_wit,
