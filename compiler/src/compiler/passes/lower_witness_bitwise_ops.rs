@@ -1,13 +1,12 @@
 //! Lowers witness-tainted bitwise operations before the main explicit-witness pass.
 //!
-//! This pass emits natural-width `Spread` operations for non-byte-aligned widths. Byte-aligned
-//! widths preserve the old byte-decomposed lowering shape so this refactor does not perturb existing
-//! bytecode/R1CS sizes. `ExplicitWitness` is responsible for spilling wide spreads into the smaller
-//! spread lookups supported by the backend.
+//! This pass emits natural-width `Spread` operations, except for `u64` bitwise ops where it uses a
+//! two-limb `u32` decomposition. `ExplicitWitness` is responsible for spilling wide spreads into
+//! the smaller spread lookups supported by the backend.
 
 use std::collections::HashMap;
 
-use ark_ff::Field as _;
+use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
@@ -19,13 +18,11 @@ use crate::compiler::{
     ssa::{
         BlockId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, Endianness, HLBlock, HLSSA, OpCode, Radix, TypeExpr,
+            BinaryArithOpKind, CastTarget, HLBlock, HLSSA, OpCode, TypeExpr,
             builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
         },
     },
 };
-
-const DIRECT_SPREAD_LOOKUP_BITS: u8 = 16;
 
 pub struct LowerWitnessBitwiseOps {}
 
@@ -131,7 +128,7 @@ impl LowerWitnessBitwiseOps {
     ) {
         let bits = unsigned_bits(function_type_info, lhs, "bitwise operand");
         assert!(
-            bits <= 64,
+            bits <= 128,
             "bitwise spread width too large for natural-width Spread lowering: {bits}"
         );
 
@@ -140,31 +137,8 @@ impl LowerWitnessBitwiseOps {
             return;
         }
 
-        if bits % 8 == 0 {
-            self.lower_byte_decomposed_bitwise(
-                b,
-                kind,
-                lhs,
-                rhs,
-                lhs_witness,
-                rhs_witness,
-                bits,
-                result,
-            );
-            return;
-        }
-
-        if bits < DIRECT_SPREAD_LOOKUP_BITS as usize {
-            self.lower_small_bitwise(
-                b,
-                kind,
-                result,
-                lhs,
-                rhs,
-                bits as u8,
-                lhs_witness,
-                rhs_witness,
-            );
+        if bits == 64 {
+            self.lower_binary_bitwise_u64(b, kind, result, lhs, rhs, lhs_witness, rhs_witness);
             return;
         }
 
@@ -179,11 +153,7 @@ impl LowerWitnessBitwiseOps {
         let result_word = match kind {
             BinaryArithOpKind::And => and_wit,
             BinaryArithOpKind::Xor => xor_wit,
-            BinaryArithOpKind::Or => {
-                let and_field = b.cast_to_field(and_wit);
-                let xor_field = b.cast_to_field(xor_wit);
-                b.add(and_field, xor_field)
-            }
+            BinaryArithOpKind::Or => b.add(and_wit, xor_wit),
             _ => unreachable!(),
         };
 
@@ -264,205 +234,54 @@ impl LowerWitnessBitwiseOps {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn lower_small_bitwise(
+    fn lower_binary_bitwise_u64(
         &self,
         b: &mut HLInstrBuilder<'_>,
         kind: BinaryArithOpKind,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
-        bits: u8,
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        let one = b.field_const(Field::ONE);
-        let two = b.field_const(Field::from(2));
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
 
-        let lhs_spread = small_spread_as_field(b, lhs, lhs_pure, bits, lhs_witness, one);
-        let rhs_spread = small_spread_as_field(b, rhs, rhs_pure, bits, rhs_witness, one);
-        let input_spread_sum = b.add(lhs_spread, rhs_spread);
+        let lhs_limbs = decompose_u64_input(b, lhs, lhs_pure, lhs_witness);
+        let rhs_limbs = decompose_u64_input(b, rhs, rhs_pure, rhs_witness);
 
         let and_hint = b.and(lhs_pure, rhs_pure);
         let xor_hint = b.xor(lhs_pure, rhs_pure);
-        let (and_wit, and_spread) = write_small_spread_witness(b, and_hint, bits, one);
+        let and_hint = write_u64_hint(b, and_hint);
+        let xor_hint = write_u64_hint(b, xor_hint);
 
-        let xor_field = b.cast_to_field(xor_hint);
-        let xor_wit = b.write_witness(xor_field);
-        let two_and_spread = b.mul(two, and_spread);
-        let xor_spread = b.sub(input_spread_sum, two_and_spread);
-        b.lookup_spread(bits, xor_wit, xor_spread, one);
+        constrain_u32_limb_bitwise_identity(
+            b,
+            lhs_limbs.lo,
+            rhs_limbs.lo,
+            and_hint.limbs.lo,
+            xor_hint.limbs.lo,
+        );
+        constrain_u32_limb_bitwise_identity(
+            b,
+            lhs_limbs.hi,
+            rhs_limbs.hi,
+            and_hint.limbs.hi,
+            xor_hint.limbs.hi,
+        );
 
         let result_word = match kind {
-            BinaryArithOpKind::And => and_wit,
-            BinaryArithOpKind::Xor => xor_wit,
-            BinaryArithOpKind::Or => b.add(and_wit, xor_wit),
+            BinaryArithOpKind::And => and_hint.word,
+            BinaryArithOpKind::Xor => xor_hint.word,
+            BinaryArithOpKind::Or => b.add(and_hint.word, xor_hint.word),
             _ => unreachable!(),
         };
 
         b.push(OpCode::Cast {
             result,
             value: result_word,
-            target: CastTarget::U(bits as usize),
+            target: CastTarget::U(64),
         });
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn lower_byte_decomposed_bitwise(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        kind: BinaryArithOpKind,
-        lhs: ValueId,
-        rhs: ValueId,
-        lhs_witness: bool,
-        rhs_witness: bool,
-        bits: usize,
-        result: ValueId,
-    ) {
-        assert!(bits % 8 == 0 && bits >= 8 && bits <= 64);
-        let chunks = bits / 8;
-        let one = b.field_const(Field::ONE);
-        let zero = b.field_const(Field::from(0));
-        let two = b.field_const(Field::from(2));
-        let two_to_8 = b.field_const(Field::from(256u128));
-        let two_to_16 = b.field_const(Field::from(1u128 << 16));
-
-        let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
-        let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
-
-        let (lhs_bytes, lhs_spread) =
-            self.spread_decompose(b, lhs_pure, lhs_field, chunks, one, lhs_witness);
-        let (rhs_bytes, rhs_spread) =
-            self.spread_decompose(b, rhs_pure, rhs_field, chunks, one, rhs_witness);
-
-        let mut and_word = zero;
-        let mut xor_word = zero;
-        let mut and_spread = zero;
-        let mut xor_spread = zero;
-        for i in 0..chunks {
-            let lhs_byte = b.cast_to(CastTarget::U(8), lhs_bytes[i]);
-            let rhs_byte = b.cast_to(CastTarget::U(8), rhs_bytes[i]);
-            let and_hint = b.and(lhs_byte, rhs_byte);
-            let xor_hint = b.xor(lhs_byte, rhs_byte);
-
-            let (and_byte, and_byte_spread) = self.write_spread_byte_witness(b, and_hint, one);
-            let shifted_and_word = b.mul(and_word, two_to_8);
-            and_word = b.add(shifted_and_word, and_byte);
-            let shifted_and_spread = b.mul(and_spread, two_to_16);
-            and_spread = b.add(shifted_and_spread, and_byte_spread);
-
-            if i < chunks - 1 {
-                let (xor_byte, xor_byte_spread) = self.write_spread_byte_witness(b, xor_hint, one);
-                let shifted_xor_word = b.mul(xor_word, two_to_8);
-                xor_word = b.add(shifted_xor_word, xor_byte);
-                let shifted_xor_spread = b.mul(xor_spread, two_to_16);
-                xor_spread = b.add(shifted_xor_spread, xor_byte_spread);
-            } else {
-                let xor_field = b.cast_to_field(xor_hint);
-                let xor_byte = b.write_witness(xor_field);
-                let shifted_xor_word = b.mul(xor_word, two_to_8);
-                xor_word = b.add(shifted_xor_word, xor_byte);
-
-                let input_spread = b.add(lhs_spread, rhs_spread);
-                let two_and_spread = b.mul(two, and_spread);
-                let remaining_after_and = b.sub(input_spread, two_and_spread);
-                let shifted_xor_spread = b.mul(xor_spread, two_to_16);
-                let xor_spread_last = b.sub(remaining_after_and, shifted_xor_spread);
-                b.lookup_spread(8, xor_byte, xor_spread_last, one);
-            }
-        }
-
-        let result_word = match kind {
-            BinaryArithOpKind::And => and_word,
-            BinaryArithOpKind::Xor => xor_word,
-            BinaryArithOpKind::Or => b.add(and_word, xor_word),
-            _ => unreachable!(),
-        };
-
-        b.push(OpCode::Cast {
-            result,
-            value: result_word,
-            target: CastTarget::U(bits),
-        });
-    }
-
-    fn spread_decompose(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        pure_value: ValueId,
-        field_value: ValueId,
-        chunks: usize,
-        one: ValueId,
-        is_witness: bool,
-    ) -> (Vec<ValueId>, ValueId) {
-        let zero = b.field_const(Field::from(0));
-        let two_to_8 = b.field_const(Field::from(256u128));
-        let two_to_16 = b.field_const(Field::from(1u128 << 16));
-        let pure_field = b.cast_to_field(pure_value);
-        let bytes = b.to_radix(pure_field, Radix::Bytes, Endianness::Big, chunks);
-        let mut pure_bytes = Vec::with_capacity(chunks);
-
-        if !is_witness {
-            let mut spread = zero;
-            for i in 0..chunks {
-                let idx = b.u_const(32, i as u128);
-                let byte = b.array_get(bytes, idx);
-                pure_bytes.push(byte);
-
-                let byte_spread = b.spread(byte, 8);
-                let byte_spread = b.cast_to_field(byte_spread);
-                let shifted_spread = b.mul(spread, two_to_16);
-                spread = b.add(shifted_spread, byte_spread);
-            }
-            return (pure_bytes, b.write_witness(spread));
-        }
-
-        let mut reconstructed_value = zero;
-        let mut reconstructed_spread = zero;
-        for i in 0..chunks - 1 {
-            let idx = b.u_const(32, i as u128);
-            let byte = b.array_get(bytes, idx);
-            let (byte_wit, spread_wit) = self.write_spread_byte_witness(b, byte, one);
-
-            let shifted_value = b.mul(reconstructed_value, two_to_8);
-            reconstructed_value = b.add(shifted_value, byte_wit);
-            let shifted_spread = b.mul(reconstructed_spread, two_to_16);
-            reconstructed_spread = b.add(shifted_spread, spread_wit);
-            pure_bytes.push(byte);
-        }
-
-        let last_idx = b.u_const(32, (chunks - 1) as u128);
-        let last_byte_pure = b.array_get(bytes, last_idx);
-        let shifted_value = b.mul(reconstructed_value, two_to_8);
-        let last_byte = b.sub(field_value, shifted_value);
-        let last_spread = b.spread(last_byte_pure, 8);
-        let last_spread_field = b.cast_to_field(last_spread);
-        let last_spread = b.write_witness(last_spread_field);
-        b.lookup_spread(8, last_byte, last_spread, one);
-
-        let shifted_spread = b.mul(reconstructed_spread, two_to_16);
-        reconstructed_spread = b.add(shifted_spread, last_spread);
-        pure_bytes.push(last_byte_pure);
-
-        (pure_bytes, reconstructed_spread)
-    }
-
-    fn write_spread_byte_witness(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        byte: ValueId,
-        one: ValueId,
-    ) -> (ValueId, ValueId) {
-        let spread = b.spread(byte, 8);
-        let byte_field = b.cast_to_field(byte);
-        let byte = b.write_witness(byte_field);
-        let spread_field = b.cast_to_field(spread);
-        let spread = b.write_witness(spread_field);
-        b.lookup_spread(8, byte, spread, one);
-        (byte, spread)
     }
 
     fn lower_not(
@@ -482,6 +301,18 @@ impl LowerWitnessBitwiseOps {
             target: cast_target,
         });
     }
+}
+
+#[derive(Clone, Copy)]
+struct U64Limbs {
+    lo: ValueId,
+    hi: ValueId,
+}
+
+#[derive(Clone, Copy)]
+struct U64Hint {
+    word: ValueId,
+    limbs: U64Limbs,
 }
 
 fn unsigned_bits(function_type_info: &FunctionTypeInfo, value: ValueId, context: &str) -> usize {
@@ -516,37 +347,97 @@ fn spread_as_field(b: &mut HLInstrBuilder<'_>, value: ValueId, bits: u8) -> Valu
     b.cast_to_field(spread)
 }
 
-fn small_spread_as_field(
+fn decompose_u64_input(
     b: &mut HLInstrBuilder<'_>,
     value: ValueId,
     pure_value: ValueId,
-    bits: u8,
     is_witness: bool,
-    one: ValueId,
-) -> ValueId {
-    let spread = b.spread(pure_value, bits);
-    let spread_field = b.cast_to_field(spread);
+) -> U64Limbs {
+    let pure_limbs = extract_u64_limbs(b, pure_value);
     if !is_witness {
-        return spread_field;
+        return pure_limbs;
     }
 
-    let input_field = b.cast_to_field(value);
-    let spread_wit = b.write_witness(spread_field);
-    b.lookup_spread(bits, input_field, spread_wit, one);
-    spread_wit
+    let hi_field = b.cast_to_field(pure_limbs.hi);
+    let hi_wit = b.write_witness(hi_field);
+    let lo = derive_low_u32_limb(b, value, hi_wit);
+
+    U64Limbs {
+        lo,
+        hi: b.cast_to(CastTarget::U(32), hi_wit),
+    }
 }
 
-fn write_small_spread_witness(
-    b: &mut HLInstrBuilder<'_>,
-    value: ValueId,
-    bits: u8,
-    one: ValueId,
-) -> (ValueId, ValueId) {
+fn write_u64_hint(b: &mut HLInstrBuilder<'_>, hint: ValueId) -> U64Hint {
+    let hint_field = b.cast_to_field(hint);
+    let word_wit = b.write_witness(hint_field);
+    let pure_limbs = extract_u64_limbs(b, hint);
+    let hi_field = b.cast_to_field(pure_limbs.hi);
+    let hi_wit = b.write_witness(hi_field);
+    let lo = derive_low_u32_limb_from_field(b, word_wit, hi_wit);
+
+    U64Hint {
+        word: word_wit,
+        limbs: U64Limbs {
+            lo,
+            hi: b.cast_to(CastTarget::U(32), hi_wit),
+        },
+    }
+}
+
+fn extract_u64_limbs(b: &mut HLInstrBuilder<'_>, value: ValueId) -> U64Limbs {
+    U64Limbs {
+        lo: extract_u64_limb(b, value, 0),
+        hi: extract_u64_limb(b, value, 32),
+    }
+}
+
+fn extract_u64_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, offset: usize) -> ValueId {
+    let shifted = if offset == 0 {
+        value
+    } else {
+        let divisor = b.u_const(64, 1u128 << offset);
+        b.div(value, divisor)
+    };
+    let modulus = b.u_const(64, 1u128 << 32);
+    let limb = b.modulo(shifted, modulus);
+    b.cast_to(CastTarget::U(32), limb)
+}
+
+fn derive_low_u32_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, hi_field: ValueId) -> ValueId {
     let value_field = b.cast_to_field(value);
-    let value_wit = b.write_witness(value_field);
-    let spread = b.spread(value, bits);
-    let spread_field = b.cast_to_field(spread);
-    let spread_wit = b.write_witness(spread_field);
-    b.lookup_spread(bits, value_wit, spread_wit, one);
-    (value_wit, spread_wit)
+    derive_low_u32_limb_from_field(b, value_field, hi_field)
+}
+
+fn derive_low_u32_limb_from_field(
+    b: &mut HLInstrBuilder<'_>,
+    value_field: ValueId,
+    hi_field: ValueId,
+) -> ValueId {
+    let shift = b.field_const(Field::from(1u128 << 32));
+    let shifted_hi = b.mul(hi_field, shift);
+    let lo_field = b.sub(value_field, shifted_hi);
+    b.cast_to(CastTarget::U(32), lo_field)
+}
+
+fn constrain_u32_limb_bitwise_identity(
+    b: &mut HLInstrBuilder<'_>,
+    lhs: ValueId,
+    rhs: ValueId,
+    and_value: ValueId,
+    xor_value: ValueId,
+) {
+    let one = b.field_const(Field::ONE);
+    let zero = b.field_const(Field::ZERO);
+    let two = b.field_const(Field::from(2));
+    let lhs_spread = spread_as_field(b, lhs, 32);
+    let rhs_spread = spread_as_field(b, rhs, 32);
+    let and_spread = spread_as_field(b, and_value, 32);
+    let xor_spread = spread_as_field(b, xor_value, 32);
+
+    let input_spread_sum = b.add(lhs_spread, rhs_spread);
+    let two_and_spread = b.mul(two, and_spread);
+    let output_spread_sum = b.add(two_and_spread, xor_spread);
+    let spread_diff = b.sub(input_spread_sum, output_spread_sum);
+    b.constrain(spread_diff, one, zero);
 }
