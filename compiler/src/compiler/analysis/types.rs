@@ -80,18 +80,18 @@ impl Types {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
             TypeExpr::U(bits) => {
-                if *bits > 128 {
+                if *bits > 64 {
                     return Err(format!(
-                        "Spread expects u(n) with n <= 128, got {}",
+                        "Spread expects u(n) with n <= 64, got {}",
                         value_type
                     ));
                 }
                 Ok(Type::u(bits * 2))
             }
             TypeExpr::I(bits) => {
-                if *bits > 128 {
+                if *bits > 64 {
                     return Err(format!(
-                        "Spread expects i(n) with n <= 128, got {}",
+                        "Spread expects i(n) with n <= 64, got {}",
                         value_type
                     ));
                 }
