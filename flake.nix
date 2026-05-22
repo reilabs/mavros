@@ -11,10 +11,16 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         llvmPackages = pkgs.llvmPackages_22;
+        noBrew = pkgs.writeShellScriptBin "brew" ''
+          echo "brew is intentionally unavailable inside this Nix dev shell" >&2
+          exit 127
+        '';
       in
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            noBrew
+
             # Rust Toolchain
             (rust-bin.nightly.latest.default.override {
               extensions = [ 

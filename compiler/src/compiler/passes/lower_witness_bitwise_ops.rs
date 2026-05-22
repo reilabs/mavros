@@ -1,12 +1,12 @@
 //! Lowers witness-tainted bitwise operations before the main explicit-witness pass.
 //!
-//! This pass emits natural-width `Spread` operations, except for `u64` bitwise ops where it uses a
-//! two-limb `u32` decomposition. `ExplicitWitness` is responsible for spilling wide spreads into
-//! the smaller spread lookups supported by the backend.
+//! This pass emits `Spread`/`Unspread` operations, except for `u64` bitwise ops where it keeps a
+//! two-limb `u32` decomposition. `ExplicitWitness` is responsible for the witness writes and lookup
+//! constraints needed by those bitwise operations.
 
 use std::collections::HashMap;
 
-use ark_ff::{AdditiveGroup, Field as _};
+use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
@@ -133,7 +133,7 @@ impl LowerWitnessBitwiseOps {
         );
 
         if bits == 1 {
-            self.lower_u1_bitwise(b, kind, result, lhs, rhs, lhs_witness, rhs_witness);
+            self.lower_u1_bitwise(b, kind, result, lhs, rhs);
             return;
         }
 
@@ -171,57 +171,24 @@ impl LowerWitnessBitwiseOps {
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
-        lhs_witness: bool,
-        rhs_witness: bool,
     ) {
         let target = CastTarget::U(1);
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
 
         let result_field = match kind {
-            BinaryArithOpKind::And => {
-                if lhs_witness && rhs_witness {
-                    let lhs_pure = b.value_of(lhs);
-                    let rhs_pure = b.value_of(rhs);
-                    let result_hint = b.and(lhs_pure, rhs_pure);
-                    let result_hint_field = b.cast_to_field(result_hint);
-                    let result_wit = b.write_witness(result_hint_field);
-                    b.constrain(lhs_field, rhs_field, result_wit);
-                    result_wit
-                } else {
-                    b.mul(lhs_field, rhs_field)
-                }
-            }
+            BinaryArithOpKind::And => b.mul(lhs_field, rhs_field),
             BinaryArithOpKind::Or => {
                 let sum = b.add(lhs_field, rhs_field);
-                if lhs_witness && rhs_witness {
-                    let lhs_pure = b.value_of(lhs_field);
-                    let rhs_pure = b.value_of(rhs_field);
-                    let product_hint = b.mul(lhs_pure, rhs_pure);
-                    let product_wit = b.write_witness(product_hint);
-                    b.constrain(lhs_field, rhs_field, product_wit);
-                    b.sub(sum, product_wit)
-                } else {
-                    let product = b.mul(lhs_field, rhs_field);
-                    b.sub(sum, product)
-                }
+                let product = b.mul(lhs_field, rhs_field);
+                b.sub(sum, product)
             }
             BinaryArithOpKind::Xor => {
                 let sum = b.add(lhs_field, rhs_field);
                 let two = b.field_const(Field::from(2));
-                if lhs_witness && rhs_witness {
-                    let lhs_pure = b.value_of(lhs_field);
-                    let rhs_pure = b.value_of(rhs_field);
-                    let product_hint = b.mul(lhs_pure, rhs_pure);
-                    let product_wit = b.write_witness(product_hint);
-                    b.constrain(lhs_field, rhs_field, product_wit);
-                    let two_product = b.mul(two, product_wit);
-                    b.sub(sum, two_product)
-                } else {
-                    let product = b.mul(lhs_field, rhs_field);
-                    let two_product = b.mul(two, product);
-                    b.sub(sum, two_product)
-                }
+                let product = b.mul(lhs_field, rhs_field);
+                let two_product = b.mul(two, product);
+                b.sub(sum, two_product)
             }
             _ => unreachable!(),
         };
@@ -233,7 +200,6 @@ impl LowerWitnessBitwiseOps {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_binary_bitwise_u64(
         &self,
         b: &mut HLInstrBuilder<'_>,
@@ -244,38 +210,14 @@ impl LowerWitnessBitwiseOps {
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
-        let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
+        let lhs_limbs = decompose_u64_input(b, lhs, lhs_witness);
+        let rhs_limbs = decompose_u64_input(b, rhs, rhs_witness);
 
-        let lhs_limbs = decompose_u64_input(b, lhs, lhs_pure, lhs_witness);
-        let rhs_limbs = decompose_u64_input(b, rhs, rhs_pure, rhs_witness);
-
-        let and_hint = b.and(lhs_pure, rhs_pure);
-        let xor_hint = b.xor(lhs_pure, rhs_pure);
-        let and_hint = write_u64_hint(b, and_hint);
-        let xor_hint = write_u64_hint(b, xor_hint);
-
-        constrain_u32_limb_bitwise_identity(
-            b,
-            lhs_limbs.lo,
-            rhs_limbs.lo,
-            and_hint.limbs.lo,
-            xor_hint.limbs.lo,
-        );
-        constrain_u32_limb_bitwise_identity(
-            b,
-            lhs_limbs.hi,
-            rhs_limbs.hi,
-            and_hint.limbs.hi,
-            xor_hint.limbs.hi,
-        );
-
-        let result_word = match kind {
-            BinaryArithOpKind::And => and_hint.word,
-            BinaryArithOpKind::Xor => xor_hint.word,
-            BinaryArithOpKind::Or => b.add(and_hint.word, xor_hint.word),
-            _ => unreachable!(),
+        let result_limbs = U64Limbs {
+            lo: lower_limb_bitwise(b, kind, lhs_limbs.lo, rhs_limbs.lo),
+            hi: lower_limb_bitwise(b, kind, lhs_limbs.hi, rhs_limbs.hi),
         };
+        let result_word = combine_u32_limbs(b, result_limbs);
 
         b.push(OpCode::Cast {
             result,
@@ -307,12 +249,6 @@ impl LowerWitnessBitwiseOps {
 struct U64Limbs {
     lo: ValueId,
     hi: ValueId,
-}
-
-#[derive(Clone, Copy)]
-struct U64Hint {
-    word: ValueId,
-    limbs: U64Limbs,
 }
 
 fn unsigned_bits(function_type_info: &FunctionTypeInfo, value: ValueId, context: &str) -> usize {
@@ -347,41 +283,48 @@ fn spread_as_field(b: &mut HLInstrBuilder<'_>, value: ValueId, bits: u8) -> Valu
     b.cast_to_field(spread)
 }
 
-fn decompose_u64_input(
+fn lower_limb_bitwise(
     b: &mut HLInstrBuilder<'_>,
-    value: ValueId,
-    pure_value: ValueId,
-    is_witness: bool,
-) -> U64Limbs {
-    let pure_limbs = extract_u64_limbs(b, pure_value);
+    kind: BinaryArithOpKind,
+    lhs: ValueId,
+    rhs: ValueId,
+) -> ValueId {
+    let lhs_spread = spread_as_field(b, lhs, 32);
+    let rhs_spread = spread_as_field(b, rhs, 32);
+    let input_spread_sum = b.add(lhs_spread, rhs_spread);
+    let input_spread_sum = b.cast_to(CastTarget::U(64), input_spread_sum);
+    let (and_limb, xor_limb) = b.unspread(input_spread_sum, 32);
+
+    match kind {
+        BinaryArithOpKind::And => and_limb,
+        BinaryArithOpKind::Xor => xor_limb,
+        BinaryArithOpKind::Or => b.add(and_limb, xor_limb),
+        _ => unreachable!(),
+    }
+}
+
+fn combine_u32_limbs(b: &mut HLInstrBuilder<'_>, limbs: U64Limbs) -> ValueId {
+    let lo = b.cast_to_field(limbs.lo);
+    let hi = b.cast_to_field(limbs.hi);
+    let shift = b.field_const(Field::from(1u128 << 32));
+    let shifted_hi = b.mul(hi, shift);
+    b.add(lo, shifted_hi)
+}
+
+fn decompose_u64_input(b: &mut HLInstrBuilder<'_>, value: ValueId, is_witness: bool) -> U64Limbs {
     if !is_witness {
-        return pure_limbs;
+        return extract_u64_limbs(b, value);
     }
 
-    let hi_field = b.cast_to_field(pure_limbs.hi);
+    let pure_value = b.value_of(value);
+    let hi_hint = extract_u64_limb(b, pure_value, 32);
+    let hi_field = b.cast_to_field(hi_hint);
     let hi_wit = b.write_witness(hi_field);
     let lo = derive_low_u32_limb(b, value, hi_wit);
 
     U64Limbs {
         lo,
         hi: b.cast_to(CastTarget::U(32), hi_wit),
-    }
-}
-
-fn write_u64_hint(b: &mut HLInstrBuilder<'_>, hint: ValueId) -> U64Hint {
-    let hint_field = b.cast_to_field(hint);
-    let word_wit = b.write_witness(hint_field);
-    let pure_limbs = extract_u64_limbs(b, hint);
-    let hi_field = b.cast_to_field(pure_limbs.hi);
-    let hi_wit = b.write_witness(hi_field);
-    let lo = derive_low_u32_limb_from_field(b, word_wit, hi_wit);
-
-    U64Hint {
-        word: word_wit,
-        limbs: U64Limbs {
-            lo,
-            hi: b.cast_to(CastTarget::U(32), hi_wit),
-        },
     }
 }
 
@@ -406,38 +349,8 @@ fn extract_u64_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, offset: usize) -
 
 fn derive_low_u32_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, hi_field: ValueId) -> ValueId {
     let value_field = b.cast_to_field(value);
-    derive_low_u32_limb_from_field(b, value_field, hi_field)
-}
-
-fn derive_low_u32_limb_from_field(
-    b: &mut HLInstrBuilder<'_>,
-    value_field: ValueId,
-    hi_field: ValueId,
-) -> ValueId {
     let shift = b.field_const(Field::from(1u128 << 32));
     let shifted_hi = b.mul(hi_field, shift);
     let lo_field = b.sub(value_field, shifted_hi);
     b.cast_to(CastTarget::U(32), lo_field)
-}
-
-fn constrain_u32_limb_bitwise_identity(
-    b: &mut HLInstrBuilder<'_>,
-    lhs: ValueId,
-    rhs: ValueId,
-    and_value: ValueId,
-    xor_value: ValueId,
-) {
-    let one = b.field_const(Field::ONE);
-    let zero = b.field_const(Field::ZERO);
-    let two = b.field_const(Field::from(2));
-    let lhs_spread = spread_as_field(b, lhs, 32);
-    let rhs_spread = spread_as_field(b, rhs, 32);
-    let and_spread = spread_as_field(b, and_value, 32);
-    let xor_spread = spread_as_field(b, xor_value, 32);
-
-    let input_spread_sum = b.add(lhs_spread, rhs_spread);
-    let two_and_spread = b.mul(two, and_spread);
-    let output_spread_sum = b.add(two_and_spread, xor_spread);
-    let spread_diff = b.sub(input_spread_sum, output_spread_sum);
-    b.constrain(spread_diff, one, zero);
 }
