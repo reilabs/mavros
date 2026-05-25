@@ -63,6 +63,15 @@ pub enum OpCode {
         from_bits: usize,
         to_bits: usize,
     },
+    BitRange {
+        result: ValueId,
+        value: ValueId,
+        offset: usize,
+        width: usize,
+        /// Optional proof bound for values already known to occupy fewer bits than their scalar
+        /// type. It does not change the value-level semantics, only the lowering obligation.
+        source_width: Option<usize>,
+    },
     Not {
         result: ValueId,
         value: ValueId,
@@ -603,6 +612,25 @@ impl Instruction for OpCode {
                     out_bits
                 )
             }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+                source_width,
+            } => {
+                let source_width = source_width
+                    .map(|source_width| format!(", source_width={source_width}"))
+                    .unwrap_or_default();
+                format!(
+                    "v{}{} = bit_range(v{}, {}, {})",
+                    result.0,
+                    annotate_value(*result),
+                    value.0,
+                    offset,
+                    width
+                ) + &source_width
+            }
             OpCode::Not { result, value } => {
                 format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
@@ -897,6 +925,13 @@ impl Instruction for OpCode {
                 value: c,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: _,
+                value: c,
+                offset: _,
+                width: _,
+                source_width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1041,6 +1076,7 @@ impl Instruction for OpCode {
             | Self::Cast { result: r, .. }
             | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
+            | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
@@ -1098,6 +1134,7 @@ impl Instruction for OpCode {
             | Self::Cast { result: r, .. }
             | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
+            | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
@@ -1237,6 +1274,13 @@ impl Instruction for OpCode {
                 value: c,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: _,
+                value: c,
+                offset: _,
+                width: _,
+                source_width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1414,6 +1458,13 @@ impl Instruction for OpCode {
                 value: b,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: a,
+                value: b,
+                offset: _,
+                width: _,
+                source_width: _,
             } => vec![a, b].into_iter(),
             Self::ArraySet {
                 result: a,

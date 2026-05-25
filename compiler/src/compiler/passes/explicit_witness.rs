@@ -309,7 +309,7 @@ impl ExplicitWitness {
                 }
                 panic!(
                     "witness integer shift {:?} should have been lowered by \
-                     lower_witness_integer_casts_and_shifts",
+                     lower_witness_bitwise_ops",
                     kind
                 );
             }
@@ -590,7 +590,7 @@ impl ExplicitWitness {
                     if value_type.strip_witness().is_integer() {
                         panic!(
                             "witness integer truncate should have been lowered by \
-                             lower_witness_integer_casts_and_shifts"
+                             lower_witness_bitwise_ops"
                         );
                     }
                     let one = b.field_const(Field::ONE);
@@ -613,7 +613,7 @@ impl ExplicitWitness {
                 if i_taint && value_type.strip_witness().is_integer() {
                     panic!(
                         "witness integer sign-extension should have been lowered by \
-                         lower_witness_integer_casts_and_shifts"
+                         lower_witness_bitwise_ops"
                     );
                 }
                 let one = b.field_const(Field::ONE);
@@ -636,6 +636,9 @@ impl ExplicitWitness {
             }
             OpCode::Not { result, value } => {
                 b.push(OpCode::Not { result, value });
+            }
+            OpCode::BitRange { .. } => {
+                panic!("BitRange should have been lowered by lower_bit_range_ops");
             }
             OpCode::ToBits {
                 result: _,
@@ -932,7 +935,7 @@ impl ExplicitWitness {
                     {
                         panic!(
                             "guarded witness integer truncate should have been lowered by \
-                             lower_witness_integer_casts_and_shifts"
+                             lower_witness_bitwise_ops"
                         );
                     }
                     let cond_type = function_type_info.get_value_type(condition);
@@ -963,7 +966,7 @@ impl ExplicitWitness {
                     if value_type.strip_witness().is_integer() {
                         panic!(
                             "guarded witness integer sign-extension should have been lowered by \
-                             lower_witness_integer_casts_and_shifts"
+                             lower_witness_bitwise_ops"
                         );
                     }
                     let cond_type = function_type_info.get_value_type(condition);
@@ -1109,9 +1112,12 @@ impl ExplicitWitness {
                 }
                 panic!(
                     "guarded witness integer shift {:?} should have been lowered by \
-                     lower_witness_integer_casts_and_shifts",
+                     lower_witness_bitwise_ops",
                     kind
                 );
+            }
+            OpCode::BitRange { .. } => {
+                panic!("guarded BitRange should have been lowered by lower_bit_range_ops");
             }
             OpCode::Cast { .. }
             | OpCode::Const { .. }

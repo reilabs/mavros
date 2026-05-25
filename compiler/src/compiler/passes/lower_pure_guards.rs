@@ -270,6 +270,7 @@ impl LowerPureGuards {
                 ..
             }
             | OpCode::Cast { .. }
+            | OpCode::BitRange { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
             | OpCode::MkTuple { .. }

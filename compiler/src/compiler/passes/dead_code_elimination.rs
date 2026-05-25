@@ -120,6 +120,7 @@ impl DCE {
             | OpCode::Cast { .. }
             | OpCode::Truncate { .. }
             | OpCode::SExt { .. }
+            | OpCode::BitRange { .. }
             | OpCode::Not { .. }
             | OpCode::MulConst { .. }
             | OpCode::ReadGlobal { .. }

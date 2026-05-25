@@ -677,6 +677,19 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
     }
 
+    fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+        let new_value = self
+            .expect_constant()
+            .into_bigint()
+            .to_bits_le()
+            .iter()
+            .skip(offset)
+            .take(width)
+            .cloned()
+            .collect::<Vec<_>>();
+        Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
+    }
+
     fn sext(&self, from: usize, _to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         // Sign-extend: if sign bit is set, add (2^to - 2^from) to the value
         let val = self.expect_constant();

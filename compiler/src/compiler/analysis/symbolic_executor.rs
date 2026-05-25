@@ -40,6 +40,7 @@ where
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn truncate(&self, _from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
+    fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn to_bits(
@@ -269,6 +270,19 @@ impl SymbolicExecutor {
                         scope.insert(
                             *r,
                             a.sext(*from, *to, &fn_type_info.get_value_type(*r), ctx),
+                        );
+                    }
+                    crate::compiler::ssa::hlssa::OpCode::BitRange {
+                        result: r,
+                        value: a,
+                        offset,
+                        width,
+                        source_width: _,
+                    } => {
+                        let a = &scope[a];
+                        scope.insert(
+                            *r,
+                            a.bit_range(*offset, *width, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
                     crate::compiler::ssa::hlssa::OpCode::Not {

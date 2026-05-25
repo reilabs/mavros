@@ -1007,6 +1007,10 @@ fn lower_instruction(
             val_map.insert(*result, ll_result);
         }
 
+        OpCode::BitRange { .. } => {
+            panic!("BitRange should have been lowered before HLSSA->LLSSA lowering");
+        }
+
         OpCode::Spread {
             result,
             value,

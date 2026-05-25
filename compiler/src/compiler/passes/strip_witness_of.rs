@@ -115,6 +115,7 @@ impl StripWitnessOf {
             | OpCode::BinaryArithOp { .. }
             | OpCode::Truncate { .. }
             | OpCode::SExt { .. }
+            | OpCode::BitRange { .. }
             | OpCode::Not { .. }
             | OpCode::Store { .. }
             | OpCode::Load { .. }

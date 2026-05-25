@@ -27,31 +27,93 @@ use crate::compiler::{
 enum Expr {
     Add(Vec<Expr>),
     Mul(Vec<Expr>),
-    Div { lhs: Box<Expr>, rhs: Box<Expr> },
-    Mod { lhs: Box<Expr>, rhs: Box<Expr> },
-    Sub { lhs: Box<Expr>, rhs: Box<Expr> },
+    Div {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Mod {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Sub {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     FConst(ark_bn254::Fr),
-    UConst { bits: usize, value: u128 },
-    IConst { bits: usize, value: u128 },
+    UConst {
+        bits: usize,
+        value: u128,
+    },
+    IConst {
+        bits: usize,
+        value: u128,
+    },
     Variable(u64),
-    Eq { lhs: Box<Expr>, rhs: Box<Expr> },
-    Lt { lhs: Box<Expr>, rhs: Box<Expr> },
+    Eq {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Lt {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Xor(Vec<Expr>),
-    Shl { lhs: Box<Expr>, rhs: Box<Expr> },
-    Shr { lhs: Box<Expr>, rhs: Box<Expr> },
-    Select { condition: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr> },
-    ArrayGet { array: Box<Expr>, index: Box<Expr> },
-    TupleGet { tuple: Box<Expr>, index: Box<Expr> },
+    Shl {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Shr {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    BitRange {
+        value: Box<Expr>,
+        offset: usize,
+        width: usize,
+        source_width: Option<usize>,
+    },
+    Select {
+        condition: Box<Expr>,
+        then: Box<Expr>,
+        otherwise: Box<Expr>,
+    },
+    ArrayGet {
+        array: Box<Expr>,
+        index: Box<Expr>,
+    },
+    TupleGet {
+        tuple: Box<Expr>,
+        index: Box<Expr>,
+    },
     Not(Box<Expr>),
     ReadGlobal(u64),
-    Cast { value: Box<Expr>, target: CastTarget },
-    Truncate { value: Box<Expr>, to_bits: usize, from_bits: usize },
-    SExt { value: Box<Expr>, from_bits: usize, to_bits: usize },
+    Cast {
+        value: Box<Expr>,
+        target: CastTarget,
+    },
+    Truncate {
+        value: Box<Expr>,
+        to_bits: usize,
+        from_bits: usize,
+    },
+    SExt {
+        value: Box<Expr>,
+        from_bits: usize,
+        to_bits: usize,
+    },
     ValueOf(Box<Expr>),
-    BytesOf { value: Box<Expr>, endianness: Endianness, count: usize },
-    BitsOf { value: Box<Expr>, endianness: Endianness, count: usize },
+    BytesOf {
+        value: Box<Expr>,
+        endianness: Endianness,
+        count: usize,
+    },
+    BitsOf {
+        value: Box<Expr>,
+        endianness: Endianness,
+        count: usize,
+    },
     Witness(Box<Expr>),
 }
 
@@ -175,6 +237,15 @@ impl Expr {
         Self::Shr {
             lhs: Box::new(self.clone()),
             rhs: Box::new(other.clone()),
+        }
+    }
+
+    pub fn bit_range(&self, offset: usize, width: usize, source_width: Option<usize>) -> Self {
+        Self::BitRange {
+            value: Box::new(self.clone()),
+            offset,
+            width,
+            source_width,
         }
     }
 
@@ -329,6 +400,21 @@ impl Display for Expr {
             ),
             Self::Shl { lhs, rhs } => write!(f, "({} << {})", lhs, rhs),
             Self::Shr { lhs, rhs } => write!(f, "({} >> {})", lhs, rhs),
+            Self::BitRange {
+                value,
+                offset,
+                width,
+                source_width,
+            } => {
+                let source_width = source_width
+                    .map(|source_width| format!(", source_width={source_width}"))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "bit_range({}, {}, {}){}",
+                    value, offset, width, source_width
+                )
+            }
             Self::Select {
                 condition,
                 then,
@@ -834,6 +920,22 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.sext(*from_bits, *to_bits);
+                        exprs.insert(*r, result_expr.clone());
+                        result.entry(result_expr).or_default().push((
+                            block_id,
+                            instruction_idx,
+                            *r,
+                        ));
+                    }
+                    OpCode::BitRange {
+                        result: r,
+                        value,
+                        offset,
+                        width,
+                        source_width,
+                    } => {
+                        let value_expr = get_expr(&exprs, value);
+                        let result_expr = value_expr.bit_range(*offset, *width, *source_width);
                         exprs.insert(*r, result_expr.clone());
                         result.entry(result_expr).or_default().push((
                             block_id,

@@ -792,6 +792,7 @@ impl WitnessTypeInference {
                 OpCode::Cast { result, value, .. }
                 | OpCode::Truncate { result, value, .. }
                 | OpCode::SExt { result, value, .. }
+                | OpCode::BitRange { result, value, .. }
                 | OpCode::Not { result, value } => {
                     let val_wt = value_wt.get(value).unwrap().clone();
                     value_wt.insert(*result, val_wt);

@@ -230,6 +230,18 @@ pub trait HLEmitter {
         r
     }
 
+    fn bit_range(&mut self, value: ValueId, offset: usize, width: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BitRange {
+            result: r,
+            value,
+            offset,
+            width,
+            source_width: None,
+        });
+        r
+    }
+
     // -- Constants --
 
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {

@@ -612,6 +612,15 @@ impl ValueRangeAnalysis {
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }
 
+            OpCode::BitRange { result, width, .. } => {
+                let result_ty = types.get_value_type(*result);
+                let raw = match result_ty.strip_witness().expr {
+                    TypeExpr::I(bits) if *width >= bits => IntInterval::for_type(result_ty),
+                    _ => IntInterval::unsigned_full(*width),
+                };
+                Self::overwrite(bounds, *result, cap_to_type(*result, raw), changed);
+            }
+
             OpCode::WriteWitness {
                 result: Some(r),
                 value,

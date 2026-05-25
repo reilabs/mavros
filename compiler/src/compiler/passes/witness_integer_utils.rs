@@ -8,7 +8,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
+            CastTarget, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -16,11 +16,6 @@ use crate::compiler::{
 
 pub(crate) fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
-}
-
-pub(crate) fn two_pow_u128(exponent: usize) -> u128 {
-    assert!(exponent < 128, "u128 constant cannot hold 2^{exponent}");
-    1u128 << exponent
 }
 
 pub(crate) fn bn254_modulus() -> BigInt {
@@ -70,16 +65,6 @@ pub(crate) fn guarded_rangecheck(
     } else {
         b.emit(rangecheck);
     }
-}
-
-pub(crate) fn assign_field(b: &mut HLBlockEmitter<'_>, result: ValueId, value: ValueId) {
-    let zero = b.field_const(Field::ZERO);
-    b.emit(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
-        result,
-        lhs: value,
-        rhs: zero,
-    });
 }
 
 pub(crate) fn guarded_or_zero_field(
@@ -160,72 +145,60 @@ pub(crate) fn range_fits_field_injectively(range: &IntInterval) -> bool {
     hi - lo < p
 }
 
-pub(crate) fn extract_sign_bit_from_integer(
+pub(crate) fn guarded_bit_range(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
-    value_field: ValueId,
+    guard: Option<ValueId>,
+    offset: usize,
+    width: usize,
+    source_width: Option<usize>,
+) -> ValueId {
+    let result = b.fresh_value();
+    let bit_range = OpCode::BitRange {
+        result,
+        value,
+        offset,
+        width,
+        source_width,
+    };
+    if let Some(condition) = guard {
+        b.emit(OpCode::Guard {
+            condition,
+            inner: Box::new(bit_range),
+        });
+    } else {
+        b.emit(bit_range);
+    }
+    result
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SignBitSource {
+    Integer,
+    Field,
+}
+
+pub(crate) fn extract_sign_bit(
+    b: &mut HLBlockEmitter<'_>,
+    encoded: ValueId,
     bits: usize,
-    is_witness: bool,
     value_range: &IntInterval,
     guard: Option<ValueId>,
+    source: SignBitSource,
 ) -> ValueId {
     if value_range.is_non_negative_in_signed(bits) {
         return b.field_const(Field::ZERO);
     }
     assert!(bits >= 1, "signed integer width must be at least 1 bit");
-
-    let pure_value = if is_witness { b.value_of(value) } else { value };
-    let unsigned_value = b.cast_to(CastTarget::U(bits), pure_value);
-    let divisor = b.u_const(bits, two_pow_u128(bits - 1));
-    let sign_hint = b.div(unsigned_value, divisor);
-    let sign_hint_field = b.cast_to_field(sign_hint);
-
-    if !is_witness {
-        return sign_hint_field;
+    let source_width = match source {
+        SignBitSource::Integer => None,
+        SignBitSource::Field => Some(bits),
+    };
+    let sign = guarded_bit_range(b, encoded, guard, bits - 1, 1, source_width);
+    match source {
+        SignBitSource::Integer => b.cast_to_field(sign),
+        SignBitSource::Field => sign,
     }
-
-    let sign_wit = b.write_witness(sign_hint_field);
-    guarded_rangecheck(b, sign_wit, 1, guard);
-
-    if bits > 1 {
-        let sign_shift = b.field_const(two_pow(bits - 1));
-        let sign_shifted = b.mul(sign_wit, sign_shift);
-        let low = b.sub(value_field, sign_shifted);
-        guarded_rangecheck(b, low, bits - 1, guard);
-    }
-
-    sign_wit
-}
-
-pub(crate) fn extract_sign_bit_from_field(
-    b: &mut HLBlockEmitter<'_>,
-    value_field: ValueId,
-    bits: usize,
-    value_range: &IntInterval,
-    guard: Option<ValueId>,
-) -> ValueId {
-    if value_range.is_non_negative_in_signed(bits) {
-        return b.field_const(Field::ZERO);
-    }
-    assert!(
-        bits <= 64,
-        "sign extraction from field expressions wider than 64 bits needs a limb split"
-    );
-
-    let pure_value = b.value_of(value_field);
-    let low_hint = b.truncate(pure_value, bits - 1, 254);
-    let high_hint = b.sub(pure_value, low_hint);
-    let sign_shift = b.field_const(two_pow(bits - 1));
-    let sign_hint = b.div(high_hint, sign_shift);
-    let sign_wit = b.write_witness(sign_hint);
-
-    guarded_rangecheck(b, sign_wit, 1, guard);
-    if bits > 1 {
-        let sign_shifted = b.mul(sign_wit, sign_shift);
-        let low = b.sub(value_field, sign_shifted);
-        guarded_rangecheck(b, low, bits - 1, guard);
-    }
-    sign_wit
 }
 
 pub(crate) fn signed_value_from_encoded(

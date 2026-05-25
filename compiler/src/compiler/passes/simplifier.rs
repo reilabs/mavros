@@ -285,6 +285,23 @@ impl Simplifier {
                                 target: *lhs,
                             });
                         }
+                        if matches!(kind, BinaryArithOpKind::Shr) {
+                            if let Some(offset) = const_as_usize(defs, *rhs) {
+                                let lhs_type = types.get_value_type(*lhs);
+                                let lhs_inner = lhs_type.strip_witness();
+                                if let TypeExpr::U(bits) = lhs_inner.expr {
+                                    if offset < bits {
+                                        return Some(Rewrite::Replace(vec![OpCode::BitRange {
+                                            result: *result,
+                                            value: *lhs,
+                                            offset,
+                                            width: bits - offset,
+                                            source_width: None,
+                                        }]));
+                                    }
+                                }
+                            }
+                        }
                     }
                     BinaryArithOpKind::Mod => {}
                 }
@@ -510,5 +527,17 @@ fn is_one(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
         }
     } else {
         false
+    }
+}
+
+fn const_as_usize(defs: &FunctionValueDefinitions, v: ValueId) -> Option<usize> {
+    let def = defs.get_definition(v);
+    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
+        match value {
+            ConstValue::U(_, value) | ConstValue::I(_, value) => (*value).try_into().ok(),
+            ConstValue::Field(_) | ConstValue::FnPtr(_) => None,
+        }
+    } else {
+        None
     }
 }

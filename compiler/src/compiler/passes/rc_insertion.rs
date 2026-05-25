@@ -263,6 +263,13 @@ impl RCInsertion {
                         from_bits: _,
                         to_bits: _,
                     }
+                    | OpCode::BitRange {
+                        result: _,
+                        value: _,
+                        offset: _,
+                        width: _,
+                        source_width: _,
+                    }
                     | OpCode::AssertR1C { a: _, b: _, c: _ }
                     | OpCode::Constrain { a: _, b: _, c: _ }
                     | OpCode::WriteWitness {
