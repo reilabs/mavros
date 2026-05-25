@@ -9,7 +9,7 @@ use crate::compiler::{
     Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
-        Instruction, Terminator, ValueId,
+        Instruction, ValueId,
         hlssa::{
             CastTarget, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
@@ -34,16 +34,15 @@ impl LoweringPass for LowerGuards {
             OpCode::Guard { condition, inner } => {
                 let results: Vec<_> = inner.get_results().copied().collect();
                 if results.is_empty() {
-                    let (exec_block, _) = emitter.add_block();
-                    let (continue_block, _) = emitter.add_block();
-
-                    emitter.seal_and_switch(
-                        Terminator::JmpIf(condition, exec_block, continue_block),
-                        exec_block,
+                    emitter.build_if_else_into(
+                        condition,
+                        vec![],
+                        |e| {
+                            e.emit(*inner);
+                            vec![]
+                        },
+                        |_| vec![],
                     );
-                    emitter.emit(*inner);
-                    emitter
-                        .seal_and_switch(Terminator::Jmp(continue_block, vec![]), continue_block);
                 } else {
                     Self::lower_guard_with_result(emitter, condition, *inner, &results, type_info);
                 }
@@ -55,25 +54,12 @@ impl LoweringPass for LowerGuards {
                 if_f,
             } => {
                 let result_type = type_info.get_value_type(result).clone();
-
-                let (t_block, _) = emitter.add_block();
-                let (f_block, _) = emitter.add_block();
-                let (merge_block, _) = emitter.add_block();
-
-                // Add phi param to merge block with correct type
-                emitter
-                    .function
-                    .get_block_mut(merge_block)
-                    .push_parameter(result, result_type);
-
-                // Current -> JmpIf(cond, t, f)
-                emitter.seal_and_switch(Terminator::JmpIf(cond, t_block, f_block), t_block);
-
-                // True -> Jmp(merge, if_t)
-                emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![if_t]), f_block);
-
-                // False -> Jmp(merge, if_f)
-                emitter.seal_and_switch(Terminator::Jmp(merge_block, vec![if_f]), merge_block);
+                emitter.build_if_else_into(
+                    cond,
+                    vec![(result, result_type)],
+                    |_| vec![if_t],
+                    |_| vec![if_f],
+                );
             }
             other => {
                 emitter.emit(other);

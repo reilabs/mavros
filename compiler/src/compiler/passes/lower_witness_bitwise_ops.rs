@@ -114,7 +114,7 @@ impl LowerWitnessBitwiseOps {
         b.emit(OpCode::Cast {
             result,
             value: result_word,
-            target: CastTarget::U(bits as usize),
+            target: CastTarget::U(bits),
         });
     }
 
