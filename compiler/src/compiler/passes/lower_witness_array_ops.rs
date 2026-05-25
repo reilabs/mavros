@@ -7,73 +7,22 @@ use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
-    analysis::types::{FunctionTypeInfo, TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
+            CastTarget, OpCode, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
+use super::lowering_pass::LoweringPass;
+
 pub struct LowerWitnessArrayOps {}
 
-impl Pass for LowerWitnessArrayOps {
-    fn name(&self) -> &'static str {
-        "lower_witness_array_ops"
-    }
-
-    fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
-    }
-
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
-    }
-
-    fn preserves(&self) -> Vec<AnalysisId> {
-        vec![]
-    }
-}
-
-impl LowerWitnessArrayOps {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
-        let fids: Vec<_> = ssa.get_function_ids().collect();
-        let mut sb = HLSSABuilder::new(ssa);
-        for function_id in fids {
-            let function_type_info = type_info.get_function(function_id);
-            sb.modify_function(function_id, |fb| {
-                self.run_function(fb, function_type_info);
-            });
-        }
-    }
-
-    fn run_function(&self, fb: &mut HLFunctionBuilder<'_>, function_type_info: &FunctionTypeInfo) {
-        let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
-        for block_id in block_ids {
-            let (instructions, terminator) = {
-                let mut block = fb.function.take_block(block_id);
-                let instructions = block.take_instructions();
-                let terminator = block.take_terminator();
-                fb.function.put_block(block_id, block);
-                (instructions, terminator)
-            };
-
-            let mut b = fb.block(block_id);
-            for instruction in instructions {
-                self.process_instruction(&mut b, function_type_info, instruction);
-            }
-            if let Some(terminator) = terminator {
-                b.set_terminator(terminator);
-            }
-        }
-    }
+impl LoweringPass for LowerWitnessArrayOps {
+    const NAME: &'static str = "lower_witness_array_ops";
 
     fn process_instruction(
         &self,
@@ -86,6 +35,12 @@ impl LowerWitnessArrayOps {
         } else {
             self.process_array_op(b, function_type_info, None, instruction);
         }
+    }
+}
+
+impl LowerWitnessArrayOps {
+    pub fn new() -> Self {
+        Self {}
     }
 
     fn process_array_op(

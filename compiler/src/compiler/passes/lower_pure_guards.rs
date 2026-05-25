@@ -23,34 +23,37 @@
 //!   (SExt, integer arith).
 
 use crate::compiler::{
-    analysis::types::TypeInfo,
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    analysis::types::FunctionTypeInfo,
     ssa::{
-        BlockId, Instruction, ValueId,
+        Instruction, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
+            BinaryArithOpKind, CastTarget, CmpKind, OpCode, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
+use super::lowering_pass::LoweringPass;
+
 pub struct LowerPureGuards {}
 
-impl Pass for LowerPureGuards {
-    fn name(&self) -> &'static str {
-        "lower_pure_guards"
-    }
+impl LoweringPass for LowerPureGuards {
+    const NAME: &'static str = "lower_pure_guards";
 
-    fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
-    }
-
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
-    }
-
-    fn preserves(&self) -> Vec<AnalysisId> {
-        vec![]
+    fn process_instruction(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        type_info: &FunctionTypeInfo,
+        instruction: OpCode,
+    ) {
+        match instruction {
+            OpCode::Guard { condition, inner } => {
+                self.lower_guard(emitter, condition, *inner, type_info);
+            }
+            other => {
+                emitter.emit(other);
+            }
+        }
     }
 }
 
@@ -59,66 +62,8 @@ impl LowerPureGuards {
         Self {}
     }
 
-    fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
-        let function_ids: Vec<_> = ssa.get_function_ids().collect();
-        let mut sb = HLSSABuilder::new(ssa);
-        for function_id in &function_ids {
-            let func_types = type_info.get_function(*function_id);
-            sb.modify_function(*function_id, |fb| {
-                self.run_function(fb, func_types);
-            });
-        }
-    }
-
-    fn run_function(
-        &self,
-        fb: &mut HLFunctionBuilder<'_>,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-    ) {
-        let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
-        for block_id in block_ids {
-            self.lower_block(fb, block_id, type_info);
-        }
-    }
-
-    fn lower_block(
-        &self,
-        fb: &mut HLFunctionBuilder<'_>,
-        block_id: BlockId,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-    ) {
-        let (instructions, terminator) = {
-            let mut block = fb.function.take_block(block_id);
-            let instructions = block.take_instructions();
-            let terminator = block.take_terminator();
-            fb.function.put_block(block_id, block);
-            (instructions, terminator)
-        };
-
-        let mut emitter = fb.block(block_id);
-
-        for instruction in instructions {
-            match instruction {
-                OpCode::Guard { condition, inner } => {
-                    self.lower_guard(&mut emitter, condition, *inner, type_info);
-                }
-                other => {
-                    emitter.emit(other);
-                }
-            }
-        }
-
-        if let Some(term) = terminator {
-            emitter.set_terminator(term);
-        }
-    }
-
     /// Check whether all inputs to an opcode are pure (not WitnessOf-typed).
-    fn all_inputs_pure(
-        &self,
-        op: &OpCode,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
-    ) -> bool {
+    fn all_inputs_pure(&self, op: &OpCode, type_info: &FunctionTypeInfo) -> bool {
         op.get_inputs().all(|id| {
             let ty = type_info.get_value_type(*id);
             !ty.is_witness_of()
@@ -131,7 +76,7 @@ impl LowerPureGuards {
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
         inner: OpCode,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        type_info: &FunctionTypeInfo,
     ) {
         match inner {
             // -- Side-effectful / constraint-generating: always keep as Guard --
@@ -682,7 +627,7 @@ impl LowerPureGuards {
         array: ValueId,
         index: ValueId,
         value: ValueId,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        type_info: &FunctionTypeInfo,
     ) {
         let array_type = type_info.get_value_type(array).strip_witness().clone();
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
@@ -716,7 +661,7 @@ impl LowerPureGuards {
         original_result: ValueId,
         array: ValueId,
         index: ValueId,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        type_info: &FunctionTypeInfo,
     ) {
         let array_type = type_info.get_value_type(array);
         let elem_type = match &array_type.strip_witness().expr {
@@ -753,7 +698,7 @@ impl LowerPureGuards {
         condition: ValueId,
         value: ValueId,
         max_bits: usize,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        type_info: &FunctionTypeInfo,
     ) {
         let val_type = type_info.get_value_type(value);
         let val_bits = match &val_type.expr {
@@ -807,7 +752,7 @@ impl LowerPureGuards {
         emitter: &mut HLBlockEmitter<'_>,
         seq: ValueId,
         index: ValueId,
-        type_info: &crate::compiler::analysis::types::FunctionTypeInfo,
+        type_info: &FunctionTypeInfo,
     ) -> ValueId {
         let seq_type = type_info.get_value_type(seq);
         let len_val = match &seq_type.strip_witness().expr {

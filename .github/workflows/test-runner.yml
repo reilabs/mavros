@@ -28,9 +28,6 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Download Nix Dependencies
         run: nix develop
 
@@ -53,9 +50,6 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Download Nix Dependencies
         run: nix develop
@@ -97,9 +91,6 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Download Nix Dependencies
         run: nix develop
