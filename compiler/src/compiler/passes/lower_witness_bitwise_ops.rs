@@ -137,24 +137,13 @@ impl LowerWitnessBitwiseOps {
             return;
         }
 
-        if bits == 64 {
-            self.lower_binary_bitwise_u64(b, kind, result, lhs, rhs, lhs_witness, rhs_witness);
-            return;
-        }
-
-        let bits = bits as u8;
-
-        let lhs_spread = spread_as_field(b, lhs, bits);
-        let rhs_spread = spread_as_field(b, rhs, bits);
-        let input_spread_sum = b.add(lhs_spread, rhs_spread);
-        let input_spread_sum = b.cast_to(CastTarget::U(bits as usize * 2), input_spread_sum);
-        let (and_wit, xor_wit) = b.unspread(input_spread_sum, bits);
-
-        let result_word = match kind {
-            BinaryArithOpKind::And => and_wit,
-            BinaryArithOpKind::Xor => xor_wit,
-            BinaryArithOpKind::Or => b.add(and_wit, xor_wit),
-            _ => unreachable!(),
+        let result_word = if bits == 64 {
+            let lhs_limbs = decompose_u64_input(b, lhs, lhs_witness);
+            let rhs_limbs = decompose_u64_input(b, rhs, rhs_witness);
+            let result_limbs = lower_u64_limb_bitwise(b, kind, lhs_limbs, rhs_limbs);
+            combine_u32_limbs(b, result_limbs)
+        } else {
+            lower_word_bitwise(b, kind, lhs, rhs, bits as u8)
         };
 
         b.push(OpCode::Cast {
@@ -197,32 +186,6 @@ impl LowerWitnessBitwiseOps {
             result,
             value: result_field,
             target,
-        });
-    }
-
-    fn lower_binary_bitwise_u64(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        kind: BinaryArithOpKind,
-        result: ValueId,
-        lhs: ValueId,
-        rhs: ValueId,
-        lhs_witness: bool,
-        rhs_witness: bool,
-    ) {
-        let lhs_limbs = decompose_u64_input(b, lhs, lhs_witness);
-        let rhs_limbs = decompose_u64_input(b, rhs, rhs_witness);
-
-        let result_limbs = U64Limbs {
-            lo: lower_limb_bitwise(b, kind, lhs_limbs.lo, rhs_limbs.lo),
-            hi: lower_limb_bitwise(b, kind, lhs_limbs.hi, rhs_limbs.hi),
-        };
-        let result_word = combine_u32_limbs(b, result_limbs);
-
-        b.push(OpCode::Cast {
-            result,
-            value: result_word,
-            target: CastTarget::U(64),
         });
     }
 
@@ -283,23 +246,36 @@ fn spread_as_field(b: &mut HLInstrBuilder<'_>, value: ValueId, bits: u8) -> Valu
     b.cast_to_field(spread)
 }
 
-fn lower_limb_bitwise(
+fn lower_word_bitwise(
     b: &mut HLInstrBuilder<'_>,
     kind: BinaryArithOpKind,
     lhs: ValueId,
     rhs: ValueId,
+    bits: u8,
 ) -> ValueId {
-    let lhs_spread = spread_as_field(b, lhs, 32);
-    let rhs_spread = spread_as_field(b, rhs, 32);
+    let lhs_spread = spread_as_field(b, lhs, bits);
+    let rhs_spread = spread_as_field(b, rhs, bits);
     let input_spread_sum = b.add(lhs_spread, rhs_spread);
-    let input_spread_sum = b.cast_to(CastTarget::U(64), input_spread_sum);
-    let (and_limb, xor_limb) = b.unspread(input_spread_sum, 32);
+    let input_spread_sum = b.cast_to(CastTarget::U(bits as usize * 2), input_spread_sum);
+    let (and_word, xor_word) = b.unspread(input_spread_sum, bits);
 
     match kind {
-        BinaryArithOpKind::And => and_limb,
-        BinaryArithOpKind::Xor => xor_limb,
-        BinaryArithOpKind::Or => b.add(and_limb, xor_limb),
+        BinaryArithOpKind::And => and_word,
+        BinaryArithOpKind::Xor => xor_word,
+        BinaryArithOpKind::Or => b.add(and_word, xor_word),
         _ => unreachable!(),
+    }
+}
+
+fn lower_u64_limb_bitwise(
+    b: &mut HLInstrBuilder<'_>,
+    kind: BinaryArithOpKind,
+    lhs: U64Limbs,
+    rhs: U64Limbs,
+) -> U64Limbs {
+    U64Limbs {
+        lo: lower_word_bitwise(b, kind, lhs.lo, rhs.lo, 32),
+        hi: lower_word_bitwise(b, kind, lhs.hi, rhs.hi, 32),
     }
 }
 
