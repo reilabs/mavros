@@ -18,7 +18,7 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::LoweringPass;
+use super::lowering_pass::{LoweringContext, LoweringPass};
 
 pub struct LowerWitnessSpreadOps {}
 
@@ -32,9 +32,10 @@ impl LoweringPass for LowerWitnessSpreadOps {
     fn process_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
-        function_type_info: &FunctionTypeInfo,
+        context: &LoweringContext<'_>,
         instruction: OpCode,
     ) {
+        let function_type_info = context.types();
         match instruction {
             OpCode::Spread {
                 result,

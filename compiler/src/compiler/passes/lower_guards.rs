@@ -17,7 +17,7 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::LoweringPass;
+use super::lowering_pass::{LoweringContext, LoweringPass};
 
 pub struct LowerGuards {}
 
@@ -27,9 +27,10 @@ impl LoweringPass for LowerGuards {
     fn process_instruction(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
-        type_info: &FunctionTypeInfo,
+        context: &LoweringContext<'_>,
         instruction: OpCode,
     ) {
+        let type_info = context.types();
         match instruction {
             OpCode::Guard { condition, inner } => {
                 let results: Vec<_> = inner.get_results().copied().collect();

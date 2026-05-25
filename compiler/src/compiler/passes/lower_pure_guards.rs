@@ -33,7 +33,7 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::LoweringPass;
+use super::lowering_pass::{LoweringContext, LoweringPass};
 
 pub struct LowerPureGuards {}
 
@@ -43,9 +43,10 @@ impl LoweringPass for LowerPureGuards {
     fn process_instruction(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
-        type_info: &FunctionTypeInfo,
+        context: &LoweringContext<'_>,
         instruction: OpCode,
     ) {
+        let type_info = context.types();
         match instruction {
             OpCode::Guard { condition, inner } => {
                 self.lower_guard(emitter, condition, *inner, type_info);
