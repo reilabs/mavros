@@ -3,76 +3,35 @@
 //! The later `ExplicitWitness` pass lowers wide spread lookups into word-sized lookups. This keeps
 //! word splitting in one place without making witness spread/unspread special there.
 
-use std::collections::HashMap;
-
 use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    analysis::{flow_analysis::FlowAnalysis, types::FunctionTypeInfo},
+    pass_manager::AnalysisId,
     ssa::{
-        BlockId, ValueId,
+        ValueId,
         hlssa::{
-            CastTarget, HLBlock, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
+            CastTarget, OpCode, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
+use super::lowering_pass::LoweringPass;
+
 pub struct LowerWitnessSpreadOps {}
 
-impl Pass for LowerWitnessSpreadOps {
-    fn name(&self) -> &'static str {
-        "lower_witness_spread_ops"
-    }
+impl LoweringPass for LowerWitnessSpreadOps {
+    const NAME: &'static str = "lower_witness_spread_ops";
 
-    fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
-    }
-
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
-    }
-
-    fn preserves(&self) -> Vec<AnalysisId> {
+    fn preserved_analyses(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
-    }
-}
-
-impl LowerWitnessSpreadOps {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
-        let fids: Vec<_> = ssa.get_function_ids().collect();
-        let mut sb = HLSSABuilder::new(ssa);
-        for function_id in fids {
-            let function_type_info = type_info.get_function(function_id);
-            sb.modify_function(function_id, |fb| {
-                let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
-                for (bid, mut block) in fb.function.take_blocks().into_iter() {
-                    let mut new_instructions = Vec::new();
-                    for instruction in block.take_instructions().into_iter() {
-                        let b =
-                            &mut HLInstrBuilder::new(fb.function, fb.ssa, &mut new_instructions);
-                        self.process_instruction(b, function_type_info, instruction);
-                    }
-                    block.put_instructions(new_instructions);
-                    new_blocks.insert(bid, block);
-                }
-                fb.function.put_blocks(new_blocks);
-            });
-        }
     }
 
     fn process_instruction(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         instruction: OpCode,
     ) {
@@ -85,7 +44,7 @@ impl LowerWitnessSpreadOps {
                 if function_type_info.get_value_type(value).is_witness_of() {
                     self.lower_witness_spread(b, function_type_info, result, value, bits);
                 } else {
-                    b.push(OpCode::Spread {
+                    b.emit(OpCode::Spread {
                         result,
                         value,
                         bits,
@@ -108,7 +67,7 @@ impl LowerWitnessSpreadOps {
                         bits,
                     );
                 } else {
-                    b.push(OpCode::Unspread {
+                    b.emit(OpCode::Unspread {
                         result_odd,
                         result_even,
                         value,
@@ -116,20 +75,26 @@ impl LowerWitnessSpreadOps {
                     });
                 }
             }
-            other => b.push(other),
+            other => b.emit(other),
         }
+    }
+}
+
+impl LowerWitnessSpreadOps {
+    pub fn new() -> Self {
+        Self {}
     }
 
     fn lower_witness_spread(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         result: ValueId,
         value: ValueId,
         bits: u8,
     ) {
         let spread_wit = self.write_spread_witness_and_lookup(b, value, bits);
-        b.push(OpCode::Cast {
+        b.emit(OpCode::Cast {
             result,
             value: spread_wit,
             target: cast_target_for_type(function_type_info.get_value_type(result)),
@@ -138,7 +103,7 @@ impl LowerWitnessSpreadOps {
 
     fn lower_witness_unspread(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         result_odd: ValueId,
         result_even: ValueId,
@@ -164,14 +129,14 @@ impl LowerWitnessSpreadOps {
 
     fn write_unspread_result(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         result: ValueId,
         hint: ValueId,
     ) {
         let hint_field = b.cast_to_field(hint);
         let hint_wit = b.write_witness(hint_field);
-        b.push(OpCode::Cast {
+        b.emit(OpCode::Cast {
             result,
             value: hint_wit,
             target: cast_target_for_type(function_type_info.get_value_type(result)),
@@ -180,7 +145,7 @@ impl LowerWitnessSpreadOps {
 
     fn write_spread_witness_and_lookup(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         value: ValueId,
         bits: u8,
     ) -> ValueId {

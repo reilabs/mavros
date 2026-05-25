@@ -10,6 +10,7 @@ pub mod lower_pure_guards;
 pub mod lower_witness_array_ops;
 pub mod lower_witness_bitwise_ops;
 pub mod lower_witness_spread_ops;
+mod lowering_pass;
 pub mod mem2reg;
 pub mod prepare_entry_point;
 pub mod rc_insertion;

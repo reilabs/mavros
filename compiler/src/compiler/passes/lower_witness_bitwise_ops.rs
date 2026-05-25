@@ -4,76 +4,35 @@
 //! two-limb `u32` decomposition. `ExplicitWitness` is responsible for the witness writes and lookup
 //! constraints needed by those bitwise operations.
 
-use std::collections::HashMap;
-
 use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    analysis::{flow_analysis::FlowAnalysis, types::FunctionTypeInfo},
+    pass_manager::AnalysisId,
     ssa::{
-        BlockId, ValueId,
+        ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, HLBlock, HLSSA, OpCode, TypeExpr,
-            builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
+            BinaryArithOpKind, CastTarget, OpCode, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
+use super::lowering_pass::LoweringPass;
+
 pub struct LowerWitnessBitwiseOps {}
 
-impl Pass for LowerWitnessBitwiseOps {
-    fn name(&self) -> &'static str {
-        "lower_witness_bitwise_ops"
-    }
+impl LoweringPass for LowerWitnessBitwiseOps {
+    const NAME: &'static str = "lower_witness_bitwise_ops";
 
-    fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
-    }
-
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
-    }
-
-    fn preserves(&self) -> Vec<AnalysisId> {
+    fn preserved_analyses(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
-    }
-}
-
-impl LowerWitnessBitwiseOps {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
-        let fids: Vec<_> = ssa.get_function_ids().collect();
-        let mut sb = HLSSABuilder::new(ssa);
-        for function_id in fids {
-            let function_type_info = type_info.get_function(function_id);
-            sb.modify_function(function_id, |fb| {
-                let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
-                for (bid, mut block) in fb.function.take_blocks().into_iter() {
-                    let mut new_instructions = Vec::new();
-                    for instruction in block.take_instructions().into_iter() {
-                        let b =
-                            &mut HLInstrBuilder::new(fb.function, fb.ssa, &mut new_instructions);
-                        self.process_instruction(b, function_type_info, instruction);
-                    }
-                    block.put_instructions(new_instructions);
-                    new_blocks.insert(bid, block);
-                }
-                fb.function.put_blocks(new_blocks);
-            });
-        }
     }
 
     fn process_instruction(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         instruction: OpCode,
     ) {
@@ -99,7 +58,7 @@ impl LowerWitnessBitwiseOps {
                         rhs_witness,
                     );
                 } else {
-                    b.push(OpCode::BinaryArithOp {
+                    b.emit(OpCode::BinaryArithOp {
                         kind,
                         result,
                         lhs,
@@ -110,14 +69,20 @@ impl LowerWitnessBitwiseOps {
             OpCode::Not { result, value } => {
                 self.lower_not(b, function_type_info, result, value);
             }
-            other => b.push(other),
+            other => b.emit(other),
         }
+    }
+}
+
+impl LowerWitnessBitwiseOps {
+    pub fn new() -> Self {
+        Self {}
     }
 
     #[allow(clippy::too_many_arguments)]
     fn lower_binary_bitwise(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         kind: BinaryArithOpKind,
         result: ValueId,
@@ -146,7 +111,7 @@ impl LowerWitnessBitwiseOps {
             lower_word_bitwise(b, kind, lhs, rhs, bits as u8)
         };
 
-        b.push(OpCode::Cast {
+        b.emit(OpCode::Cast {
             result,
             value: result_word,
             target: CastTarget::U(bits as usize),
@@ -155,7 +120,7 @@ impl LowerWitnessBitwiseOps {
 
     fn lower_u1_bitwise(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         kind: BinaryArithOpKind,
         result: ValueId,
         lhs: ValueId,
@@ -182,7 +147,7 @@ impl LowerWitnessBitwiseOps {
             _ => unreachable!(),
         };
 
-        b.push(OpCode::Cast {
+        b.emit(OpCode::Cast {
             result,
             value: result_field,
             target,
@@ -191,7 +156,7 @@ impl LowerWitnessBitwiseOps {
 
     fn lower_not(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         result: ValueId,
         value: ValueId,
@@ -200,7 +165,7 @@ impl LowerWitnessBitwiseOps {
         let ones = b.field_const((Field::from(2).pow([bits as u64])) - Field::ONE);
         let value_field = b.cast_to_field(value);
         let not_value = b.sub(ones, value_field);
-        b.push(OpCode::Cast {
+        b.emit(OpCode::Cast {
             result,
             value: not_value,
             target: cast_target,
@@ -241,13 +206,13 @@ fn integer_bits_and_cast(
     }
 }
 
-fn spread_as_field(b: &mut HLInstrBuilder<'_>, value: ValueId, bits: u8) -> ValueId {
+fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: u8) -> ValueId {
     let spread = b.spread(value, bits);
     b.cast_to_field(spread)
 }
 
 fn lower_word_bitwise(
-    b: &mut HLInstrBuilder<'_>,
+    b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,
     lhs: ValueId,
     rhs: ValueId,
@@ -268,7 +233,7 @@ fn lower_word_bitwise(
 }
 
 fn lower_u64_limb_bitwise(
-    b: &mut HLInstrBuilder<'_>,
+    b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,
     lhs: U64Limbs,
     rhs: U64Limbs,
@@ -279,7 +244,7 @@ fn lower_u64_limb_bitwise(
     }
 }
 
-fn combine_u32_limbs(b: &mut HLInstrBuilder<'_>, limbs: U64Limbs) -> ValueId {
+fn combine_u32_limbs(b: &mut impl HLEmitter, limbs: U64Limbs) -> ValueId {
     let lo = b.cast_to_field(limbs.lo);
     let hi = b.cast_to_field(limbs.hi);
     let shift = b.field_const(Field::from(1u128 << 32));
@@ -287,7 +252,7 @@ fn combine_u32_limbs(b: &mut HLInstrBuilder<'_>, limbs: U64Limbs) -> ValueId {
     b.add(lo, shifted_hi)
 }
 
-fn decompose_u64_input(b: &mut HLInstrBuilder<'_>, value: ValueId, is_witness: bool) -> U64Limbs {
+fn decompose_u64_input(b: &mut impl HLEmitter, value: ValueId, is_witness: bool) -> U64Limbs {
     if !is_witness {
         return extract_u64_limbs(b, value);
     }
@@ -304,14 +269,14 @@ fn decompose_u64_input(b: &mut HLInstrBuilder<'_>, value: ValueId, is_witness: b
     }
 }
 
-fn extract_u64_limbs(b: &mut HLInstrBuilder<'_>, value: ValueId) -> U64Limbs {
+fn extract_u64_limbs(b: &mut impl HLEmitter, value: ValueId) -> U64Limbs {
     U64Limbs {
         lo: extract_u64_limb(b, value, 0),
         hi: extract_u64_limb(b, value, 32),
     }
 }
 
-fn extract_u64_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, offset: usize) -> ValueId {
+fn extract_u64_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
     let shifted = if offset == 0 {
         value
     } else {
@@ -323,7 +288,7 @@ fn extract_u64_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, offset: usize) -
     b.cast_to(CastTarget::U(32), limb)
 }
 
-fn derive_low_u32_limb(b: &mut HLInstrBuilder<'_>, value: ValueId, hi_field: ValueId) -> ValueId {
+fn derive_low_u32_limb(b: &mut impl HLEmitter, value: ValueId, hi_field: ValueId) -> ValueId {
     let value_field = b.cast_to_field(value);
     let shift = b.field_const(Field::from(1u128 << 32));
     let shifted_hi = b.mul(hi_field, shift);
