@@ -145,30 +145,21 @@ pub(crate) fn range_fits_field_injectively(range: &IntInterval) -> bool {
     hi - lo < p
 }
 
-pub(crate) fn guarded_bit_range(
+pub(crate) fn emit_bit_range(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
-    guard: Option<ValueId>,
     offset: usize,
     width: usize,
     source_width: Option<usize>,
 ) -> ValueId {
     let result = b.fresh_value();
-    let bit_range = OpCode::BitRange {
+    b.emit(OpCode::BitRange {
         result,
         value,
         offset,
         width,
         source_width,
-    };
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(bit_range),
-        });
-    } else {
-        b.emit(bit_range);
-    }
+    });
     result
 }
 
@@ -183,7 +174,6 @@ pub(crate) fn extract_sign_bit(
     encoded: ValueId,
     bits: usize,
     value_range: &IntInterval,
-    guard: Option<ValueId>,
     source: SignBitSource,
 ) -> ValueId {
     if value_range.is_non_negative_in_signed(bits) {
@@ -194,7 +184,7 @@ pub(crate) fn extract_sign_bit(
         SignBitSource::Integer => None,
         SignBitSource::Field => Some(bits),
     };
-    let sign = guarded_bit_range(b, encoded, guard, bits - 1, 1, source_width);
+    let sign = emit_bit_range(b, encoded, bits - 1, 1, source_width);
     match source {
         SignBitSource::Integer => b.cast_to_field(sign),
         SignBitSource::Field => sign,

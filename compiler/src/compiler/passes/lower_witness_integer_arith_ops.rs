@@ -222,22 +222,8 @@ impl LowerWitnessIntegerArithOps {
     ) {
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let sign_l = extract_sign_bit(
-            b,
-            lhs,
-            bits,
-            &context.range(lhs),
-            guard,
-            SignBitSource::Integer,
-        );
-        let sign_r = extract_sign_bit(
-            b,
-            rhs,
-            bits,
-            &context.range(rhs),
-            guard,
-            SignBitSource::Integer,
-        );
+        let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
+        let sign_r = extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer);
 
         let result_range = match kind {
             BinaryArithOpKind::Add => context.range(lhs).add(&context.range(rhs)),
@@ -261,14 +247,8 @@ impl LowerWitnessIntegerArithOps {
 
                 guarded_rangecheck(b, result_lc, bits, guard);
                 guarded_rangecheck(b, carry, 1, guard);
-                let sign_result = extract_sign_bit(
-                    b,
-                    result_lc,
-                    bits,
-                    &result_range,
-                    guard,
-                    SignBitSource::Field,
-                );
+                let sign_result =
+                    extract_sign_bit(b, result_lc, bits, &result_range, SignBitSource::Field);
 
                 let lhs_overflow = b.add(carry, sign_result);
                 let rhs_overflow = b.add(sign_l, sign_r);
@@ -298,14 +278,8 @@ impl LowerWitnessIntegerArithOps {
 
                 guarded_rangecheck(b, result_lc, bits, guard);
                 guarded_rangecheck(b, borrow, 1, guard);
-                let sign_result = extract_sign_bit(
-                    b,
-                    result_lc,
-                    bits,
-                    &result_range,
-                    guard,
-                    SignBitSource::Field,
-                );
+                let sign_result =
+                    extract_sign_bit(b, result_lc, bits, &result_range, SignBitSource::Field);
 
                 let one = b.field_const(Field::ONE);
                 let lhs_overflow = b.add(borrow, sign_result);
@@ -346,22 +320,8 @@ impl LowerWitnessIntegerArithOps {
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let sign_l = extract_sign_bit(
-            b,
-            lhs,
-            bits,
-            &context.range(lhs),
-            guard,
-            SignBitSource::Integer,
-        );
-        let sign_r = extract_sign_bit(
-            b,
-            rhs,
-            bits,
-            &context.range(rhs),
-            guard,
-            SignBitSource::Integer,
-        );
+        let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
+        let sign_r = extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer);
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
@@ -372,14 +332,8 @@ impl LowerWitnessIntegerArithOps {
         let result_hint_field = b.cast_to_field(result_hint_unsigned);
         let result_wit = b.write_witness(result_hint_field);
         guarded_rangecheck(b, result_wit, bits, guard);
-        let sign_result = extract_sign_bit(
-            b,
-            result_wit,
-            bits,
-            &product_range,
-            guard,
-            SignBitSource::Field,
-        );
+        let sign_result =
+            extract_sign_bit(b, result_wit, bits, &product_range, SignBitSource::Field);
         let result_signed = signed_value_from_encoded(b, result_wit, sign_result, bits);
 
         let use_product_witness = lhs_witness && rhs_witness;
@@ -466,25 +420,11 @@ impl LowerWitnessIntegerArithOps {
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let sign_l = extract_sign_bit(
-            b,
-            lhs,
-            bits,
-            &context.range(lhs),
-            guard,
-            SignBitSource::Integer,
-        );
+        let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
         let sign_r = if lhs == rhs {
             sign_l
         } else {
-            extract_sign_bit(
-                b,
-                rhs,
-                bits,
-                &context.range(rhs),
-                guard,
-                SignBitSource::Integer,
-            )
+            extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer)
         };
 
         let sign_l_is_witness = lhs_witness && !context.range(lhs).is_non_negative_in_signed(bits);
@@ -637,8 +577,7 @@ impl LowerWitnessIntegerArithOps {
         guarded_rangecheck(b, encoded, bits, guard);
 
         let sign_range = IntInterval::top();
-        let result_sign =
-            extract_sign_bit(b, encoded, bits, &sign_range, guard, SignBitSource::Field);
+        let result_sign = extract_sign_bit(b, encoded, bits, &sign_range, SignBitSource::Field);
         let signed_result = signed_value_from_encoded(b, encoded, result_sign, bits);
 
         let two = b.field_const(Field::from(2));

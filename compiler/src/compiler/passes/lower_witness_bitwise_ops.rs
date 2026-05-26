@@ -24,7 +24,7 @@ use crate::compiler::{
 use super::{
     lowering_pass::{LoweringContext, LoweringPass},
     witness_integer_utils::{
-        SignBitSource, cast_target_for_integer_type, extract_sign_bit, guarded_bit_range,
+        SignBitSource, cast_target_for_integer_type, emit_bit_range, extract_sign_bit,
         guarded_rangecheck, integer_bits_and_signedness, lower_unsigned_divmod,
         one_or_condition_field, two_pow,
     },
@@ -136,7 +136,7 @@ impl LowerWitnessBitwiseOps {
             } if context.types().get_value_type(value).is_witness_of()
                 && integer_bits_and_signedness(context.types().get_value_type(value)).is_some() =>
             {
-                self.lower_integer_sext(b, context, guard, result, value, from_bits, to_bits);
+                self.lower_integer_sext(b, context, result, value, from_bits, to_bits);
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
@@ -270,7 +270,7 @@ impl LowerWitnessBitwiseOps {
             return;
         }
 
-        let low = guarded_bit_range(b, value, guard, 0, to_bits, None);
+        let low = emit_bit_range(b, value, 0, to_bits, None);
         b.emit(OpCode::Cast {
             result,
             value: low,
@@ -282,7 +282,6 @@ impl LowerWitnessBitwiseOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         value: ValueId,
         from_bits: usize,
@@ -294,7 +293,6 @@ impl LowerWitnessBitwiseOps {
             value,
             from_bits,
             &context.range(value),
-            guard,
             SignBitSource::Integer,
         );
         let extension = b.field_const(two_pow(to_bits) - two_pow(from_bits));
