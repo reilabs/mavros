@@ -1184,58 +1184,49 @@ fn lower_instruction(
 
         OpCode::Lookup {
             target: crate::compiler::ssa::hlssa::LookupTarget::Array(arr),
-            keys,
-            results,
+            args,
             flag,
         } => {
-            assert_eq!(keys.len(), 1, "Array lookup must have exactly one key");
             assert_eq!(
-                results.len(),
-                1,
-                "Array lookup must have exactly one result"
+                args.len(),
+                2,
+                "Array lookup must have exactly one key and one result"
             );
             let arr_type = fn_type_info.get_value_type(*arr);
             let ll_arr = val_map[arr];
-            let key = val_map[&keys[0]];
-            let result = val_map[&results[0]];
+            let key = val_map[&args[0]];
+            let result = val_map[&args[1]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_array_lookup_fn(arr_type, e.ssa);
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::Lookup {
             target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
-            keys,
-            results,
+            args,
             flag,
         } => {
-            assert!(
-                results.is_empty(),
-                "Rangecheck(8) lookup must have no results"
-            );
             assert_eq!(
-                keys.len(),
+                args.len(),
                 1,
                 "Rangecheck(8) lookup must have exactly one key"
             );
-            let key = val_map[&keys[0]];
+            let key = val_map[&args[0]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_rngchk_8_fn(e.ssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::Lookup {
             target: crate::compiler::ssa::hlssa::LookupTarget::Spread(bits),
-            keys,
-            results,
+            args,
             flag,
         } => {
-            assert_eq!(keys.len(), 1, "Spread lookup must have exactly one key");
             assert_eq!(
-                results.len(),
-                1,
-                "Spread lookup must have exactly one result"
+                args.len(),
+                2,
+                "Spread lookup must have exactly one key and one result"
             );
-            let key = val_map[&keys[0]];
-            let result = val_map[&results[0]];
+            let key = val_map[&args[0]];
+            let result = val_map[&args[1]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_spread_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, result, flag_val], 0);
@@ -1249,58 +1240,49 @@ fn lower_instruction(
 
         OpCode::DLookup {
             target: crate::compiler::ssa::hlssa::LookupTarget::Array(arr),
-            keys,
-            results,
+            args,
             flag,
         } => {
-            assert_eq!(keys.len(), 1, "Array dlookup must have exactly one key");
             assert_eq!(
-                results.len(),
-                1,
-                "Array dlookup must have exactly one result"
+                args.len(),
+                2,
+                "Array dlookup must have exactly one key and one result"
             );
             let arr_type = fn_type_info.get_value_type(*arr);
             let ll_arr = val_map[arr];
-            let key = val_map[&keys[0]];
-            let result = val_map[&results[0]];
+            let key = val_map[&args[0]];
+            let result = val_map[&args[1]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_darray_call_fn(arr_type, e.ssa);
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::DLookup {
             target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
-            keys,
-            results,
+            args,
             flag,
         } => {
-            assert!(
-                results.is_empty(),
-                "Rangecheck(8) dlookup must have no results"
-            );
             assert_eq!(
-                keys.len(),
+                args.len(),
                 1,
                 "Rangecheck(8) dlookup must have exactly one key"
             );
-            let key = val_map[&keys[0]];
+            let key = val_map[&args[0]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_drngchk_8_call_fn(e.ssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::DLookup {
             target: crate::compiler::ssa::hlssa::LookupTarget::Spread(bits),
-            keys,
-            results,
+            args,
             flag,
         } => {
-            assert_eq!(keys.len(), 1, "Spread dlookup must have exactly one key");
             assert_eq!(
-                results.len(),
-                1,
-                "Spread dlookup must have exactly one result"
+                args.len(),
+                2,
+                "Spread dlookup must have exactly one key and one result"
             );
-            let key = val_map[&keys[0]];
-            let result = val_map[&results[0]];
+            let key = val_map[&args[0]];
+            let result = val_map[&args[1]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_dspread_call_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, result, flag_val], 0);

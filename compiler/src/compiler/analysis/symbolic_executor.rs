@@ -100,11 +100,11 @@ pub trait Context<V> {
 
     // TODO it looks odd that this is the only opcode implemented here.
     // This is the _new_ structure, so at some point we should migrate all other opcodes here.
-    fn lookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
+    fn lookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement lookup");
     }
 
-    fn dlookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
+    fn dlookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement dlookup");
     }
 
@@ -528,8 +528,7 @@ impl SymbolicExecutor {
                     }
                     crate::compiler::ssa::hlssa::OpCode::Lookup {
                         target,
-                        keys,
-                        results,
+                        args,
                         flag,
                     } => {
                         let target = match target {
@@ -540,18 +539,13 @@ impl SymbolicExecutor {
                             }
                             LookupTarget::Array(arr) => LookupTarget::Array(scope[arr].clone()),
                         };
-                        let keys = keys.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
-                        let results = results
-                            .iter()
-                            .map(|id| scope[id].clone())
-                            .collect::<Vec<_>>();
+                        let args = args.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
                         let flag_value = scope[flag].clone();
-                        ctx.lookup(target, keys, results, flag_value);
+                        ctx.lookup(target, args, flag_value);
                     }
                     crate::compiler::ssa::hlssa::OpCode::DLookup {
                         target,
-                        keys,
-                        results,
+                        args,
                         flag,
                     } => {
                         let target = match target {
@@ -562,13 +556,9 @@ impl SymbolicExecutor {
                             }
                             LookupTarget::Array(arr) => LookupTarget::Array(scope[arr].clone()),
                         };
-                        let keys = keys.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
-                        let results = results
-                            .iter()
-                            .map(|id| scope[id].clone())
-                            .collect::<Vec<_>>();
+                        let args = args.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
                         let flag_value = scope[flag].clone();
-                        ctx.dlookup(target, keys, results, flag_value);
+                        ctx.dlookup(target, args, flag_value);
                     }
                     crate::compiler::ssa::hlssa::OpCode::TupleProj {
                         result: r,

@@ -988,33 +988,29 @@ impl CodeGen {
                 }
                 hlssa::OpCode::Lookup {
                     target: LookupTarget::Rangecheck(8),
-                    keys,
-                    results,
+                    args,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
-                    assert!(results.len() == 0);
-                    assert!(type_info.get_value_type(keys[0]).is_field());
+                    assert!(args.len() == 1);
+                    assert!(type_info.get_value_type(args[0]).is_field());
                     emitter.push_op(bytecode::OpCode::Rngchk8Field {
-                        val: layouter.get_value(keys[0]),
+                        val: layouter.get_value(args[0]),
                         flag: layouter.get_value(*flag),
                     });
                 }
                 hlssa::OpCode::Lookup {
                     target: LookupTarget::Array(arr),
-                    keys,
-                    results,
+                    args,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
-                    assert!(results.len() == 1);
+                    assert!(args.len() == 2);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
                     let (stride, elem_kind) = lookup_elem_kind(&elem_type);
                     emitter.push_op(bytecode::OpCode::ArrayLookupField {
                         array: layouter.get_value(*arr),
-                        index: layouter.get_value(keys[0]),
-                        result: layouter.get_value(results[0]),
+                        index: layouter.get_value(args[0]),
+                        result: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
                         stride,
                         elem_kind,
@@ -1022,33 +1018,29 @@ impl CodeGen {
                 }
                 hlssa::OpCode::DLookup {
                     target: LookupTarget::Rangecheck(8),
-                    keys,
-                    results,
+                    args,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
-                    assert!(results.len() == 0);
-                    assert!(type_info.get_value_type(keys[0]).is_witness_of());
+                    assert!(args.len() == 1);
+                    assert!(type_info.get_value_type(args[0]).is_witness_of());
                     emitter.push_op(bytecode::OpCode::Drngchk8Field {
-                        val: layouter.get_value(keys[0]),
+                        val: layouter.get_value(args[0]),
                         flag: layouter.get_value(*flag),
                     });
                 }
                 hlssa::OpCode::DLookup {
                     target: LookupTarget::Array(arr),
-                    keys,
-                    results,
+                    args,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
-                    assert!(results.len() == 1);
+                    assert!(args.len() == 2);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
                     let (stride, elem_kind) = lookup_elem_kind(&elem_type);
                     emitter.push_op(bytecode::OpCode::DarrayLookupField {
                         array: layouter.get_value(*arr),
-                        index: layouter.get_value(keys[0]),
-                        result: layouter.get_value(results[0]),
+                        index: layouter.get_value(args[0]),
+                        result: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
                         stride,
                         elem_kind,
@@ -1056,30 +1048,26 @@ impl CodeGen {
                 }
                 hlssa::OpCode::Lookup {
                     target: LookupTarget::Spread(bits),
-                    keys,
-                    results,
+                    args,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
-                    assert!(results.len() == 1);
+                    assert!(args.len() == 2);
                     emitter.push_op(bytecode::OpCode::SpreadLookupField {
-                        val: layouter.get_value(keys[0]),
-                        result: layouter.get_value(results[0]),
+                        val: layouter.get_value(args[0]),
+                        result: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
                         bits: *bits as usize,
                     });
                 }
                 hlssa::OpCode::DLookup {
                     target: LookupTarget::Spread(bits),
-                    keys,
-                    results,
+                    args,
                     flag,
                 } => {
-                    assert!(keys.len() == 1);
-                    assert!(results.len() == 1);
+                    assert!(args.len() == 2);
                     emitter.push_op(bytecode::OpCode::DspreadLookupField {
-                        val: layouter.get_value(keys[0]),
-                        result: layouter.get_value(results[0]),
+                        val: layouter.get_value(args[0]),
+                        result: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
                         bits: *bits as usize,
                     });

@@ -340,11 +340,14 @@ impl symbolic_executor::Context<Value> for R1CGen {
     fn lookup(
         &mut self,
         target: hlssa::LookupTarget<Value>,
-        keys: Vec<Value>,
-        results: Vec<Value>,
+        args: Vec<Value>,
         flag: Value,
     ) {
         let flag_lc = flag.expect_linear_combination();
+        let els: Vec<_> = args
+            .into_iter()
+            .map(|e| e.expect_linear_combination())
+            .collect();
         match target {
             hlssa::LookupTarget::Rangecheck(i) => {
                 // TODO this will become table resolution logic eventually
@@ -357,11 +360,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
@@ -381,11 +379,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
@@ -405,11 +398,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         self.tables.len() - 1
                     }
                 };
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,
@@ -428,11 +416,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     arr.borrow().table_id.unwrap()
                 };
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,

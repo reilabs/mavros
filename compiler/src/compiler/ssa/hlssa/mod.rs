@@ -183,14 +183,12 @@ pub enum OpCode {
     },
     Lookup {
         target: LookupTarget<ValueId>,
-        keys: Vec<ValueId>,
-        results: Vec<ValueId>,
+        args: Vec<ValueId>,
         flag: ValueId,
     },
     DLookup {
         target: LookupTarget<ValueId>,
-        keys: Vec<ValueId>,
-        results: Vec<ValueId>,
+        args: Vec<ValueId>,
         flag: ValueId,
     },
     MulConst {
@@ -476,12 +474,10 @@ impl Instruction for OpCode {
             }
             OpCode::Lookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             } => {
-                let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
-                let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
+                let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let target_str = match target {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
@@ -489,8 +485,8 @@ impl Instruction for OpCode {
                     LookupTarget::Spread(n) => format!("spread({})", n),
                 };
                 format!(
-                    "constrain_lookup({}, ({}) => ({}), flag=v{})",
-                    target_str, keys_str, results_str, flag.0
+                    "constrain_lookup({}, ({}), flag=v{})",
+                    target_str, args_str, flag.0
                 )
             }
             OpCode::NextDCoeff { result } => {
@@ -510,12 +506,10 @@ impl Instruction for OpCode {
             }
             OpCode::DLookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             } => {
-                let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
-                let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
+                let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let target_str = match target {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
@@ -523,8 +517,8 @@ impl Instruction for OpCode {
                     LookupTarget::Spread(n) => format!("spread({})", n),
                 };
                 format!(
-                    "∂lookup({}, ({}) => ({}), flag=v{})",
-                    target_str, keys_str, results_str, flag.0
+                    "∂lookup({}, ({}), flag=v{})",
+                    target_str, args_str, flag.0
                 )
             }
             OpCode::MkSeq {
@@ -974,14 +968,12 @@ impl Instruction for OpCode {
             } => vec![].into_iter(),
             Self::Lookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             }
             | Self::DLookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             } => {
                 let mut ret_vec = vec![];
@@ -994,8 +986,7 @@ impl Instruction for OpCode {
                         ret_vec.push(arr);
                     }
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
+                ret_vec.extend(args);
                 ret_vec.push(flag);
                 ret_vec.into_iter()
             }
@@ -1319,14 +1310,12 @@ impl Instruction for OpCode {
             } => vec![].into_iter(),
             Self::Lookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             }
             | Self::DLookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             } => {
                 let mut ret_vec = vec![];
@@ -1339,8 +1328,7 @@ impl Instruction for OpCode {
                         ret_vec.push(arr);
                     }
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
+                ret_vec.extend(args);
                 ret_vec.push(flag);
                 ret_vec.into_iter()
             }
@@ -1475,14 +1463,12 @@ impl Instruction for OpCode {
             }
             Self::Lookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             }
             | Self::DLookup {
                 target,
-                keys,
-                results,
+                args,
                 flag,
             } => {
                 let mut ret_vec = vec![];
@@ -1495,8 +1481,7 @@ impl Instruction for OpCode {
                         ret_vec.push(arr);
                     }
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
+                ret_vec.extend(args);
                 ret_vec.push(flag);
                 ret_vec.into_iter()
             }
