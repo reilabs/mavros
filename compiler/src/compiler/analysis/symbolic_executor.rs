@@ -18,8 +18,6 @@ use crate::compiler::{
     },
 };
 
-/// Build the value-typed representation of a single `ConstValue`, used to pre-seed `scope` with
-/// every entry in `ssa.const_storage()` before symbolic execution starts.
 fn materialise_const<V, Ctx>(value: &ConstValue, ctx: &mut Ctx) -> V
 where
     V: Value<Ctx>,

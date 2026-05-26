@@ -13,8 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
+        BlockId, FunctionId, Terminator, ValueId,
         hlssa::{
             CallTarget, ConstValue, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLEmitter, HLSSABuilder},
@@ -123,7 +124,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             _ => None,
         })
         .collect();
-    let mut const_remap: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut const_remap = ValueReplacements::new();
     for (old_id, fn_id) in fn_ptr_consts.iter().copied() {
         // Remove the FnPtr entry so the new U32 entry can claim a fresh ValueId (or alias an
         // existing one) without violating the bimap's bijection invariant.
@@ -133,38 +134,14 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             const_remap.insert(old_id, new_id);
         }
     }
-    if !const_remap.is_empty() {
-        let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
-        for fid in &func_ids {
-            let func = ssa.get_function_mut(*fid);
-            for (_, block) in func.get_blocks_mut() {
-                for instruction in block.get_instructions_mut() {
-                    for input in instruction.get_inputs_mut() {
-                        if let Some(new) = const_remap.get(input) {
-                            *input = *new;
-                        }
-                    }
-                }
-                if let Some(term) = block.get_terminator().cloned() {
-                    let new_term = match term {
-                        Terminator::Jmp(b, args) => Terminator::Jmp(
-                            b,
-                            args.into_iter()
-                                .map(|v| const_remap.get(&v).copied().unwrap_or(v))
-                                .collect(),
-                        ),
-                        Terminator::JmpIf(c, t, f) => {
-                            Terminator::JmpIf(const_remap.get(&c).copied().unwrap_or(c), t, f)
-                        }
-                        Terminator::Return(vals) => Terminator::Return(
-                            vals.into_iter()
-                                .map(|v| const_remap.get(&v).copied().unwrap_or(v))
-                                .collect(),
-                        ),
-                    };
-                    block.set_terminator(new_term);
-                }
+    let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+    for fid in &func_ids {
+        let func = ssa.get_function_mut(*fid);
+        for (_, block) in func.get_blocks_mut() {
+            for instruction in block.get_instructions_mut() {
+                const_remap.replace_inputs(instruction);
             }
+            const_remap.replace_terminator(block.get_terminator_mut());
         }
     }
 

@@ -4,10 +4,13 @@ pub mod builder;
 pub mod type_system;
 
 use itertools::Itertools;
+use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::compiler::ssa::{
-    Block, ConstantsDisplay, Function, FunctionId, Instruction, SSA, ValueId,
+use crate::compiler::{
+    analysis::flow_analysis::FlowAnalysis,
+    passes::fix_double_jumps::ValueReplacements,
+    ssa::{Block, ConstantsDisplay, Function, FunctionId, Instruction, SSA, ValueId},
 };
 pub use type_system::{Type, TypeExpr};
 
@@ -36,6 +39,167 @@ impl HLSSA {
     /// Look up a constant by `ValueId`. Returns `None` if `id` is not a constant.
     pub fn get_const(&self, id: ValueId) -> Option<&ConstValue> {
         self.const_storage().get_by_left(&id)
+    }
+
+    /// Folds `other` into `self`, allocating fresh identifiers as it goes and re-interning
+    /// constants so duplicates collapse.
+    ///
+    /// Returns the source-to-destination `FunctionId` map so callers can locate the merged-in
+    /// functions; constant- and value-ID remappings stay internal.
+    ///
+    /// Unreachable blocks in `other` (not visited by a dominator-order walk from each function's
+    /// entry block) are dropped. Run dead-code elimination on `other` first if they must be
+    /// preserved.
+    pub fn merge(&mut self, other: HLSSA) -> HashMap<FunctionId, FunctionId> {
+        let global_offset = self.num_globals();
+        if global_offset > 0 || !other.get_global_types().is_empty() {
+            let mut combined = self.get_global_types().to_vec();
+            combined.extend(other.get_global_types().iter().cloned());
+            self.set_global_types(combined);
+        }
+        if self.get_globals_init_fn().is_some() && other.get_globals_init_fn().is_some() {
+            panic!("ICE: HLSSA::merge cannot compose two globals_init_fns");
+        }
+        if self.get_globals_deinit_fn().is_some() && other.get_globals_deinit_fn().is_some() {
+            panic!("ICE: HLSSA::merge cannot compose two globals_deinit_fns");
+        }
+
+        let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
+        let src_fn_ids: Vec<FunctionId> = other
+            .iter_functions()
+            .map(|(id, _)| *id)
+            .sorted_by_key(|id| id.0)
+            .collect();
+        for src_fn_id in &src_fn_ids {
+            let name = other.get_function(*src_fn_id).get_name().to_string();
+            let dst_fn_id = self.add_function(name);
+            fn_map.insert(*src_fn_id, dst_fn_id);
+        }
+
+        // The re-interned constants are used to seed a value replacements table for downstream
+        // replacement in the function.
+        let mut replacements = ValueReplacements::new();
+        let mut const_entries: Vec<(ValueId, ConstValue)> = other
+            .const_storage()
+            .iter()
+            .map(|(id, cv)| (*id, cv.clone()))
+            .collect();
+        const_entries.sort_by_key(|(id, _)| id.0);
+        for (src_id, cv) in const_entries {
+            let rewritten = match cv {
+                ConstValue::FnPtr(fid) => ConstValue::FnPtr(fn_map[&fid]),
+                other_cv => other_cv,
+            };
+            let new_id = self.intern_const(rewritten);
+            replacements.insert(src_id, new_id);
+        }
+
+        // The functions are walked in dominator order to ensure that we can do replacements in a
+        // single pass, rather than two.
+        let other_flow = FlowAnalysis::run(&other);
+        let mut other = other;
+        for src_fn_id in &src_fn_ids {
+            let cfg = other_flow.get_function_cfg(*src_fn_id);
+            let src_fn = other.take_function(*src_fn_id);
+            let (mut new_fn, mut src_blocks, returns) = src_fn.prepare_rebuild();
+            for ret in returns {
+                new_fn.add_return_type(ret);
+            }
+
+            for block_id in cfg.get_domination_pre_order() {
+                let Some(mut block) = src_blocks.remove(&block_id) else {
+                    continue;
+                };
+
+                let old_params = block.take_parameters();
+                let mut new_params = Vec::with_capacity(old_params.len());
+                for (old_param, ty) in old_params {
+                    let new_param = self.fresh_value();
+                    replacements.insert(old_param, new_param);
+                    new_params.push((new_param, ty));
+                }
+                block.put_parameters(new_params);
+
+                let old_instructions = block.take_instructions();
+                let mut new_instructions = Vec::with_capacity(old_instructions.len());
+                for mut instr in old_instructions {
+                    // Allocate fresh IDs for every result so `replace_instruction` finds them.
+                    let old_results: Vec<ValueId> = instr.get_results().copied().collect();
+                    for old in old_results {
+                        let new = self.fresh_value();
+                        replacements.insert(old, new);
+                    }
+                    // Lookup/DLookup are strange, so we have to handle these manually.
+                    match &instr {
+                        OpCode::Lookup { results, .. } | OpCode::DLookup { results, .. } => {
+                            for old in results.clone() {
+                                let new = self.fresh_value();
+                                replacements.insert(old, new);
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    replacements.replace_instruction(&mut instr);
+                    remap_static_calls(&mut instr, &fn_map);
+                    if global_offset > 0 {
+                        shift_globals(&mut instr, global_offset);
+                    }
+
+                    new_instructions.push(instr);
+                }
+                block.put_instructions(new_instructions);
+
+                if let Some(mut term) = block.take_terminator() {
+                    replacements.replace_terminator(&mut term);
+                    block.set_terminator(term);
+                }
+
+                new_fn.put_block(block_id, block);
+            }
+
+            self.put_function(fn_map[src_fn_id], new_fn);
+        }
+
+        if self.get_globals_init_fn().is_none() {
+            if let Some(fid) = other.get_globals_init_fn() {
+                self.set_globals_init_fn(fn_map[&fid]);
+            }
+        }
+        if self.get_globals_deinit_fn().is_none() {
+            if let Some(fid) = other.get_globals_deinit_fn() {
+                self.set_globals_deinit_fn(fn_map[&fid]);
+            }
+        }
+
+        fn_map
+    }
+}
+
+/// Rewrites `FunctionId`s embedded in static `Call` targets (and inside `Guard`'s inner op)
+/// using `fn_map`. `ValueReplacements` only rewrites `ValueId`s, so this complements it.
+fn remap_static_calls(instr: &mut OpCode, fn_map: &HashMap<FunctionId, FunctionId>) {
+    match instr {
+        OpCode::Call {
+            function: CallTarget::Static(fid),
+            ..
+        } => {
+            *fid = fn_map[fid];
+        }
+        OpCode::Guard { inner, .. } => remap_static_calls(inner, fn_map),
+        _ => {}
+    }
+}
+
+/// Shifts global indices in `ReadGlobal`/`InitGlobal`/`DropGlobal` (and inside `Guard`) so that
+/// `other`'s globals land in the appended section of `self`'s globals table.
+fn shift_globals(instr: &mut OpCode, offset: usize) {
+    match instr {
+        OpCode::ReadGlobal { offset: o, .. } => *o += offset as u64,
+        OpCode::InitGlobal { global, .. } => *global += offset,
+        OpCode::DropGlobal { global } => *global += offset,
+        OpCode::Guard { inner, .. } => shift_globals(inner, offset),
+        _ => {}
     }
 }
 
@@ -1779,4 +1943,149 @@ pub enum LookupTarget<V> {
 pub enum Radix<V> {
     Bytes,
     Dyn(V),
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::Terminator;
+
+    /// Builds a tiny HLSSA with a configurable constant and a Call site for testing merge.
+    /// Returns: (ssa, main_id, callee_id, the U(32, _) constant ValueId, the FnPtr constant ValueId).
+    fn build_fixture(
+        callee_name: &str,
+        const_val: u128,
+    ) -> (HLSSA, FunctionId, FunctionId, ValueId, ValueId) {
+        let mut ssa = HLSSA::new();
+        let main_id = ssa.get_main_id();
+        let callee_id = ssa.add_function(callee_name.to_string());
+
+        let u_const = ssa.intern_const(ConstValue::U(32, const_val));
+        let fn_ptr = ssa.intern_const(ConstValue::FnPtr(callee_id));
+
+        // main: entry block does `r = u_const + u_const`, then calls callee, then returns r.
+        let r = ssa.fresh_value();
+        let call_result = ssa.fresh_value();
+        let main = ssa.get_function_mut(main_id);
+        let entry = main.get_entry_mut();
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: r,
+            lhs: u_const,
+            rhs: u_const,
+        });
+        entry.push_instruction(OpCode::Call {
+            results: vec![call_result],
+            function: CallTarget::Static(callee_id),
+            args: vec![r],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![r]));
+
+        // callee: returns its single parameter unchanged.
+        let p = ssa.fresh_value();
+        let callee = ssa.get_function_mut(callee_id);
+        callee.add_return_type(Type::u(32));
+        let entry = callee.get_entry_mut();
+        entry.push_parameter(p, Type::u(32));
+        entry.set_terminator(Terminator::Return(vec![p]));
+
+        (ssa, main_id, callee_id, u_const, fn_ptr)
+    }
+
+    #[test]
+    fn merge_returns_function_map_for_every_source_function() {
+        let (target, _, _, _, _) = build_fixture("callee_a", 7);
+        let (source, src_main, src_callee, _, _) = build_fixture("callee_b", 7);
+        let mut target = target;
+        let fn_map = target.merge(source);
+
+        assert!(fn_map.contains_key(&src_main));
+        assert!(fn_map.contains_key(&src_callee));
+        assert_eq!(fn_map.len(), 2);
+        // The destination IDs must not collide with anything already in target.
+        for (src_id, dst_id) in &fn_map {
+            assert_ne!(src_id, dst_id);
+            assert_ne!(target.get_main_id(), *dst_id);
+        }
+    }
+
+    #[test]
+    fn merge_deduplicates_shared_constants() {
+        // Both fixtures intern U(32, 7); after merge target should still have exactly 3 constants:
+        // U(32, 7), FnPtr(target_callee), FnPtr(source_callee) — the U is shared, the FnPtrs differ
+        // because they reference different functions.
+        let (mut target, _, _, _, _) = build_fixture("callee_a", 7);
+        let (source, _, _, _, _) = build_fixture("callee_b", 7);
+        let before = target.const_storage().len();
+        let _ = target.merge(source);
+        assert_eq!(before, 2); // U(32,7) + FnPtr(target_callee)
+        assert_eq!(target.const_storage().len(), 3);
+
+        // Both FnPtr constants must point at distinct destination functions.
+        let fn_ptrs: Vec<FunctionId> = target
+            .const_storage()
+            .iter()
+            .filter_map(|(_, cv)| match cv {
+                ConstValue::FnPtr(fid) => Some(*fid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fn_ptrs.len(), 2);
+        assert_ne!(fn_ptrs[0], fn_ptrs[1]);
+    }
+
+    #[test]
+    fn merge_remaps_static_call_target() {
+        let (mut target, _, _, _, _) = build_fixture("callee_a", 7);
+        let (source, src_main, src_callee, _, _) = build_fixture("callee_b", 11);
+        let fn_map = target.merge(source);
+        let merged_main = target.get_function(fn_map[&src_main]);
+        let call_target = merged_main
+            .get_entry()
+            .get_instructions()
+            .find_map(|instr| match instr {
+                OpCode::Call {
+                    function: CallTarget::Static(fid),
+                    ..
+                } => Some(*fid),
+                _ => None,
+            })
+            .expect("merged main should contain a static Call");
+        assert_eq!(call_target, fn_map[&src_callee]);
+    }
+
+    #[test]
+    fn merge_allocates_fresh_value_ids() {
+        let (mut target, _, _, _, _) = build_fixture("callee_a", 7);
+        let value_bound_before = target.value_num_bound();
+
+        let (source, src_main, _, _, _) = build_fixture("callee_b", 11);
+        let fn_map = target.merge(source);
+
+        // Every operand in the merged main must reference a value either already in target
+        // (a constant — bound < before) or one freshly allocated by merge (>= before).
+        // What must hold strictly: none of the operands point at a ValueId that didn't exist
+        // before merge but isn't a constant in the new table.
+        let merged_main = target.get_function(fn_map[&src_main]);
+        for instr in merged_main.get_entry().get_instructions() {
+            for v in instr.get_inputs().chain(instr.get_results()) {
+                assert!(
+                    (v.0 as usize) < target.value_num_bound(),
+                    "ValueId {} out of bounds",
+                    v.0
+                );
+                let is_constant = target.get_const(*v).is_some();
+                let is_fresh = (v.0 as usize) >= value_bound_before;
+                assert!(
+                    is_constant || is_fresh,
+                    "v{} is neither a constant nor a freshly-allocated id",
+                    v.0
+                );
+            }
+        }
+    }
 }

@@ -8,7 +8,7 @@ use num_traits::{One, Zero};
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, Types, const_type_seed},
+        types::{FunctionTypeInfo, Types},
         value_definitions::{FunctionValueDefinitions, ValueDefinition},
     },
     pass_manager::{AnalysisId, AnalysisStore, Pass},
@@ -81,13 +81,7 @@ impl Simplifier {
             let cfg = flow.get_function_cfg(function_id);
             sb.modify_function(function_id, |fb| {
                 for _ in 0..self.max_iterations {
-                    // `materialize_const` may intern fresh constants into `fb.ssa`, so refresh the
-                    // seed every iteration; otherwise newly-interned ValueIds would be absent from
-                    // the type map and `Types::run_function` would panic on the next instruction
-                    // that uses them.
-                    let const_types = const_type_seed(fb.ssa);
-                    let fti =
-                        Types::new().run_function(fb.function, &function_types, &const_types, cfg);
+                    let fti = Types::new().run_function(fb.function, &function_types, fb.ssa, cfg);
                     if !self.run_function(fb, &fti) {
                         break;
                     }

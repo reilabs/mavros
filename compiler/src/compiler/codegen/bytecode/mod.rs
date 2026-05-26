@@ -120,7 +120,7 @@ impl CodeGen {
         // Pre-emit MovConst for every HL constant referenced by this function. Constants now
         // live in `ssa.const_storage()` rather than as `OpCode::Const` instructions, so the
         // backend must materialise their frame slots up-front.
-        emit_function_constants(function, constants, type_info, &mut layouter, &mut emitter);
+        emit_function_constants(function, constants, &mut layouter, &mut emitter);
 
         self.run_block_body(
             function,
@@ -1247,7 +1247,6 @@ impl CodeGen {
 fn emit_function_constants(
     function: &HLFunction,
     constants: &hlssa::Constants,
-    type_info: &FunctionTypeInfo,
     layouter: &mut FrameLayouter,
     emitter: &mut EmitterState,
 ) {
@@ -1290,9 +1289,6 @@ fn emit_function_constants(
         let cv = constants.get_by_left(&id).expect("constant present");
         match cv {
             hlssa::ConstValue::U(size, val) | hlssa::ConstValue::I(size, val) => {
-                // `type_info` covers every value defined inside the function, plus the seed
-                // entries we added for constants. Either source gives the same size.
-                let _ = type_info; // explicit no-op: layout is determined by `*size` alone here.
                 emitter.push_op(bytecode::OpCode::MovConst {
                     res: layouter.alloc_u64(id, *size),
                     val: *val as u64,

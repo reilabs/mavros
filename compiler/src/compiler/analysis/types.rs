@@ -68,11 +68,9 @@ impl Types {
             .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
             .collect::<HashMap<_, _>>();
 
-        let const_types = const_type_seed(ssa);
-
         for (function_id, function) in ssa.iter_functions() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let function_info = self.run_function(function, &function_types, &const_types, cfg);
+            let function_info = self.run_function(function, &function_types, ssa, cfg);
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
@@ -146,11 +144,11 @@ impl Types {
         &self,
         function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
-        const_types: &HashMap<ValueId, Type>,
+        ssa: &HLSSA,
         cfg: &CFG,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
-            values: const_types.clone(),
+            values: const_type_seed(ssa),
         };
 
         for block_id in cfg.get_domination_pre_order() {
@@ -698,9 +696,7 @@ impl Types {
     }
 }
 
-/// Build a `ValueId -> Type` map covering every constant in the SSA's side-table, ready to be
-/// cloned into each function's local type-info to seed constant references.
-pub fn const_type_seed(ssa: &HLSSA) -> HashMap<ValueId, Type> {
+fn const_type_seed(ssa: &HLSSA) -> HashMap<ValueId, Type> {
     ssa.const_storage()
         .iter()
         .map(|(id, cv)| {
