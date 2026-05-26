@@ -617,8 +617,7 @@ impl Types {
             }
             OpCode::DLookup {
                 target: _,
-                keys: _,
-                results: _,
+                args: _,
                 flag: _,
             } => Ok(()),
             OpCode::MulConst {
@@ -653,8 +652,7 @@ impl Types {
             }
             OpCode::Lookup {
                 target: _,
-                keys: _,
-                results: _,
+                args: _,
                 flag: _,
             } => Ok(()),
             OpCode::TupleProj { result, tuple, idx } => {

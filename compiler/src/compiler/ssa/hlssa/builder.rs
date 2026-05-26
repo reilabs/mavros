@@ -511,8 +511,7 @@ pub trait HLEmitter {
     fn lookup_spread(&mut self, bits: u8, key: ValueId, result: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Spread(bits),
-            keys: vec![key],
-            results: vec![result],
+            args: vec![key, result],
             flag,
         });
     }
@@ -520,8 +519,7 @@ pub trait HLEmitter {
     fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target,
-            keys: vec![value],
-            results: vec![],
+            args: vec![value],
             flag,
         });
     }
@@ -529,8 +527,7 @@ pub trait HLEmitter {
     fn lookup_rngchk_8(&mut self, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Rangecheck(8),
-            keys: vec![value],
-            results: vec![],
+            args: vec![value],
             flag,
         });
     }
@@ -538,8 +535,7 @@ pub trait HLEmitter {
     fn lookup_arr(&mut self, array: ValueId, index: ValueId, result: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Array(array),
-            keys: vec![index],
-            results: vec![result],
+            args: vec![index, result],
             flag,
         });
     }

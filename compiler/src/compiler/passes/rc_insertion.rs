@@ -280,14 +280,12 @@ impl RCInsertion {
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::Lookup {
                         target: _,
-                        keys: _,
-                        results: _,
+                        args: _,
                         flag: _,
                     }
                     | OpCode::DLookup {
                         target: _,
-                        keys: _,
-                        results: _,
+                        args: _,
                         flag: _,
                     }
                     | OpCode::Not {
