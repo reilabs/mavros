@@ -224,80 +224,54 @@ impl LowerWitnessIntegerArithOps {
         let rhs_field = b.cast_to_field(rhs);
         let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
         let sign_r = extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer);
+        let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
+        let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
         let result_range = match kind {
             BinaryArithOpKind::Add => context.range(lhs).add(&context.range(rhs)),
             BinaryArithOpKind::Sub => context.range(lhs).sub(&context.range(rhs)),
             _ => unreachable!(),
         };
+        assert!(
+            range_fits_field_injectively(&result_range),
+            "signed add/sub result range is too wide for a single-field equality"
+        );
 
-        let two_n = b.field_const(two_pow(bits));
-        let zero = b.field_const(Field::ZERO);
-        match kind {
-            BinaryArithOpKind::Add => {
-                let raw = b.add(lhs_field, rhs_field);
-                let raw_for_hint = guarded_or_zero_field(b, raw, guard);
-                let raw_pure = b.value_of(raw_for_hint);
-                let hint_result = b.truncate(raw_pure, bits, 254);
-                let hint_diff = b.sub(raw_pure, hint_result);
-                let hint_carry = b.div(hint_diff, two_n);
-                let carry = b.write_witness(hint_carry);
-                let carry_shifted = b.mul(carry, two_n);
-                let result_lc = b.sub(raw, carry_shifted);
-
-                guarded_rangecheck(b, result_lc, bits, guard);
-                guarded_rangecheck(b, carry, 1, guard);
-                let sign_result =
-                    extract_sign_bit(b, result_lc, bits, &result_range, SignBitSource::Field);
-
-                let lhs_overflow = b.add(carry, sign_result);
-                let rhs_overflow = b.add(sign_l, sign_r);
-                let diff = b.sub(lhs_overflow, rhs_overflow);
-                let flag = one_or_condition_field(b, context.types(), guard);
-                b.constrain(flag, diff, zero);
-
-                let result_lc = guarded_or_zero_field(b, result_lc, guard);
-                b.emit(OpCode::Cast {
-                    result,
-                    value: result_lc,
-                    target: CastTarget::I(bits),
-                });
-            }
-            BinaryArithOpKind::Sub => {
-                let raw = b.sub(lhs_field, rhs_field);
-                let raw_for_hint = guarded_or_zero_field(b, raw, guard);
-                let raw_pure = b.value_of(raw_for_hint);
-                let shifted = b.add(raw_pure, two_n);
-                let hint_result = b.truncate(shifted, bits, 254);
-                let hint_rem = b.sub(shifted, hint_result);
-                let hint_borrow = b.div(hint_rem, two_n);
-                let borrow = b.write_witness(hint_borrow);
-                let lhs_full = b.add(raw, two_n);
-                let borrow_shifted = b.mul(borrow, two_n);
-                let result_lc = b.sub(lhs_full, borrow_shifted);
-
-                guarded_rangecheck(b, result_lc, bits, guard);
-                guarded_rangecheck(b, borrow, 1, guard);
-                let sign_result =
-                    extract_sign_bit(b, result_lc, bits, &result_range, SignBitSource::Field);
-
-                let one = b.field_const(Field::ONE);
-                let lhs_overflow = b.add(borrow, sign_result);
-                let lhs_overflow = b.add(lhs_overflow, sign_r);
-                let rhs_overflow = b.add(one, sign_l);
-                let diff = b.sub(lhs_overflow, rhs_overflow);
-                let flag = one_or_condition_field(b, context.types(), guard);
-                b.constrain(flag, diff, zero);
-
-                let result_lc = guarded_or_zero_field(b, result_lc, guard);
-                b.emit(OpCode::Cast {
-                    result,
-                    value: result_lc,
-                    target: CastTarget::I(bits),
-                });
-            }
+        let signed_raw = match kind {
+            BinaryArithOpKind::Add => b.add(lhs_signed, rhs_signed),
+            BinaryArithOpKind::Sub => b.sub(lhs_signed, rhs_signed),
             _ => unreachable!(),
-        }
+        };
+
+        let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
+        let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
+        let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
+        let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
+        let result_hint = match kind {
+            BinaryArithOpKind::Add => b.add(lhs_pure, rhs_pure),
+            BinaryArithOpKind::Sub => b.sub(lhs_pure, rhs_pure),
+            _ => unreachable!(),
+        };
+        let result_hint_unsigned = b.cast_to(CastTarget::U(bits), result_hint);
+        let result_hint_field = b.cast_to_field(result_hint_unsigned);
+        let result_wit = b.write_witness(result_hint_field);
+
+        guarded_rangecheck(b, result_wit, bits, guard);
+        let sign_result =
+            extract_sign_bit(b, result_wit, bits, &result_range, SignBitSource::Field);
+        let result_signed = signed_value_from_encoded(b, result_wit, sign_result, bits);
+
+        let diff = b.sub(signed_raw, result_signed);
+        let zero = b.field_const(Field::ZERO);
+        let flag = one_or_condition_field(b, context.types(), guard);
+        b.constrain(flag, diff, zero);
+
+        let result_value = guarded_or_zero_field(b, result_wit, guard);
+        b.emit(OpCode::Cast {
+            result,
+            value: result_value,
+            target: CastTarget::I(bits),
+        });
     }
 
     fn lower_signed_mul(
