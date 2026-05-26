@@ -941,11 +941,10 @@ impl CSE {
                     }
                     OpCode::Lookup {
                         target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
-                        keys,
-                        results: _,
+                        args,
                         flag,
-                    } if keys.len() == 1 => {
-                        let key_expr = get_expr(&exprs, &keys[0]);
+                    } if args.len() == 1 => {
+                        let key_expr = get_expr(&exprs, &args[0]);
                         let flag_expr = get_expr(&exprs, flag);
                         assertions
                             .entry(Assertion::ByteLookup {
@@ -980,8 +979,7 @@ impl CSE {
                     | OpCode::Lookup { .. }
                     | OpCode::DLookup {
                         target: _,
-                        keys: _,
-                        results: _,
+                        args: _,
                         flag: _,
                     }
                     | OpCode::Todo { .. }

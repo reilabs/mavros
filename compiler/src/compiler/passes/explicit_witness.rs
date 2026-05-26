@@ -921,24 +921,15 @@ impl ExplicitWitness {
             }
             OpCode::Lookup {
                 target: LookupTarget::Spread(bits),
-                keys,
-                results,
+                args,
                 flag,
             } if bits >= SPREAD_SPILL_THRESHOLD_BITS => {
-                assert_eq!(keys.len(), 1, "Spread lookup must have exactly one key");
                 assert_eq!(
-                    results.len(),
-                    1,
-                    "Spread lookup must have exactly one result"
+                    args.len(),
+                    2,
+                    "Spread lookup must have exactly one key and one result"
                 );
-                self.lower_wide_spread_lookup(
-                    b,
-                    function_type_info,
-                    keys[0],
-                    results[0],
-                    flag,
-                    bits,
-                );
+                self.lower_wide_spread_lookup(b, function_type_info, args[0], args[1], flag, bits);
             }
             OpCode::Lookup { .. } => {
                 b.push(instruction);
