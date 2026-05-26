@@ -3,10 +3,7 @@
 //! Does not float expressions across branches or otherwise move them outside the block in which
 //! they appear (#172).
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::{Debug, Display},
-};
+use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
@@ -23,26 +20,24 @@ use crate::compiler::{
     passes::fix_double_jumps::ValueReplacements,
 };
 
-// Lowered bit-range gadgets can build very deep arithmetic trees. Keeping those
-// trees as CSE keys makes hashing/cloning dominate compilation, while matching
-// across such large expressions is not worth the cost.
-const MAX_CSE_EXPR_NODES: usize = 256;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ExprId(u32);
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Expr {
-    Add(Vec<Expr>),
-    Mul(Vec<Expr>),
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum ExprNode {
+    Add(Vec<ExprId>),
+    Mul(Vec<ExprId>),
     Div {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
     Mod {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
     Sub {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
     FConst(ark_bn254::Fr),
     UConst {
@@ -55,477 +50,303 @@ enum Expr {
     },
     Variable(u64),
     Eq {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
     Lt {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
-    And(Vec<Expr>),
-    Or(Vec<Expr>),
-    Xor(Vec<Expr>),
+    And(Vec<ExprId>),
+    Or(Vec<ExprId>),
+    Xor(Vec<ExprId>),
     Shl {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
     Shr {
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
     BitRange {
-        value: Box<Expr>,
+        value: ExprId,
         offset: usize,
         width: usize,
         source_width: Option<usize>,
     },
     Select {
-        condition: Box<Expr>,
-        then: Box<Expr>,
-        otherwise: Box<Expr>,
+        condition: ExprId,
+        then: ExprId,
+        otherwise: ExprId,
     },
     ArrayGet {
-        array: Box<Expr>,
-        index: Box<Expr>,
+        array: ExprId,
+        index: ExprId,
     },
     TupleGet {
-        tuple: Box<Expr>,
-        index: Box<Expr>,
+        tuple: ExprId,
+        index: ExprId,
     },
-    Not(Box<Expr>),
+    Not(ExprId),
     ReadGlobal(u64),
     Cast {
-        value: Box<Expr>,
+        value: ExprId,
         target: CastTarget,
     },
     Truncate {
-        value: Box<Expr>,
+        value: ExprId,
         to_bits: usize,
         from_bits: usize,
     },
     SExt {
-        value: Box<Expr>,
+        value: ExprId,
         from_bits: usize,
         to_bits: usize,
     },
-    ValueOf(Box<Expr>),
+    ValueOf(ExprId),
     BytesOf {
-        value: Box<Expr>,
+        value: ExprId,
         endianness: Endianness,
         count: usize,
     },
     BitsOf {
-        value: Box<Expr>,
+        value: ExprId,
         endianness: Endianness,
         count: usize,
     },
-    Witness(Box<Expr>),
+    Witness(ExprId),
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Assertion {
-    Rangecheck { value: Expr, max_bits: usize },
-    ByteLookup { key: Expr, flag: Expr },
+    Rangecheck { value: ExprId, max_bits: usize },
+    ByteLookup { key: ExprId, flag: ExprId },
 }
 
-impl Expr {
-    pub fn variable(value_id: ValueId) -> Self {
-        Self::Variable(value_id.0)
+#[derive(Default)]
+struct ExprInterner {
+    nodes: Vec<ExprNode>,
+    ids: HashMap<ExprNode, ExprId>,
+}
+
+impl ExprInterner {
+    fn intern(&mut self, node: ExprNode) -> ExprId {
+        if let Some(id) = self.ids.get(&node) {
+            return *id;
+        }
+
+        let id = ExprId(self.nodes.len() as u32);
+        self.nodes.push(node.clone());
+        self.ids.insert(node, id);
+        id
     }
 
-    fn get_adds(&self) -> Vec<Self> {
-        match self {
-            Self::Add(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![self.clone()],
+    fn node(&self, id: ExprId) -> &ExprNode {
+        &self.nodes[id.0 as usize]
+    }
+
+    fn variable(&mut self, value_id: ValueId) -> ExprId {
+        self.intern(ExprNode::Variable(value_id.0))
+    }
+
+    fn fconst(&mut self, value: ark_bn254::Fr) -> ExprId {
+        self.intern(ExprNode::FConst(value))
+    }
+
+    fn uconst(&mut self, bits: usize, value: u128) -> ExprId {
+        self.intern(ExprNode::UConst { bits, value })
+    }
+
+    fn iconst(&mut self, bits: usize, value: u128) -> ExprId {
+        self.intern(ExprNode::IConst { bits, value })
+    }
+
+    fn extend_adds(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Add(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
         }
     }
 
-    fn get_muls(&self) -> Vec<Self> {
-        match self {
-            Self::Mul(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![self.clone()],
+    fn extend_muls(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Mul(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
         }
     }
 
-    fn get_ands(&self) -> Vec<Self> {
-        match self {
-            Self::And(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![self.clone()],
+    fn extend_ands(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::And(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
         }
     }
 
-    /// Flatten nested Adds and sort for a canonical form.
-    pub fn add(&self, other: &Self) -> Self {
-        let mut adds: Vec<Self> = self
-            .get_adds()
-            .into_iter()
-            .chain(other.get_adds())
-            .collect();
+    fn extend_ors(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Or(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn extend_xors(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Xor(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn add(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut adds = Vec::new();
+        self.extend_adds(lhs, &mut adds);
+        self.extend_adds(rhs, &mut adds);
         adds.sort();
-        Self::Add(adds)
+        self.intern(ExprNode::Add(adds))
     }
 
-    pub fn mul(&self, other: &Self) -> Self {
-        let mut muls: Vec<Self> = self
-            .get_muls()
-            .into_iter()
-            .chain(other.get_muls())
-            .collect();
+    fn mul(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut muls = Vec::new();
+        self.extend_muls(lhs, &mut muls);
+        self.extend_muls(rhs, &mut muls);
         muls.sort();
-        Self::Mul(muls)
+        self.intern(ExprNode::Mul(muls))
     }
 
-    pub fn div(&self, other: &Self) -> Self {
-        Self::Div {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn div(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Div { lhs, rhs })
     }
 
-    pub fn modulo(&self, other: &Self) -> Self {
-        Self::Mod {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn modulo(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Mod { lhs, rhs })
     }
 
-    pub fn sub(&self, other: &Self) -> Self {
-        Self::Sub {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn sub(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Sub { lhs, rhs })
     }
 
-    pub fn and(&self, other: &Self) -> Self {
-        let mut ands = self.get_ands();
-        ands.extend(other.get_ands());
+    fn and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut ands = Vec::new();
+        self.extend_ands(lhs, &mut ands);
+        self.extend_ands(rhs, &mut ands);
         ands.sort();
         ands.dedup();
-        Self::And(ands)
+        self.intern(ExprNode::And(ands))
     }
 
-    pub fn or(&self, other: &Self) -> Self {
-        let mut ors: Vec<Self> = match self {
-            Self::Or(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![self.clone()],
-        };
-        ors.extend(match other {
-            Self::Or(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![other.clone()],
-        });
+    fn or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut ors = Vec::new();
+        self.extend_ors(lhs, &mut ors);
+        self.extend_ors(rhs, &mut ors);
         ors.sort();
         ors.dedup();
-        Self::Or(ors)
+        self.intern(ExprNode::Or(ors))
     }
 
-    pub fn xor(&self, other: &Self) -> Self {
-        let mut xors: Vec<Self> = match self {
-            Self::Xor(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![self.clone()],
-        };
-        xors.extend(match other {
-            Self::Xor(exprs) => exprs.iter().cloned().collect(),
-            _ => vec![other.clone()],
-        });
+    fn xor(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut xors = Vec::new();
+        self.extend_xors(lhs, &mut xors);
+        self.extend_xors(rhs, &mut xors);
         xors.sort();
-        Self::Xor(xors)
+        self.intern(ExprNode::Xor(xors))
     }
 
-    pub fn shl(&self, other: &Self) -> Self {
-        Self::Shl {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn shl(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Shl { lhs, rhs })
     }
 
-    pub fn shr(&self, other: &Self) -> Self {
-        Self::Shr {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn shr(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Shr { lhs, rhs })
     }
 
-    pub fn bit_range(&self, offset: usize, width: usize, source_width: Option<usize>) -> Self {
-        Self::BitRange {
-            value: Box::new(self.clone()),
+    fn bit_range(
+        &mut self,
+        value: ExprId,
+        offset: usize,
+        width: usize,
+        source_width: Option<usize>,
+    ) -> ExprId {
+        self.intern(ExprNode::BitRange {
+            value,
             offset,
             width,
             source_width,
-        }
+        })
     }
 
-    pub fn fconst(value: ark_bn254::Fr) -> Self {
-        Self::FConst(value)
+    fn eq(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Eq { lhs, rhs })
     }
 
-    pub fn eq(&self, other: &Self) -> Self {
-        Self::Eq {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn lt(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Lt { lhs, rhs })
     }
 
-    pub fn lt(&self, other: &Self) -> Self {
-        Self::Lt {
-            lhs: Box::new(self.clone()),
-            rhs: Box::new(other.clone()),
-        }
+    fn array_get(&mut self, array: ExprId, index: ExprId) -> ExprId {
+        self.intern(ExprNode::ArrayGet { array, index })
     }
 
-    pub fn array_get(&self, index: &Self) -> Self {
-        Self::ArrayGet {
-            array: Box::new(self.clone()),
-            index: Box::new(index.clone()),
-        }
+    fn tuple_get(&mut self, tuple: ExprId, index: ExprId) -> ExprId {
+        self.intern(ExprNode::TupleGet { tuple, index })
     }
 
-    pub fn tuple_get(&self, index: &Self) -> Self {
-        Self::TupleGet {
-            tuple: Box::new(self.clone()),
-            index: Box::new(index.clone()),
-        }
+    fn select(&mut self, condition: ExprId, then: ExprId, otherwise: ExprId) -> ExprId {
+        self.intern(ExprNode::Select {
+            condition,
+            then,
+            otherwise,
+        })
     }
 
-    pub fn select(&self, then: &Self, otherwise: &Self) -> Self {
-        Self::Select {
-            condition: Box::new(self.clone()),
-            then: Box::new(then.clone()),
-            otherwise: Box::new(otherwise.clone()),
-        }
+    fn not(&mut self, value: ExprId) -> ExprId {
+        self.intern(ExprNode::Not(value))
     }
 
-    pub fn not(&self) -> Self {
-        Self::Not(Box::new(self.clone()))
+    fn read_global(&mut self, index: u64) -> ExprId {
+        self.intern(ExprNode::ReadGlobal(index))
     }
 
-    pub fn cast(&self, target: CastTarget) -> Self {
-        Self::Cast {
-            value: Box::new(self.clone()),
-            target,
-        }
+    fn cast(&mut self, value: ExprId, target: CastTarget) -> ExprId {
+        self.intern(ExprNode::Cast { value, target })
     }
 
-    pub fn truncate(&self, to_bits: usize, from_bits: usize) -> Self {
-        Self::Truncate {
-            value: Box::new(self.clone()),
+    fn truncate(&mut self, value: ExprId, to_bits: usize, from_bits: usize) -> ExprId {
+        self.intern(ExprNode::Truncate {
+            value,
             to_bits,
             from_bits,
-        }
+        })
     }
 
-    pub fn sext(&self, from_bits: usize, to_bits: usize) -> Self {
-        Self::SExt {
-            value: Box::new(self.clone()),
+    fn sext(&mut self, value: ExprId, from_bits: usize, to_bits: usize) -> ExprId {
+        self.intern(ExprNode::SExt {
+            value,
             from_bits,
             to_bits,
-        }
+        })
     }
 
-    pub fn value_of(&self) -> Self {
-        Self::ValueOf(Box::new(self.clone()))
+    fn value_of(&mut self, value: ExprId) -> ExprId {
+        self.intern(ExprNode::ValueOf(value))
     }
 
-    pub fn bytes_of(&self, endianness: Endianness, count: usize) -> Self {
-        Self::BytesOf {
-            value: Box::new(self.clone()),
+    fn bytes_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
+        self.intern(ExprNode::BytesOf {
+            value,
             endianness,
             count,
-        }
+        })
     }
 
-    pub fn bits_of(&self, endianness: Endianness, count: usize) -> Self {
-        Self::BitsOf {
-            value: Box::new(self.clone()),
+    fn bits_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
+        self.intern(ExprNode::BitsOf {
+            value,
             endianness,
             count,
-        }
+        })
     }
 
-    pub fn witness(&self) -> Self {
-        Self::Witness(Box::new(self.clone()))
-    }
-
-    fn exceeds_node_budget(&self, budget: usize) -> bool {
-        fn visit(expr: &Expr, remaining: &mut usize) -> bool {
-            if *remaining == 0 {
-                return true;
-            }
-            *remaining -= 1;
-
-            match expr {
-                Expr::Add(exprs)
-                | Expr::Mul(exprs)
-                | Expr::And(exprs)
-                | Expr::Or(exprs)
-                | Expr::Xor(exprs) => exprs.iter().any(|expr| visit(expr, remaining)),
-                Expr::Div { lhs, rhs }
-                | Expr::Mod { lhs, rhs }
-                | Expr::Sub { lhs, rhs }
-                | Expr::Eq { lhs, rhs }
-                | Expr::Lt { lhs, rhs }
-                | Expr::Shl { lhs, rhs }
-                | Expr::Shr { lhs, rhs }
-                | Expr::ArrayGet {
-                    array: lhs,
-                    index: rhs,
-                } => visit(lhs, remaining) || visit(rhs, remaining),
-                Expr::BitRange { value, .. }
-                | Expr::Not(value)
-                | Expr::Cast { value, .. }
-                | Expr::Truncate { value, .. }
-                | Expr::SExt { value, .. }
-                | Expr::ValueOf(value)
-                | Expr::BytesOf { value, .. }
-                | Expr::BitsOf { value, .. }
-                | Expr::Witness(value) => visit(value, remaining),
-                Expr::Select {
-                    condition,
-                    then,
-                    otherwise,
-                } => {
-                    visit(condition, remaining)
-                        || visit(then, remaining)
-                        || visit(otherwise, remaining)
-                }
-                Expr::TupleGet { tuple, index } => {
-                    visit(tuple, remaining) || visit(index, remaining)
-                }
-                Expr::FConst(_)
-                | Expr::UConst { .. }
-                | Expr::IConst { .. }
-                | Expr::Variable(_)
-                | Expr::ReadGlobal(_) => false,
-            }
-        }
-
-        let mut remaining = budget;
-        visit(self, &mut remaining)
-    }
-}
-
-impl Display for Expr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Add(exprs) => write!(
-                f,
-                "({})",
-                exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" + ")
-            ),
-            Self::Mul(exprs) => write!(
-                f,
-                "({})",
-                exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" * ")
-            ),
-            Self::Div { lhs, rhs } => write!(f, "({} / {})", lhs, rhs),
-            Self::Mod { lhs, rhs } => write!(f, "({} % {})", lhs, rhs),
-            Self::Sub { lhs, rhs } => write!(f, "({} - {})", lhs, rhs),
-            Self::FConst(value) => write!(f, "{}", value),
-            Self::UConst { bits, value } => write!(f, "u{}({})", bits, value),
-            Self::IConst { bits, value } => write!(f, "i{}({})", bits, value),
-            Self::Variable(value) => write!(f, "v{}", value),
-            Self::Eq { lhs, rhs } => write!(f, "({} == {})", lhs, rhs),
-            Self::Lt { lhs, rhs } => write!(f, "({} < {})", lhs, rhs),
-            Self::And(exprs) => write!(
-                f,
-                "({})",
-                exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" & ")
-            ),
-            Self::Or(exprs) => write!(
-                f,
-                "({})",
-                exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            ),
-            Self::Xor(exprs) => write!(
-                f,
-                "({})",
-                exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ^ ")
-            ),
-            Self::Shl { lhs, rhs } => write!(f, "({} << {})", lhs, rhs),
-            Self::Shr { lhs, rhs } => write!(f, "({} >> {})", lhs, rhs),
-            Self::BitRange {
-                value,
-                offset,
-                width,
-                source_width,
-            } => {
-                let source_width = source_width
-                    .map(|source_width| format!(", source_width={source_width}"))
-                    .unwrap_or_default();
-                write!(
-                    f,
-                    "bit_range({}, {}, {}){}",
-                    value, offset, width, source_width
-                )
-            }
-            Self::Select {
-                condition,
-                then,
-                otherwise,
-            } => {
-                write!(f, "({} ? {} : {})", condition, then, otherwise)
-            }
-            Self::ArrayGet { array, index } => write!(f, "{}[{}]", array, index),
-            Self::TupleGet { tuple, index } => write!(f, "{}.{}", tuple, index),
-            Self::Not(value) => write!(f, "(~{})", value),
-            Self::ReadGlobal(index) => write!(f, "g{}", index),
-            Self::Cast { value, target } => write!(f, "cast({}, {})", value, target),
-            Self::Truncate {
-                value,
-                to_bits,
-                from_bits,
-            } => {
-                write!(f, "trunc({}, {}, {})", value, to_bits, from_bits)
-            }
-            Self::SExt {
-                value,
-                from_bits,
-                to_bits,
-            } => {
-                write!(f, "sext({}, {}, {})", value, from_bits, to_bits)
-            }
-            Self::ValueOf(value) => write!(f, "value_of({})", value),
-            Self::BytesOf {
-                value,
-                endianness,
-                count,
-            } => {
-                write!(f, "bytes_of({}, {:?}, {})", value, endianness, count)
-            }
-            Self::BitsOf {
-                value,
-                endianness,
-                count,
-            } => {
-                write!(f, "bits_of({}, {:?}, {})", value, endianness, count)
-            }
-            Self::Witness(hint) => write!(f, "witness({})", hint),
-        }
-    }
-}
-
-impl Debug for Expr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+    fn witness(&mut self, value: ExprId) -> ExprId {
+        self.intern(ExprNode::Witness(value))
     }
 }
 pub struct CSE {}
@@ -689,34 +510,34 @@ impl CSE {
         ssa: &HLFunction,
         cfg: &CFG,
     ) -> (
-        HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
+        HashMap<ExprId, Vec<(BlockId, usize, ValueId)>>,
         HashMap<Assertion, Vec<(BlockId, usize)>>,
     ) {
-        let mut result: HashMap<Expr, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
+        let mut interner = ExprInterner::default();
+        let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::new();
-        let mut exprs = HashMap::<ValueId, Expr>::new();
+        let mut exprs = HashMap::<ValueId, ExprId>::new();
 
-        fn get_expr(exprs: &HashMap<ValueId, Expr>, value_id: &ValueId) -> Expr {
+        fn get_expr(
+            exprs: &HashMap<ValueId, ExprId>,
+            interner: &mut ExprInterner,
+            value_id: &ValueId,
+        ) -> ExprId {
             exprs
-                .get(&value_id)
-                .cloned()
-                .unwrap_or(Expr::variable(*value_id))
+                .get(value_id)
+                .copied()
+                .unwrap_or_else(|| interner.variable(*value_id))
         }
 
         fn record_expr(
-            exprs: &mut HashMap<ValueId, Expr>,
-            result: &mut HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
+            exprs: &mut HashMap<ValueId, ExprId>,
+            result: &mut HashMap<ExprId, Vec<(BlockId, usize, ValueId)>>,
             block_id: BlockId,
             instruction_idx: usize,
             value_id: ValueId,
-            expr: Expr,
+            expr: ExprId,
         ) {
-            if expr.exceeds_node_budget(MAX_CSE_EXPR_NODES) {
-                exprs.insert(value_id, Expr::variable(value_id));
-                return;
-            }
-
-            exprs.insert(value_id, expr.clone());
+            exprs.insert(value_id, expr);
             result
                 .entry(expr)
                 .or_default()
@@ -729,19 +550,6 @@ impl CSE {
             instruction_idx: usize,
             assertion: Assertion,
         ) {
-            let exceeds_budget = match &assertion {
-                Assertion::Rangecheck { value, .. } => {
-                    value.exceeds_node_budget(MAX_CSE_EXPR_NODES)
-                }
-                Assertion::ByteLookup { key, flag } => {
-                    key.exceeds_node_budget(MAX_CSE_EXPR_NODES)
-                        || flag.exceeds_node_budget(MAX_CSE_EXPR_NODES)
-                }
-            };
-            if exceeds_budget {
-                return;
-            }
-
             assertions
                 .entry(assertion)
                 .or_default()
@@ -759,9 +567,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.add(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.add(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -777,9 +585,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.mul(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.mul(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -795,9 +603,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.div(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.div(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -813,9 +621,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.sub(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.sub(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -831,9 +639,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.eq(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.eq(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -849,9 +657,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.lt(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.lt(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -867,9 +675,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.modulo(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.modulo(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -885,9 +693,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.and(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.and(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -903,9 +711,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.or(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.or(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -921,9 +729,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.xor(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.xor(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -939,9 +747,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.shl(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.shl(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -957,9 +765,9 @@ impl CSE {
                         lhs,
                         rhs,
                     } => {
-                        let lhs_expr = get_expr(&exprs, lhs);
-                        let rhs_expr = get_expr(&exprs, rhs);
-                        let result_expr = lhs_expr.shr(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, lhs);
+                        let rhs_expr = get_expr(&exprs, &mut interner, rhs);
+                        let result_expr = interner.shr(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -974,9 +782,9 @@ impl CSE {
                         array,
                         index,
                     } => {
-                        let array_expr = get_expr(&exprs, array);
-                        let index_expr = get_expr(&exprs, index);
-                        let result_expr = array_expr.array_get(&index_expr);
+                        let array_expr = get_expr(&exprs, &mut interner, array);
+                        let index_expr = get_expr(&exprs, &mut interner, index);
+                        let result_expr = interner.array_get(array_expr, index_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -992,10 +800,10 @@ impl CSE {
                         if_t: then,
                         if_f: otherwise,
                     } => {
-                        let cond_expr = get_expr(&exprs, cond);
-                        let then_expr = get_expr(&exprs, then);
-                        let otherwise_expr = get_expr(&exprs, otherwise);
-                        let result_expr = cond_expr.select(&then_expr, &otherwise_expr);
+                        let cond_expr = get_expr(&exprs, &mut interner, cond);
+                        let then_expr = get_expr(&exprs, &mut interner, then);
+                        let otherwise_expr = get_expr(&exprs, &mut interner, otherwise);
+                        let result_expr = interner.select(cond_expr, then_expr, otherwise_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1010,7 +818,7 @@ impl CSE {
                         offset: index,
                         result_type: _,
                     } => {
-                        let result_expr = Expr::ReadGlobal(*index);
+                        let result_expr = interner.read_global(*index);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1025,8 +833,8 @@ impl CSE {
                         value,
                         target,
                     } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.cast(*target);
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.cast(value_expr, *target);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1042,8 +850,8 @@ impl CSE {
                         to_bits,
                         from_bits,
                     } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.truncate(*to_bits, *from_bits);
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.truncate(value_expr, *to_bits, *from_bits);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1059,8 +867,8 @@ impl CSE {
                         from_bits,
                         to_bits,
                     } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.sext(*from_bits, *to_bits);
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.sext(value_expr, *from_bits, *to_bits);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1077,8 +885,9 @@ impl CSE {
                         width,
                         source_width,
                     } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.bit_range(*offset, *width, *source_width);
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr =
+                            interner.bit_range(value_expr, *offset, *width, *source_width);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1089,8 +898,8 @@ impl CSE {
                         );
                     }
                     OpCode::ValueOf { result: r, value } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.value_of();
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.value_of(value_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1106,9 +915,9 @@ impl CSE {
                         var,
                     } => {
                         // Fold into Expr::Mul so MulConst dedups with BinaryArithOp::Mul.
-                        let lhs_expr = get_expr(&exprs, const_val);
-                        let rhs_expr = get_expr(&exprs, var);
-                        let result_expr = lhs_expr.mul(&rhs_expr);
+                        let lhs_expr = get_expr(&exprs, &mut interner, const_val);
+                        let rhs_expr = get_expr(&exprs, &mut interner, var);
+                        let result_expr = interner.mul(lhs_expr, rhs_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1124,8 +933,8 @@ impl CSE {
                         endianness,
                         count,
                     } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.bits_of(*endianness, *count);
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.bits_of(value_expr, *endianness, *count);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1146,8 +955,9 @@ impl CSE {
                         // so only the static `Bytes` case is keyed.
                         match radix {
                             Radix::Bytes => {
-                                let value_expr = get_expr(&exprs, value);
-                                let result_expr = value_expr.bytes_of(*endianness, *count);
+                                let value_expr = get_expr(&exprs, &mut interner, value);
+                                let result_expr =
+                                    interner.bytes_of(value_expr, *endianness, *count);
                                 record_expr(
                                     &mut exprs,
                                     &mut result,
@@ -1166,8 +976,8 @@ impl CSE {
                         pinned: false,
                     } => {
                         // Two non-pinned writes with the same hint can share a slot.
-                        let hint_expr = get_expr(&exprs, value);
-                        let result_expr = hint_expr.witness();
+                        let hint_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.witness(hint_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1187,7 +997,7 @@ impl CSE {
                     } => {}
                     OpCode::FreshWitness { .. } => {}
                     OpCode::Rangecheck { value, max_bits } => {
-                        let value_expr = get_expr(&exprs, value);
+                        let value_expr = get_expr(&exprs, &mut interner, value);
                         record_assertion(
                             &mut assertions,
                             block_id,
@@ -1203,8 +1013,8 @@ impl CSE {
                         args,
                         flag,
                     } if args.len() == 1 => {
-                        let key_expr = get_expr(&exprs, &args[0]);
-                        let flag_expr = get_expr(&exprs, flag);
+                        let key_expr = get_expr(&exprs, &mut interner, &args[0]);
+                        let flag_expr = get_expr(&exprs, &mut interner, flag);
                         record_assertion(
                             &mut assertions,
                             block_id,
@@ -1249,8 +1059,8 @@ impl CSE {
                     | OpCode::Spread { .. }
                     | OpCode::Unspread { .. } => {}
                     OpCode::Not { result: r, value } => {
-                        let value_expr = get_expr(&exprs, value);
-                        let result_expr = value_expr.not();
+                        let value_expr = get_expr(&exprs, &mut interner, value);
+                        let result_expr = interner.not(value_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1265,12 +1075,9 @@ impl CSE {
                         tuple,
                         idx,
                     } => {
-                        let tuple_expr = get_expr(&exprs, tuple);
-                        let index_expr = Expr::UConst {
-                            bits: 64,
-                            value: *idx as u128,
-                        };
-                        let result_expr = tuple_expr.tuple_get(&index_expr);
+                        let tuple_expr = get_expr(&exprs, &mut interner, tuple);
+                        let index_expr = interner.uconst(64, *idx as u128);
+                        let result_expr = interner.tuple_get(tuple_expr, index_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1285,10 +1092,7 @@ impl CSE {
                         value: cv,
                     } => match cv {
                         ConstValue::U(size, val) => {
-                            let expr = Expr::UConst {
-                                bits: *size,
-                                value: *val,
-                            };
+                            let expr = interner.uconst(*size, *val);
                             record_expr(
                                 &mut exprs,
                                 &mut result,
@@ -1299,10 +1103,7 @@ impl CSE {
                             );
                         }
                         ConstValue::I(size, val) => {
-                            let expr = Expr::IConst {
-                                bits: *size,
-                                value: *val,
-                            };
+                            let expr = interner.iconst(*size, *val);
                             record_expr(
                                 &mut exprs,
                                 &mut result,
@@ -1313,7 +1114,7 @@ impl CSE {
                             );
                         }
                         ConstValue::Field(val) => {
-                            let expr = Expr::fconst(*val);
+                            let expr = interner.fconst(*val);
                             record_expr(
                                 &mut exprs,
                                 &mut result,
