@@ -23,6 +23,11 @@ use crate::compiler::{
     passes::fix_double_jumps::ValueReplacements,
 };
 
+// Lowered bit-range gadgets can build very deep arithmetic trees. Keeping those
+// trees as CSE keys makes hashing/cloning dominate compilation, while matching
+// across such large expressions is not worth the cost.
+const MAX_CSE_EXPR_NODES: usize = 256;
+
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Expr {
     Add(Vec<Expr>),
@@ -339,6 +344,63 @@ impl Expr {
     pub fn witness(&self) -> Self {
         Self::Witness(Box::new(self.clone()))
     }
+
+    fn exceeds_node_budget(&self, budget: usize) -> bool {
+        fn visit(expr: &Expr, remaining: &mut usize) -> bool {
+            if *remaining == 0 {
+                return true;
+            }
+            *remaining -= 1;
+
+            match expr {
+                Expr::Add(exprs)
+                | Expr::Mul(exprs)
+                | Expr::And(exprs)
+                | Expr::Or(exprs)
+                | Expr::Xor(exprs) => exprs.iter().any(|expr| visit(expr, remaining)),
+                Expr::Div { lhs, rhs }
+                | Expr::Mod { lhs, rhs }
+                | Expr::Sub { lhs, rhs }
+                | Expr::Eq { lhs, rhs }
+                | Expr::Lt { lhs, rhs }
+                | Expr::Shl { lhs, rhs }
+                | Expr::Shr { lhs, rhs }
+                | Expr::ArrayGet {
+                    array: lhs,
+                    index: rhs,
+                } => visit(lhs, remaining) || visit(rhs, remaining),
+                Expr::BitRange { value, .. }
+                | Expr::Not(value)
+                | Expr::Cast { value, .. }
+                | Expr::Truncate { value, .. }
+                | Expr::SExt { value, .. }
+                | Expr::ValueOf(value)
+                | Expr::BytesOf { value, .. }
+                | Expr::BitsOf { value, .. }
+                | Expr::Witness(value) => visit(value, remaining),
+                Expr::Select {
+                    condition,
+                    then,
+                    otherwise,
+                } => {
+                    visit(condition, remaining)
+                        || visit(then, remaining)
+                        || visit(otherwise, remaining)
+                }
+                Expr::TupleGet { tuple, index } => {
+                    visit(tuple, remaining) || visit(index, remaining)
+                }
+                Expr::FConst(_)
+                | Expr::UConst { .. }
+                | Expr::IConst { .. }
+                | Expr::Variable(_)
+                | Expr::ReadGlobal(_) => false,
+            }
+        }
+
+        let mut remaining = budget;
+        visit(self, &mut remaining)
+    }
 }
 
 impl Display for Expr {
@@ -641,6 +703,51 @@ impl CSE {
                 .unwrap_or(Expr::variable(*value_id))
         }
 
+        fn record_expr(
+            exprs: &mut HashMap<ValueId, Expr>,
+            result: &mut HashMap<Expr, Vec<(BlockId, usize, ValueId)>>,
+            block_id: BlockId,
+            instruction_idx: usize,
+            value_id: ValueId,
+            expr: Expr,
+        ) {
+            if expr.exceeds_node_budget(MAX_CSE_EXPR_NODES) {
+                exprs.insert(value_id, Expr::variable(value_id));
+                return;
+            }
+
+            exprs.insert(value_id, expr.clone());
+            result
+                .entry(expr)
+                .or_default()
+                .push((block_id, instruction_idx, value_id));
+        }
+
+        fn record_assertion(
+            assertions: &mut HashMap<Assertion, Vec<(BlockId, usize)>>,
+            block_id: BlockId,
+            instruction_idx: usize,
+            assertion: Assertion,
+        ) {
+            let exceeds_budget = match &assertion {
+                Assertion::Rangecheck { value, .. } => {
+                    value.exceeds_node_budget(MAX_CSE_EXPR_NODES)
+                }
+                Assertion::ByteLookup { key, flag } => {
+                    key.exceeds_node_budget(MAX_CSE_EXPR_NODES)
+                        || flag.exceeds_node_budget(MAX_CSE_EXPR_NODES)
+                }
+            };
+            if exceeds_budget {
+                return;
+            }
+
+            assertions
+                .entry(assertion)
+                .or_default()
+                .push((block_id, instruction_idx));
+        }
+
         for block_id in cfg.get_domination_pre_order() {
             let block = ssa.get_block(block_id);
 
@@ -655,12 +762,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.add(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Mul,
@@ -671,12 +780,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.mul(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Div,
@@ -687,12 +798,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.div(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Sub,
@@ -703,12 +816,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.sub(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::Cmp {
                         kind: CmpKind::Eq,
@@ -719,12 +834,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.eq(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::Cmp {
                         kind: CmpKind::Lt,
@@ -735,12 +852,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.lt(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Mod,
@@ -751,12 +870,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.modulo(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::And,
@@ -767,12 +888,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.and(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Or,
@@ -783,12 +906,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.or(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Xor,
@@ -799,12 +924,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.xor(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Shl,
@@ -815,12 +942,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.shl(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Shr,
@@ -831,12 +960,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, lhs);
                         let rhs_expr = get_expr(&exprs, rhs);
                         let result_expr = lhs_expr.shr(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::ArrayGet {
                         result: r,
@@ -846,12 +977,14 @@ impl CSE {
                         let array_expr = get_expr(&exprs, array);
                         let index_expr = get_expr(&exprs, index);
                         let result_expr = array_expr.array_get(&index_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::Select {
                         result: r,
@@ -863,12 +996,14 @@ impl CSE {
                         let then_expr = get_expr(&exprs, then);
                         let otherwise_expr = get_expr(&exprs, otherwise);
                         let result_expr = cond_expr.select(&then_expr, &otherwise_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::ReadGlobal {
                         result: r,
@@ -876,12 +1011,14 @@ impl CSE {
                         result_type: _,
                     } => {
                         let result_expr = Expr::ReadGlobal(*index);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::Cast {
                         result: r,
@@ -890,12 +1027,14 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.cast(*target);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::Truncate {
                         result: r,
@@ -905,12 +1044,14 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.truncate(*to_bits, *from_bits);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::SExt {
                         result: r,
@@ -920,12 +1061,14 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.sext(*from_bits, *to_bits);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::BitRange {
                         result: r,
@@ -936,22 +1079,26 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.bit_range(*offset, *width, *source_width);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::ValueOf { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.value_of();
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::MulConst {
                         result: r,
@@ -962,12 +1109,14 @@ impl CSE {
                         let lhs_expr = get_expr(&exprs, const_val);
                         let rhs_expr = get_expr(&exprs, var);
                         let result_expr = lhs_expr.mul(&rhs_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::ToBits {
                         result: r,
@@ -977,12 +1126,14 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.bits_of(*endianness, *count);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::ToRadix {
                         result: r,
@@ -997,12 +1148,14 @@ impl CSE {
                             Radix::Bytes => {
                                 let value_expr = get_expr(&exprs, value);
                                 let result_expr = value_expr.bytes_of(*endianness, *count);
-                                exprs.insert(*r, result_expr.clone());
-                                result.entry(result_expr).or_default().push((
+                                record_expr(
+                                    &mut exprs,
+                                    &mut result,
                                     block_id,
                                     instruction_idx,
                                     *r,
-                                ));
+                                    result_expr,
+                                );
                             }
                             Radix::Dyn(_) => {}
                         }
@@ -1015,12 +1168,14 @@ impl CSE {
                         // Two non-pinned writes with the same hint can share a slot.
                         let hint_expr = get_expr(&exprs, value);
                         let result_expr = hint_expr.witness();
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     // Pinned WriteWitness and FreshWitness must not merge with anything;
                     // skipping the Expr insert leaves `get_expr` to fall back to a
@@ -1033,13 +1188,15 @@ impl CSE {
                     OpCode::FreshWitness { .. } => {}
                     OpCode::Rangecheck { value, max_bits } => {
                         let value_expr = get_expr(&exprs, value);
-                        assertions
-                            .entry(Assertion::Rangecheck {
+                        record_assertion(
+                            &mut assertions,
+                            block_id,
+                            instruction_idx,
+                            Assertion::Rangecheck {
                                 value: value_expr,
                                 max_bits: *max_bits,
-                            })
-                            .or_default()
-                            .push((block_id, instruction_idx));
+                            },
+                        );
                     }
                     OpCode::Lookup {
                         target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
@@ -1048,13 +1205,15 @@ impl CSE {
                     } if args.len() == 1 => {
                         let key_expr = get_expr(&exprs, &args[0]);
                         let flag_expr = get_expr(&exprs, flag);
-                        assertions
-                            .entry(Assertion::ByteLookup {
+                        record_assertion(
+                            &mut assertions,
+                            block_id,
+                            instruction_idx,
+                            Assertion::ByteLookup {
                                 key: key_expr,
                                 flag: flag_expr,
-                            })
-                            .or_default()
-                            .push((block_id, instruction_idx));
+                            },
+                        );
                     }
                     OpCode::WriteWitness { result: None, .. }
                     | OpCode::Constrain { .. }
@@ -1092,12 +1251,14 @@ impl CSE {
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, value);
                         let result_expr = value_expr.not();
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::TupleProj {
                         result: r,
@@ -1110,12 +1271,14 @@ impl CSE {
                             value: *idx as u128,
                         };
                         let result_expr = tuple_expr.tuple_get(&index_expr);
-                        exprs.insert(*r, result_expr.clone());
-                        result.entry(result_expr).or_default().push((
+                        record_expr(
+                            &mut exprs,
+                            &mut result,
                             block_id,
                             instruction_idx,
                             *r,
-                        ));
+                            result_expr,
+                        );
                     }
                     OpCode::Const {
                         result: r,
@@ -1126,30 +1289,39 @@ impl CSE {
                                 bits: *size,
                                 value: *val,
                             };
-                            exprs.insert(*r, expr.clone());
-                            result
-                                .entry(expr)
-                                .or_default()
-                                .push((block_id, instruction_idx, *r));
+                            record_expr(
+                                &mut exprs,
+                                &mut result,
+                                block_id,
+                                instruction_idx,
+                                *r,
+                                expr,
+                            );
                         }
                         ConstValue::I(size, val) => {
                             let expr = Expr::IConst {
                                 bits: *size,
                                 value: *val,
                             };
-                            exprs.insert(*r, expr.clone());
-                            result
-                                .entry(expr)
-                                .or_default()
-                                .push((block_id, instruction_idx, *r));
+                            record_expr(
+                                &mut exprs,
+                                &mut result,
+                                block_id,
+                                instruction_idx,
+                                *r,
+                                expr,
+                            );
                         }
                         ConstValue::Field(val) => {
                             let expr = Expr::fconst(*val);
-                            exprs.insert(*r, expr.clone());
-                            result
-                                .entry(expr)
-                                .or_default()
-                                .push((block_id, instruction_idx, *r));
+                            record_expr(
+                                &mut exprs,
+                                &mut result,
+                                block_id,
+                                instruction_idx,
+                                *r,
+                                expr,
+                            );
                         }
                         ConstValue::FnPtr(_) => {}
                     },
