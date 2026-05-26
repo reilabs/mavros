@@ -6,7 +6,7 @@ use crate::compiler::{
     passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BlockId, Terminator, ValueId,
-        hlssa::{ConstValue, HLSSA, OpCode, builder::HLSSABuilder},
+        hlssa::{Constant, HLSSA, builder::HLSSABuilder},
     },
 };
 
@@ -56,22 +56,18 @@ impl ConditionPropagation {
                         .iter()
                         .filter(|(cond_block, _, _)| func_cfg.dominates(*cond_block, block_id));
 
-                    let mut const_opcodes = Vec::new();
                     for (_, vid, value) in dominated {
-                        let const_id = fb.ssa.fresh_value();
-                        const_opcodes.push(OpCode::Const {
-                            result: const_id,
-                            value: ConstValue::U(1, if *value { 1 } else { 0 }),
-                        });
+                        let const_id = fb.ssa.add_const(Constant::U(1, if *value { 1 } else { 0 }));
                         replacements.insert(*vid, const_id);
                     }
 
                     let block = fb.function.get_block_mut(block_id);
                     let instructions = block.take_instructions();
-                    let mut new_instructions = const_opcodes;
-                    new_instructions.extend(instructions.iter().cloned());
-                    for instruction in new_instructions.iter_mut() {
-                        replacements.replace_inputs(instruction);
+                    let mut new_instructions = Vec::with_capacity(instructions.len());
+                    for instr in instructions {
+                        let mut instr = instr;
+                        replacements.replace_inputs(&mut instr);
+                        new_instructions.push(instr);
                     }
                     block.put_instructions(new_instructions);
                     replacements.replace_terminator(block.get_terminator_mut());

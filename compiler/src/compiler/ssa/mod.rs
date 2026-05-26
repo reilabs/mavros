@@ -8,11 +8,38 @@ pub mod id;
 pub mod llssa;
 pub mod traits;
 
+use bimap::BiHashMap;
 use itertools::Itertools;
-use std::{collections::HashMap, fmt::Debug, vec};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    hash::Hash,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    vec,
+};
 
 pub use id::{BlockId, FunctionId, ValueId};
 pub use traits::{Instruction, SSAAnotator, SSAType};
+
+// TYPE ALIASES
+// ================================================================================================
+
+/// Storage for constants inside the SSA, maintaining a 1:1 mapping between value and its
+/// identifier.
+///
+/// Wrapped in a [`RwLock`] so constants can be interned and read through a shared `&SSA`, and the
+/// values are `Arc`-shared so reads can hand back owned handles without keeping the lock held. The
+/// lock is an implementation detail: all access goes through [`SSA`] methods that acquire and
+/// release it internally, so callers never see a guard.
+pub type SSAConstants<C> = RwLock<BiHashMap<ValueId, Arc<C>>>;
+
+/// An owned, lock-free snapshot of the constants (the `ValueId -> value` direction only), handed
+/// out by [`SSA::const_snapshot`] so callers can iterate and look up constants without holding the
+/// constants lock.
+pub type SSAConstantsSnapshot<C> = HashMap<ValueId, Arc<C>>;
 
 // SSA
 // ================================================================================================
@@ -23,9 +50,14 @@ pub use traits::{Instruction, SSAAnotator, SSAType};
 /// - `Op` is the type of instructions in the SSA, allowing customization of the instruction set
 ///   over which the IR is operating.
 /// - `Ty` is the type system for the SSA, describing the valid types and their interactions.
-/// - `Cn` is the type of the constant storage for the SSA, providing an arbitrary interface.
-#[derive(Clone)]
-pub struct SSA<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
+/// - `C` is the value type stored in the SSA's constants side-table, which maps each constant
+///   `ValueId` to its value bidirectionally.
+///
+/// It is assumed that all `ValueId`s refer to unique values within the program. If one identifier
+/// is used to refer to two different values, then miscompilation may occur. All sources of value
+/// identifiers should either re-use identifiers known to be unique, or be issued (however
+/// transitively) from [`SSA::fresh_value`].
+pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// A mapping from function identifiers to true functions contained in the SSA.
     functions: HashMap<FunctionId, Function<Op, Ty>>,
 
@@ -49,14 +81,35 @@ pub struct SSA<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> {
     next_function_id: u64,
 
     /// A monotonic counter for `ValueId`s, globally unique within this SSA.
-    next_value_id: u64,
+    ///
+    /// Atomic so passes can mint fresh IDs from a shared `&SSA` (e.g. in the specializer) without
+    /// needing exclusive access.
+    next_value_id: AtomicU64,
 
-    /// Side-table holding constant data for the SSA.
-    constants: Cn,
+    /// Bidirectional mapping between constant `ValueId`s and their values. The bijection is
+    /// maintained by routing all insertions through [`SSA::add_const`], which interns by value.
+    constants: SSAConstants<C>,
 }
 
-impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
-    pub fn with_main(name: String, constants: Cn) -> Self {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<Op, Ty, C> {
+    /// Take care when cloning the SSA as both original and clone will have the same state for the
+    /// fresh variable allocation.
+    fn clone(&self) -> Self {
+        SSA {
+            functions: self.functions.clone(),
+            global_types: self.global_types.clone(),
+            globals_init_fn: self.globals_init_fn,
+            globals_deinit_fn: self.globals_deinit_fn,
+            main_id: self.main_id,
+            next_function_id: self.next_function_id,
+            next_value_id: AtomicU64::new(self.next_value_id.load(Ordering::Relaxed)),
+            constants: RwLock::new(self.constants.read().unwrap().clone()),
+        }
+    }
+}
+
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
+    pub fn with_main(name: String) -> Self {
         let main_function = Function::<Op, Ty>::empty(name);
         let main_id = FunctionId(0);
         let mut functions = HashMap::new();
@@ -68,17 +121,17 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
             globals_deinit_fn: None,
             main_id,
             next_function_id: 1,
-            next_value_id: 0,
-            constants,
+            next_value_id: AtomicU64::new(0),
+            constants: RwLock::new(BiHashMap::new()),
         }
     }
 }
 
-impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
     pub fn prepare_rebuild(
         self,
     ) -> (
-        SSA<Op, Ty, Cn>,
+        SSA<Op, Ty, C>,
         HashMap<FunctionId, Function<Op, Ty>>,
         Vec<Ty>,
     ) {
@@ -98,11 +151,37 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
         )
     }
 
+    /// Inserts the provided `function` into the SSA.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure that `function` does not reference any value that is not available in the
+    /// SSA, and that all values in the function have unique identifiers.
     pub fn insert_function(&mut self, function: Function<Op, Ty>) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
         self.functions.insert(new_id, function);
         new_id
+    }
+
+    /// Remove a function from the SSA, returning it if present.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure no surviving instruction, constant, or SSA-level reference still
+    /// references `id`.
+    pub fn delete_function(&mut self, id: FunctionId) -> Option<Function<Op, Ty>> {
+        self.functions.remove(&id)
+    }
+
+    /// Drop functions for which `f` returns `false`.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure no surviving instruction, constant, or SSA-level reference still
+    /// references the identifier of any removed function.
+    pub fn retain_functions(&mut self, mut f: impl FnMut(FunctionId, &Function<Op, Ty>) -> bool) {
+        self.functions.retain(|id, fun| f(*id, fun));
     }
 
     pub fn set_entry_point(&mut self, id: FunctionId) {
@@ -113,12 +192,18 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
         self.main_id
     }
 
+    /// Gets a mutable reference to the main function or panics if no main function exists.
+    ///
+    /// # Safety
+    ///
+    /// All mutations made to the main function must ensure the internal consistency of the SSA.
     pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
             .get_mut(&self.main_id)
             .expect("Main function should exist")
     }
 
+    /// Gets a reference to the main function or panics if no main function exists.
     pub fn get_main(&self) -> &Function<Op, Ty> {
         self.functions
             .get(&self.main_id)
@@ -129,10 +214,21 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
         self.functions.get(&id).expect("Function should exist")
     }
 
+    /// Gets a mutable reference to a function in the SSA or panics if no such function exists.
+    ///
+    /// # Safety
+    ///
+    /// Any mutations made to the returned function must ensure the internal consistency of the SSA.
     pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function<Op, Ty> {
         self.functions.get_mut(&id).expect("Function should exist")
     }
 
+    /// Removes the provided function from the SSA or panics if it does not exist.
+    ///
+    /// # Safety
+    ///
+    /// The caller is responsible for fixing any references to this function in the SSA that may be
+    /// left dangling by this operation.
     pub fn take_function(&mut self, id: FunctionId) -> Function<Op, Ty> {
         self.functions.remove(&id).expect("Function should exist")
     }
@@ -149,25 +245,99 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
         new_id
     }
 
+    /// Creates a unique copy of the function identified by `function_id` under the returned
+    /// function identifier.
+    ///
+    /// The copy has been inserted into the SSA, and while it contains the same block identifiers,
+    /// all value identifiers barring those for constants are now unique to the new occurrences.
+    pub fn duplicate_function(&mut self, function_id: FunctionId) -> FunctionId {
+        let mut cloned = self
+            .functions
+            .get(&function_id)
+            .expect("Function should exist")
+            .clone();
+
+        // Phase 1: collect every ValueId appearing anywhere in the function, then
+        // allocate a fresh id for each unique non-constant one.
+        let mut all_ids: Vec<ValueId> = Vec::new();
+        for (_, block) in cloned.get_blocks() {
+            for (v, _) in block.get_parameters() {
+                all_ids.push(*v);
+            }
+            for instr in block.get_instructions() {
+                all_ids.extend(instr.get_inputs().copied());
+                all_ids.extend(instr.get_results().copied());
+            }
+            if let Some(term) = block.get_terminator() {
+                match term {
+                    Terminator::Jmp(_, args) => all_ids.extend(args.iter().copied()),
+                    Terminator::JmpIf(cond, _, _) => all_ids.push(*cond),
+                    Terminator::Return(vs) => all_ids.extend(vs.iter().copied()),
+                }
+            }
+        }
+        let mut remap: HashMap<ValueId, ValueId> = HashMap::new();
+        for v in all_ids {
+            if remap.contains_key(&v) || self.is_const(v) {
+                continue;
+            }
+            let fresh = self.fresh_value();
+            remap.insert(v, fresh);
+        }
+
+        // Phase 2: apply the remap to every ValueId reference in the cloned function.
+        for (_, block) in cloned.get_blocks_mut() {
+            for (v, _) in block.get_parameters_mut() {
+                if let Some(&new_id) = remap.get(v) {
+                    *v = new_id;
+                }
+            }
+            for instr in block.get_instructions_mut() {
+                for op in instr.get_operands_mut() {
+                    if let Some(&new_id) = remap.get(op) {
+                        *op = new_id;
+                    }
+                }
+            }
+            if block.get_terminator().is_some() {
+                match block.get_terminator_mut() {
+                    Terminator::Jmp(_, args) => {
+                        for v in args.iter_mut() {
+                            if let Some(&new_id) = remap.get(v) {
+                                *v = new_id;
+                            }
+                        }
+                    }
+                    Terminator::JmpIf(cond, _, _) => {
+                        if let Some(&new_id) = remap.get(cond) {
+                            *cond = new_id;
+                        }
+                    }
+                    Terminator::Return(vs) => {
+                        for v in vs.iter_mut() {
+                            if let Some(&new_id) = remap.get(v) {
+                                *v = new_id;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.insert_function(cloned)
+    }
+
     /// Allocate a fresh `ValueId` from the SSA-wide counter.
-    pub fn fresh_value(&mut self) -> ValueId {
-        let value_id = ValueId(self.next_value_id);
-        self.next_value_id += 1;
-        value_id
+    ///
+    /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
+    /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    pub fn fresh_value(&self) -> ValueId {
+        ValueId(self.next_value_id.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Upper bound on `ValueId`s issued so far. Useful for sizing dense per-value tables.
     pub fn value_num_bound(&self) -> usize {
-        self.next_value_id as usize
-    }
-
-    /// Advance the value counter to `end` if it is currently lower. Used by passes that
-    /// allocate `ValueId`s into a transient buffer (see e.g. the specializer) and want to
-    /// reconcile the buffer's IDs back into the SSA.
-    pub fn reserve_values_up_to(&mut self, end: u64) {
-        if end > self.next_value_id {
-            self.next_value_id = end;
-        }
+        self.next_value_id.load(Ordering::Relaxed) as usize
     }
 
     pub fn iter_functions(&self) -> impl Iterator<Item = (&FunctionId, &Function<Op, Ty>)> {
@@ -212,23 +382,118 @@ impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug> SSA<Op, Ty, Cn> {
         self.globals_deinit_fn
     }
 
-    pub fn const_storage(&self) -> &Cn {
-        &self.constants
+    /// Return a shared handle to the constant bound to `vid`, if any.
+    ///
+    /// The constants lock is acquired and released internally, so the caller never holds it.
+    pub fn get_const(&self, vid: ValueId) -> Option<Arc<C>> {
+        self.constants.read().unwrap().get_by_left(&vid).cloned()
     }
 
-    pub fn const_storage_mut(&mut self) -> &mut Cn {
-        &mut self.constants
+    /// Whether `vid` names a constant.
+    pub fn is_const(&self, vid: ValueId) -> bool {
+        self.constants.read().unwrap().contains_left(&vid)
+    }
+
+    /// Take an owned, lock-free snapshot of the constants (`ValueId -> value`).
+    ///
+    /// The values are `Arc`-shared, so cloning the table is cheap. The lock is released before
+    /// returning, letting callers iterate and look up constants without holding it.
+    pub fn const_snapshot(&self) -> SSAConstantsSnapshot<C> {
+        self.constants
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(vid, cv)| (*vid, cv.clone()))
+            .collect()
+    }
+
+    /// Store a constant in the SSA.
+    ///
+    /// If `value` is already present in the constants table, returns its existing `ValueId`;
+    /// otherwise allocates a fresh `ValueId`, inserts the pair, and returns it. This is the only
+    /// safe way to introduce a constant. Takes `&self` so constants can be interned through a
+    /// shared `&SSA`.
+    pub fn add_const(&self, value: C) -> ValueId {
+        // Fast path: re-interning an existing constant is by far the common case
+        // (`materialize_constants` re-emits the whole table on every function entry). Resolve those
+        // hits under a shared read lock so they don't serialize on the write lock.
+        if let Some(&id) = self.constants.read().unwrap().get_by_right(&value) {
+            return id;
+        }
+
+        // Slow path: a genuine miss. Take the write lock and re-check, since another writer may have
+        // inserted between releasing the read lock and acquiring the write lock. Holding the write
+        // lock across the re-check and the insert keeps them atomic; an intervening reader/writer
+        // cannot observe a half-updated table.
+        let mut constants = self.constants.write().unwrap();
+        if let Some(&id) = constants.get_by_right(&value) {
+            return id;
+        }
+        let id = self.fresh_value();
+        constants.insert(id, Arc::new(value));
+        id
+    }
+
+    /// Remove the constant bound to `vid` from the table, returning its value if present and
+    /// panicking if not.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure the SSA no longer references `vid` lest a dangling reference be created.
+    pub fn remove_const_by_id(&self, vid: ValueId) -> Arc<C> {
+        self.constants
+            .write()
+            .unwrap()
+            .remove_by_left(&vid)
+            .map(|(_, v)| v)
+            .expect("Constant should exist")
+    }
+
+    /// Drop constants for which `f` returns `false`.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure the SSA does not reference any removed value ids to avoid creating
+    /// dangling references.
+    pub fn retain_constants(&self, mut f: impl FnMut(&ValueId, &Arc<C>) -> bool) {
+        self.constants.write().unwrap().retain(|vid, cv| f(vid, cv));
+    }
+
+    /// Visit every constant in place, without cloning the table.
+    ///
+    /// Holds the constants read lock for the duration of the walk and hands each
+    /// `(&ValueId, &Arc<C>)` to `f`. Prefer this over [`SSA::const_snapshot`] when you only need a
+    /// single pass and do not need to keep the constants around afterwards.
+    ///
+    /// `f` must not call any method that mutates the constants table (e.g. [`SSA::add_const`],
+    /// [`SSA::retain_constants`]); doing so would deadlock on the read lock held here.
+    pub fn for_each_const(&self, mut f: impl FnMut(&ValueId, &Arc<C>)) {
+        for (vid, cv) in self.constants.read().unwrap().iter() {
+            f(vid, cv);
+        }
     }
 }
 
-impl<Op: Instruction, Ty: SSAType, C: Clone + Debug> SSA<Op, Ty, C> {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
     pub fn to_string(&self, value_annotator: &dyn SSAAnotator) -> String {
         let func_name = |id: FunctionId| self.get_function(id).get_name().to_string();
-        self.functions
+        let functions = self
+            .functions
             .iter()
             .sorted_by_key(|(fn_id, _)| fn_id.0)
             .map(|(fn_id, func)| func.to_string(&func_name, *fn_id, value_annotator))
-            .join("\n\n")
+            .join("\n\n");
+        let const_guard = self.constants.read().unwrap();
+        if const_guard.is_empty() {
+            functions
+        } else {
+            let constants = const_guard
+                .iter()
+                .sorted_by_key(|(vid, _)| vid.0)
+                .map(|(vid, cv)| format!("  v{} = {:?}", vid.0, cv))
+                .join("\n");
+            format!("constants:\n{}\n\n{}", constants, functions)
+        }
     }
 }
 
@@ -635,3 +900,27 @@ impl Terminator {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct DefaultSSAAnnotator;
 impl SSAAnotator for DefaultSSAAnnotator {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::compiler::ssa::hlssa::{Constant, HLSSA};
+
+    /// `for_each_const` visits every interned constant exactly once, in place.
+    #[test]
+    fn for_each_const_visits_all() {
+        let ssa = HLSSA::with_main("main".to_string());
+        let a = ssa.add_const(Constant::U(8, 1));
+        let b = ssa.add_const(Constant::U(8, 2));
+
+        let mut seen = HashMap::new();
+        ssa.for_each_const(|vid, cv| {
+            seen.insert(*vid, cv.as_ref().clone());
+        });
+
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.get(&a), Some(&Constant::U(8, 1)));
+        assert_eq!(seen.get(&b), Some(&Constant::U(8, 2)));
+    }
+}

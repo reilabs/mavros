@@ -13,10 +13,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
+    passes::fix_double_jumps::ValueReplacements,
     ssa::{
         BlockId, FunctionId, Terminator, ValueId,
         hlssa::{
-            CallTarget, ConstValue, HLSSA, OpCode, Type, TypeExpr,
+            CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLEmitter, HLSSABuilder},
         },
     },
@@ -47,23 +48,9 @@ type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
 fn run_defunctionalize(ssa: &mut HLSSA) {
     // Check if there are any FnPtrs at all
     let has_fn_ptrs = ssa
-        .get_function_ids()
-        .collect::<Vec<_>>()
-        .iter()
-        .any(|fid| {
-            let func = ssa.get_function(*fid);
-            func.get_blocks().any(|(_, block)| {
-                block.get_instructions().any(|i| {
-                    matches!(
-                        i,
-                        OpCode::Const {
-                            value: ConstValue::FnPtr(_),
-                            ..
-                        }
-                    )
-                })
-            })
-        });
+        .const_snapshot()
+        .values()
+        .any(|cv| matches!(cv.as_ref(), Constant::FnPtr(_)));
     if !has_fn_ptrs {
         return;
     }
@@ -126,27 +113,27 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 3: Transformation
 
-    // 3a. Replace FnPtrConst → UConst(32, ...) in all functions
-    let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
-    for fid in &func_ids {
-        let func = ssa.get_function_mut(*fid);
-        for (_, block) in func.get_blocks_mut() {
-            for instruction in block.get_instructions_mut() {
-                if let OpCode::Const {
-                    result,
-                    value: ConstValue::FnPtr(fn_id),
-                } = instruction
-                {
-                    *instruction = OpCode::Const {
-                        result: *result,
-                        value: ConstValue::U(32, fn_id.0 as u128),
-                    };
-                }
-            }
-        }
+    // 3a. Intern a `U(32, fn_id)` constant for every FnPtr in storage, build a remap from each
+    // FnPtr `ValueId` to its canonical U-typed `ValueId`, and remove the FnPtr entries. The
+    // remap is applied globally in phase 3d below, after `Call::Dynamic` rewriting in 3b has
+    // run on the still-original operands.
+    let fnptr_entries: Vec<(ValueId, FunctionId)> = ssa
+        .const_snapshot()
+        .iter()
+        .filter_map(|(vid, cv)| match cv.as_ref() {
+            Constant::FnPtr(fn_id) => Some((*vid, *fn_id)),
+            _ => None,
+        })
+        .collect();
+    let mut fnptr_remap = ValueReplacements::new();
+    for (fnptr_vid, fn_id) in &fnptr_entries {
+        let canon = ssa.add_const(Constant::U(32, fn_id.0 as u128));
+        fnptr_remap.insert(*fnptr_vid, canon);
     }
 
-    // 3b. Replace CallTarget::Dynamic → CallTarget::Static(dispatch_fn)
+    // 3b. Replace CallTarget::Dynamic → CallTarget::Static(dispatch_fn). The lookup uses the
+    // original FnPtr vid (still present in the IR at this point); the emitted dispatcher Call
+    // carries `fn_ptr_val` as args[0], which is remapped to the canonical vid by phase 3d.
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
         let func = ssa.get_function(fid);
@@ -167,6 +154,8 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
         let func = ssa.get_function(fid);
         let block_ids: Vec<BlockId> = func.get_blocks().map(|(bid, _)| *bid).collect();
+        // Safe as we only take and replace contents, and never duplicate them, ensuring the
+        // uniqueness of value identifiers.
         let func = ssa.get_function_mut(fid);
         for bid in block_ids {
             let block = func.get_block_mut(bid);
@@ -206,9 +195,22 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         }
     }
 
+    // 3d. Apply the FnPtr → U(32, ...) operand remap globally. This is the operand-rewriting
+    // step that used to be implicit when the FnPtr entry was rebound in place at the same vid.
+    for (_, func) in ssa.iter_functions_mut() {
+        for (_, block) in func.get_blocks_mut() {
+            for instr in block.get_instructions_mut() {
+                fnptr_remap.replace_inputs(instr);
+            }
+            fnptr_remap.replace_terminator(block.get_terminator_mut());
+        }
+    }
+
     // 3c. Replace TypeExpr::Function → TypeExpr::U(32) everywhere
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
+        // Safe as we only take and replace contents of the function and never duplicate them,
+        // ensuring the uniqueness of value identifiers.
         let func = ssa.get_function_mut(fid);
 
         let mut returns = func.take_returns();
@@ -291,19 +293,19 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         }
     }
 
-    // Seed from FnPtr consts
+    // Seed from FnPtr constants in storage. They are module-level — visible to every function
+    // that references them — so seed under each function id.
+    let fnptr_constants: Vec<(ValueId, FunctionId)> = ssa
+        .const_snapshot()
+        .iter()
+        .filter_map(|(vid, cv)| match cv.as_ref() {
+            Constant::FnPtr(fn_id) => Some((*vid, *fn_id)),
+            _ => None,
+        })
+        .collect();
     for &fid in &func_ids {
-        let func = ssa.get_function(fid);
-        for (_, block) in func.get_blocks() {
-            for instruction in block.get_instructions() {
-                if let OpCode::Const {
-                    result,
-                    value: ConstValue::FnPtr(fn_id),
-                } = instruction
-                {
-                    reaching.entry((fid, *result)).or_default().insert(*fn_id);
-                }
-            }
+        for (vid, target) in &fnptr_constants {
+            reaching.entry((fid, *vid)).or_default().insert(*target);
         }
     }
 

@@ -125,7 +125,6 @@ impl DCE {
             | OpCode::ReadGlobal { .. }
             | OpCode::MkTuple { .. }
             | OpCode::ValueOf { .. }
-            | OpCode::Const { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => false,
             OpCode::Guard { inner, .. } => self.is_initially_live(inner.as_ref()),
@@ -404,8 +403,20 @@ impl DCE {
             }
         }
 
+        // Sweep the module-level constant storage: a constant is live iff some live instruction
+        // (in any function) references its `ValueId`.
+        let all_live: HashSet<ValueId> = live_values
+            .values()
+            .flat_map(|set| set.iter().copied())
+            .collect();
+        // Safe to do as we ensure that all retained constants are live, and hence the dropped ones
+        // have no reachable references.
+        ssa.retain_constants(|vid, _| all_live.contains(vid));
+
         for function_id in function_ids {
             let function_cfg = cfg.get_function_cfg(function_id);
+            // Safe as a function is replaced under the same ID after processing, ensuring that
+            // there are no dangling references left.
             let mut function = ssa.take_function(function_id);
             let entry_id = function.get_entry_id();
 
