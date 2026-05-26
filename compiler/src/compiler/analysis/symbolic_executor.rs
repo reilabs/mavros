@@ -526,11 +526,7 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::hlssa::OpCode::DropGlobal { global } => {
                         globals[*global] = None;
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Lookup {
-                        target,
-                        args,
-                        flag,
-                    } => {
+                    crate::compiler::ssa::hlssa::OpCode::Lookup { target, args, flag } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
@@ -543,11 +539,7 @@ impl SymbolicExecutor {
                         let flag_value = scope[flag].clone();
                         ctx.lookup(target, args, flag_value);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::DLookup {
-                        target,
-                        args,
-                        flag,
-                    } => {
+                    crate::compiler::ssa::hlssa::OpCode::DLookup { target, args, flag } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),

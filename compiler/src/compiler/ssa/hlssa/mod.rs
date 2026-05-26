@@ -472,11 +472,7 @@ impl Instruction for OpCode {
             OpCode::Constrain { a, b, c } => {
                 format!("constrain_r1c(v{} * v{} - v{} == 0)", a.0, b.0, c.0)
             }
-            OpCode::Lookup {
-                target,
-                args,
-                flag,
-            } => {
+            OpCode::Lookup { target, args, flag } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let target_str = match target {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
@@ -504,11 +500,7 @@ impl Instruction for OpCode {
                 };
                 format!("∂{} / ∂v{} += v{}", matrix_str, result.0, value.0)
             }
-            OpCode::DLookup {
-                target,
-                args,
-                flag,
-            } => {
+            OpCode::DLookup { target, args, flag } => {
                 let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let target_str = match target {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
@@ -516,10 +508,7 @@ impl Instruction for OpCode {
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                     LookupTarget::Spread(n) => format!("spread({})", n),
                 };
-                format!(
-                    "∂lookup({}, ({}), flag=v{})",
-                    target_str, args_str, flag.0
-                )
+                format!("∂lookup({}, ({}), flag=v{})", target_str, args_str, flag.0)
             }
             OpCode::MkSeq {
                 result,
@@ -966,16 +955,7 @@ impl Instruction for OpCode {
                 offset: _,
                 result_type: _,
             } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                args,
-                flag,
-            }
-            | Self::DLookup {
-                target,
-                args,
-                flag,
-            } => {
+            Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
                     LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
@@ -1308,16 +1288,7 @@ impl Instruction for OpCode {
                 offset: _,
                 result_type: _,
             } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                args,
-                flag,
-            }
-            | Self::DLookup {
-                target,
-                args,
-                flag,
-            } => {
+            Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
                     LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
@@ -1461,16 +1432,7 @@ impl Instruction for OpCode {
                 ret_vec.extend(args_vec);
                 ret_vec.into_iter()
             }
-            Self::Lookup {
-                target,
-                args,
-                flag,
-            }
-            | Self::DLookup {
-                target,
-                args,
-                flag,
-            } => {
+            Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
                     LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}

@@ -337,12 +337,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
 
-    fn lookup(
-        &mut self,
-        target: hlssa::LookupTarget<Value>,
-        args: Vec<Value>,
-        flag: Value,
-    ) {
+    fn lookup(&mut self, target: hlssa::LookupTarget<Value>, args: Vec<Value>, flag: Value) {
         let flag_lc = flag.expect_linear_combination();
         let els: Vec<_> = args
             .into_iter()

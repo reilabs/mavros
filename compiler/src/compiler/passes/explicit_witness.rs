@@ -929,14 +929,7 @@ impl ExplicitWitness {
                     2,
                     "Spread lookup must have exactly one key and one result"
                 );
-                self.lower_wide_spread_lookup(
-                    b,
-                    function_type_info,
-                    args[0],
-                    args[1],
-                    flag,
-                    bits,
-                );
+                self.lower_wide_spread_lookup(b, function_type_info, args[0], args[1], flag, bits);
             }
             OpCode::Lookup { .. } => {
                 b.push(instruction);
