@@ -288,15 +288,22 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Specializer::new(5.0)),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(LowerWitnessArrayOps::new()),
                 Box::new(LowerWitnessBitwiseOps::new()),
                 Box::new(LowerWitnessSpreadOps::new()),
                 Box::new(LowerWitnessIntegerArithOps::new()),
-                Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(LowerBitRangeOps::new()),
+                // After the last pre-explicit-witness lowering, run cleanup twice
+                // back-to-back. The first round exposes folds/dedup opportunities
+                // that the second round can then consume.
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
