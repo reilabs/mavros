@@ -27,93 +27,31 @@ struct ExprId(u32);
 enum ExprNode {
     Add(Vec<ExprId>),
     Mul(Vec<ExprId>),
-    Div {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
-    Mod {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
-    Sub {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
+    Div { lhs: ExprId, rhs: ExprId },
+    Mod { lhs: ExprId, rhs: ExprId },
+    Sub { lhs: ExprId, rhs: ExprId },
     FConst(ark_bn254::Fr),
-    UConst {
-        bits: usize,
-        value: u128,
-    },
-    IConst {
-        bits: usize,
-        value: u128,
-    },
+    UConst { bits: usize, value: u128 },
+    IConst { bits: usize, value: u128 },
     Variable(u64),
-    Eq {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
-    Lt {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
+    Eq { lhs: ExprId, rhs: ExprId },
+    Lt { lhs: ExprId, rhs: ExprId },
     And(Vec<ExprId>),
     Or(Vec<ExprId>),
     Xor(Vec<ExprId>),
-    Shl {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
-    Shr {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
-    BitRange {
-        value: ExprId,
-        offset: usize,
-        width: usize,
-        source_width: Option<usize>,
-    },
-    Select {
-        condition: ExprId,
-        then: ExprId,
-        otherwise: ExprId,
-    },
-    ArrayGet {
-        array: ExprId,
-        index: ExprId,
-    },
-    TupleGet {
-        tuple: ExprId,
-        index: ExprId,
-    },
+    Shl { lhs: ExprId, rhs: ExprId },
+    Shr { lhs: ExprId, rhs: ExprId },
+    BitRange { value: ExprId, offset: usize, width: usize },
+    Select { condition: ExprId, then: ExprId, otherwise: ExprId },
+    ArrayGet { array: ExprId, index: ExprId },
+    TupleGet { tuple: ExprId, index: ExprId },
     Not(ExprId),
     ReadGlobal(u64),
-    Cast {
-        value: ExprId,
-        target: CastTarget,
-    },
-    Truncate {
-        value: ExprId,
-        to_bits: usize,
-        from_bits: usize,
-    },
-    SExt {
-        value: ExprId,
-        from_bits: usize,
-        to_bits: usize,
-    },
+    Cast { value: ExprId, target: CastTarget },
+    SExt { value: ExprId, from_bits: usize, to_bits: usize },
     ValueOf(ExprId),
-    BytesOf {
-        value: ExprId,
-        endianness: Endianness,
-        count: usize,
-    },
-    BitsOf {
-        value: ExprId,
-        endianness: Endianness,
-        count: usize,
-    },
+    BytesOf { value: ExprId, endianness: Endianness, count: usize },
+    BitsOf { value: ExprId, endianness: Endianness, count: usize },
     Witness(ExprId),
 }
 
@@ -258,18 +196,11 @@ impl ExprInterner {
         self.intern(ExprNode::Shr { lhs, rhs })
     }
 
-    fn bit_range(
-        &mut self,
-        value: ExprId,
-        offset: usize,
-        width: usize,
-        source_width: Option<usize>,
-    ) -> ExprId {
+    fn bit_range(&mut self, value: ExprId, offset: usize, width: usize) -> ExprId {
         self.intern(ExprNode::BitRange {
             value,
             offset,
             width,
-            source_width,
         })
     }
 
@@ -307,14 +238,6 @@ impl ExprInterner {
 
     fn cast(&mut self, value: ExprId, target: CastTarget) -> ExprId {
         self.intern(ExprNode::Cast { value, target })
-    }
-
-    fn truncate(&mut self, value: ExprId, to_bits: usize, from_bits: usize) -> ExprId {
-        self.intern(ExprNode::Truncate {
-            value,
-            to_bits,
-            from_bits,
-        })
     }
 
     fn sext(&mut self, value: ExprId, from_bits: usize, to_bits: usize) -> ExprId {
@@ -844,23 +767,6 @@ impl CSE {
                             result_expr,
                         );
                     }
-                    OpCode::Truncate {
-                        result: r,
-                        value,
-                        to_bits,
-                        from_bits,
-                    } => {
-                        let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr = interner.truncate(value_expr, *to_bits, *from_bits);
-                        record_expr(
-                            &mut exprs,
-                            &mut result,
-                            block_id,
-                            instruction_idx,
-                            *r,
-                            result_expr,
-                        );
-                    }
                     OpCode::SExt {
                         result: r,
                         value,
@@ -883,11 +789,9 @@ impl CSE {
                         value,
                         offset,
                         width,
-                        source_width,
                     } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr =
-                            interner.bit_range(value_expr, *offset, *width, *source_width);
+                        let result_expr = interner.bit_range(value_expr, *offset, *width);
                         record_expr(
                             &mut exprs,
                             &mut result,

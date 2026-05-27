@@ -61,7 +61,6 @@ impl WitnessWriteToFresh {
                         | OpCode::MkRepeated { .. }
                         | OpCode::Alloc { .. }
                         | OpCode::BinaryArithOp { .. }
-                        | OpCode::Truncate { .. }
                         | OpCode::SExt { .. }
                         | OpCode::BitRange { .. }
                         | OpCode::Not { .. }

@@ -296,7 +296,6 @@ impl Simplifier {
                                             value: *lhs,
                                             offset,
                                             width: bits - offset,
-                                            source_width: None,
                                         }]));
                                     }
                                 }

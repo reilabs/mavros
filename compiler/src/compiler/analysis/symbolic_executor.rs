@@ -38,7 +38,6 @@ where
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
-    fn truncate(&self, _from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
@@ -248,18 +247,6 @@ impl SymbolicExecutor {
                             a.cast(cast_target, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Truncate {
-                        result: r,
-                        value: a,
-                        to_bits: to,
-                        from_bits: from,
-                    } => {
-                        let a = &scope[a];
-                        scope.insert(
-                            *r,
-                            a.truncate(*from, *to, &fn_type_info.get_value_type(*r), ctx),
-                        );
-                    }
                     crate::compiler::ssa::hlssa::OpCode::SExt {
                         result: r,
                         value: a,
@@ -277,7 +264,6 @@ impl SymbolicExecutor {
                         value: a,
                         offset,
                         width,
-                        source_width: _,
                     } => {
                         let a = &scope[a];
                         scope.insert(

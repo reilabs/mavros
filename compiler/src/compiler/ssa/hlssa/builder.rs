@@ -208,17 +208,6 @@ pub trait HLEmitter {
         r
     }
 
-    fn truncate(&mut self, value: ValueId, to_bits: usize, from_bits: usize) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Truncate {
-            result: r,
-            value,
-            to_bits,
-            from_bits,
-        });
-        r
-    }
-
     fn sext(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::SExt {
@@ -237,7 +226,6 @@ pub trait HLEmitter {
             value,
             offset,
             width,
-            source_width: None,
         });
         r
     }

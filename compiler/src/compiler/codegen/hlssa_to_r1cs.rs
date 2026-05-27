@@ -643,18 +643,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(new_array)
     }
 
-    fn truncate(&self, _from: usize, to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        let new_value = self
-            .expect_constant()
-            .into_bigint()
-            .to_bits_le()
-            .iter()
-            .take(to)
-            .cloned()
-            .collect::<Vec<_>>();
-        Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
-    }
-
     fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let new_value = self
             .expect_constant()
@@ -824,13 +812,33 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn to_radix(
         &self,
-        _radix: &Radix<Self>,
-        _endianness: crate::compiler::ssa::hlssa::Endianness,
-        _size: usize,
+        radix: &Radix<Self>,
+        endianness: crate::compiler::ssa::hlssa::Endianness,
+        size: usize,
         _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
-        todo!("ToRadix R1CS generation not yet implemented")
+        match radix {
+            Radix::Bytes => {
+                let bits = self.expect_constant().into_bigint().to_bits_le();
+                let mut bytes = Vec::with_capacity(size);
+                for byte_idx in 0..size {
+                    let mut byte = 0u128;
+                    for bit_idx in 0..8 {
+                        let bit = byte_idx * 8 + bit_idx;
+                        if bits.get(bit).copied().unwrap_or(false) {
+                            byte |= 1u128 << bit_idx;
+                        }
+                    }
+                    bytes.push(Value::Const(ark_bn254::Fr::from(byte)));
+                }
+                if matches!(endianness, crate::compiler::ssa::hlssa::Endianness::Big) {
+                    bytes.reverse();
+                }
+                Value::mk_array(bytes)
+            }
+            Radix::Dyn(_) => todo!("dynamic ToRadix R1CS generation not yet implemented"),
+        }
     }
 
     fn spread(&self, bits: u8, _ctx: &mut R1CGen) -> Self {

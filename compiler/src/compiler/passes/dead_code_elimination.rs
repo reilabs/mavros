@@ -118,7 +118,6 @@ impl DCE {
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
             | OpCode::Cast { .. }
-            | OpCode::Truncate { .. }
             | OpCode::SExt { .. }
             | OpCode::BitRange { .. }
             | OpCode::Not { .. }

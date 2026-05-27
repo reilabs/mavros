@@ -367,35 +367,6 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
-    fn truncate(
-        &self,
-        from: usize,
-        to: usize,
-        _out_type: &Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
-        let self_const = ctx.const_vals.get(&self.0).cloned();
-        match self_const {
-            Some(ConstVal::U(_, v)) => {
-                let res = v & ((1 << to) - 1);
-                let res_v = ctx.u_const(to, res);
-                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
-                Self(res_v)
-            }
-            Some(ConstVal::Field(f)) => {
-                let v: u128 = f.into_bigint().as_ref()[0] as u128;
-                let res = v & ((1 << to) - 1);
-                let res_v = ctx.u_const(to, res);
-                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
-                Self(res_v)
-            }
-            _ => {
-                let res = ctx.truncate(self.0, to, from);
-                Self(res)
-            }
-        }
-    }
-
     fn sext(
         &self,
         from: usize,

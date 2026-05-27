@@ -251,12 +251,6 @@ impl RCInsertion {
                         lhs: _,
                         rhs: _,
                     }
-                    | OpCode::Truncate {
-                        result: _,
-                        value: _,
-                        to_bits: _,
-                        from_bits: _,
-                    }
                     | OpCode::SExt {
                         result: _,
                         value: _,
@@ -268,7 +262,6 @@ impl RCInsertion {
                         value: _,
                         offset: _,
                         width: _,
-                        source_width: _,
                     }
                     | OpCode::AssertR1C { a: _, b: _, c: _ }
                     | OpCode::Constrain { a: _, b: _, c: _ }

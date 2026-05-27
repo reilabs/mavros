@@ -42,45 +42,16 @@ impl LoweringPass for LowerBitRangeOps {
                 value,
                 offset,
                 width,
-                source_width,
-            } => self.lower_bit_range(b, context, None, result, value, offset, width, source_width),
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits,
-                from_bits,
-            } => self.lower_truncate(b, context, None, result, value, to_bits, from_bits),
+            } => self.lower_bit_range(b, context, None, result, value, offset, width),
             OpCode::Guard { condition, inner } => match *inner {
                 OpCode::BitRange {
                     result,
                     value,
                     offset,
                     width,
-                    source_width,
-                } => self.lower_bit_range(
-                    b,
-                    context,
-                    Some(condition),
-                    result,
-                    value,
-                    offset,
-                    width,
-                    source_width,
-                ),
-                OpCode::Truncate {
-                    result,
-                    value,
-                    to_bits,
-                    from_bits,
-                } => self.lower_truncate(
-                    b,
-                    context,
-                    Some(condition),
-                    result,
-                    value,
-                    to_bits,
-                    from_bits,
-                ),
+                } => {
+                    self.lower_bit_range(b, context, Some(condition), result, value, offset, width)
+                }
                 other => b.emit(OpCode::Guard {
                     condition,
                     inner: Box::new(other),
@@ -106,18 +77,10 @@ impl LowerBitRangeOps {
         value: ValueId,
         offset: usize,
         width: usize,
-        source_width: Option<usize>,
     ) {
         assert!(width > 0, "BitRange width must be at least 1");
         let value_type = context.types().get_value_type(value);
-        let value_bits = value_type.get_bit_size();
-        let source_bits = source_width.unwrap_or(value_bits);
-        assert!(
-            source_bits <= value_bits,
-            "BitRange source width {} exceeds value width {}",
-            source_bits,
-            value_bits
-        );
+        let source_bits = value_type.get_bit_size();
         assert!(
             offset + width <= source_bits,
             "BitRange({}, {}) exceeds source width {}",
@@ -126,18 +89,7 @@ impl LowerBitRangeOps {
             source_bits
         );
         if value_type.strip_witness().is_field() {
-            if value_type.is_witness_of() && source_width.is_some() {
-                self.lower_witness_bit_range(
-                    b,
-                    context,
-                    guard,
-                    result,
-                    value,
-                    offset,
-                    width,
-                    source_bits,
-                );
-            } else if value_type.is_witness_of() {
+            if value_type.is_witness_of() {
                 self.lower_witness_field_bit_range(b, context, guard, result, value, offset, width);
             } else {
                 self.lower_pure_bit_range(b, context.types(), guard, result, value, offset, width);
@@ -146,71 +98,10 @@ impl LowerBitRangeOps {
         }
 
         if value_type.is_witness_of() {
-            self.lower_witness_bit_range(
-                b,
-                context,
-                guard,
-                result,
-                value,
-                offset,
-                width,
-                source_bits,
-            );
+            self.lower_witness_bit_range(b, context, guard, result, value, offset, width);
         } else {
             self.lower_pure_bit_range(b, context.types(), guard, result, value, offset, width);
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn lower_truncate(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
-        result: ValueId,
-        value: ValueId,
-        to_bits: usize,
-        from_bits: usize,
-    ) {
-        if to_bits >= from_bits || to_bits == 0 {
-            emit_guarded(
-                b,
-                guard,
-                OpCode::Truncate {
-                    result,
-                    value,
-                    to_bits,
-                    from_bits,
-                },
-            );
-            return;
-        }
-
-        let value_type = context.types().get_value_type(value);
-        if !value_type.is_witness_of() {
-            emit_guarded(
-                b,
-                guard,
-                OpCode::Truncate {
-                    result,
-                    value,
-                    to_bits,
-                    from_bits,
-                },
-            );
-            return;
-        }
-
-        self.lower_bit_range(
-            b,
-            context,
-            guard,
-            result,
-            value,
-            0,
-            to_bits,
-            Some(from_bits),
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -256,9 +147,9 @@ impl LowerBitRangeOps {
         value: ValueId,
         offset: usize,
         width: usize,
-        source_bits: usize,
     ) {
         let value_type = context.types().get_value_type(value);
+        let source_bits = value_type.get_bit_size();
         let pure_value = b.value_of(value);
         let hint =
             lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), offset, width);
@@ -356,17 +247,6 @@ impl LowerBitRangeOps {
             value: selected,
             target: CastTarget::Field,
         });
-    }
-}
-
-fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(op),
-        });
-    } else {
-        b.emit(op);
     }
 }
 

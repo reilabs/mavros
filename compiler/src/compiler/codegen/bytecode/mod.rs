@@ -508,32 +508,6 @@ impl CodeGen {
                     }
                     t => panic!("Unsupported type for comparison: {:?}", t),
                 },
-                hlssa::OpCode::Truncate {
-                    result: val,
-                    value: op,
-                    to_bits,
-                    from_bits,
-                } => {
-                    assert!(*to_bits <= 64);
-                    let in_type = type_info.get_value_type(*op);
-                    if in_type.is_field() {
-                        // TruncateFToU writes a full Field (4 limbs), so allocate Field-sized output
-                        let result = layouter.alloc_field(*val);
-                        emitter.push_op(bytecode::OpCode::TruncateFToU {
-                            res: result,
-                            a: layouter.get_value(*op),
-                            to_bits: *to_bits as u64,
-                        });
-                    } else {
-                        let result = layouter.alloc_u64(*val, 64);
-                        assert!(*from_bits <= 64);
-                        emitter.push_op(bytecode::OpCode::TruncateU64 {
-                            res: result,
-                            a: layouter.get_value(*op),
-                            to_bits: *to_bits as u64,
-                        });
-                    }
-                }
                 hlssa::OpCode::Cast {
                     result: r,
                     value: v,

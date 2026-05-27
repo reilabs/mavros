@@ -51,12 +51,6 @@ pub enum OpCode {
         value: ValueId,
         target: CastTarget,
     },
-    Truncate {
-        result: ValueId,
-        value: ValueId,
-        to_bits: usize,
-        from_bits: usize,
-    },
     SExt {
         result: ValueId,
         value: ValueId,
@@ -68,9 +62,6 @@ pub enum OpCode {
         value: ValueId,
         offset: usize,
         width: usize,
-        /// Optional proof bound for values already known to occupy fewer bits than their scalar
-        /// type. It does not change the value-level semantics, only the lowering obligation.
-        source_width: Option<usize>,
     },
     Not {
         result: ValueId,
@@ -565,21 +556,6 @@ impl Instruction for OpCode {
                     target
                 )
             }
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits: out_bits,
-                from_bits: in_bits,
-            } => {
-                format!(
-                    "v{}{} = truncate v{} from {} bits to {} bits",
-                    result.0,
-                    annotate_value(*result),
-                    value.0,
-                    in_bits,
-                    out_bits
-                )
-            }
             OpCode::SExt {
                 result,
                 value,
@@ -600,11 +576,7 @@ impl Instruction for OpCode {
                 value,
                 offset,
                 width,
-                source_width,
             } => {
-                let source_width = source_width
-                    .map(|source_width| format!(", source_width={source_width}"))
-                    .unwrap_or_default();
                 format!(
                     "v{}{} = bit_range(v{}, {}, {})",
                     result.0,
@@ -612,7 +584,7 @@ impl Instruction for OpCode {
                     value.0,
                     offset,
                     width
-                ) + &source_width
+                )
             }
             OpCode::Not { result, value } => {
                 format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
@@ -897,12 +869,6 @@ impl Instruction for OpCode {
                 value: c,
                 target: _,
             }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            }
             | Self::SExt {
                 result: _,
                 value: c,
@@ -914,7 +880,6 @@ impl Instruction for OpCode {
                 value: c,
                 offset: _,
                 width: _,
-                source_width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1045,7 +1010,6 @@ impl Instruction for OpCode {
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
-            | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
             | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
@@ -1103,7 +1067,6 @@ impl Instruction for OpCode {
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
-            | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
             | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
@@ -1234,12 +1197,6 @@ impl Instruction for OpCode {
                 value: c,
                 target: _,
             }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            }
             | Self::SExt {
                 result: _,
                 value: c,
@@ -1251,7 +1208,6 @@ impl Instruction for OpCode {
                 value: c,
                 offset: _,
                 width: _,
-                source_width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1406,12 +1362,6 @@ impl Instruction for OpCode {
                 value: b,
                 target: _,
             } => vec![a, b].into_iter(),
-            Self::Truncate {
-                result: a,
-                value: b,
-                to_bits: _,
-                from_bits: _,
-            } => vec![a, b].into_iter(),
             Self::SExt {
                 result: a,
                 value: b,
@@ -1423,7 +1373,6 @@ impl Instruction for OpCode {
                 value: b,
                 offset: _,
                 width: _,
-                source_width: _,
             } => vec![a, b].into_iter(),
             Self::ArraySet {
                 result: a,

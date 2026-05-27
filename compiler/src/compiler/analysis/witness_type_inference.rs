@@ -790,7 +790,6 @@ impl WitnessTypeInference {
                     value_wt.insert(*result_even, val_wt);
                 }
                 OpCode::Cast { result, value, .. }
-                | OpCode::Truncate { result, value, .. }
                 | OpCode::SExt { result, value, .. }
                 | OpCode::BitRange { result, value, .. }
                 | OpCode::Not { result, value } => {

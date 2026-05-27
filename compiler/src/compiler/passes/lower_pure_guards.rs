@@ -7,7 +7,7 @@
 //! Classification:
 //!
 //! - **Always unwrap** (no constraints, no side effects, can't fail): Const, Cmp, Not, And, Or,
-//!   Xor, Cast, Truncate, ExtractTupleField, MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
+//!   Xor, Cast, BitRange, ExtractTupleField, MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 //! - **Lower with OOB check** (can fail if given an out-of-bounds index): ArrayGet — if OOB, assert
 //!   !cond and produce default; else array_get.
 //! - **Lower with OOB check + passthrough** (RC-tracked allocation): ArraySet — if OOB, assert
@@ -217,11 +217,6 @@ impl LowerPureGuards {
                         });
                     }
                 }
-            }
-
-            // -- Truncate: pure bit-narrowing, can't fail → always unwrap --
-            OpCode::Truncate { .. } => {
-                emitter.emit(inner);
             }
 
             // -- SExt: keep as Guard (ExplicitWitness handles it) --

@@ -680,33 +680,6 @@ impl Value {
         }
     }
 
-    fn truncate_op(
-        &self,
-        _from: usize,
-        to: usize,
-        _instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
-        match self {
-            Value::Unknown(kind) => Value::Unknown(*kind),
-            Value::WitnessOf(inner) => {
-                Value::WitnessOf(Box::new(inner.truncate_op(_from, to, _instrumenter)))
-            }
-            Value::U(_, v) => Value::U(to, v & ((1 << to) - 1)),
-            Value::I(_, v) => Value::I(to, v & ((1 << to) - 1)),
-            Value::Field(f) => {
-                let bits = f
-                    .into_bigint()
-                    .to_bits_le()
-                    .into_iter()
-                    .take(to)
-                    .collect::<Vec<_>>();
-                let r = Field::from_bigint(BigInt::from_bits_le(&bits));
-                Value::Field(r.unwrap())
-            }
-            _ => panic!("Cannot truncate {:?}", self),
-        }
-    }
-
     fn bit_range_op(
         &self,
         offset: usize,
@@ -1168,25 +1141,6 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             specialized: self
                 .specialized
                 .cast_op(cast_target, instrumenter.get_specialized()),
-        }
-    }
-
-    fn truncate(
-        &self,
-        from: usize,
-        to: usize,
-        _tp: &Type,
-        instrumenter: &mut CostAnalysis,
-    ) -> SpecSplitValue {
-        SpecSplitValue {
-            unspecialized: self.unspecialized.truncate_op(
-                from,
-                to,
-                instrumenter.get_unspecialized(),
-            ),
-            specialized: self
-                .specialized
-                .truncate_op(from, to, instrumenter.get_specialized()),
         }
     }
 

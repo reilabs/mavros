@@ -24,9 +24,8 @@ use crate::compiler::{
 use super::{
     lowering_pass::{LoweringContext, LoweringPass},
     witness_integer_utils::{
-        SignBitSource, cast_target_for_integer_type, emit_bit_range, extract_sign_bit,
-        guarded_rangecheck, integer_bits_and_signedness, lower_unsigned_divmod,
-        one_or_condition_field, two_pow,
+        SignBitSource, cast_target_for_integer_type, extract_sign_bit, guarded_rangecheck,
+        integer_bits_and_signedness, lower_unsigned_divmod, one_or_condition_field, two_pow,
     },
 };
 
@@ -117,16 +116,6 @@ impl LowerWitnessBitwiseOps {
             }
             OpCode::Not { result, value } => {
                 self.lower_not(b, function_type_info, result, value);
-            }
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits,
-                from_bits,
-            } if context.types().get_value_type(value).is_witness_of()
-                && integer_bits_and_signedness(context.types().get_value_type(value)).is_some() =>
-            {
-                self.lower_integer_truncate(b, context, guard, result, value, to_bits, from_bits);
             }
             OpCode::SExt {
                 result,
@@ -242,39 +231,6 @@ impl LowerWitnessBitwiseOps {
             result,
             value: not_value,
             target: cast_target,
-        });
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn lower_integer_truncate(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
-        result: ValueId,
-        value: ValueId,
-        to_bits: usize,
-        from_bits: usize,
-    ) {
-        if to_bits >= from_bits {
-            self.emit_guarded(
-                b,
-                guard,
-                OpCode::Truncate {
-                    result,
-                    value,
-                    to_bits,
-                    from_bits,
-                },
-            );
-            return;
-        }
-
-        let low = emit_bit_range(b, value, 0, to_bits, None);
-        b.emit(OpCode::Cast {
-            result,
-            value: low,
-            target: cast_target_for_integer_type(context.types().get_value_type(result)),
         });
     }
 
