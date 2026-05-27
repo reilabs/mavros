@@ -1150,45 +1150,7 @@ impl<'a> ExpressionConverter<'a> {
         match call.func.as_ref() {
             Expression::Ident(ident) => {
                 match &ident.definition {
-                    Definition::Function(func_id) => {
-                        let args: Vec<ValueId> = call
-                            .arguments
-                            .iter()
-                            .map(|arg| self.convert_expression(arg, b).unwrap())
-                            .collect();
-
-                        let ssa_func_id = self
-                            .function_mapper
-                            .get(func_id)
-                            .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
-
-                        // Return size is 1 for tuples (they're returned as a single value)
-                        // and 0 for unit
-                        let return_type = &call.return_type;
-                        let return_size = self.return_size(return_type);
-
-                        // Constrained calling unconstrained: emit unconstrained call
-                        let is_unconstrained_call =
-                            !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
-
-                        let results = if is_unconstrained_call {
-                            b.block(self.current_block).call_unconstrained(
-                                *ssa_func_id,
-                                args,
-                                return_size,
-                            )
-                        } else {
-                            b.block(self.current_block)
-                                .call(*ssa_func_id, args, return_size)
-                        };
-
-                        if results.is_empty() {
-                            None
-                        } else {
-                            // Always a single value (tuples are materialized)
-                            Some(results[0])
-                        }
-                    }
+                    Definition::Function(func_id) => self.convert_static_call(func_id, call, b),
                     // Builtin/LowLevel calls handle their own argument conversion
                     // since some arguments (e.g. string messages) must be skipped
                     Definition::Builtin(name) => self.convert_builtin_call(name, call, b),
@@ -1223,18 +1185,52 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    fn convert_static_call(
+        &mut self,
+        func_id: &AstFuncId,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        let args: Vec<ValueId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.convert_expression(arg, b).unwrap())
+            .collect();
+
+        let ssa_func_id = self
+            .function_mapper
+            .get(func_id)
+            .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
+
+        // Return size is 1 for tuples (they're returned as a single value)
+        // and 0 for unit
+        let return_size = self.return_size(&call.return_type);
+
+        // Constrained calling unconstrained: emit unconstrained call
+        let is_unconstrained_call =
+            !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
+        let results = if is_unconstrained_call {
+            b.block(self.current_block)
+                .call_unconstrained(*ssa_func_id, args, return_size)
+        } else {
+            b.block(self.current_block)
+                .call(*ssa_func_id, args, return_size)
+        };
+
+        if results.is_empty() {
+            None
+        } else {
+            // Always a single value (tuples are materialized)
+            Some(results[0])
+        }
+    }
+
     fn convert_builtin_call(
         &mut self,
         name: &str,
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        // Builtins with a Noir replacement (registered via REPLACEMENT_CRATES)
-        // dispatch to that replacement instead of the inline handling below.
-        if self.lowlevel_replacements.contains_key(name) {
-            return self.call_replacement(name, call, b);
-        }
-
         match name {
             "assert_eq" => {
                 let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
@@ -1368,6 +1364,9 @@ impl<'a> ExpressionConverter<'a> {
                         .cast_to(CastTarget::ArrayToSlice, array),
                 )
             }
+            _ if self.lowlevel_replacements.contains_key(name) => {
+                self.convert_replacement_call(name, call, b)
+            }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
     }
@@ -1383,22 +1382,19 @@ impl<'a> ExpressionConverter<'a> {
             return Some(result);
         }
 
-        assert!(
-            self.lowlevel_replacements.contains_key(name),
-            "LowLevel function '{name}' has no replacement"
-        );
-        self.call_replacement(name, call, b)
+        self.convert_replacement_call(name, call, b)
     }
 
-    /// Emit a call to the Noir replacement function registered for `name`.
-    /// The caller must have already verified that a replacement exists.
-    fn call_replacement(
+    fn convert_replacement_call(
         &mut self,
         name: &str,
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let replacement = &self.lowlevel_replacements[name];
+        let replacement = self
+            .lowlevel_replacements
+            .get(name)
+            .unwrap_or_else(|| panic!("No replacement registered for function '{name}'"));
 
         let replacement_id = match replacement {
             LowLevelReplacement::Single(func_id) => func_id,
@@ -1413,38 +1409,7 @@ impl<'a> ExpressionConverter<'a> {
             }
         };
 
-        let ssa_func_id = self
-            .function_mapper
-            .get(replacement_id)
-            .unwrap_or_else(|| panic!("Replacement function not in function_mapper"));
-
-        let args: Vec<ValueId> = call
-            .arguments
-            .iter()
-            .map(|arg| self.convert_expression(arg, b).unwrap())
-            .collect();
-
-        let return_size = self.return_size(&call.return_type);
-
-        // If the replacement is natively unconstrained and we're being called
-        // from a constrained context, emit an unconstrained call. Otherwise
-        // the replacement's body (e.g. loop `break`s, witness-conditional
-        // mutation) would leak into the caller's constrained SSA.
-        let is_unconstrained_call =
-            !self.in_unconstrained && self.natively_unconstrained.contains(replacement_id);
-        let results = if is_unconstrained_call {
-            b.block(self.current_block)
-                .call_unconstrained(*ssa_func_id, args, return_size)
-        } else {
-            b.block(self.current_block)
-                .call(*ssa_func_id, args, return_size)
-        };
-
-        if results.is_empty() {
-            None
-        } else {
-            Some(results[0])
-        }
+        self.convert_static_call(replacement_id, call, b)
     }
 
     /// Handle mavros-specific foreign functions directly in SSA,
