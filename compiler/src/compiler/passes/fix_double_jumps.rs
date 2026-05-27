@@ -1,9 +1,17 @@
+//! Merges blocks connected by trivial unconditional jumps for blocks that have only one incoming
+//! edge.
+//!
+//! This eliminates the need to jump (obviously), but also reduces block parameter traffic.
+
 use std::collections::HashMap;
 
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLSSA, Instruction, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, Instruction, Terminator, ValueId,
+        hlssa::{HLSSA, OpCode},
+    },
 };
 
 pub struct ValueReplacements {

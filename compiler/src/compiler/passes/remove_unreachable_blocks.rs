@@ -1,14 +1,15 @@
+//! Removes blocks in the SSA that are unreachable as Noir's compiler generates these.
+//!
+//! TODO Check if we need this once we do our own SSA generation (#169).
+
 use std::collections::HashSet;
 
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLSSA},
+    ssa::{BlockId, hlssa::HLSSA},
 };
 
-// Needs to happen because apparently Noir
-// produces dead code paths that have no predecessors.
-// TODO: Check if we need this with our own SSA gen.
 pub struct RemoveUnreachableBlocks {}
 
 impl RemoveUnreachableBlocks {

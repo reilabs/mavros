@@ -1,8 +1,11 @@
+//! This pass is intended to be the first step of the R1CS generation phase, and converts every
+//! `WriteWitness` opcode into a `FreshWitness` opcode as the actual computed value cannot be known
+//! in this portion of the pipeline.
+
 use crate::compiler::{
-    analysis::types::TypeInfo,
-    flow_analysis::FlowAnalysis,
+    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{HLSSA, OpCode},
+    ssa::hlssa::{HLSSA, OpCode},
 };
 
 pub struct WitnessWriteToFresh {}
@@ -55,6 +58,7 @@ impl WitnessWriteToFresh {
                         OpCode::Cmp { .. }
                         | OpCode::Cast { .. }
                         | OpCode::MkSeq { .. }
+                        | OpCode::MkRepeated { .. }
                         | OpCode::Alloc { .. }
                         | OpCode::BinaryArithOp { .. }
                         | OpCode::Truncate { .. }

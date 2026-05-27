@@ -1,3 +1,10 @@
+//! Implements a promotion from stack-based load-store traffic into pure SSA values (virtual
+//! registers) akin to the same pass in LLVM.
+//!
+//! Note that we use block parameters instead of phi edges here, but other than that it is a
+//! standard Cytron-style (TOPLAS '91) dominance-frontier iteration. Note that the escape analysis
+//! is currently extremely conservative, and can be improved.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use tracing::{Level, debug, instrument};
@@ -5,10 +12,15 @@ use tracing::{Level, debug, instrument};
 use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
 use crate::compiler::passes::fix_double_jumps::ValueReplacements;
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
-    ir::r#type::{Type, TypeExpr},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLFunction, HLSSA, OpCode, Terminator, ValueId},
+    ssa::{
+        BlockId, Terminator, ValueId,
+        hlssa::{
+            HLFunction, HLSSA, OpCode, Type, TypeExpr,
+            builder::{HLFunctionBuilder, HLSSABuilder},
+        },
+    },
 };
 
 pub struct Mem2Reg {}
@@ -33,29 +45,35 @@ impl Mem2Reg {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) {
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let function_type_info = type_info.get_function(*function_id);
-            if self.escape_safe(function, function_type_info) {
-                self.run_function(
-                    function,
-                    cfg.get_function_cfg(*function_id),
-                    function_type_info,
-                );
-            } else {
-                debug!(
-                    "Skipping mem2reg for function: {:?} because it failed escape analysis",
-                    function.get_name()
-                );
-            }
+        let fids: Vec<_> = ssa.get_function_ids().collect();
+        let mut sb = HLSSABuilder::new(ssa);
+        for function_id in fids {
+            let function_type_info = type_info.get_function(function_id);
+            let func_cfg = cfg.get_function_cfg(function_id);
+            sb.modify_function(function_id, |fb| {
+                if self.escape_safe(fb.function, function_type_info) {
+                    self.run_function(fb, func_cfg, function_type_info);
+                } else {
+                    debug!(
+                        "Skipping mem2reg for function: {:?} because it failed escape analysis",
+                        fb.function.get_name()
+                    );
+                }
+            });
         }
     }
 
-    #[instrument(skip_all, level = Level::DEBUG, fields(function = %function.get_name()))]
-    fn run_function(&self, function: &mut HLFunction, cfg: &CFG, type_info: &FunctionTypeInfo) {
-        let (writes, defs) = self.find_pointer_writes_and_defs(function);
+    #[instrument(skip_all, level = Level::DEBUG, fields(function = %fb.function.get_name()))]
+    fn run_function(
+        &self,
+        fb: &mut HLFunctionBuilder<'_>,
+        cfg: &CFG,
+        type_info: &FunctionTypeInfo,
+    ) {
+        let (writes, defs) = self.find_pointer_writes_and_defs(fb.function);
         let phi_blocks = self.find_phi_blocks(&writes, &defs, cfg);
-        let phi_args = self.initialize_phis(function, &phi_blocks, type_info);
-        self.remove_ptrs(function, cfg, &phi_args);
+        let phi_args = self.initialize_phis(fb, &phi_blocks, type_info);
+        self.remove_ptrs(fb.function, cfg, &phi_args);
     }
 
     fn remove_ptrs(
@@ -179,15 +197,16 @@ impl Mem2Reg {
     // and value_id is the id of the pointer that is being replaced
     fn initialize_phis(
         &self,
-        function: &mut HLFunction,
+        fb: &mut HLFunctionBuilder<'_>,
         phi_blocks: &HashMap<ValueId, HashSet<BlockId>>,
         type_info: &FunctionTypeInfo,
     ) -> HashMap<BlockId, Vec<(ValueId, ValueId)>> {
         let mut result: HashMap<BlockId, Vec<(ValueId, ValueId)>> = HashMap::new();
         for (value, blocks) in phi_blocks {
             for block in blocks {
-                let param =
-                    function.add_parameter(*block, type_info.get_value_type(*value).get_pointed());
+                let param = fb
+                    .block(*block)
+                    .add_parameter(type_info.get_value_type(*value).get_pointed());
                 result.entry(*block).or_default().push((param, *value));
             }
         }
@@ -258,9 +277,9 @@ impl Mem2Reg {
         result
     }
 
-    // This is _very_ crude. We give up on mem2reg for the entire function
-    // if we detect _any_ pointer escaping or entering the function, or being
-    // written to another pointer. Obviously this needs a better implementation.
+    // This is _very_ crude. We give up on mem2reg for the entire function if we detect _any_
+    // pointer escaping or entering the function, or being written to another pointer. Obviously
+    // this needs a better implementation (#168).
     fn escape_safe(&self, function: &HLFunction, type_info: &FunctionTypeInfo) -> bool {
         for (_, block) in function.get_blocks() {
             for (_, typ) in block.get_parameters() {
@@ -315,6 +334,17 @@ impl Mem2Reg {
                         result: _,
                         elems: _,
                         seq_type: _,
+                        elem_type: typ,
+                    } => {
+                        if self.type_contains_ptr(typ) {
+                            return false;
+                        }
+                    }
+                    OpCode::MkRepeated {
+                        result: _,
+                        element: _,
+                        seq_type: _,
+                        count: _,
                         elem_type: typ,
                     } => {
                         if self.type_contains_ptr(typ) {

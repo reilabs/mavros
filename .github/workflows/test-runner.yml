@@ -28,9 +28,6 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Download Nix Dependencies
         run: nix develop
 
@@ -53,9 +50,6 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Download Nix Dependencies
         run: nix develop
@@ -98,9 +92,6 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Cache Nix Store
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Download Nix Dependencies
         run: nix develop
 
@@ -117,7 +108,7 @@ jobs:
         run: make build-test-runner
 
       - name: Run Tests
-        run: make func-test
+        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 2
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

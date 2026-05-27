@@ -1,18 +1,24 @@
+//! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
+
 use std::collections::HashMap;
 
 use tracing::{Level, instrument};
 
 use crate::compiler::{
-    analysis::types::{FunctionTypeInfo, Types},
-    block_builder::{HLEmitter, HLInstrBuilder},
-    flow_analysis::FlowAnalysis,
-    ir::r#type::{Type, TypeExpr},
-    ssa::{
-        BinaryArithOpKind, BlockId, CallTarget, FunctionId, HLBlock, HLFunction, HLSSA, OpCode,
-        SeqType, Terminator, ValueId,
+    analysis::{
+        flow_analysis::{CFG, FlowAnalysis},
+        types::{FunctionTypeInfo, Types},
+        witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
+        witness_type_inference::WitnessTypeInference,
     },
-    witness_info::{ConstantWitness, FunctionWitnessType, WitnessInfo, WitnessType},
-    witness_type_inference::WitnessTypeInference,
+    ssa::{
+        BlockId, FunctionId, Terminator, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, OpCode, SequenceTargetType,
+            Type, TypeExpr,
+            builder::{HLEmitter, HLInstrBuilder},
+        },
+    },
 };
 
 pub struct UntaintControlFlow {}
@@ -22,12 +28,12 @@ pub struct UntaintControlFlow {}
 fn get_witness_or_pure(
     function_wt: &FunctionWitnessType,
     v: crate::compiler::ssa::ValueId,
-) -> ConstantWitness {
+) -> WitnessType {
     function_wt
         .value_witness_types
         .get(&v)
         .map(|wt| wt.toplevel_info())
-        .unwrap_or(ConstantWitness::Pure)
+        .unwrap_or(WitnessType::Pure)
 }
 
 /// Push an instruction, wrapping in Guard if block is tainted.
@@ -124,13 +130,32 @@ impl UntaintControlFlow {
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
+                    OpCode::MkRepeated {
+                        result: r,
+                        element,
+                        seq_type,
+                        count,
+                        elem_type: tp,
+                    } => {
+                        let r_wt = function_wt
+                            .get_value_witness_type(r)
+                            .child_witness_type()
+                            .unwrap();
+                        OpCode::MkRepeated {
+                            result: r,
+                            element,
+                            seq_type,
+                            count,
+                            elem_type: apply_witness_type(tp, &r_wt),
+                        }
+                    }
                     OpCode::MkTuple {
                         result: r,
                         elems: l,
                         element_types: tps,
                     } => {
                         let r_wt = function_wt.get_value_witness_type(r);
-                        let child_wts = if let WitnessType::Tuple(_, children) = r_wt {
+                        let child_wts = if let WitnessShape::Tuple(_, children) = r_wt {
                             children
                         } else {
                             panic!("MkTuple result should have Tuple witness type")
@@ -218,6 +243,7 @@ impl UntaintControlFlow {
                 self.run_function(
                     function_id,
                     &mut function,
+                    &mut ssa,
                     function_wt,
                     &flow_analysis,
                     func_type_info,
@@ -234,6 +260,7 @@ impl UntaintControlFlow {
         &mut self,
         function_id: FunctionId,
         function: &mut HLFunction,
+        ssa: &mut HLSSA,
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
         type_info: Option<&FunctionTypeInfo>,
@@ -241,7 +268,12 @@ impl UntaintControlFlow {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
-            Some(function.add_parameter(function.get_entry_id(), Type::witness_of(Type::u(1))))
+            let entry_id = function.get_entry_id();
+            let id = ssa.fresh_value();
+            function
+                .get_block_mut(entry_id)
+                .push_parameter(id, Type::witness_of(Type::u(1)));
+            Some(id)
         } else {
             None
         };
@@ -263,200 +295,260 @@ impl UntaintControlFlow {
         }
 
         for block_id in cfg.get_blocks_bfs() {
-            let mut block = function.take_block(block_id);
-            let block_taint = *block_taint_vars.get(&block_id).unwrap();
-
-            let old_instructions = block.take_instructions();
-            let mut new_instructions = Vec::new();
-
-            for instruction in old_instructions {
-                self.process_instruction(
-                    instruction,
-                    function,
-                    type_info,
-                    block_taint,
-                    &mut new_instructions,
-                );
-            }
-
-            // Handle terminator
-            match block.get_terminator().cloned() {
-                Some(Terminator::JmpIf(cond, if_true, if_false)) => {
-                    let cond_wt = get_witness_or_pure(function_wt, cond);
-                    match cond_wt {
-                        ConstantWitness::Pure => {
-                            // Pure JmpIf: insert casts at Jmp boundaries in branch blocks
-                            // (handled when those blocks are processed)
-                        }
-                        ConstantWitness::Witness => {
-                            let child_block_taint = match block_taint {
-                                Some(tnt) => {
-                                    let result_val = function.fresh_value();
-                                    new_instructions.push(OpCode::BinaryArithOp {
-                                        kind: BinaryArithOpKind::And,
-                                        result: result_val,
-                                        lhs: tnt,
-                                        rhs: cond,
-                                    });
-                                    result_val
-                                }
-                                None => cond,
-                            };
-                            let body = cfg.get_if_body(block_id);
-                            for block_id in body {
-                                block_taint_vars.insert(block_id, Some(child_block_taint));
-                            }
-
-                            let merge = cfg.get_merge_point(block_id);
-
-                            if merge == if_true {
-                                block.set_terminator(Terminator::Jmp(if_false, vec![]));
-                            } else if merge == if_false {
-                                block.set_terminator(Terminator::Jmp(if_true, vec![]));
-                            } else {
-                                block.set_terminator(Terminator::Jmp(if_true, vec![]));
-
-                                if merge == function.get_entry_id() {
-                                    panic!(
-                                        "TODO: jump back into entry not supported yet. Is it even possible?"
-                                    )
-                                }
-
-                                let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
-                                if jumps.len() != 1 {
-                                    panic!(
-                                        "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
-                                        block_id, if_true, merge, jumps
-                                    );
-                                }
-                                let out_true_block = jumps[0];
-
-                                let merge_params = function.get_block_mut(merge).take_parameters();
-
-                                let args_passed_from_lhs = match function
-                                    .get_block_mut(out_true_block)
-                                    .take_terminator()
-                                {
-                                    Some(Terminator::Jmp(_, args)) => args,
-                                    _ => panic!(
-                                        "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
-                                    ),
-                                };
-
-                                function
-                                    .get_block_mut(out_true_block)
-                                    .set_terminator(Terminator::Jmp(if_false, vec![]));
-
-                                let jumps = cfg.get_jumps_into_merge_from_branch(if_false, merge);
-                                if jumps.len() != 1 {
-                                    panic!(
-                                        "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
-                                        block_id, if_false, merge, jumps
-                                    );
-                                }
-                                let out_false_block = jumps[0];
-                                let args_passed_from_rhs = match function
-                                    .get_block_mut(out_false_block)
-                                    .take_terminator()
-                                {
-                                    Some(Terminator::Jmp(_, args)) => args,
-                                    _ => panic!(
-                                        "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
-                                    ),
-                                };
-
-                                let merger_block = function.add_block();
-                                function
-                                    .get_block_mut(out_false_block)
-                                    .set_terminator(Terminator::Jmp(merger_block, vec![]));
-                                function
-                                    .get_block_mut(merger_block)
-                                    .set_terminator(Terminator::Jmp(merge, vec![]));
-
-                                if !args_passed_from_lhs.is_empty() {
-                                    let mut instrs = Vec::new();
-                                    {
-                                        let mut builder =
-                                            HLInstrBuilder::new(function, &mut instrs);
-                                        for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
-                                            args_passed_from_lhs
-                                                .iter()
-                                                .zip(args_passed_from_rhs.iter()),
-                                        ) {
-                                            let lhs_type = type_info
-                                                .map(|ti| ti.get_value_type(*lhs).clone())
-                                                .unwrap_or_else(|| typ.clone());
-                                            let rhs_type = type_info
-                                                .map(|ti| ti.get_value_type(*rhs).clone())
-                                                .unwrap_or_else(|| typ.clone());
-                                            emit_merge_select(
-                                                &mut builder,
-                                                cond,
-                                                *lhs,
-                                                *rhs,
-                                                Some(*res),
-                                                typ,
-                                                &lhs_type,
-                                                &rhs_type,
-                                            );
-                                        }
-                                    }
-                                    for instr in instrs {
-                                        function
-                                            .get_block_mut(merger_block)
-                                            .push_instruction(instr);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(Terminator::Jmp(target, args)) => {
-                    // Insert casts at Jmp boundaries
-                    if let (Some(ti), Some(param_types)) =
-                        (type_info, block_param_types.get(&target))
-                    {
-                        let mut cast_instrs = Vec::new();
-                        let new_args: Vec<_> = {
-                            let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
-                            args.iter()
-                                .zip(param_types.iter())
-                                .map(|(arg, expected_type)| {
-                                    convert_if_needed(*arg, expected_type, ti, &mut builder)
-                                })
-                                .collect()
-                        };
-                        for instr in cast_instrs {
-                            maybe_guard(&mut new_instructions, block_taint, instr);
-                        }
-                        block.set_terminator(Terminator::Jmp(target, new_args));
-                    }
-                }
-                Some(Terminator::Return(values)) => {
-                    if let Some(ti) = type_info {
-                        let mut cast_instrs = Vec::new();
-                        let new_values: Vec<_> = {
-                            let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
-                            values
-                                .iter()
-                                .zip(return_types.iter())
-                                .map(|(val, expected_type)| {
-                                    convert_if_needed(*val, expected_type, ti, &mut builder)
-                                })
-                                .collect()
-                        };
-                        for instr in cast_instrs {
-                            maybe_guard(&mut new_instructions, block_taint, instr);
-                        }
-                        block.set_terminator(Terminator::Return(new_values));
-                    }
-                }
-                None => {}
-            };
-
-            block.put_instructions(new_instructions);
-            function.put_block(block_id, block);
+            self.process_block(
+                block_id,
+                function,
+                ssa,
+                cfg,
+                function_wt,
+                &mut block_taint_vars,
+                &block_param_types,
+                return_types.as_slice(),
+                type_info,
+            );
         }
+    }
+
+    fn process_block(
+        &self,
+        block_id: BlockId,
+        function: &mut HLFunction,
+        ssa: &mut HLSSA,
+        cfg: &CFG,
+        function_wt: &FunctionWitnessType,
+        block_taint_vars: &mut HashMap<BlockId, Option<ValueId>>,
+        block_param_types: &HashMap<BlockId, Vec<Type>>,
+        return_types: &[Type],
+        type_info: Option<&FunctionTypeInfo>,
+    ) {
+        let mut block = function.take_block(block_id);
+        let block_taint = *block_taint_vars.get(&block_id).unwrap();
+
+        let old_instructions = block.take_instructions();
+        let mut new_instructions = Vec::new();
+
+        for instruction in old_instructions {
+            self.process_instruction(
+                instruction,
+                function,
+                ssa,
+                type_info,
+                block_taint,
+                &mut new_instructions,
+            );
+        }
+
+        // Handle terminator
+        match block.get_terminator().cloned() {
+            Some(Terminator::JmpIf(cond, if_true, if_false)) => {
+                let cond_wt = get_witness_or_pure(function_wt, cond);
+                match cond_wt {
+                    WitnessType::Pure => {
+                        // Pure JmpIf: insert casts at Jmp boundaries in branch blocks
+                        // (handled when those blocks are processed)
+                    }
+                    WitnessType::Witness => {
+                        // The then branch is taken when `cond` is true, the
+                        // else branch when it's false. Each branch must run
+                        // under a different guard, so compute both taints —
+                        // `parent_taint AND cond` for then, `parent_taint AND
+                        // NOT cond` for else — and assign per body block by
+                        // which branch dominates it.
+                        let then_taint = match block_taint {
+                            Some(tnt) => {
+                                let result_val = ssa.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::And,
+                                    result: result_val,
+                                    lhs: tnt,
+                                    rhs: cond,
+                                });
+                                result_val
+                            }
+                            None => cond,
+                        };
+                        let not_cond = {
+                            let nv = ssa.fresh_value();
+                            new_instructions.push(OpCode::Not {
+                                result: nv,
+                                value: cond,
+                            });
+                            nv
+                        };
+                        let else_taint = match block_taint {
+                            Some(tnt) => {
+                                let result_val = ssa.fresh_value();
+                                new_instructions.push(OpCode::BinaryArithOp {
+                                    kind: BinaryArithOpKind::And,
+                                    result: result_val,
+                                    lhs: tnt,
+                                    rhs: not_cond,
+                                });
+                                result_val
+                            }
+                            None => not_cond,
+                        };
+                        let body = cfg.get_if_body(block_id);
+                        for body_bid in body {
+                            let taint = if cfg.dominates(if_true, body_bid) {
+                                then_taint
+                            } else if cfg.dominates(if_false, body_bid) {
+                                else_taint
+                            } else {
+                                panic!(
+                                    "untaint_cf: block {:?} in if-body is dominated by neither \
+                                     then-branch {:?} nor else-branch {:?}",
+                                    body_bid, if_true, if_false
+                                );
+                            };
+                            block_taint_vars.insert(body_bid, Some(taint));
+                        }
+
+                        let merge = cfg.get_merge_point(block_id);
+
+                        if merge == if_true {
+                            block.set_terminator(Terminator::Jmp(if_false, vec![]));
+                        } else if merge == if_false {
+                            block.set_terminator(Terminator::Jmp(if_true, vec![]));
+                        } else {
+                            block.set_terminator(Terminator::Jmp(if_true, vec![]));
+
+                            if merge == function.get_entry_id() {
+                                panic!(
+                                    "TODO: jump back into entry not supported yet. Is it even possible?"
+                                )
+                            }
+
+                            let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
+                            if jumps.len() != 1 {
+                                panic!(
+                                    "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                    block_id, if_true, merge, jumps
+                                );
+                            }
+                            let out_true_block = jumps[0];
+
+                            let merge_params = function.get_block_mut(merge).take_parameters();
+
+                            let args_passed_from_lhs = match function
+                                .get_block_mut(out_true_block)
+                                .take_terminator()
+                            {
+                                Some(Terminator::Jmp(_, args)) => args,
+                                _ => panic!(
+                                    "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
+                                ),
+                            };
+
+                            function
+                                .get_block_mut(out_true_block)
+                                .set_terminator(Terminator::Jmp(if_false, vec![]));
+
+                            let jumps = cfg.get_jumps_into_merge_from_branch(if_false, merge);
+                            if jumps.len() != 1 {
+                                panic!(
+                                    "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                    block_id, if_false, merge, jumps
+                                );
+                            }
+                            let out_false_block = jumps[0];
+                            let args_passed_from_rhs = match function
+                                .get_block_mut(out_false_block)
+                                .take_terminator()
+                            {
+                                Some(Terminator::Jmp(_, args)) => args,
+                                _ => panic!(
+                                    "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
+                                ),
+                            };
+
+                            let merger_block = function.add_block();
+                            function
+                                .get_block_mut(out_false_block)
+                                .set_terminator(Terminator::Jmp(merger_block, vec![]));
+                            function
+                                .get_block_mut(merger_block)
+                                .set_terminator(Terminator::Jmp(merge, vec![]));
+
+                            if !args_passed_from_lhs.is_empty() {
+                                let mut instrs = Vec::new();
+                                {
+                                    let mut builder =
+                                        HLInstrBuilder::new(function, ssa, &mut instrs);
+                                    for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
+                                        args_passed_from_lhs
+                                            .iter()
+                                            .zip(args_passed_from_rhs.iter()),
+                                    ) {
+                                        let lhs_type = type_info
+                                            .map(|ti| ti.get_value_type(*lhs).clone())
+                                            .unwrap_or_else(|| typ.clone());
+                                        let rhs_type = type_info
+                                            .map(|ti| ti.get_value_type(*rhs).clone())
+                                            .unwrap_or_else(|| typ.clone());
+                                        emit_merge_select(
+                                            &mut builder,
+                                            cond,
+                                            *lhs,
+                                            *rhs,
+                                            Some(*res),
+                                            typ,
+                                            &lhs_type,
+                                            &rhs_type,
+                                        );
+                                    }
+                                }
+                                for instr in instrs {
+                                    function.get_block_mut(merger_block).push_instruction(instr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Terminator::Jmp(target, args)) => {
+                // Insert casts at Jmp boundaries
+                if let (Some(ti), Some(param_types)) = (type_info, block_param_types.get(&target)) {
+                    let mut cast_instrs = Vec::new();
+                    let new_args: Vec<_> = {
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
+                        args.iter()
+                            .zip(param_types.iter())
+                            .map(|(arg, expected_type)| {
+                                convert_if_needed(*arg, expected_type, ti, &mut builder)
+                            })
+                            .collect()
+                    };
+                    for instr in cast_instrs {
+                        maybe_guard(&mut new_instructions, block_taint, instr);
+                    }
+                    block.set_terminator(Terminator::Jmp(target, new_args));
+                }
+            }
+            Some(Terminator::Return(values)) => {
+                if let Some(ti) = type_info {
+                    let mut cast_instrs = Vec::new();
+                    let new_values: Vec<_> = {
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
+                        values
+                            .iter()
+                            .zip(return_types.iter())
+                            .map(|(val, expected_type)| {
+                                convert_if_needed(*val, expected_type, ti, &mut builder)
+                            })
+                            .collect()
+                    };
+                    for instr in cast_instrs {
+                        maybe_guard(&mut new_instructions, block_taint, instr);
+                    }
+                    block.set_terminator(Terminator::Return(new_values));
+                }
+            }
+            None => {}
+        };
+
+        block.put_instructions(new_instructions);
+        function.put_block(block_id, block);
     }
 
     /// Process a single instruction: apply cast insertion, then Guard-wrap if tainted.
@@ -464,6 +556,7 @@ impl UntaintControlFlow {
         &self,
         instruction: OpCode,
         function: &mut HLFunction,
+        ssa: &mut HLSSA,
         type_info: Option<&FunctionTypeInfo>,
         block_taint: Option<ValueId>,
         new_instructions: &mut Vec<OpCode>,
@@ -496,7 +589,7 @@ impl UntaintControlFlow {
                 if let Some(ti) = type_info {
                     let mut cast_instrs = Vec::new();
                     let new_args: Vec<_> = {
-                        let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                         args.into_iter()
                             .map(|arg| {
                                 let arg_type = ti.get_value_type(arg);
@@ -544,7 +637,7 @@ impl UntaintControlFlow {
                 let target_elem_type = tp.clone();
                 let mut cast_instrs = Vec::new();
                 let new_vs: Vec<_> = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     vs.iter()
                         .map(|v| convert_if_needed(*v, &target_elem_type, ti, &mut builder))
                         .collect()
@@ -559,6 +652,36 @@ impl UntaintControlFlow {
                         result: r,
                         elems: new_vs,
                         seq_type: s,
+                        elem_type: target_elem_type,
+                    },
+                );
+            }
+            // -- Cast insertion for MkRepeated --
+            OpCode::MkRepeated {
+                result: r,
+                element,
+                seq_type,
+                count,
+                elem_type: ref tp,
+            } if type_info.is_some() => {
+                let ti = type_info.unwrap();
+                let target_elem_type = tp.clone();
+                let mut cast_instrs = Vec::new();
+                let new_element = {
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
+                    convert_if_needed(element, &target_elem_type, ti, &mut builder)
+                };
+                for instr in cast_instrs {
+                    maybe_guard(new_instructions, block_taint, instr);
+                }
+                maybe_guard(
+                    new_instructions,
+                    block_taint,
+                    OpCode::MkRepeated {
+                        result: r,
+                        element: new_element,
+                        seq_type,
+                        count,
                         elem_type: target_elem_type,
                     },
                 );
@@ -579,7 +702,7 @@ impl UntaintControlFlow {
                 };
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     let ca = convert_if_needed(array, result_type, ti, &mut builder);
                     let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
                     (ca, cv)
@@ -613,7 +736,7 @@ impl UntaintControlFlow {
                 };
                 let mut cast_instrs = Vec::new();
                 let new_values: Vec<_> = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     values
                         .iter()
                         .map(|v| convert_if_needed(*v, &expected_elem_type, ti, &mut builder))
@@ -640,7 +763,7 @@ impl UntaintControlFlow {
                 let target_type = ptr_type.get_pointed();
                 let mut cast_instrs = Vec::new();
                 let converted = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     convert_if_needed(value, &target_type, ti, &mut builder)
                 };
                 for instr in cast_instrs {
@@ -668,7 +791,7 @@ impl UntaintControlFlow {
                 let target_type = if_t_type.get_arithmetic_result_type(if_f_type);
                 let mut cast_instrs = Vec::new();
                 let (new_if_t, new_if_f) = {
-                    let mut builder = HLInstrBuilder::new(function, &mut cast_instrs);
+                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     let t = convert_if_needed(if_t, &target_type, ti, &mut builder);
                     let f = convert_if_needed(if_f, &target_type, ti, &mut builder);
                     (t, f)
@@ -718,6 +841,9 @@ fn emit_value_conversion(
     target_type: &Type,
     builder: &mut HLInstrBuilder<'_>,
 ) -> ValueId {
+    if source_type == target_type {
+        return value;
+    }
     match (&source_type.expr, &target_type.expr) {
         // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
         (TypeExpr::Field, TypeExpr::WitnessOf(_))
@@ -746,8 +872,6 @@ fn emit_value_conversion(
             }
             builder.mk_tuple(converted_elems, tgt_fields.clone())
         }
-        // WitnessOf→WitnessOf: identity (same runtime repr)
-        (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => value,
         _ => panic!(
             "witness cast insertion: unsupported conversion {:?} -> {:?}",
             source_type, target_type
@@ -771,7 +895,11 @@ fn emit_unrolled_array_conversion(
         let converted = emit_value_conversion(elem, src_elem_type, tgt_elem_type, builder);
         elems.push(converted);
     }
-    builder.mk_seq(elems, SeqType::Array(size), tgt_elem_type.clone())
+    builder.mk_seq(
+        elems,
+        SequenceTargetType::Array(size),
+        tgt_elem_type.clone(),
+    )
 }
 
 /// Recursively strip WitnessOf from a value (for unconstrained call args).
@@ -799,7 +927,11 @@ fn emit_strip_witness(
                 let converted = emit_strip_witness(elem, src_inner, tgt_inner, builder);
                 elems.push(converted);
             }
-            builder.mk_seq(elems, SeqType::Array(*src_size), *tgt_inner.clone())
+            builder.mk_seq(
+                elems,
+                SequenceTargetType::Array(*src_size),
+                *tgt_inner.clone(),
+            )
         }
         // Tuple: decompose, per-field recursive, recompose
         (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
@@ -869,7 +1001,7 @@ fn emit_merge_select(
             builder.push(OpCode::MkSeq {
                 result,
                 elems,
-                seq_type: SeqType::Array(*size),
+                seq_type: SequenceTargetType::Array(*size),
                 elem_type: *result_elem_type.clone(),
             });
             result
@@ -951,9 +1083,9 @@ fn emit_merge_select(
 // Type application helper
 // ---------------------------------------------------------------------------
 
-fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
+fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
     match (typ.expr, wt) {
-        (TypeExpr::Field, WitnessType::Scalar(info)) => {
+        (TypeExpr::Field, WitnessShape::Scalar(info)) => {
             let base = Type::field();
             if info.is_witness() {
                 Type::witness_of(base)
@@ -961,7 +1093,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
                 base
             }
         }
-        (TypeExpr::U(size), WitnessType::Scalar(info)) => {
+        (TypeExpr::U(size), WitnessShape::Scalar(info)) => {
             let base = Type::u(size);
             if info.is_witness() {
                 Type::witness_of(base)
@@ -969,7 +1101,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
                 base
             }
         }
-        (TypeExpr::I(size), WitnessType::Scalar(info)) => {
+        (TypeExpr::I(size), WitnessShape::Scalar(info)) => {
             let base = Type::i(size);
             if info.is_witness() {
                 Type::witness_of(base)
@@ -977,7 +1109,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
                 base
             }
         }
-        (TypeExpr::Array(inner, size), WitnessType::Array(top, inner_wt)) => {
+        (TypeExpr::Array(inner, size), WitnessShape::Array(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
             if top.is_witness() {
                 Type::witness_of(base)
@@ -985,7 +1117,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
                 base
             }
         }
-        (TypeExpr::Slice(inner), WitnessType::Array(top, inner_wt)) => {
+        (TypeExpr::Slice(inner), WitnessShape::Array(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).slice_of();
             if top.is_witness() {
                 Type::witness_of(base)
@@ -993,7 +1125,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
                 base
             }
         }
-        (TypeExpr::Ref(inner), WitnessType::Ref(top, inner_wt)) => {
+        (TypeExpr::Ref(inner), WitnessShape::Ref(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).ref_of();
             if top.is_witness() {
                 Type::witness_of(base)
@@ -1001,7 +1133,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessType) -> Type {
                 base
             }
         }
-        (TypeExpr::Tuple(child_types), WitnessType::Tuple(top, child_wts)) => {
+        (TypeExpr::Tuple(child_types), WitnessShape::Tuple(top, child_wts)) => {
             let base = Type::tuple_of(
                 child_types
                     .iter()

@@ -1,3 +1,6 @@
+//! Determines the smallest closed interval over which any numeric value in the SSA can range,
+//! uniformly across all integer types.
+
 use std::collections::HashMap;
 
 use ark_ff::PrimeField;
@@ -7,13 +10,16 @@ use tracing::{Level, instrument};
 
 use crate::compiler::{
     Field,
-    analysis::types::{FunctionTypeInfo, TypeInfo},
-    flow_analysis::{CFG, FlowAnalysis},
-    ir::r#type::{Type, TypeExpr},
+    analysis::{
+        flow_analysis::{CFG, FlowAnalysis},
+        types::{FunctionTypeInfo, TypeInfo},
+    },
     pass_manager::{Analysis, AnalysisId, AnalysisStore},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, ConstValue, FunctionId, HLFunction, HLSSA,
-        Instruction, OpCode, Terminator, ValueId,
+        BlockId, FunctionId, Instruction, Terminator, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+        },
     },
 };
 
@@ -29,18 +35,28 @@ use crate::compiler::{
 /// integer might denote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntInterval {
-    pub lo: Option<BigInt>,
-    pub hi: Option<BigInt>,
+    lo: Option<BigInt>,
+    hi: Option<BigInt>,
 }
 
 impl IntInterval {
+    /// Lower bound; `None` means −∞.
+    pub fn lo(&self) -> Option<&BigInt> {
+        self.lo.as_ref()
+    }
+
+    /// Upper bound; `None` means +∞.
+    pub fn hi(&self) -> Option<&BigInt> {
+        self.hi.as_ref()
+    }
+
     /// `(-∞, +∞)`.
     pub fn top() -> Self {
         Self { lo: None, hi: None }
     }
 
     /// The unique empty interval (used as the bottom of the lattice). Any
-    /// "lo > hi" interval is normalised to this representation.
+    /// "lo > hi" interval is normalized to this representation.
     pub fn empty() -> Self {
         Self {
             lo: Some(BigInt::one()),

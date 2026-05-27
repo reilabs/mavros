@@ -1,8 +1,12 @@
+//! This pass is intended to be the first step of the witness generation phase, and converts every
+//! witness write into a side-effect-only sink, with witnesses now flowing as plain values in the
+//! CFG.
+
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{HLSSA, OpCode},
+    ssa::hlssa::{HLSSA, OpCode},
 };
 
 pub struct WitnessWriteToVoid {}

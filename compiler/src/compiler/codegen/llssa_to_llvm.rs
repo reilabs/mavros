@@ -1,7 +1,7 @@
 //! LLSSA → LLVM Code Generation
 //!
 //! Translates LLSSA into LLVM IR, which can then be compiled to WebAssembly.
-//! Operates on LLSSA + LLType — types are explicit in the LLSSA ops, no TypeInfo needed.
+//! Operates on LLSSA + Type — types are explicit in the LLSSA ops, no TypeInfo needed.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -21,9 +21,10 @@ use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
 
-use crate::compiler::flow_analysis::FlowAnalysis;
-use crate::compiler::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, LLType,
+use crate::compiler::analysis::flow_analysis;
+use crate::compiler::analysis::flow_analysis::FlowAnalysis;
+use crate::compiler::ssa::llssa::{
+    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, Type,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -31,11 +32,11 @@ use mavros_wasm_layout::WASM_PTR_SIZE;
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
-fn ll_type_size_bytes(ty: &LLType) -> u32 {
+fn ll_type_size_bytes(ty: &Type) -> u32 {
     match ty {
-        LLType::Int(bits) => bits.div_ceil(8),
-        LLType::Ptr => WASM_PTR_SIZE,
-        LLType::Struct(s) => ll_struct_size_bytes(s),
+        Type::Int(bits) => bits.div_ceil(8),
+        Type::Ptr => WASM_PTR_SIZE,
+        Type::Struct(s) => ll_struct_size_bytes(s),
     }
 }
 
@@ -107,18 +108,18 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     // ── Type conversion ─────────────────────────────────────────────────
 
-    /// Convert an LLType to the corresponding LLVM type.
-    fn convert_type(&self, ty: &LLType) -> BasicTypeEnum<'ctx> {
+    /// Convert an Type to the corresponding LLVM type.
+    fn convert_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
         match ty {
-            LLType::Int(bits) => self
+            Type::Int(bits) => self
                 .context
                 .custom_width_int_type(
                     NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
                 )
                 .expect("A basic integer type can be created")
                 .into(),
-            LLType::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
-            LLType::Struct(s) => self.convert_struct_type(s),
+            Type::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
+            Type::Struct(s) => self.convert_struct_type(s),
         }
     }
 
@@ -439,7 +440,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         &mut self,
         fn_id: FunctionId,
         function: &LLFunction,
-        cfg: &crate::compiler::flow_analysis::CFG,
+        cfg: &flow_analysis::CFG,
         main_id: FunctionId,
     ) {
         self.value_map.clear();
@@ -509,7 +510,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     fn load_main_params_from_memory<'a>(
         &mut self,
-        parameters: impl Iterator<Item = &'a (ValueId, LLType)>,
+        parameters: impl Iterator<Item = &'a (ValueId, Type)>,
     ) {
         let vm_ptr = self
             .vm_ptr

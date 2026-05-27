@@ -1,9 +1,10 @@
+//! Removes redundant traffic from phi inputs at join points, reducing value flow from N edges to 1.
+
 use std::collections::HashMap;
 
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, HLSSA, Terminator, ValueId},
+    ssa::{BlockId, Terminator, ValueId, hlssa::HLSSA},
 };
 
 pub struct DeduplicatePhis {}
@@ -14,7 +15,7 @@ impl Pass for DeduplicatePhis {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
+        vec![]
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
@@ -41,6 +42,8 @@ impl DeduplicatePhis {
                 }
             }
 
+            // The iteration order is non-deterministic, but given block IDs shouldn't leak into
+            // anything user-facing this isn't really an issue.
             for ((target, inputs), blocks) in unifications {
                 if blocks.len() <= 1 {
                     continue;

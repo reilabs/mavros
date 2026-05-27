@@ -1,11 +1,17 @@
+//! Computes the set of SSA values that are live-in and live-out for each block in the SSA using the
+//! conventional, block-based approach.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use itertools::Itertools;
 use tracing::{Level, instrument, trace};
 
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
-    ssa::{BlockId, FunctionId, HLFunction, HLSSA, Instruction, Terminator, ValueId},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
+    ssa::{
+        BlockId, FunctionId, Instruction, Terminator, ValueId,
+        hlssa::{HLFunction, HLSSA},
+    },
 };
 
 pub enum InstructionPosition {

@@ -1,3 +1,5 @@
+//! The driver API for the compilation pipeline.
+
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -14,9 +16,14 @@ use crate::{
     Project,
     compiler::{
         Field,
-        analysis::types::Types,
-        codegen::CodeGen,
-        flow_analysis::FlowAnalysis,
+        analysis::{
+            flow_analysis::FlowAnalysis, types::Types, witness_type_inference::WitnessTypeInference,
+        },
+        codegen::{
+            bytecode::CodeGen,
+            hlssa_to_r1cs::{R1CGen, R1CS},
+        },
+        lowering::LowLevelReplacement,
         pass_manager::PassManager,
         passes::{
             common_subexpression_elimination::CSE,
@@ -28,28 +35,27 @@ use crate::{
             fix_double_jumps::FixDoubleJumps,
             lower_guards::LowerGuards,
             lower_pure_guards::LowerPureGuards,
+            lower_witness_array_ops::LowerWitnessArrayOps,
+            lower_witness_bitwise_ops::LowerWitnessBitwiseOps,
+            lower_witness_spread_ops::LowerWitnessSpreadOps,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
-            pull_into_assert::PullIntoAssert,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
             simplifier::Simplifier,
+            simplify_asserts::SimplifyAsserts,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
-        r1cs_gen::{R1CGen, R1CS},
-        ssa::{DefaultSsaAnnotator, HLSSA},
-        ssa_gen::LowLevelReplacement,
+        ssa::{DefaultSSAAnnotator, hlssa::HLSSA},
         untaint_control_flow::UntaintControlFlow,
-        witness_type_inference::WitnessTypeInference,
     },
     lowlevel_replacement::{
-        REPLACEMENT_CRATES, add_lowlevel_replacements, find_needed_lowlevels,
-        prepare_replacement_crate,
+        REPLACEMENT_CRATES, add_lowlevel_replacements, prepare_replacement_crate,
     },
 };
 
@@ -135,23 +141,23 @@ impl Driver {
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
 
-        monomorphizer.process_queue().unwrap();
-        let needed_lowlevels = find_needed_lowlevels(&monomorphizer);
-
+        // Queue blackbox replacements RIGHT AFTER `compile_main`, before
+        // draining the queue. At this point `in_unconstrained_function` is
+        // whatever `compile_main` set for `main` (false for `fn main`), which
+        // is what we need: each `pub fn` substitute gets monomorphized as
+        // constrained even when the user code only reaches the blackbox
+        // through an unconstrained path (e.g. `if is_unconstrained()`).
+        // mavros' SSA gen then produces both SSA variants for each one and the
+        // active `function_mapper` dispatches per call site. Unused
+        // replacements get DCE'd later.
         let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
         for (replacement, functions) in &prepared_replacements {
-            if replacement
-                .lowlevel_names()
-                .iter()
-                .any(|name| needed_lowlevels.contains(*name))
-            {
-                add_lowlevel_replacements(
-                    replacement,
-                    functions,
-                    &mut monomorphizer,
-                    &mut lowlevel_replacements,
-                );
-            }
+            add_lowlevel_replacements(
+                replacement,
+                functions,
+                &mut monomorphizer,
+                &mut lowlevel_replacements,
+            );
         }
 
         monomorphizer.process_queue().unwrap();
@@ -174,7 +180,7 @@ impl Driver {
             self.initial_ssa
                 .as_ref()
                 .unwrap()
-                .to_string(&DefaultSsaAnnotator),
+                .to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -247,7 +253,7 @@ impl Driver {
             self.monomorphized_ssa
                 .as_ref()
                 .unwrap()
-                .to_string(&DefaultSsaAnnotator),
+                .to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -277,10 +283,13 @@ impl Driver {
                 Box::new(DeduplicatePhis::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(FixDoubleJumps::new()),
-                Box::new(PullIntoAssert::new()),
+                Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Specializer::new(5.0)),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(LowerWitnessArrayOps::new()),
+                Box::new(LowerWitnessBitwiseOps::new()),
+                Box::new(LowerWitnessSpreadOps::new()),
                 Box::new(ExplicitWitness::new()),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
@@ -446,8 +455,8 @@ impl Driver {
         r1cs: &R1CS,
         wasm_config: Option<std::path::PathBuf>,
     ) -> Result<Option<String>, Error> {
-        use crate::compiler::hlssa_to_llssa;
-        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
+        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
+        use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
@@ -461,7 +470,7 @@ impl Driver {
         fs::write(
             self.get_debug_output_dir()
                 .join("hlssa_before_lowering.txt"),
-            ssa.to_string(&DefaultSsaAnnotator),
+            ssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -477,7 +486,7 @@ impl Driver {
         // Dump LLSSA after lowering
         fs::write(
             self.get_debug_output_dir().join("llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSsaAnnotator),
+            llssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -512,8 +521,8 @@ impl Driver {
         wasm_path: std::path::PathBuf,
         r1cs: &R1CS,
     ) -> Result<(), Error> {
-        use crate::compiler::hlssa_to_llssa;
-        use crate::compiler::llssa_llvm_codegen::LLVMCodeGen;
+        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
+        use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
@@ -540,7 +549,7 @@ impl Driver {
         fs::write(
             self.get_debug_output_dir()
                 .join("ad_hlssa_before_lowering.txt"),
-            ssa.to_string(&DefaultSsaAnnotator),
+            ssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 
@@ -557,7 +566,7 @@ impl Driver {
         fs::write(
             self.get_debug_output_dir()
                 .join("ad_llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSsaAnnotator),
+            llssa.to_string(&DefaultSSAAnnotator),
         )
         .unwrap();
 

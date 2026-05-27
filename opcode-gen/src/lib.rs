@@ -695,17 +695,21 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
     );
     let op_name = format_ident!("{}", &def.name);
 
-    let call_op = quote! {
-        #op_name(#(#call_params),*);
-    };
-
-    let finish = if def.is_raw {
-        quote! {}
+    let (call_and_finish, return_call) = if def.is_raw {
+        // Raw opcodes already return `(*const u64, Frame)` themselves; the
+        // wrapper just forwards that result.
+        let call_op = quote! { #op_name(#(#call_params),*) };
+        (quote! {}, call_op)
     } else {
-        quote! {
+        // Non-raw opcodes do their work and then advance the pc past their
+        // own operands. The wrapper assembles the `(pc, frame)` pair for the
+        // next dispatch step.
+        let call_op = quote! { #op_name(#(#call_params),*); };
+        let finish = quote! {
             let pc = unsafe { pc.offset(current_field_offset) };
-            unsafe { dispatch(pc, frame, vm) }
-        }
+            (pc, frame)
+        };
+        (call_op, finish)
     };
 
     let handler_name = format_ident!("{}_handler", def.name);
@@ -715,15 +719,15 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
             pc: *const u64,
             frame: Frame,
             vm: &mut VM,
-        ) {
+        ) -> (*const u64, Frame) {
             // unsafe {
             //     println!("opcode: {:?}", *(pc as *mut (*mut usize)));
             // }
             let mut current_field_offset = 1isize;
             #getters
-            #call_op
+            #call_and_finish
 
-            #finish
+            #return_call
         }
     }
 }

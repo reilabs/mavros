@@ -1,3 +1,10 @@
+//! Implements a specialization cost-estimation analysis for the compiler.
+//!
+//! It functions by performing speculative specialization to estimate how many constraints, lookups,
+//! and range-checks could be saved by certain specializations. This is done using symbolic
+//! execution combined with an instrumenter for the circuit cost, and gives the compiler an idea of
+//! how much a function could be shrunk through specialization on concrete inputs.
+
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
@@ -10,11 +17,14 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    ir::r#type::{Type, TypeExpr},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, CastTarget, CmpKind, Endianness, FunctionId, HLSSA,
-        MemOp, Radix, SeqType, SliceOpDir,
+        FunctionId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, Radix, RefCountOp,
+            SequenceTargetType, SliceOpDir, Type, TypeExpr,
+        },
     },
+    util::{spread_bits, unspread_bits},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,12 +48,13 @@ impl ScalarKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
-    U(usize, u128),
-    I(usize, u128),
+    U { bits_size: usize, value: u128 },
+    I { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
     Unknown(ScalarKind),
+    UnknownSlice,
     WitnessOf(Box<ValueSignature>),
     Tuple(Vec<ValueSignature>),
 }
@@ -51,14 +62,15 @@ pub enum ValueSignature {
 impl ValueSignature {
     pub fn to_value(&self) -> Value {
         match self {
-            ValueSignature::U(size, val) => Value::U(*size, *val),
-            ValueSignature::I(size, val) => Value::I(*size, *val),
+            ValueSignature::U { bits_size, value } => Value::U(*bits_size, *value),
+            ValueSignature::I { bits_size, value } => Value::I(*bits_size, *value),
             ValueSignature::Field(field) => Value::Field(*field),
             ValueSignature::Array(vals) => {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
             }
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
             ValueSignature::Unknown(kind) => Value::Unknown(*kind),
+            ValueSignature::UnknownSlice => Value::UnknownSlice,
             ValueSignature::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.to_value())),
             ValueSignature::Tuple(elements) => {
                 Value::Tuple(elements.iter().map(|e| e.to_value()).collect())
@@ -68,7 +80,9 @@ impl ValueSignature {
 
     pub fn pretty_print(&self, full: bool) -> String {
         match self {
-            ValueSignature::U(_, v) | ValueSignature::I(_, v) => format!("{v}"),
+            ValueSignature::U { value, .. } | ValueSignature::I { value, .. } => {
+                format!("{value}")
+            }
             ValueSignature::Field(f) => format!("{}", f),
             ValueSignature::Array(items) => {
                 if full {
@@ -80,6 +94,7 @@ impl ValueSignature {
             }
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
             ValueSignature::Unknown(_) => "?".to_string(),
+            ValueSignature::UnknownSlice => "?slice".to_string(),
             ValueSignature::WitnessOf(inner) => format!("W({})", inner.pretty_print(full)),
             ValueSignature::Tuple(elements) => {
                 if full {
@@ -101,6 +116,7 @@ pub enum Value {
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
+    UnknownSlice,
     WitnessOf(Box<Value>),
     Tuple(Vec<Value>),
 }
@@ -142,6 +158,29 @@ impl Value {
         match self {
             Value::WitnessOf(inner) => inner.as_ref(),
             other => other,
+        }
+    }
+
+    fn unknown_from_type(tp: &Type) -> Value {
+        match &tp.expr {
+            TypeExpr::Field => Value::Unknown(ScalarKind::Field),
+            TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
+            TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
+            TypeExpr::WitnessOf(inner) => {
+                Value::WitnessOf(Box::new(Value::unknown_from_type(inner)))
+            }
+            TypeExpr::Array(elem, n) => {
+                let elem_unknown = Value::unknown_from_type(elem);
+                Value::Array(vec![elem_unknown; *n])
+            }
+            TypeExpr::Slice(_) => Value::UnknownSlice,
+            TypeExpr::Tuple(elems) => {
+                Value::Tuple(elems.iter().map(Value::unknown_from_type).collect())
+            }
+            TypeExpr::Ref(inner) => {
+                Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
+            }
+            TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
         }
     }
 
@@ -207,7 +246,7 @@ impl Value {
     fn binary_arith_op(
         &self,
         b: &Value,
-        binary_arith_op_kind: &crate::compiler::ssa::BinaryArithOpKind,
+        binary_arith_op_kind: &crate::compiler::ssa::hlssa::BinaryArithOpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match binary_arith_op_kind {
@@ -463,7 +502,7 @@ impl Value {
             Value::WitnessOf(inner) => {
                 inner.forget_concrete();
             }
-            Value::Unknown(_) => {}
+            Value::Unknown(_) | Value::UnknownSlice => {}
             Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in vals {
@@ -486,7 +525,7 @@ impl Value {
             Value::U(s, _) => *self = Value::Unknown(ScalarKind::U(*s)),
             Value::I(s, _) => *self = Value::Unknown(ScalarKind::I(*s)),
             Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
-            Value::Unknown(_) => {}
+            Value::Unknown(_) | Value::UnknownSlice => {}
             Value::WitnessOf(inner) => {
                 inner.forget_concrete();
             }
@@ -509,11 +548,18 @@ impl Value {
     fn make_unspecialized_sig(&self) -> ValueSignature {
         match self {
             Value::Unknown(kind) => ValueSignature::Unknown(*kind),
+            Value::UnknownSlice => ValueSignature::UnknownSlice,
             Value::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
-            Value::U(s, v) => ValueSignature::U(*s, *v),
-            Value::I(s, v) => ValueSignature::I(*s, *v),
+            Value::U(s, v) => ValueSignature::U {
+                bits_size: *s,
+                value: *v,
+            },
+            Value::I(s, v) => ValueSignature::I {
+                bits_size: *s,
+                value: *v,
+            },
             Value::Field(f) => ValueSignature::Field(*f),
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
@@ -559,9 +605,9 @@ impl Value {
         }
     }
 
-    fn array_get(&self, index: &Value, _tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
-        if matches!(self, Value::Unknown(_)) {
-            return Value::Unknown(ScalarKind::Field);
+    fn array_get(&self, index: &Value, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
+        if matches!(self, Value::Unknown(_) | Value::UnknownSlice) {
+            return Value::unknown_from_type(tp);
         }
 
         let arr = self.unwrap_witness();
@@ -572,14 +618,14 @@ impl Value {
                 Value::U(_, index) => vals[*index as usize].clone(),
                 _ => {
                     instrumenter.record_lookups(vals.len(), 1, 1);
-                    Value::Unknown(ScalarKind::Field)
+                    Value::unknown_from_type(tp)
                 }
             },
             (Value::Array(vals), Value::Unknown(_)) => {
                 instrumenter.record_lookups(vals.len(), 1, 1);
-                Value::Unknown(ScalarKind::Field)
+                Value::unknown_from_type(tp)
             }
-            (Value::Unknown(_), _) => Value::Unknown(ScalarKind::Field),
+            (Value::Unknown(_) | Value::UnknownSlice, _) => Value::unknown_from_type(tp),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
@@ -626,6 +672,7 @@ impl Value {
                 let new_vals = vals.iter().map(|_| value.clone()).collect();
                 Value::Array(new_vals)
             }
+            (Value::UnknownSlice, _, _) => Value::UnknownSlice,
             _ => panic!(
                 "Cannot set array element of {:?} with index {:?} to {:?}",
                 self, index, value
@@ -688,7 +735,7 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got u{}",
                     bits
                 );
-                Value::U(bits * 2, ssa_mod::spread_bits(*v, *bits))
+                Value::U(bits * 2, spread_bits(*v, *bits))
             }
             Value::I(bits, v) => {
                 assert!(
@@ -696,7 +743,7 @@ impl Value {
                     "Spread only supports integer widths up to 64 bits, got i{}",
                     bits
                 );
-                Value::I(bits * 2, ssa_mod::spread_bits(*v, *bits))
+                Value::I(bits * 2, spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
             Value::WitnessOf(inner) => {
@@ -734,7 +781,7 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got u{}",
                     bits
                 );
-                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
+                let (odd_val, even_val) = unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
             }
@@ -744,7 +791,7 @@ impl Value {
                     "Unspread expects an even integer width up to 128 bits, got i{}",
                     bits
                 );
-                let (odd_val, even_val) = ssa_mod::unspread_bits(*v, *bits);
+                let (odd_val, even_val) = unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
                 (Value::I(half_bits, odd_val), Value::I(half_bits, even_val))
             }
@@ -792,7 +839,7 @@ impl Value {
 
     fn cast_op(
         &self,
-        cast_target: &crate::compiler::ssa::CastTarget,
+        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match (self, cast_target) {
@@ -840,7 +887,7 @@ impl Value {
         }
     }
 
-    fn to_bits(&self, endianness: &crate::compiler::ssa::Endianness, size: usize) -> Value {
+    fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {
@@ -882,7 +929,7 @@ impl Value {
     fn to_radix(
         &self,
         radix: &Radix<Value>,
-        _endianness: &crate::compiler::ssa::Endianness,
+        _endianness: &crate::compiler::ssa::hlssa::Endianness,
         size: usize,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
@@ -1082,7 +1129,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn cast(
         &self,
-        cast_target: &crate::compiler::ssa::CastTarget,
+        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
         _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
@@ -1158,7 +1205,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn mk_array(
         values: Vec<SpecSplitValue>,
         _ctx: &mut CostAnalysis,
-        _seq_type: SeqType,
+        _seq_type: SequenceTargetType,
         _elem_type: &Type,
     ) -> SpecSplitValue {
         let (uns, spec) = values
@@ -1452,7 +1499,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn mem_op(&self, _kind: MemOp, _ctx: &mut CostAnalysis) {}
+    fn mem_op(&self, _kind: RefCountOp, _ctx: &mut CostAnalysis) {}
 
     fn spread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> Self {
         Self {
@@ -1734,6 +1781,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
                 Value::Array(new_values)
             }
+            Value::UnknownSlice => Value::UnknownSlice,
             _ => panic!("Cannot push to {:?}", slice.unspecialized),
         };
         let new_spec = match &slice.specialized {
@@ -1742,6 +1790,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
                 Value::Array(new_values)
             }
+            Value::UnknownSlice => Value::UnknownSlice,
             _ => panic!("Cannot push to {:?}", slice.specialized),
         };
         SpecSplitValue {
@@ -1753,10 +1802,12 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
             Value::Array(values) => Value::U(32, values.len() as u128),
+            Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.unspecialized),
         };
         let spec = match &slice.specialized {
             Value::Array(values) => Value::U(32, values.len() as u128),
+            Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.specialized),
         };
         SpecSplitValue {
@@ -1767,7 +1818,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
 
     fn on_guard(
         &mut self,
-        inner: &crate::compiler::ssa::OpCode,
+        inner: &crate::compiler::ssa::hlssa::OpCode,
         _condition: &SpecSplitValue,
         inputs: Vec<&SpecSplitValue>,
         result_types: Vec<&Type>,
@@ -1787,7 +1838,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
 
         // Nuke ptr contents for effectful ptr ops
-        if let crate::compiler::ssa::OpCode::Store { .. } = inner {
+        if let crate::compiler::ssa::hlssa::OpCode::Store { .. } = inner {
             // First input is the ptr
             if let Some(ptr_val) = inputs.first() {
                 if let Value::Pointer(p) = &ptr_val.unspecialized {

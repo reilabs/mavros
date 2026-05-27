@@ -1,410 +1,34 @@
-use crate::compiler::ir::r#type::SSAType;
-use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+//! The low-level SSA representation used in the compiler and its associated types.
+
+pub mod builder;
+pub mod type_system;
+
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Types
-// ═══════════════════════════════════════════════════════════════════════════════
+use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+pub use type_system::Type;
 
-/// SSA value type for LLSSA.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LLType {
-    /// Sized unsigned integer. Int(1) = bool, Int(8) = byte, Int(32), Int(64).
-    Int(u32),
-    /// Opaque pointer.
-    Ptr,
-    /// Multi-word aggregate, by value. Only for value-safe structs.
-    Struct(LLStruct),
-}
+// Re-export DMatrix for use by other LLSSA modules.
+pub use super::hlssa::DMatrix;
 
-impl LLType {
-    pub fn i1() -> Self {
-        LLType::Int(1)
-    }
-    pub fn i32() -> Self {
-        LLType::Int(32)
-    }
-    pub fn i64() -> Self {
-        LLType::Int(64)
-    }
-    pub fn ptr() -> Self {
-        LLType::Ptr
-    }
-}
+// LLSSA
+// ================================================================================================
 
-impl Display for LLType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            LLType::Int(bits) => write!(f, "i{}", bits),
-            LLType::Ptr => write!(f, "ptr"),
-            LLType::Struct(s) => write!(f, "{}", s),
-        }
-    }
-}
+/// The low-level SSA exposes runtime details: explicit struct layouts, pointer arithmetic,
+/// integer/field arithmetic split, and explicit memory management.
+pub type LLSSA = SSA<LLOp, Type, Constants>;
 
-impl SSAType for LLType {}
+// CONSTANT STORAGE
+// ================================================================================================
 
-/// Struct layout, owned inline. Structural equality.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LLStruct {
-    pub fields: Vec<LLFieldType>,
-}
+/// Constant storage for the low-level SSA. Currently a placeholder while constants still live
+/// inline as `LLOp::IntConst` / `LLOp::NullPtr` instructions; future work moves the constant data
+/// into this side-table for the LLVM backend.
+pub type Constants = ();
 
-impl LLStruct {
-    pub fn new(fields: Vec<LLFieldType>) -> Self {
-        LLStruct { fields }
-    }
-
-    /// 4×i64 struct representing a BN254 field element in Montgomery form.
-    pub fn field_elem() -> Self {
-        Self::new(vec![
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-        ])
-    }
-
-    /// 4×i64 struct representing raw (non-Montgomery) limbs.
-    pub fn limbs() -> Self {
-        Self::new(vec![
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-        ])
-    }
-
-    /// RC header: { Int(64) } — just a refcount.
-    pub fn rc_header() -> Self {
-        Self::new(vec![LLFieldType::Int(64)])
-    }
-
-    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
-    pub fn rc_array(elem: LLStruct, count: usize) -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(64),
-            LLFieldType::InlineArray(elem, count),
-        ])
-    }
-
-    // ── AD node structs ────────────────────────────────────────────────
-    // All AD nodes share a common prefix: { Inline(RcHeader), Int(32) }
-    // so the tag can be read from any node pointer using ad_node_base().
-
-    /// Common prefix for all AD nodes: { RC, tag }.
-    pub fn ad_node_base() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-        ])
-    }
-
-    /// AD constant node: { RC, tag, FieldElem(value) }
-    pub fn ad_const_node() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-            LLFieldType::Inline(Self::field_elem()),
-        ])
-    }
-
-    /// AD witness node: { RC, tag, Int(64)(index) }
-    pub fn ad_witness_node() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-            LLFieldType::Int(64),
-        ])
-    }
-
-    /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db), FieldElem(dc) }
-    pub fn ad_sum_node() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-            LLFieldType::Ptr,
-            LLFieldType::Ptr,
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
-        ])
-    }
-
-    /// Per-slot table-info record. Mirrors the byte layout of
-    /// `TABLE_INFO_*_OFFSET` in `mavros-wasm-layout`. One of these lives in
-    /// each host-visible runtime table slot of the witgen VM struct.
-    ///
-    /// Field index → name (use `TABLE_INFO_*` constants below):
-    ///   0: mults_base   (ptr)
-    ///   1: inv_cnst_off (i32)
-    ///   2: inv_wit_off  (i32)
-    ///   3: num_indices  (i32)
-    ///   4: num_values   (i32)
-    ///   5: length       (i32)
-    pub fn table_info_slot() -> Self {
-        Self::new(vec![
-            LLFieldType::Ptr,
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-            LLFieldType::Int(32),
-        ])
-    }
-
-    pub const TABLE_INFO_MULTS_BASE: usize = 0;
-    pub const TABLE_INFO_INV_CNST_OFF: usize = 1;
-    pub const TABLE_INFO_INV_WIT_OFF: usize = 2;
-    pub const TABLE_INFO_NUM_INDICES: usize = 3;
-    pub const TABLE_INFO_NUM_VALUES: usize = 4;
-    pub const TABLE_INFO_LENGTH: usize = 5;
-
-    /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
-    pub fn ad_mul_const_node() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Ptr,
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
-        ])
-    }
-
-    /// VM struct used by the forward-pass/witgen entrypoint.
-    ///
-    /// Keep this in field-index order with `mavros-wasm-layout`.
-    pub fn witgen_vm() -> Self {
-        Self::new(vec![
-            LLFieldType::Ptr,     // 0  witness
-            LLFieldType::Ptr,     // 1  a
-            LLFieldType::Ptr,     // 2  a_base
-            LLFieldType::Ptr,     // 3  b
-            LLFieldType::Ptr,     // 4  c
-            LLFieldType::Ptr,     // 5  mults_cursor
-            LLFieldType::Ptr,     // 6  lookups_a
-            LLFieldType::Ptr,     // 7  lookups_b
-            LLFieldType::Ptr,     // 8  lookups_c
-            LLFieldType::Ptr,     // 9  inputs
-            LLFieldType::Int(32), // 10 tables_len
-            LLFieldType::Int(32), // 11 tables_cap
-            LLFieldType::Ptr,     // 12 tables_ptr
-            LLFieldType::Int(32), // 13 current_cnst_tables_off
-            LLFieldType::Int(32), // 14 current_wit_tables_off
-            LLFieldType::Int(32), // 15 reserved padding
-        ])
-    }
-
-    pub const WITGEN_VM_WITNESS: usize = 0;
-    pub const WITGEN_VM_A: usize = 1;
-    pub const WITGEN_VM_A_BASE: usize = 2;
-    pub const WITGEN_VM_B: usize = 3;
-    pub const WITGEN_VM_C: usize = 4;
-    /// Cursor into the witness multiplicities section. Mirrors VM
-    /// `multiplicities_witness`: each first-use lookup snapshots this into
-    /// its slot, then bumps it by the table's length.
-    pub const WITGEN_VM_MULTS_CURSOR: usize = 5;
-    pub const WITGEN_VM_LOOKUPS_A: usize = 6;
-    pub const WITGEN_VM_LOOKUPS_B: usize = 7;
-    pub const WITGEN_VM_LOOKUPS_C: usize = 8;
-    pub const WITGEN_VM_INPUTS: usize = 9;
-    /// Cursor counting allocated tables. Each first-use claim assigns the
-    /// current `tables_len` as the new table id, then bumps it.
-    /// Mirrors `vm.tables.len()`.
-    pub const WITGEN_VM_TABLES_LEN: usize = 10;
-    /// Capacity of the host-allocated table-info buffer.
-    pub const WITGEN_VM_TABLES_CAP: usize = 11;
-    /// Base pointer to the host-allocated table-info buffer.
-    pub const WITGEN_VM_TABLES_PTR: usize = 12;
-    /// Cursor into the constraints-region tables section (advances on
-    /// first-use claims by each table's footprint). Forward-side, written-
-    /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
-    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 13;
-    /// Cursor into the post-commitment witness tables section (relative to
-    /// `challenges_start`).
-    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 14;
-
-    /// VM struct used by the reverse AD entrypoint.
-    ///
-    /// Keep this in field-index order with `mavros-wasm-layout`.
-    pub fn ad_vm() -> Self {
-        Self::new(vec![
-            LLFieldType::Ptr,     // 0  out_da
-            LLFieldType::Ptr,     // 1  out_db
-            LLFieldType::Ptr,     // 2  out_dc
-            LLFieldType::Ptr,     // 3  coeffs (cursor)
-            LLFieldType::Int(32), // 4  current_wit_off
-            LLFieldType::Ptr,     // 5  coeffs_base
-            LLFieldType::Int(32), // 6  current_lookup_wit_off
-            LLFieldType::Int(32), // 7  current_cnst_tables_off
-            LLFieldType::Int(32), // 8  current_wit_tables_off
-            LLFieldType::Int(32), // 9  current_wit_multiplicities_off
-        ])
-    }
-
-    pub const AD_VM_OUT_DA: usize = 0;
-    pub const AD_VM_OUT_DB: usize = 1;
-    pub const AD_VM_OUT_DC: usize = 2;
-    pub const AD_VM_COEFFS: usize = 3;
-    pub const AD_VM_CURRENT_WIT_OFF: usize = 4;
-    pub const AD_VM_COEFFS_BASE: usize = 5;
-    pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
-    /// Cursor for the constraints tables section. Mirrors VM
-    /// `current_cnst_tables_off`.
-    pub const AD_VM_CURRENT_CNST_TABLES_OFF: usize = 7;
-    /// Cursor for the witness tables section.
-    pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
-    /// Cursor for the witness multiplicities section.
-    pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
-
-    /// AD tag constants.
-    pub const AD_TAG_CONST: u64 = 0;
-    pub const AD_TAG_WITNESS: u64 = 1;
-    pub const AD_TAG_SUM: u64 = 2;
-    pub const AD_TAG_MUL_CONST: u64 = 3;
-
-    /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
-    /// Value-safe structs can be used as SSA values (`LLType::Struct`).
-    pub fn is_value_safe(&self) -> bool {
-        self.fields.iter().all(|f| match f {
-            LLFieldType::Int(_) | LLFieldType::Ptr => true,
-            LLFieldType::Inline(inner) => inner.is_value_safe(),
-            LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => false,
-        })
-    }
-}
-
-impl Display for LLStruct {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{{ {} }}",
-            self.fields.iter().map(|ft| ft.to_string()).join(", ")
-        )
-    }
-}
-
-/// What a struct field / memory slot holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LLFieldType {
-    Int(u32),
-    Ptr,
-    /// Nested struct embedded in place.
-    Inline(LLStruct),
-    /// Fixed-count contiguous array of identical structs.
-    InlineArray(LLStruct, usize),
-    /// Variable-length trailing array (C99 flexible array member).
-    FlexArray(LLStruct),
-}
-
-impl LLFieldType {
-    /// Convert to the corresponding LLType (for Int/Ptr/Inline).
-    /// Panics on InlineArray/FlexArray (memory-only).
-    pub fn to_ll_type(&self) -> LLType {
-        match self {
-            LLFieldType::Int(bits) => LLType::Int(*bits),
-            LLFieldType::Ptr => LLType::Ptr,
-            LLFieldType::Inline(s) => LLType::Struct(s.clone()),
-            LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => {
-                panic!("InlineArray/FlexArray fields are memory-only; cannot convert to LLType")
-            }
-        }
-    }
-}
-
-impl Display for LLFieldType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            LLFieldType::Int(bits) => write!(f, "i{}", bits),
-            LLFieldType::Ptr => write!(f, "ptr"),
-            LLFieldType::Inline(s) => write!(f, "{}", s),
-            LLFieldType::InlineArray(s, count) => write!(f, "[{} x {}]", count, s),
-            LLFieldType::FlexArray(s) => write!(f, "[? x {}]", s),
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Op-kind enums
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IntArithOp {
-    Add,
-    Sub,
-    Mul,
-    UDiv,
-    URem,
-    And,
-    Or,
-    Xor,
-    Shl,
-    UShr,
-}
-
-impl Display for IntArithOp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            IntArithOp::Add => "add",
-            IntArithOp::Sub => "sub",
-            IntArithOp::Mul => "mul",
-            IntArithOp::UDiv => "udiv",
-            IntArithOp::URem => "urem",
-            IntArithOp::And => "and",
-            IntArithOp::Or => "or",
-            IntArithOp::Xor => "xor",
-            IntArithOp::Shl => "shl",
-            IntArithOp::UShr => "ushr",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IntCmpOp {
-    Eq,
-    ULt,
-    SLt,
-}
-
-impl Display for IntCmpOp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            IntCmpOp::Eq => "eq",
-            IntCmpOp::ULt => "ult",
-            IntCmpOp::SLt => "slt",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FieldArithOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-impl Display for FieldArithOp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            FieldArithOp::Add => "field.add",
-            FieldArithOp::Sub => "field.sub",
-            FieldArithOp::Mul => "field.mul",
-            FieldArithOp::Div => "field.div",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LLOp
-// ═══════════════════════════════════════════════════════════════════════════════
+// LLSSA OPCODES
+// ================================================================================================
 
 #[derive(Clone, Debug)]
 pub enum LLOp {
@@ -513,7 +137,7 @@ pub enum LLOp {
     Load {
         result: ValueId,
         ptr: ValueId,
-        ty: LLType,
+        ty: Type,
     },
     Store {
         ptr: ValueId,
@@ -562,10 +186,6 @@ pub enum LLOp {
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Instruction impl for LLOp
-// ═══════════════════════════════════════════════════════════════════════════════
 
 impl Instruction for LLOp {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
@@ -656,6 +276,41 @@ impl Instruction for LLOp {
             } => vec![result_odd, result_even].into_iter(),
 
             // No result
+            LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
+                vec![].into_iter()
+            }
+        }
+    }
+
+    fn get_results_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
+        match self {
+            LLOp::IntConst { result, .. }
+            | LLOp::NullPtr { result }
+            | LLOp::IntArith { result, .. }
+            | LLOp::Not { result, .. }
+            | LLOp::Spread { result, .. }
+            | LLOp::IntCmp { result, .. }
+            | LLOp::Truncate { result, .. }
+            | LLOp::ZExt { result, .. }
+            | LLOp::FieldArith { result, .. }
+            | LLOp::FieldNeg { result, .. }
+            | LLOp::FieldEq { result, .. }
+            | LLOp::FieldToLimbs { result, .. }
+            | LLOp::FieldFromLimbs { result, .. }
+            | LLOp::MkStruct { result, .. }
+            | LLOp::ExtractField { result, .. }
+            | LLOp::HeapAlloc { result, .. }
+            | LLOp::Load { result, .. }
+            | LLOp::StructFieldPtr { result, .. }
+            | LLOp::ArrayElemPtr { result, .. }
+            | LLOp::Select { result, .. }
+            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            LLOp::Call { results, .. } => results.iter_mut().collect::<Vec<_>>().into_iter(),
+            LLOp::Unspread {
+                result_odd,
+                result_even,
+                ..
+            } => vec![result_odd, result_even].into_iter(),
             LLOp::Free { .. } | LLOp::Store { .. } | LLOp::Memcpy { .. } | LLOp::Trap => {
                 vec![].into_iter()
             }
@@ -1021,28 +676,390 @@ impl Instruction for LLOp {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Type aliases
-// ═══════════════════════════════════════════════════════════════════════════════
+// LLSSA TYPE ALIASES
+// ================================================================================================
 
-pub type LLSSA = SSA<LLOp, LLType>;
-pub type LLFunction = Function<LLOp, LLType>;
-pub type LLBlock = Block<LLOp, LLType>;
+pub type LLFunction = Function<LLOp, Type>;
+pub type LLBlock = Block<LLOp, Type>;
 
-// Re-export DMatrix for use by other LLSSA modules.
-pub use crate::compiler::ssa::DMatrix as LLDMatrix;
+// Builder methods are provided by the LLEmitter trait in `block_builder` (sibling module).
 
-// Builder methods are provided by the LLEmitter trait in block_builder.rs.
+// STRUCT LAYOUT
+// ================================================================================================
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════════
+/// Struct layout, owned inline. Structural equality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LLStruct {
+    pub fields: Vec<LLFieldType>,
+}
+
+impl LLStruct {
+    pub fn new(fields: Vec<LLFieldType>) -> Self {
+        LLStruct { fields }
+    }
+
+    /// 4×i64 struct representing a BN254 field element in Montgomery form.
+    pub fn field_elem() -> Self {
+        Self::new(vec![
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+        ])
+    }
+
+    /// 4×i64 struct representing raw (non-Montgomery) limbs.
+    pub fn limbs() -> Self {
+        Self::new(vec![
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+        ])
+    }
+
+    /// RC header: { Int(64) } — just a refcount.
+    pub fn rc_header() -> Self {
+        Self::new(vec![LLFieldType::Int(64)])
+    }
+
+    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
+    pub fn rc_array(elem: LLStruct, count: usize) -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(64),
+            LLFieldType::InlineArray(elem, count),
+        ])
+    }
+
+    // ── AD node structs ────────────────────────────────────────────────
+    // All AD nodes share a common prefix: { Inline(RcHeader), Int(32) }
+    // so the tag can be read from any node pointer using ad_node_base().
+
+    /// Common prefix for all AD nodes: { RC, tag }.
+    pub fn ad_node_base() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+        ])
+    }
+
+    /// AD constant node: { RC, tag, FieldElem(value) }
+    pub fn ad_const_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Inline(Self::field_elem()),
+        ])
+    }
+
+    /// AD witness node: { RC, tag, Int(64)(index) }
+    pub fn ad_witness_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Int(64),
+        ])
+    }
+
+    /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db), FieldElem(dc) }
+    pub fn ad_sum_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Ptr,
+            LLFieldType::Ptr,
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+        ])
+    }
+
+    /// Per-slot table-info record. Mirrors the byte layout of
+    /// `TABLE_INFO_*_OFFSET` in `mavros-wasm-layout`. One of these lives in
+    /// each host-visible runtime table slot of the witgen VM struct.
+    ///
+    /// Field index → name (use `TABLE_INFO_*` constants below):
+    ///   0: mults_base   (ptr)
+    ///   1: inv_cnst_off (i32)
+    ///   2: inv_wit_off  (i32)
+    ///   3: num_indices  (i32)
+    ///   4: num_values   (i32)
+    ///   5: length       (i32)
+    pub fn table_info_slot() -> Self {
+        Self::new(vec![
+            LLFieldType::Ptr,
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+            LLFieldType::Int(32),
+        ])
+    }
+
+    pub const TABLE_INFO_MULTS_BASE: usize = 0;
+    pub const TABLE_INFO_INV_CNST_OFF: usize = 1;
+    pub const TABLE_INFO_INV_WIT_OFF: usize = 2;
+    pub const TABLE_INFO_NUM_INDICES: usize = 3;
+    pub const TABLE_INFO_NUM_VALUES: usize = 4;
+    pub const TABLE_INFO_LENGTH: usize = 5;
+
+    /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
+    pub fn ad_mul_const_node() -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(32),
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Ptr,
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem()),
+        ])
+    }
+
+    /// VM struct used by the forward-pass/witgen entrypoint.
+    ///
+    /// Keep this in field-index order with `mavros-wasm-layout`.
+    pub fn witgen_vm() -> Self {
+        Self::new(vec![
+            LLFieldType::Ptr,     // 0  witness
+            LLFieldType::Ptr,     // 1  a
+            LLFieldType::Ptr,     // 2  a_base
+            LLFieldType::Ptr,     // 3  b
+            LLFieldType::Ptr,     // 4  c
+            LLFieldType::Ptr,     // 5  mults_cursor
+            LLFieldType::Ptr,     // 6  lookups_a
+            LLFieldType::Ptr,     // 7  lookups_b
+            LLFieldType::Ptr,     // 8  lookups_c
+            LLFieldType::Ptr,     // 9  inputs
+            LLFieldType::Int(32), // 10 tables_len
+            LLFieldType::Int(32), // 11 tables_cap
+            LLFieldType::Ptr,     // 12 tables_ptr
+            LLFieldType::Int(32), // 13 current_cnst_tables_off
+            LLFieldType::Int(32), // 14 current_wit_tables_off
+            LLFieldType::Int(32), // 15 reserved padding
+        ])
+    }
+
+    pub const WITGEN_VM_WITNESS: usize = 0;
+    pub const WITGEN_VM_A: usize = 1;
+    pub const WITGEN_VM_A_BASE: usize = 2;
+    pub const WITGEN_VM_B: usize = 3;
+    pub const WITGEN_VM_C: usize = 4;
+    /// Cursor into the witness multiplicities section. Mirrors VM
+    /// `multiplicities_witness`: each first-use lookup snapshots this into
+    /// its slot, then bumps it by the table's length.
+    pub const WITGEN_VM_MULTS_CURSOR: usize = 5;
+    pub const WITGEN_VM_LOOKUPS_A: usize = 6;
+    pub const WITGEN_VM_LOOKUPS_B: usize = 7;
+    pub const WITGEN_VM_LOOKUPS_C: usize = 8;
+    pub const WITGEN_VM_INPUTS: usize = 9;
+    /// Cursor counting allocated tables. Each first-use claim assigns the
+    /// current `tables_len` as the new table id, then bumps it.
+    /// Mirrors `vm.tables.len()`.
+    pub const WITGEN_VM_TABLES_LEN: usize = 10;
+    /// Capacity of the host-allocated table-info buffer.
+    pub const WITGEN_VM_TABLES_CAP: usize = 11;
+    /// Base pointer to the host-allocated table-info buffer.
+    pub const WITGEN_VM_TABLES_PTR: usize = 12;
+    /// Cursor into the constraints-region tables section (advances on
+    /// first-use claims by each table's footprint). Forward-side, written-
+    /// only — read by Phase 2 via the per-slot `inv_cnst_off` snapshot.
+    pub const WITGEN_VM_CURRENT_CNST_TABLES_OFF: usize = 13;
+    /// Cursor into the post-commitment witness tables section (relative to
+    /// `challenges_start`).
+    pub const WITGEN_VM_CURRENT_WIT_TABLES_OFF: usize = 14;
+
+    /// VM struct used by the reverse AD entrypoint.
+    ///
+    /// Keep this in field-index order with `mavros-wasm-layout`.
+    pub fn ad_vm() -> Self {
+        Self::new(vec![
+            LLFieldType::Ptr,     // 0  out_da
+            LLFieldType::Ptr,     // 1  out_db
+            LLFieldType::Ptr,     // 2  out_dc
+            LLFieldType::Ptr,     // 3  coeffs (cursor)
+            LLFieldType::Int(32), // 4  current_wit_off
+            LLFieldType::Ptr,     // 5  coeffs_base
+            LLFieldType::Int(32), // 6  current_lookup_wit_off
+            LLFieldType::Int(32), // 7  current_cnst_tables_off
+            LLFieldType::Int(32), // 8  current_wit_tables_off
+            LLFieldType::Int(32), // 9  current_wit_multiplicities_off
+        ])
+    }
+
+    pub const AD_VM_OUT_DA: usize = 0;
+    pub const AD_VM_OUT_DB: usize = 1;
+    pub const AD_VM_OUT_DC: usize = 2;
+    pub const AD_VM_COEFFS: usize = 3;
+    pub const AD_VM_CURRENT_WIT_OFF: usize = 4;
+    pub const AD_VM_COEFFS_BASE: usize = 5;
+    pub const AD_VM_CURRENT_LOOKUP_WIT_OFF: usize = 6;
+    /// Cursor for the constraints tables section. Mirrors VM
+    /// `current_cnst_tables_off`.
+    pub const AD_VM_CURRENT_CNST_TABLES_OFF: usize = 7;
+    /// Cursor for the witness tables section.
+    pub const AD_VM_CURRENT_WIT_TABLES_OFF: usize = 8;
+    /// Cursor for the witness multiplicities section.
+    pub const AD_VM_CURRENT_WIT_MULTIPLICITIES_OFF: usize = 9;
+
+    /// AD tag constants.
+    pub const AD_TAG_CONST: u64 = 0;
+    pub const AD_TAG_WITNESS: u64 = 1;
+    pub const AD_TAG_SUM: u64 = 2;
+    pub const AD_TAG_MUL_CONST: u64 = 3;
+
+    /// A struct is value-safe if all fields are Int, Ptr, or Inline(value_safe).
+    /// Value-safe structs can be used as SSA values (`Type::Struct`).
+    pub fn is_value_safe(&self) -> bool {
+        self.fields.iter().all(|f| match f {
+            LLFieldType::Int(_) | LLFieldType::Ptr => true,
+            LLFieldType::Inline(inner) => inner.is_value_safe(),
+            LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => false,
+        })
+    }
+}
+
+impl Display for LLStruct {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{{ {} }}",
+            self.fields.iter().map(|ft| ft.to_string()).join(", ")
+        )
+    }
+}
+
+// FIELD TYPE
+// ================================================================================================
+
+/// What a struct field / memory slot holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LLFieldType {
+    Int(u32),
+    Ptr,
+    /// Nested struct embedded in place.
+    Inline(LLStruct),
+    /// Fixed-count contiguous array of identical structs.
+    InlineArray(LLStruct, usize),
+    /// Variable-length trailing array (C99 flexible array member).
+    FlexArray(LLStruct),
+}
+
+impl LLFieldType {
+    /// Convert to the corresponding `Type` (for Int/Ptr/Inline).
+    /// Panics on InlineArray/FlexArray (memory-only).
+    pub fn to_ll_type(&self) -> Type {
+        match self {
+            LLFieldType::Int(bits) => Type::Int(*bits),
+            LLFieldType::Ptr => Type::Ptr,
+            LLFieldType::Inline(s) => Type::Struct(s.clone()),
+            LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => {
+                panic!("InlineArray/FlexArray fields are memory-only; cannot convert to Type")
+            }
+        }
+    }
+}
+
+impl Display for LLFieldType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            LLFieldType::Int(bits) => write!(f, "i{}", bits),
+            LLFieldType::Ptr => write!(f, "ptr"),
+            LLFieldType::Inline(s) => write!(f, "{}", s),
+            LLFieldType::InlineArray(s, count) => write!(f, "[{} x {}]", count, s),
+            LLFieldType::FlexArray(s) => write!(f, "[? x {}]", s),
+        }
+    }
+}
+
+// INT ARITH OPERATION KIND
+// ================================================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntArithOp {
+    Add,
+    Sub,
+    Mul,
+    UDiv,
+    URem,
+    And,
+    Or,
+    Xor,
+    Shl,
+    UShr,
+}
+
+impl Display for IntArithOp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            IntArithOp::Add => "add",
+            IntArithOp::Sub => "sub",
+            IntArithOp::Mul => "mul",
+            IntArithOp::UDiv => "udiv",
+            IntArithOp::URem => "urem",
+            IntArithOp::And => "and",
+            IntArithOp::Or => "or",
+            IntArithOp::Xor => "xor",
+            IntArithOp::Shl => "shl",
+            IntArithOp::UShr => "ushr",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+// INT COMPARISON KIND
+// ================================================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntCmpOp {
+    Eq,
+    ULt,
+    SLt,
+}
+
+impl Display for IntCmpOp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            IntCmpOp::Eq => "eq",
+            IntCmpOp::ULt => "ult",
+            IntCmpOp::SLt => "slt",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+// FIELD ARITH OPERATION KIND
+// ================================================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl Display for FieldArithOp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            FieldArithOp::Add => "field.add",
+            FieldArithOp::Sub => "field.sub",
+            FieldArithOp::Mul => "field.mul",
+            FieldArithOp::Div => "field.div",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+// TESTS
+// ================================================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::block_builder::{LLBlockEmitter, LLEmitter};
-    use crate::compiler::ssa::DefaultSsaAnnotator;
+    use crate::compiler::ssa::DefaultSSAAnnotator;
+    use crate::compiler::ssa::llssa::builder::{LLEmitter, LLSSABuilder};
 
     #[test]
     fn field_elem_is_value_safe() {
@@ -1096,10 +1113,10 @@ mod tests {
 
     #[test]
     fn display_types() {
-        assert_eq!(LLType::i1().to_string(), "i1");
-        assert_eq!(LLType::i32().to_string(), "i32");
-        assert_eq!(LLType::i64().to_string(), "i64");
-        assert_eq!(LLType::ptr().to_string(), "ptr");
+        assert_eq!(Type::i1().to_string(), "i1");
+        assert_eq!(Type::i32().to_string(), "i32");
+        assert_eq!(Type::i64().to_string(), "i64");
+        assert_eq!(Type::ptr().to_string(), "ptr");
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1109,7 +1126,7 @@ mod tests {
         ]);
         assert_eq!(field_elem.to_string(), "{ i64, i64, i64, i64 }");
         assert_eq!(
-            LLType::Struct(field_elem.clone()).to_string(),
+            Type::Struct(field_elem.clone()).to_string(),
             "{ i64, i64, i64, i64 }"
         );
 
@@ -1122,13 +1139,10 @@ mod tests {
 
     #[test]
     fn field_type_to_ll_type() {
-        assert_eq!(LLFieldType::Int(32).to_ll_type(), LLType::i32());
-        assert_eq!(LLFieldType::Ptr.to_ll_type(), LLType::ptr());
+        assert_eq!(LLFieldType::Int(32).to_ll_type(), Type::i32());
+        assert_eq!(LLFieldType::Ptr.to_ll_type(), Type::ptr());
         let s = LLStruct::new(vec![LLFieldType::Int(64)]);
-        assert_eq!(
-            LLFieldType::Inline(s.clone()).to_ll_type(),
-            LLType::Struct(s)
-        );
+        assert_eq!(LLFieldType::Inline(s.clone()).to_ll_type(), Type::Struct(s));
     }
 
     #[test]
@@ -1140,19 +1154,19 @@ mod tests {
 
     #[test]
     fn build_simple_function() {
-        let mut ssa = LLSSA::with_main("test_main".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut ssa = LLSSA::with_main("test_main".to_string(), ());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let x = e.int_const(64, 42);
             let y = e.int_const(64, 7);
             let z = e.int_add(x, y);
             e.terminate_return(vec![z]);
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("int_const i64 42"));
         assert!(dump.contains("int_const i64 7"));
         assert!(dump.contains("add"));
@@ -1161,9 +1175,8 @@ mod tests {
 
     #[test]
     fn build_struct_ops() {
-        let mut ssa = LLSSA::with_main("struct_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("struct_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1172,8 +1185,10 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let l0 = e.int_const(64, 1);
             let l1 = e.int_const(64, 0);
             let l2 = e.int_const(64, 0);
@@ -1181,18 +1196,17 @@ mod tests {
             let s = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
             let f0 = e.extract_field(s, field_elem, 0);
             e.terminate_return(vec![f0, s]);
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("mk_struct"));
         assert!(dump.contains("extract_field"));
     }
 
     #[test]
     fn build_memory_ops() {
-        let mut ssa = LLSSA::with_main("memory_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("memory_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let rc_header = LLStruct::new(vec![LLFieldType::Int(64)]);
         let field_elem = LLStruct::new(vec![
@@ -1206,8 +1220,10 @@ mod tests {
             LLFieldType::InlineArray(field_elem.clone(), 3),
         ]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let arr = e.heap_alloc(rc_array.clone(), None);
             let rc_ptr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_word = e.struct_field_ptr(rc_ptr, rc_header, 0);
@@ -1217,12 +1233,12 @@ mod tests {
             let data = e.struct_field_ptr(arr, rc_array, 1);
             let idx = e.int_const(64, 0);
             let elem_ptr = e.array_elem_ptr(data, field_elem, idx);
-            let loaded = e.ll_load(elem_ptr, LLType::i64());
+            let loaded = e.ll_load(elem_ptr, Type::i64());
             e.free(arr);
             e.terminate_return(vec![loaded]);
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("heap_alloc"));
         assert!(dump.contains("struct_field_ptr"));
         assert!(dump.contains("array_elem_ptr"));
@@ -1233,22 +1249,22 @@ mod tests {
 
     #[test]
     fn build_call_and_select() {
-        let mut ssa = LLSSA::with_main("call_test".to_string());
+        let mut ssa = LLSSA::with_main("call_test".to_string(), ());
         let helper_id = ssa.add_function("helper".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let a = e.int_const(64, 1);
             let b = e.int_const(64, 2);
             let results = e.call(helper_id, vec![a, b], 1);
             let cond = e.int_eq(results[0], a);
             let selected = e.select(cond, a, b);
             e.terminate_return(vec![selected]);
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("call helper@"));
         assert!(dump.contains("icmp.eq"));
         assert!(dump.contains("select"));
@@ -1256,9 +1272,8 @@ mod tests {
 
     #[test]
     fn build_field_ops() {
-        let mut ssa = LLSSA::with_main("field_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("field_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1267,8 +1282,10 @@ mod tests {
             LLFieldType::Int(64),
         ]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let l0 = e.int_const(64, 1);
             let l1 = e.int_const(64, 0);
             let l2 = e.int_const(64, 0);
@@ -1282,9 +1299,9 @@ mod tests {
             let limbs = e.field_to_limbs(d);
             let back = e.field_from_limbs(limbs);
             e.terminate_return(vec![eq, back]);
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("field.add"));
         assert!(dump.contains("field.neg"));
         assert!(dump.contains("field.eq"));
@@ -1294,21 +1311,21 @@ mod tests {
 
     #[test]
     fn build_width_and_global() {
-        let mut ssa = LLSSA::with_main("width_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut ssa = LLSSA::with_main("width_test".to_string(), ());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let x = e.int_const(64, 256);
             let narrow = e.truncate(x, 8);
             let wide = e.zext(narrow, 64);
             let gp = e.global_addr(3);
             e.ll_store(gp, wide);
             e.trap();
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("trunc"));
         assert!(dump.contains("zext"));
         assert!(dump.contains("global_addr g3"));
@@ -1317,56 +1334,60 @@ mod tests {
 
     #[test]
     fn build_branching() {
-        let mut ssa = LLSSA::with_main("branch_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
-        let then_blk = func.add_block();
-        let else_blk = func.add_block();
-        let merge_blk = func.add_block();
+        let mut ssa = LLSSA::with_main("branch_test".to_string(), ());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let then_blk = fb.function.add_block();
+            let else_blk = fb.function.add_block();
+            let merge_blk = fb.function.add_block();
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
-            let x = e.int_const(64, 42);
-            let zero = e.int_const(64, 0);
-            let cond = e.int_eq(x, zero);
-            e.terminate_jmp_if(cond, then_blk, else_blk);
-        }
-        {
-            let mut e = LLBlockEmitter::new(func, then_blk);
-            let one = e.int_const(64, 1);
-            e.terminate_jmp(merge_blk, vec![one]);
-        }
-        {
-            let mut e = LLBlockEmitter::new(func, else_blk);
-            let two = e.int_const(64, 2);
-            e.terminate_jmp(merge_blk, vec![two]);
-        }
+            {
+                let mut e = fb.block(entry);
+                let x = e.int_const(64, 42);
+                let zero = e.int_const(64, 0);
+                let cond = e.int_eq(x, zero);
+                e.terminate_jmp_if(cond, then_blk, else_blk);
+            }
+            {
+                let mut e = fb.block(then_blk);
+                let one = e.int_const(64, 1);
+                e.terminate_jmp(merge_blk, vec![one]);
+            }
+            {
+                let mut e = fb.block(else_blk);
+                let two = e.int_const(64, 2);
+                e.terminate_jmp(merge_blk, vec![two]);
+            }
 
-        func.terminate_block_with_return(merge_blk, vec![]);
+            fb.function.terminate_block_with_return(merge_blk, vec![]);
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("jmp_if"));
         assert!(dump.contains("jmp block_"));
     }
 
     #[test]
     fn build_memcpy() {
-        let mut ssa = LLSSA::with_main("memcpy_test".to_string());
-        let func = ssa.get_main_mut();
-        let entry = func.get_entry_id();
+        let mut ssa = LLSSA::with_main("memcpy_test".to_string(), ());
+        let main_id = ssa.get_main_id();
 
         let elem = LLStruct::new(vec![LLFieldType::Int(64)]);
 
-        {
-            let mut e = LLBlockEmitter::new(func, entry);
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
             let dst = e.null_ptr();
             let src = e.null_ptr();
             let count = e.int_const(64, 10);
             e.memcpy(dst, src, elem, Some(count));
             e.terminate_return(vec![]);
-        }
+        });
 
-        let dump = ssa.to_string(&DefaultSsaAnnotator);
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("memcpy"));
         assert!(dump.contains("count="));
     }

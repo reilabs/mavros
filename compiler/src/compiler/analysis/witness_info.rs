@@ -1,69 +1,67 @@
 use itertools::Itertools;
 
-use crate::compiler::ssa::{BlockId, FunctionId, SsaAnnotator, ValueId};
+use crate::compiler::ssa::{BlockId, FunctionId, SSAAnotator, ValueId};
 use std::{collections::HashMap, fmt::Display};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
-pub enum ConstantWitness {
+pub enum WitnessType {
     Pure,
     Witness,
 }
 
-impl std::fmt::Display for ConstantWitness {
+impl std::fmt::Display for WitnessType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConstantWitness::Pure => write!(f, "P"),
-            ConstantWitness::Witness => write!(f, "W"),
+            WitnessType::Pure => write!(f, "P"),
+            WitnessType::Witness => write!(f, "W"),
         }
     }
 }
 
-impl ConstantWitness {
+impl WitnessType {
     pub fn is_pure(&self) -> bool {
         match self {
-            ConstantWitness::Pure => true,
-            ConstantWitness::Witness => false,
+            WitnessType::Pure => true,
+            WitnessType::Witness => false,
         }
     }
 
     pub fn is_witness(&self) -> bool {
         match self {
-            ConstantWitness::Pure => false,
-            ConstantWitness::Witness => true,
+            WitnessType::Pure => false,
+            WitnessType::Witness => true,
         }
     }
 
-    pub fn join(self, other: ConstantWitness) -> ConstantWitness {
+    pub fn join(self, other: WitnessType) -> WitnessType {
         match (self, other) {
-            (ConstantWitness::Witness, _) | (_, ConstantWitness::Witness) => {
-                ConstantWitness::Witness
-            }
-            _ => ConstantWitness::Pure,
+            (WitnessType::Witness, _) | (_, WitnessType::Witness) => WitnessType::Witness,
+            _ => WitnessType::Pure,
         }
     }
 }
 
-pub type WitnessInfo = ConstantWitness;
+pub type WitnessInfo = WitnessType;
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
-pub enum WitnessType {
+pub enum WitnessShape {
     Scalar(WitnessInfo),
-    Array(WitnessInfo, Box<WitnessType>),
-    Ref(WitnessInfo, Box<WitnessType>),
-    Tuple(WitnessInfo, Vec<WitnessType>),
+    Array(WitnessInfo, Box<WitnessShape>),
+    Ref(WitnessInfo, Box<WitnessShape>),
+    Tuple(WitnessInfo, Vec<WitnessShape>),
 }
 
-impl Display for WitnessType {
+impl Display for WitnessShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WitnessType::Scalar(info) => write!(f, "{info}"),
-            WitnessType::Array(info, inner) => {
+            WitnessShape::Scalar(info) => write!(f, "{info}"),
+            WitnessShape::Array(info, inner) => {
                 write!(f, "[{info} of {inner}]")
             }
-            WitnessType::Ref(info, inner) => {
+            WitnessShape::Ref(info, inner) => {
                 write!(f, "[*{info} of {inner}]")
             }
-            WitnessType::Tuple(info, children) => {
+            WitnessShape::Tuple(info, children) => {
                 write!(
                     f,
                     "({info} of <{}>)",
@@ -74,24 +72,26 @@ impl Display for WitnessType {
     }
 }
 
-impl WitnessType {
+impl WitnessShape {
     /// Join two witness types (least upper bound). Eagerly computes concrete result.
-    pub fn join(&self, other: &WitnessType) -> WitnessType {
+    pub fn join(&self, other: &WitnessShape) -> WitnessShape {
         match (self, other) {
-            (WitnessType::Scalar(t1), WitnessType::Scalar(t2)) => WitnessType::Scalar(t1.join(*t2)),
-            (WitnessType::Array(t1, inner1), WitnessType::Array(t2, inner2)) => {
-                WitnessType::Array(t1.join(*t2), Box::new(inner1.join(inner2)))
+            (WitnessShape::Scalar(t1), WitnessShape::Scalar(t2)) => {
+                WitnessShape::Scalar(t1.join(*t2))
             }
-            (WitnessType::Ref(t1, inner1), WitnessType::Ref(t2, inner2)) => {
-                WitnessType::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
+            (WitnessShape::Array(t1, inner1), WitnessShape::Array(t2, inner2)) => {
+                WitnessShape::Array(t1.join(*t2), Box::new(inner1.join(inner2)))
             }
-            (WitnessType::Tuple(t1, children1), WitnessType::Tuple(t2, children2)) => {
+            (WitnessShape::Ref(t1, inner1), WitnessShape::Ref(t2, inner2)) => {
+                WitnessShape::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
+            }
+            (WitnessShape::Tuple(t1, children1), WitnessShape::Tuple(t2, children2)) => {
                 let children_join = children1
                     .iter()
                     .zip(children2.iter())
                     .map(|(c1, c2)| c1.join(c2))
                     .collect();
-                WitnessType::Tuple(t1.join(*t2), children_join)
+                WitnessShape::Tuple(t1.join(*t2), children_join)
             }
             _ => panic!(
                 "Cannot join different witness types: {:?} vs {:?}",
@@ -100,32 +100,32 @@ impl WitnessType {
         }
     }
 
-    pub fn toplevel_info(&self) -> ConstantWitness {
+    pub fn toplevel_info(&self) -> WitnessType {
         match self {
-            WitnessType::Scalar(info) => *info,
-            WitnessType::Array(info, _) => *info,
-            WitnessType::Ref(info, _) => *info,
-            WitnessType::Tuple(info, _) => *info,
+            WitnessShape::Scalar(info) => *info,
+            WitnessShape::Array(info, _) => *info,
+            WitnessShape::Ref(info, _) => *info,
+            WitnessShape::Tuple(info, _) => *info,
         }
     }
 
-    pub fn child_witness_type(&self) -> Option<WitnessType> {
+    pub fn child_witness_type(&self) -> Option<WitnessShape> {
         match self {
-            WitnessType::Array(_, inner) => Some(*inner.clone()),
-            WitnessType::Ref(_, inner) => Some(*inner.clone()),
-            WitnessType::Scalar(_) => None,
-            WitnessType::Tuple(_, _) => {
+            WitnessShape::Array(_, inner) => Some(*inner.clone()),
+            WitnessShape::Ref(_, inner) => Some(*inner.clone()),
+            WitnessShape::Scalar(_) => None,
+            WitnessShape::Tuple(_, _) => {
                 panic!("Error: child_witness_type shouldn't be called for Tuple values")
             }
         }
     }
 
-    pub fn with_toplevel_info(&self, toplevel: WitnessInfo) -> WitnessType {
+    pub fn with_toplevel_info(&self, toplevel: WitnessInfo) -> WitnessShape {
         match self {
-            WitnessType::Scalar(_) => WitnessType::Scalar(toplevel),
-            WitnessType::Array(_, inner) => WitnessType::Array(toplevel, inner.clone()),
-            WitnessType::Ref(_, inner) => WitnessType::Ref(toplevel, inner.clone()),
-            WitnessType::Tuple(_, inner) => WitnessType::Tuple(toplevel, inner.clone()),
+            WitnessShape::Scalar(_) => WitnessShape::Scalar(toplevel),
+            WitnessShape::Array(_, inner) => WitnessShape::Array(toplevel, inner.clone()),
+            WitnessShape::Ref(_, inner) => WitnessShape::Ref(toplevel, inner.clone()),
+            WitnessShape::Tuple(_, inner) => WitnessShape::Tuple(toplevel, inner.clone()),
         }
     }
 
@@ -134,14 +134,14 @@ impl WitnessType {
     /// is equivalent to `with_toplevel_info`. For arrays and tuples, the
     /// info is pushed recursively into children, keeping the top-level
     /// info unchanged.
-    pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessType {
+    pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessShape {
         match self {
-            WitnessType::Scalar(existing) => WitnessType::Scalar(existing.join(info)),
-            WitnessType::Array(top, inner) => {
-                WitnessType::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
+            WitnessShape::Scalar(existing) => WitnessShape::Scalar(existing.join(info)),
+            WitnessShape::Array(top, inner) => {
+                WitnessShape::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
             }
-            WitnessType::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
-            WitnessType::Tuple(top, children) => WitnessType::Tuple(
+            WitnessShape::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
+            WitnessShape::Tuple(top, children) => WitnessShape::Tuple(
                 *top,
                 children
                     .iter()
@@ -152,17 +152,17 @@ impl WitnessType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FunctionWitnessType {
-    pub returns_witness: Vec<WitnessType>,
+    pub returns_witness: Vec<WitnessShape>,
     pub cfg_witness: WitnessInfo,
-    pub parameters: Vec<WitnessType>,
+    pub parameters: Vec<WitnessShape>,
     pub block_cfg_witness: HashMap<BlockId, WitnessInfo>,
-    pub value_witness_types: HashMap<ValueId, WitnessType>,
+    pub value_witness_types: HashMap<ValueId, WitnessShape>,
 }
 
 impl FunctionWitnessType {
-    pub fn get_value_witness_type(&self, value_id: ValueId) -> &WitnessType {
+    pub fn get_value_witness_type(&self, value_id: ValueId) -> &WitnessShape {
         self.value_witness_types.get(&value_id).unwrap()
     }
 
@@ -171,7 +171,7 @@ impl FunctionWitnessType {
     }
 }
 
-impl SsaAnnotator for FunctionWitnessType {
+impl SSAAnotator for FunctionWitnessType {
     fn annotate_value(&self, _: FunctionId, value_id: ValueId) -> String {
         let Some(wt) = self.value_witness_types.get(&value_id) else {
             return "".to_string();

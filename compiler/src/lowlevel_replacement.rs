@@ -1,4 +1,7 @@
-use std::{collections::HashMap, collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use noirc_frontend::hir::Context;
 use noirc_frontend::monomorphization::Monomorphizer;
@@ -6,7 +9,7 @@ use noirc_frontend::monomorphization::ast::{Definition, Expression, FuncId as As
 use noirc_frontend::monomorphization::visitor::visit_expr;
 use noirc_frontend::node_interner::FuncId;
 
-use crate::compiler::ssa_gen::LowLevelReplacement;
+use crate::compiler::lowering::LowLevelReplacement;
 use crate::driver::Error;
 
 pub enum ReplacementKind {
@@ -164,35 +167,29 @@ pub fn add_lowlevel_replacements(
         &(String, FuncId, noirc_errors::Location, noirc_frontend::Type),
     > = functions.iter().map(|f| (f.0.as_str(), f)).collect();
 
+    let queue = |m: &mut Monomorphizer, name: &str| -> AstFuncId {
+        let (_, func_id, location, fn_type) = functions_by_name[name];
+        m.queue_function_with_bindings(
+            *func_id,
+            *location,
+            Default::default(),
+            fn_type.clone(),
+            Vec::new(),
+            None,
+        )
+    };
+
     for spec in replacement.replacements {
         let lowlevel = match &spec.kind {
             ReplacementKind::Single(name) => {
-                let (_, func_id, location, fn_type) = functions_by_name[name];
-                let mono_func_id = monomorphizer.queue_function_with_bindings(
-                    *func_id,
-                    *location,
-                    Default::default(),
-                    fn_type.clone(),
-                    Vec::new(),
-                    None,
-                );
-                LowLevelReplacement::Single(mono_func_id)
+                LowLevelReplacement::Single(queue(monomorphizer, name))
             }
             ReplacementKind::ByArraySize(entries) => {
-                let mut size_map: HashMap<u32, AstFuncId> = HashMap::new();
+                let mut map: HashMap<u32, AstFuncId> = HashMap::new();
                 for (name, size) in *entries {
-                    let (_, func_id, location, fn_type) = functions_by_name[name];
-                    let mono_func_id = monomorphizer.queue_function_with_bindings(
-                        *func_id,
-                        *location,
-                        Default::default(),
-                        fn_type.clone(),
-                        Vec::new(),
-                        None,
-                    );
-                    size_map.insert(*size, mono_func_id);
+                    map.insert(*size, queue(monomorphizer, name));
                 }
-                LowLevelReplacement::ByArraySize(size_map)
+                LowLevelReplacement::ByArraySize(map)
             }
         };
         lowlevel_replacements.insert(spec.lowlevel_name.to_string(), lowlevel);

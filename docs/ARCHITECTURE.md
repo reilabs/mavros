@@ -92,8 +92,8 @@ source code. This provides familiar diagnostics to the user of Mavros, while ens
 code is correct Noir.
 
 We use this to convert Noir's monomorphic AST this to our own SSA representation
-([`compiler/ssa_gen`](../src/compiler/ssa_gen/)). This SSA relies mostly on immutable data
-structures to make transformations easier to write and reason about, at the cost of some data
+([`compiler/lowering`](../compiler/src/compiler/lowering/)). This SSA relies mostly on immutable
+data structures to make transformations easier to write and reason about, at the cost of some data
 copying.
 
 ### Stage 2: Witness Type Inference and Monomorphization
@@ -108,9 +108,9 @@ for R1CS compilation, with values split into two categories:
   vector.
 
 **Witness type inference**
-([`witness_type_inference.rs`](../compiler/src/compiler/witness_type_inference.rs)) propagates this
-information through the program. Starting from main function parameters (which are marked as
-`Witness`), we compute the taint of every value in the program.
+([`witness_type_inference.rs`](../compiler/src/compiler/analysis/witness_type_inference.rs))
+propagates this information through the program. Starting from main function parameters (which are
+marked as `Witness`), we compute the taint of every value in the program.
 
 **Untainting control flow**
 ([`untaint_control_flow.rs`](../compiler/src/compiler/untaint_control_flow.rs)) ensures that all
@@ -204,9 +204,9 @@ R1CS/AD path, while witgen acquires additional opportunities for common-subexpre
 
 ### Stage 6: R1CS Generation and Further Optimization
 
-**R1CS generation** (`r1cs_gen.rs`) executes the SSA symbolically and extracts the constraint
-matrices $A$, $B$, $C$ via the [mechanism](#automatic-differentiation-for-row-linear-combinations)
-described previously.
+**R1CS generation** (`codegen/hlssa_to_r1cs.rs`) executes the SSA symbolically and extracts the
+constraint matrices $A$, $B$, $C$ via the
+[mechanism](#automatic-differentiation-for-row-linear-combinations) described previously.
 
 ### Stage 7: Compilation and VM Execution
 
@@ -225,5 +225,5 @@ Executing the AD program produces, for $c_r$ some random coefficients:
 - $c_r \cdot C$, a random linear combination of $C$'s rows
 
 At the same stage, the bytecode is used to generate LLVM IR for subsequent compilation
-([`llssa_llvm_codegen`](../compiler/src/compiler/llssa_llvm_codegen.rs)). The LLVM pipeline can then
+([`llssa_to_llvm`](../compiler/src/compiler/codegen/llssa_to_llvm.rs)). The LLVM pipeline can then
 be run to produce either an optimized native binary, or a compiled `.wasm` blob.

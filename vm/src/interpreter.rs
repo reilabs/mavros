@@ -17,25 +17,80 @@ use crate::{
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
 };
 
-pub type Handler = fn(*const u64, Frame, &mut VM);
+/// An opcode handler. Returns the `(pc, frame)` to feed into the next
+/// dispatch step. A null `pc` signals that execution should halt (the program
+/// has fallen off the base frame in `ret`).
+pub type Handler = fn(*const u64, Frame, &mut VM) -> (*const u64, Frame);
 
-#[inline(always)]
+/// Tail-call-recursive dispatch. Each step reads the opcode at `pc`,
+/// transmutes it into a `Handler`, and tail-calls into the next dispatch with
+/// whatever pc/frame the handler produced. Relies on LLVM's tail-call
+/// optimization — in debug builds (or anywhere TCO does not fire) this will
+/// blow the stack on long programs; enable the `branching-interpreter` feature
+/// to switch to a loop-based dispatch for those cases.
+#[cfg(not(feature = "branching-interpreter"))]
 pub unsafe fn dispatch(pc: *const u64, frame: Frame, vm: &mut VM) {
+    if pc.is_null() {
+        return;
+    }
     let opcode: Handler = unsafe { mem::transmute(*pc) };
-    opcode(pc, frame, vm);
+    let (next_pc, next_frame) = opcode(pc, frame, vm);
+    unsafe { dispatch(next_pc, next_frame, vm) }
 }
+
+/// Loop-based dispatch. Does not rely on tail-call optimization, so it works
+/// in debug builds.
+#[cfg(feature = "branching-interpreter")]
+pub unsafe fn dispatch(mut pc: *const u64, mut frame: Frame, vm: &mut VM) {
+    while !pc.is_null() {
+        let opcode: Handler = unsafe { mem::transmute(*pc) };
+        let (next_pc, next_frame) = opcode(pc, frame, vm);
+        pc = next_pc;
+        frame = next_frame;
+    }
+}
+
+// We don't want this file to compile if we can't safely pun u64 and pointer, so we add a
+// compile-time assertion of the invariant we need.
+const _: () = assert!(
+    size_of::<*mut u64>() == size_of::<u64>(),
+    "Cannot compile for platforms with non-64-bit pointers."
+);
 
 #[derive(Debug, Copy, Clone)]
 pub struct Frame {
+    /// Stores the data in the frame.
+    ///
+    /// A valid frame has `data` pointing to the start of the frame's actual data section, not the
+    /// metadata. The metadata for the frame must be located at addresses as follows:
+    ///
+    /// - The **size** of the frame's data allocation is at `data.offset(-2)`.
+    /// - The **parent frame pointer** is at `data.offset(-1)` and must be cast to a pointer.
     pub data: *mut u64,
 }
 
 impl Frame {
+    /// Allocates the base frame of the program.
+    ///
+    /// The base frame is the frame that contains a null data pointer.
+    pub fn base_frame(size: u64, vm: &mut VM) -> Self {
+        Self::push(
+            size,
+            Frame {
+                data: std::ptr::null_mut(),
+            },
+            vm,
+        )
+    }
+
+    /// Pushes a new frame onto the stack with the provided `size` and the given `parent`.
     pub fn push(size: u64, parent: Frame, vm: &mut VM) -> Self {
         unsafe {
             let layout = Layout::array::<u64>(size as usize + 2).unwrap();
             let data = alloc::alloc(layout) as *mut u64;
             *data = size;
+
+            // This punning is safe by the assertion above.
             *data.offset(1) = parent.data as u64;
             let data = data.offset(2);
             vm.allocation_instrumenter
@@ -44,6 +99,10 @@ impl Frame {
         }
     }
 
+    /// Pops the top frame from the stack, returning it.
+    ///
+    /// The returned frame may have a data pointer that is nullptr, indicating that it is the top
+    /// frame of execution.
     #[inline(always)]
     pub fn pop(self, vm: &mut VM) -> Frame {
         unsafe {
@@ -241,13 +300,7 @@ pub fn run_phase1(
         struct_layouts,
     );
 
-    let frame = Frame::push(
-        program[code_start + 2],
-        Frame {
-            data: std::ptr::null_mut(),
-        },
-        &mut vm,
-    );
+    let frame = Frame::base_frame(program[code_start + 2], &mut vm);
 
     for (input_index, el) in flat_inputs.iter().enumerate() {
         unsafe {

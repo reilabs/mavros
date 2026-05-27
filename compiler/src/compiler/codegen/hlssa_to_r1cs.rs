@@ -5,11 +5,13 @@ use crate::compiler::{
         symbolic_executor::{self, SymbolicExecutor},
         types::TypeInfo,
     },
-    ir::r#type::{Type, TypeExpr},
     ssa::{
-        self as ssa_mod, BinaryArithOpKind, BlockId, CmpKind, FunctionId, HLSSA, MemOp, Radix,
-        SliceOpDir,
+        BlockId, FunctionId,
+        hlssa::{
+            self, BinaryArithOpKind, CmpKind, HLSSA, Radix, RefCountOp, SliceOpDir, Type, TypeExpr,
+        },
     },
+    util::{spread_bits, unspread_bits},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
@@ -284,6 +286,15 @@ impl Value {
     }
 }
 
+fn flatten_array_into_table(arr: &ArrayData, out: &mut Vec<LC>) {
+    for elem in arr.data.iter() {
+        match elem {
+            Value::Array(inner) => flatten_array_into_table(&inner.borrow(), out),
+            _ => out.push(elem.expect_linear_combination()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LookupConstraint {
     pub table_id: usize,
@@ -326,16 +337,14 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
 
-    fn lookup(
-        &mut self,
-        target: super::ssa::LookupTarget<Value>,
-        keys: Vec<Value>,
-        results: Vec<Value>,
-        flag: Value,
-    ) {
+    fn lookup(&mut self, target: hlssa::LookupTarget<Value>, args: Vec<Value>, flag: Value) {
         let flag_lc = flag.expect_linear_combination();
+        let els: Vec<_> = args
+            .into_iter()
+            .map(|e| e.expect_linear_combination())
+            .collect();
         match target {
-            super::ssa::LookupTarget::Rangecheck(i) => {
+            hlssa::LookupTarget::Rangecheck(i) => {
                 // TODO this will become table resolution logic eventually
                 assert!(i == 8, "TODO: support other rangecheck sizes");
                 if self.tables.is_empty() {
@@ -346,18 +355,13 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
                     flag: flag_lc.clone(),
                 });
             }
-            super::ssa::LookupTarget::DynRangecheck(v) => {
+            hlssa::LookupTarget::DynRangecheck(v) => {
                 // TODO this will become table resolution logic eventually
                 let v = v.expect_u32();
                 assert!(v == 256, "TODO: support other rangecheck sizes");
@@ -370,18 +374,13 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
                     flag: flag_lc.clone(),
                 });
             }
-            super::ssa::LookupTarget::Spread(bits) => {
+            hlssa::LookupTarget::Spread(bits) => {
                 let table_id = {
                     let existing = self.tables.iter().position(|t| match t {
                         Table::Spread(n) => *n == bits,
@@ -394,26 +393,17 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         self.tables.len() - 1
                     }
                 };
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,
                     flag: flag_lc,
                 });
             }
-            super::ssa::LookupTarget::Array(arr) => {
+            hlssa::LookupTarget::Array(arr) => {
                 let arr = arr.expect_array();
                 let table_id = if arr.borrow().table_id.is_none() {
-                    let elems = arr
-                        .borrow()
-                        .data
-                        .iter()
-                        .map(|e| e.expect_linear_combination())
-                        .collect();
+                    let mut elems = Vec::new();
+                    flatten_array_into_table(&arr.borrow(), &mut elems);
                     self.tables.push(Table::OfElems(elems));
                     let idx = self.tables.len() - 1;
                     arr.borrow_mut().table_id = Some(idx);
@@ -421,11 +411,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     arr.borrow().table_id.unwrap()
                 };
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,
@@ -461,7 +446,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
     fn on_guard(
         &mut self,
-        _inner: &crate::compiler::ssa::OpCode,
+        _inner: &crate::compiler::ssa::hlssa::OpCode,
         _condition: &Value,
         _inputs: Vec<&Value>,
         _result_types: Vec<&Type>,
@@ -687,12 +672,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn cast(
-        &self,
-        _cast_target: &super::ssa::CastTarget,
-        _out_type: &Type,
-        _ctx: &mut R1CGen,
-    ) -> Self {
+    fn cast(&self, _cast_target: &hlssa::CastTarget, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         self.clone()
     }
 
@@ -705,7 +685,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn to_bits(
         &self,
-        endianness: super::ssa::Endianness,
+        endianness: hlssa::Endianness,
         size: usize,
         _out_type: &Type,
         _ctx: &mut R1CGen,
@@ -722,8 +702,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
         // Handle endianness
         let final_bits = match endianness {
-            crate::compiler::ssa::Endianness::Little => bits,
-            crate::compiler::ssa::Endianness::Big => {
+            crate::compiler::ssa::hlssa::Endianness::Little => bits,
+            crate::compiler::ssa::hlssa::Endianness::Big => {
                 let mut reversed = bits;
                 reversed.reverse();
                 reversed
@@ -762,14 +742,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from(v))
     }
 
-    fn of_field(f: super::Field, _ctx: &mut R1CGen) -> Self {
+    fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
         Value::Const(ark_bn254::Fr::from(f))
     }
 
     fn mk_array(
         a: Vec<Self>,
         _ctx: &mut R1CGen,
-        _seq_type: super::ssa::SeqType,
+        _seq_type: hlssa::SequenceTargetType,
         _elem_type: &Type,
     ) -> Self {
         Value::mk_array(a)
@@ -816,7 +796,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         panic!("ICE: ValueOf should not reach R1CS gen")
     }
 
-    fn mem_op(&self, _kind: MemOp, _ctx: &mut R1CGen) {}
+    fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen) {}
 
     fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) {
         let self_const = self.expect_constant();
@@ -832,7 +812,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
     fn to_radix(
         &self,
         _radix: &Radix<Self>,
-        _endianness: crate::compiler::ssa::Endianness,
+        _endianness: crate::compiler::ssa::hlssa::Endianness,
         _size: usize,
         _out_type: &Type,
         _ctx: &mut R1CGen,
@@ -843,14 +823,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
     fn spread(&self, bits: u8, _ctx: &mut R1CGen) -> Self {
         let val = self.expect_constant();
         let v: u128 = val.into_bigint().as_ref()[0] as u128;
-        let spread_val = ssa_mod::spread_bits(v, bits as usize);
+        let spread_val = spread_bits(v, bits as usize);
         Value::Const(ark_bn254::Fr::from(spread_val))
     }
 
     fn unspread(&self, bits: u8, _ctx: &mut R1CGen) -> (Self, Self) {
         let val = self.expect_constant();
         let v: u128 = val.into_bigint().as_ref()[0] as u128;
-        let (odd_val, even_val) = ssa_mod::unspread_bits(v, bits as usize * 2);
+        let (odd_val, even_val) = unspread_bits(v, bits as usize * 2);
         (
             Value::Const(ark_bn254::Fr::from(odd_val)),
             Value::Const(ark_bn254::Fr::from(even_val)),
@@ -1066,7 +1046,7 @@ impl R1CGen {
                     let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
-                        let spread_val = ssa_mod::spread_bits(i as u128, 32);
+                        let spread_val = spread_bits(i as u128, 32);
                         let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
                         let x = witness_layout.next_table_data();
                         let y = witness_layout.next_table_data();

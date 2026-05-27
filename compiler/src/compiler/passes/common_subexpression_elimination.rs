@@ -1,13 +1,21 @@
+//! Deduplicates expressions when one occurrence dominates the other.
+//!
+//! Does not float expressions across branches or otherwise move them outside the block in which
+//! they appear (#172).
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
 };
 
 use crate::compiler::{
-    flow_analysis::{CFG, FlowAnalysis},
+    analysis::flow_analysis::{CFG, FlowAnalysis},
     ssa::{
-        BinaryArithOpKind, BlockId, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
-        OpCode, Radix, ValueId,
+        BlockId, ValueId,
+        hlssa::{
+            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
+            OpCode, Radix,
+        },
     },
 };
 use crate::compiler::{
@@ -372,10 +380,6 @@ impl Debug for Expr {
         write!(f, "{}", self)
     }
 }
-
-/// Deduplicates expressions when one occurrence dominates the other.
-/// Does not float expressions across branches or otherwise move them
-/// outside the block in which they appear.
 pub struct CSE {}
 
 impl Pass for CSE {
@@ -936,12 +940,11 @@ impl CSE {
                             .push((block_id, instruction_idx));
                     }
                     OpCode::Lookup {
-                        target: crate::compiler::ssa::LookupTarget::Rangecheck(8),
-                        keys,
-                        results: _,
+                        target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
+                        args,
                         flag,
-                    } if keys.len() == 1 => {
-                        let key_expr = get_expr(&exprs, &keys[0]);
+                    } if args.len() == 1 => {
+                        let key_expr = get_expr(&exprs, &args[0]);
                         let flag_expr = get_expr(&exprs, flag);
                         assertions
                             .entry(Assertion::ByteLookup {
@@ -967,6 +970,7 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::MkRepeated { .. }
                     | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
@@ -975,8 +979,7 @@ impl CSE {
                     | OpCode::Lookup { .. }
                     | OpCode::DLookup {
                         target: _,
-                        keys: _,
-                        results: _,
+                        args: _,
                         flag: _,
                     }
                     | OpCode::Todo { .. }

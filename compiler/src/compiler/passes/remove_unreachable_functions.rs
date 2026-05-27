@@ -1,13 +1,16 @@
+//! Removes functions that are not reachable from main via the call graph.
+//!
+//! This pass should run after defunctionalization, and entry point preparation. This ensures that
+//! all calls are static and hence avoids producing incorrect results.
+
 use std::collections::HashSet;
 
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
+    analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::HLSSA,
+    ssa::hlssa::HLSSA,
 };
 
-/// Removes functions that are not reachable from main via the call graph.
-/// This pass should run after defunctionalization, when all calls are static.
 pub struct RemoveUnreachableFunctions {}
 
 impl RemoveUnreachableFunctions {

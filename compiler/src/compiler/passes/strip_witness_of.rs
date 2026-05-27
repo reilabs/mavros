@@ -1,16 +1,16 @@
+//! Strips all `WitnessOf` type wrappers from the SSA.
+//!
+//! In the witgen pipeline, all computation is concrete — there's no need for the WitnessOf
+//! distinction. This pass converts all `WitnessOf(X)` types back to `X` and removes
+//! `Cast { target: WitnessOf }` instructions.
+
 use crate::compiler::{
-    flow_analysis::FlowAnalysis,
-    ir::r#type::Type,
+    analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::{CastTarget, HLSSA, OpCode},
+    ssa::hlssa::{CastTarget, HLSSA, OpCode, Type},
 };
 
-/// Strips all `WitnessOf` type wrappers from the SSA.
-///
-/// In the witgen pipeline, all computation is concrete — there's no need
-/// for the WitnessOf distinction. This pass converts all `WitnessOf(X)` types
-/// back to `X` and removes `Cast { target: WitnessOf }` instructions.
 pub struct StripWitnessOf {}
 
 impl Pass for StripWitnessOf {
@@ -91,6 +91,9 @@ impl StripWitnessOf {
             OpCode::MkSeq { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
+            OpCode::MkRepeated { elem_type, .. } => {
+                *elem_type = elem_type.strip_all_witness();
+            }
             OpCode::Alloc { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
@@ -142,8 +145,8 @@ impl StripWitnessOf {
             | OpCode::Const { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => {}
-            OpCode::Guard { inner, .. } => {
-                Self::strip_instruction(inner);
+            OpCode::Guard { .. } => {
+                panic!("ICE: Found Guard but `LowerGuards` should have removed them")
             }
         }
     }
