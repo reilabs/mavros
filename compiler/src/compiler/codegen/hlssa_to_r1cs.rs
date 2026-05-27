@@ -820,22 +820,21 @@ impl symbolic_executor::Value<R1CGen> for Value {
     ) -> Self {
         match radix {
             Radix::Bytes => {
-                let bits = self.expect_constant().into_bigint().to_bits_le();
-                let mut bytes = Vec::with_capacity(size);
-                for byte_idx in 0..size {
-                    let mut byte = 0u128;
-                    for bit_idx in 0..8 {
-                        let bit = byte_idx * 8 + bit_idx;
-                        if bits.get(bit).copied().unwrap_or(false) {
-                            byte |= 1u128 << bit_idx;
-                        }
-                    }
-                    bytes.push(Value::Const(ark_bn254::Fr::from(byte)));
+                let mut bytes = self.expect_constant().into_bigint().to_bytes_le();
+                if bytes.len() > size {
+                    bytes.truncate(size);
+                } else {
+                    bytes.resize(size, 0);
                 }
                 if matches!(endianness, crate::compiler::ssa::hlssa::Endianness::Big) {
                     bytes.reverse();
                 }
-                Value::mk_array(bytes)
+                Value::mk_array(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Value::Const(ark_bn254::Fr::from(byte)))
+                        .collect(),
+                )
             }
             Radix::Dyn(_) => todo!("dynamic ToRadix R1CS generation not yet implemented"),
         }
