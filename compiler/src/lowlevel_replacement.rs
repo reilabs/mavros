@@ -65,6 +65,15 @@ pub const REPLACEMENT_CRATES: &[ReplacementCrate] = &[
             kind: ReplacementKind::Single("sha256_compression"),
         }],
     },
+    ReplacementCrate {
+        file_name: "field_less_than.nr",
+        dep_name: "field_less_than",
+        source: include_str!("../../stdlib_replacements/src/field_less_than.nr"),
+        replacements: &[ReplacementSpec {
+            lowlevel_name: "field_less_than",
+            kind: ReplacementKind::Single("field_less_than"),
+        }],
+    },
 ];
 
 /// Look up named functions from the root module of a crate, returning their metadata.
