@@ -5,8 +5,6 @@
 //! `BitRange` representation where possible.
 
 use ark_ff::Field as _;
-use num_bigint::BigInt;
-use num_traits::{One, ToPrimitive};
 
 use crate::compiler::{
     Field,
@@ -25,7 +23,7 @@ use super::{
     lowering_pass::{LoweringContext, LoweringPass},
     witness_integer_utils::{
         SignBitSource, cast_target_for_integer_type, extract_sign_bit, guarded_rangecheck,
-        integer_bits_and_signedness, lower_unsigned_divmod, one_or_condition_field, two_pow,
+        integer_bits_and_signedness, two_pow,
     },
 };
 
@@ -303,48 +301,16 @@ impl LowerWitnessBitwiseOps {
                 });
             }
             BinaryArithOpKind::Shr => {
-                let factor_range = context
-                    .try_range(rhs)
-                    .map(|range| {
-                        let lo = range.lo().and_then(|v| v.to_u32()).unwrap_or(0);
-                        let hi = range
-                            .hi()
-                            .and_then(|v| v.to_u32())
-                            .unwrap_or(bits as u32 - 1)
-                            .min(bits as u32 - 1);
-                        crate::compiler::analysis::value_range_analysis::IntInterval::closed(
-                            BigInt::one() << lo,
-                            BigInt::one() << hi,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        crate::compiler::analysis::value_range_analysis::IntInterval::closed(
-                            BigInt::one(),
-                            BigInt::one() << (bits as u32 - 1),
-                        )
-                    });
-                let guard_is_witness = guard
-                    .map(|condition| context.types().get_value_type(condition).is_witness_of())
-                    .unwrap_or(false);
-                let guard_flag = one_or_condition_field(b, context.types(), guard);
-                let divmod = lower_unsigned_divmod(
+                self.emit_guarded(
                     b,
-                    lhs,
-                    factor,
-                    bits,
-                    true,
-                    false,
-                    &context.range(lhs),
-                    &factor_range,
                     guard,
-                    guard_is_witness,
-                    guard_flag,
+                    OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::Div,
+                        result,
+                        lhs,
+                        rhs: factor,
+                    },
                 );
-                b.emit(OpCode::Cast {
-                    result,
-                    value: divmod.q,
-                    target: CastTarget::U(bits),
-                });
             }
             _ => unreachable!(),
         }

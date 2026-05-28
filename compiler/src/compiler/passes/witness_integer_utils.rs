@@ -1,6 +1,6 @@
 use ark_ff::{AdditiveGroup as _, Field as _, PrimeField};
 use num_bigint::{BigInt, Sign};
-use num_traits::{One, Signed, Zero};
+use num_traits::Signed;
 
 use crate::compiler::{
     Field,
@@ -112,26 +112,6 @@ pub(crate) fn narrow_rangecheck_width(range: &IntInterval, default_bits: usize) 
     width.max(1).min(default_bits)
 }
 
-pub(crate) fn quotient_bound(a_range: &IntInterval, b_range: &IntInterval) -> IntInterval {
-    let (Some(a_hi), Some(b_lo)) = (a_range.hi(), b_range.lo()) else {
-        return IntInterval::top();
-    };
-    if !a_range.is_non_negative() || !b_lo.is_positive() {
-        return IntInterval::top();
-    }
-    IntInterval::closed(BigInt::zero(), a_hi / b_lo)
-}
-
-pub(crate) fn remainder_bound(b_range: &IntInterval) -> IntInterval {
-    let Some(b_hi) = b_range.hi() else {
-        return IntInterval::top();
-    };
-    if !b_hi.is_positive() {
-        return IntInterval::top();
-    }
-    IntInterval::closed(BigInt::zero(), b_hi - BigInt::one())
-}
-
 pub(crate) fn range_fits_field_injectively(range: &IntInterval) -> bool {
     let Some(lo) = range.lo() else {
         return false;
@@ -203,120 +183,4 @@ pub(crate) fn xor_bits(
     let two_product = b.mul(two, product);
     let sum = b.add(lhs, rhs);
     b.sub(sum, two_product)
-}
-
-pub(crate) struct DivModResult {
-    pub q: ValueId,
-    pub r: ValueId,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn lower_unsigned_divmod(
-    b: &mut HLBlockEmitter<'_>,
-    dividend: ValueId,
-    divisor: ValueId,
-    bits: usize,
-    dividend_is_witness: bool,
-    divisor_is_witness: bool,
-    dividend_range: &IntInterval,
-    divisor_range: &IntInterval,
-    guard: Option<ValueId>,
-    guard_is_witness: bool,
-    guard_flag: ValueId,
-) -> DivModResult {
-    if dividend == divisor {
-        let active = if let Some(condition) = guard {
-            let condition = if guard_is_witness {
-                b.value_of(condition)
-            } else {
-                condition
-            };
-            b.cast_to_field(condition)
-        } else {
-            b.field_const(Field::ONE)
-        };
-        let zero = b.field_const(Field::ZERO);
-        let q_wit = b.write_witness(active);
-        let r_wit = b.write_witness(zero);
-
-        let one = b.field_const(Field::ONE);
-        let q_diff = b.sub(q_wit, active);
-        b.constrain(one, q_diff, zero);
-        b.constrain(one, r_wit, zero);
-
-        guarded_rangecheck(b, q_wit, 1, guard);
-        guarded_rangecheck(b, r_wit, 1, guard);
-
-        let divisor_field = b.cast_to_field(divisor);
-        let divisor_minus_one = b.sub(divisor_field, one);
-        guarded_rangecheck(b, divisor_minus_one, bits, guard);
-
-        return DivModResult { q: q_wit, r: r_wit };
-    }
-
-    let dividend_pure = if dividend_is_witness {
-        b.value_of(dividend)
-    } else {
-        dividend
-    };
-    let divisor_pure = if divisor_is_witness {
-        b.value_of(divisor)
-    } else {
-        divisor
-    };
-
-    let mut dividend_hint = b.cast_to(CastTarget::U(bits), dividend_pure);
-    let mut divisor_hint = b.cast_to(CastTarget::U(bits), divisor_pure);
-    if let Some(condition) = guard {
-        let condition = if guard_is_witness {
-            b.value_of(condition)
-        } else {
-            condition
-        };
-        let zero = b.u_const(bits, 0);
-        let one = b.u_const(bits, 1);
-        dividend_hint = b.select(condition, dividend_hint, zero);
-        divisor_hint = b.select(condition, divisor_hint, one);
-    }
-    let q_hint = b.div(dividend_hint, divisor_hint);
-    let qb = b.mul(q_hint, divisor_hint);
-    let r_hint = b.sub(dividend_hint, qb);
-    let q_hint_field = b.cast_to_field(q_hint);
-    let r_hint_field = b.cast_to_field(r_hint);
-    let q_wit = b.write_witness(q_hint_field);
-    let r_wit = b.write_witness(r_hint_field);
-
-    let dividend_field = b.cast_to_field(dividend);
-    let divisor_field = b.cast_to_field(divisor);
-    let dividend_minus_r = b.sub(dividend_field, r_wit);
-    if guard.is_some() {
-        let product = if divisor_is_witness {
-            let q_pure = b.value_of(q_wit);
-            let divisor_pure = b.value_of(divisor_field);
-            let product_hint = b.mul(q_pure, divisor_pure);
-            let product = b.write_witness(product_hint);
-            b.constrain(q_wit, divisor_field, product);
-            product
-        } else {
-            b.mul(q_wit, divisor_field)
-        };
-        let diff = b.sub(product, dividend_minus_r);
-        let zero = b.field_const(Field::ZERO);
-        b.constrain(guard_flag, diff, zero);
-    } else {
-        b.constrain(q_wit, divisor_field, dividend_minus_r);
-    }
-
-    let q_bits = narrow_rangecheck_width(&quotient_bound(dividend_range, divisor_range), bits);
-    let r_bound = remainder_bound(divisor_range);
-    let r_bits = narrow_rangecheck_width(&r_bound, bits);
-    guarded_rangecheck(b, q_wit, q_bits, guard);
-    guarded_rangecheck(b, r_wit, r_bits, guard);
-
-    let one = b.field_const(Field::ONE);
-    let divisor_minus_r = b.sub(divisor_field, r_wit);
-    let divisor_minus_r_minus_one = b.sub(divisor_minus_r, one);
-    guarded_rangecheck(b, divisor_minus_r_minus_one, r_bits, guard);
-
-    DivModResult { q: q_wit, r: r_wit }
 }
