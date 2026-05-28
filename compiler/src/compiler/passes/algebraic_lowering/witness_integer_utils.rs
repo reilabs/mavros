@@ -125,31 +125,6 @@ pub(crate) fn range_fits_field_injectively(range: &IntInterval) -> bool {
     hi - lo < p
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum SignBitSource {
-    Integer,
-    Field,
-}
-
-pub(crate) fn extract_sign_bit(
-    b: &mut HLBlockEmitter<'_>,
-    encoded: ValueId,
-    bits: usize,
-    value_range: &IntInterval,
-    source: SignBitSource,
-) -> ValueId {
-    if value_range.is_non_negative_in_signed(bits) {
-        return b.field_const(Field::ZERO);
-    }
-    assert!(bits >= 1, "signed integer width must be at least 1 bit");
-    let encoded = match source {
-        SignBitSource::Integer => encoded,
-        SignBitSource::Field => b.cast_to(CastTarget::U(bits), encoded),
-    };
-    let sign = b.bit_range(encoded, bits - 1, 1);
-    b.cast_to_field(sign)
-}
-
 pub(crate) fn signed_value_from_encoded(
     b: &mut HLBlockEmitter<'_>,
     encoded_field: ValueId,

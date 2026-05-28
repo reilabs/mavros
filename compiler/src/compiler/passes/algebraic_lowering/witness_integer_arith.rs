@@ -17,9 +17,9 @@ use crate::compiler::{
 use super::{
     AlgebraicLoweringRule, LoweringContext,
     witness_integer_utils::{
-        SignBitSource, extract_sign_bit, guarded_or_zero_field, guarded_rangecheck,
-        integer_bits_and_signedness, narrow_rangecheck_width, one_or_condition_field,
-        range_fits_field_injectively, signed_value_from_encoded, two_pow,
+        guarded_or_zero_field, guarded_rangecheck, integer_bits_and_signedness,
+        narrow_rangecheck_width, one_or_condition_field, range_fits_field_injectively,
+        signed_value_from_encoded, two_pow,
     },
 };
 
@@ -201,16 +201,28 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        let lhs_range = context.range(lhs);
+        let rhs_range = context.range(rhs);
+        let sign_l = if lhs_range.is_non_negative_in_signed(bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
+            b.cast_to_field(sign_l_bits)
+        };
+        let sign_r = if rhs_range.is_non_negative_in_signed(bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
+            b.cast_to_field(sign_r_bits)
+        };
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
-        let sign_r = extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer);
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
         let result_range = match kind {
-            BinaryArithOpKind::Add => context.range(lhs).add(&context.range(rhs)),
-            BinaryArithOpKind::Sub => context.range(lhs).sub(&context.range(rhs)),
+            BinaryArithOpKind::Add => lhs_range.add(&rhs_range),
+            BinaryArithOpKind::Sub => lhs_range.sub(&rhs_range),
             _ => unreachable!(),
         };
         assert!(
@@ -236,10 +248,14 @@ impl LowerWitnessIntegerArithOps {
         let result_hint_unsigned = b.cast_to(CastTarget::U(bits), result_hint);
         let result_hint_field = b.cast_to_field(result_hint_unsigned);
         let result_wit = b.write_witness(result_hint_field);
-
         guarded_rangecheck(b, result_wit, bits, guard);
-        let sign_result =
-            extract_sign_bit(b, result_wit, bits, &result_range, SignBitSource::Field);
+        let sign_result = if result_range.is_non_negative_in_signed(bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let result_int = b.cast_to(CastTarget::U(bits), result_wit);
+            let sign_result_bits = b.bit_range(result_int, bits - 1, 1);
+            b.cast_to_field(sign_result_bits)
+        };
         let result_signed = signed_value_from_encoded(b, result_wit, sign_result, bits);
 
         let diff = b.sub(signed_raw, result_signed);
@@ -265,7 +281,9 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        let product_range = context.range(lhs).mul(&context.range(rhs));
+        let lhs_range = context.range(lhs);
+        let rhs_range = context.range(rhs);
+        let product_range = lhs_range.mul(&rhs_range);
         assert!(
             range_fits_field_injectively(&product_range),
             "signed multiplication product range is too wide for a single-field product"
@@ -273,10 +291,20 @@ impl LowerWitnessIntegerArithOps {
 
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
+        let sign_l = if lhs_range.is_non_negative_in_signed(bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
+            b.cast_to_field(sign_l_bits)
+        };
+        let sign_r = if rhs_range.is_non_negative_in_signed(bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
+            b.cast_to_field(sign_r_bits)
+        };
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
-        let sign_r = extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer);
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
@@ -287,8 +315,13 @@ impl LowerWitnessIntegerArithOps {
         let result_hint_field = b.cast_to_field(result_hint_unsigned);
         let result_wit = b.write_witness(result_hint_field);
         guarded_rangecheck(b, result_wit, bits, guard);
-        let sign_result =
-            extract_sign_bit(b, result_wit, bits, &product_range, SignBitSource::Field);
+        let sign_result = if product_range.is_non_negative_in_signed(bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let result_int = b.cast_to(CastTarget::U(bits), result_wit);
+            let sign_result_bits = b.bit_range(result_int, bits - 1, 1);
+            b.cast_to_field(sign_result_bits)
+        };
         let result_signed = signed_value_from_encoded(b, result_wit, sign_result, bits);
 
         let use_product_witness = lhs_witness && rhs_witness;
@@ -373,27 +406,42 @@ impl LowerWitnessIntegerArithOps {
     ) {
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
-        let sign_l = extract_sign_bit(b, lhs, bits, &context.range(lhs), SignBitSource::Integer);
-        let sign_r = if lhs == rhs {
-            sign_l
-        } else {
-            extract_sign_bit(b, rhs, bits, &context.range(rhs), SignBitSource::Integer)
-        };
+        let lhs_range = context.range(lhs);
+        let rhs_range = context.range(rhs);
 
-        let sign_l_is_witness = lhs_witness && !context.range(lhs).is_non_negative_in_signed(bits);
+        let sign_l_is_witness = lhs_witness && !lhs_range.is_non_negative_in_signed(bits);
+        let (sign_l_u1, sign_l) = if lhs_range.is_non_negative_in_signed(bits) {
+            (b.u_const(1, 0), b.field_const(Field::ZERO))
+        } else {
+            let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
+            let sign_l_u1 = b.cast_to(CastTarget::U(1), sign_l_bits);
+            let sign_l = b.cast_to_field(sign_l_u1);
+            (sign_l_u1, sign_l)
+        };
         let sign_r_is_witness = if lhs == rhs {
             sign_l_is_witness
         } else {
-            rhs_witness && !context.range(rhs).is_non_negative_in_signed(bits)
+            rhs_witness && !rhs_range.is_non_negative_in_signed(bits)
         };
+        let (sign_r_u1, sign_r) = if lhs == rhs {
+            (sign_l_u1, sign_l)
+        } else if rhs_range.is_non_negative_in_signed(bits) {
+            (b.u_const(1, 0), b.field_const(Field::ZERO))
+        } else {
+            let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
+            let sign_r_u1 = b.cast_to(CastTarget::U(1), sign_r_bits);
+            let sign_r = b.cast_to_field(sign_r_u1);
+            (sign_r_u1, sign_r)
+        };
+        let lhs_field = b.cast_to_field(lhs);
+        let rhs_field = b.cast_to_field(rhs);
 
         let abs_l = self.write_abs_value(
             b,
             lhs,
             lhs_field,
             sign_l,
+            sign_l_u1,
             bits,
             lhs_witness,
             sign_l_is_witness,
@@ -407,6 +455,7 @@ impl LowerWitnessIntegerArithOps {
                 rhs,
                 rhs_field,
                 sign_r,
+                sign_r_u1,
                 bits,
                 rhs_witness,
                 sign_r_is_witness,
@@ -414,11 +463,11 @@ impl LowerWitnessIntegerArithOps {
             )
         };
 
-        let abs_l_range = abs_bound(&context.range(lhs));
+        let abs_l_range = abs_bound(&lhs_range);
         let abs_r_range = if lhs == rhs {
             abs_l_range.clone()
         } else {
-            abs_bound(&context.range(rhs))
+            abs_bound(&rhs_range)
         };
         let guard_is_witness = guard
             .map(|condition| context.types().get_value_type(condition).is_witness_of())
@@ -438,8 +487,6 @@ impl LowerWitnessIntegerArithOps {
             guard_flag,
         );
 
-        let sign_l_u1 = b.cast_to(CastTarget::U(1), sign_l);
-        let sign_r_u1 = b.cast_to(CastTarget::U(1), sign_r);
         let quotient_sign_u1 = b.xor(sign_l_u1, sign_r_u1);
         let quotient_sign = b.cast_to_field(quotient_sign_u1);
         let quotient_sign_is_witness = sign_l_is_witness || sign_r_is_witness;
@@ -451,12 +498,20 @@ impl LowerWitnessIntegerArithOps {
             b,
             divmod.q,
             quotient_sign,
+            quotient_sign_u1,
             quotient_sign_is_witness,
             bits,
             guard,
         );
-        let remainder =
-            self.write_signed_magnitude_result(b, divmod.r, sign_l, sign_l_is_witness, bits, guard);
+        let remainder = self.write_signed_magnitude_result(
+            b,
+            divmod.r,
+            sign_l,
+            sign_l_u1,
+            sign_l_is_witness,
+            bits,
+            guard,
+        );
 
         let value = match kind {
             BinaryArithOpKind::Div => quotient,
@@ -476,6 +531,7 @@ impl LowerWitnessIntegerArithOps {
         value: ValueId,
         value_field: ValueId,
         sign: ValueId,
+        sign_u1: ValueId,
         bits: usize,
         value_is_witness: bool,
         sign_is_witness: bool,
@@ -489,12 +545,11 @@ impl LowerWitnessIntegerArithOps {
         let zero = b.i_const(bits, 0);
         let neg = b.sub(zero, pure_value);
         let sign_for_hint = if sign_is_witness {
-            b.value_of(sign)
+            b.value_of(sign_u1)
         } else {
-            sign
+            sign_u1
         };
-        let sign_u1 = b.cast_to(CastTarget::U(1), sign_for_hint);
-        let abs_hint = b.select(sign_u1, neg, pure_value);
+        let abs_hint = b.select(sign_for_hint, neg, pure_value);
         let abs_hint_field = b.cast_to_field(abs_hint);
         let abs_wit = b.write_witness(abs_hint_field);
 
@@ -513,29 +568,30 @@ impl LowerWitnessIntegerArithOps {
         b: &mut HLBlockEmitter<'_>,
         magnitude: ValueId,
         sign: ValueId,
+        sign_u1: ValueId,
         sign_is_witness: bool,
         bits: usize,
         guard: Option<ValueId>,
     ) -> ValueId {
         let magnitude_pure = b.value_of(magnitude);
         let sign_for_hint = if sign_is_witness {
-            b.value_of(sign)
+            b.value_of(sign_u1)
         } else {
-            sign
+            sign_u1
         };
-        let sign_u1 = b.cast_to(CastTarget::U(1), sign_for_hint);
         let magnitude_field = b.cast_to_field(magnitude_pure);
         let two_n_field = b.field_const(two_pow(bits));
         let neg = b.sub(two_n_field, magnitude_field);
-        let encoded_if_nonzero = b.select(sign_u1, neg, magnitude_field);
+        let encoded_if_nonzero = b.select(sign_for_hint, neg, magnitude_field);
         let zero = b.field_const(Field::ZERO);
         let magnitude_is_zero = b.eq(magnitude_field, zero);
         let encoded_hint = b.select(magnitude_is_zero, zero, encoded_if_nonzero);
         let encoded = b.write_witness(encoded_hint);
         guarded_rangecheck(b, encoded, bits, guard);
 
-        let sign_range = IntInterval::top();
-        let result_sign = extract_sign_bit(b, encoded, bits, &sign_range, SignBitSource::Field);
+        let encoded_int = b.cast_to(CastTarget::U(bits), encoded);
+        let result_sign_bits = b.bit_range(encoded_int, bits - 1, 1);
+        let result_sign = b.cast_to_field(result_sign_bits);
         let signed_result = signed_value_from_encoded(b, encoded, result_sign, bits);
 
         let two = b.field_const(Field::from(2));

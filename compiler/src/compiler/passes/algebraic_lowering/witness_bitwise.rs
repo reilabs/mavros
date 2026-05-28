@@ -4,7 +4,7 @@
 //! two-limb `u32` decomposition. It also canonicalizes witness integer casts/shifts into the shared
 //! `BitRange` representation where possible.
 
-use ark_ff::Field as _;
+use ark_ff::{AdditiveGroup as _, Field as _};
 
 use crate::compiler::{
     Field,
@@ -21,8 +21,7 @@ use crate::compiler::{
 use super::{
     AlgebraicLoweringRule, LoweringContext,
     witness_integer_utils::{
-        SignBitSource, cast_target_for_integer_type, extract_sign_bit, guarded_rangecheck,
-        integer_bits_and_signedness, two_pow,
+        cast_target_for_integer_type, guarded_rangecheck, integer_bits_and_signedness, two_pow,
     },
 };
 
@@ -226,14 +225,13 @@ impl LowerWitnessBitwiseOps {
         from_bits: usize,
         to_bits: usize,
     ) {
+        let sign = if context.range(value).is_non_negative_in_signed(from_bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let sign_bits = b.bit_range(value, from_bits - 1, 1);
+            b.cast_to_field(sign_bits)
+        };
         let value_field = b.cast_to_field(value);
-        let sign = extract_sign_bit(
-            b,
-            value,
-            from_bits,
-            &context.range(value),
-            SignBitSource::Integer,
-        );
         let extension = b.field_const(two_pow(to_bits) - two_pow(from_bits));
         let offset = b.mul(sign, extension);
         let extended = b.add(value_field, offset);
