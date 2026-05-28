@@ -7,8 +7,7 @@ use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
-    analysis::{flow_analysis::FlowAnalysis, types::FunctionTypeInfo},
-    pass_manager::AnalysisId,
+    analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
         hlssa::{
@@ -18,23 +17,17 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::{LoweringContext, LoweringPass};
+use super::{AlgebraicLoweringRule, LoweringContext};
 
 pub struct LowerWitnessSpreadOps {}
 
-impl LoweringPass for LowerWitnessSpreadOps {
-    const NAME: &'static str = "lower_witness_spread_ops";
-
-    fn preserved_analyses(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
-    }
-
-    fn process_instruction(
+impl AlgebraicLoweringRule for LowerWitnessSpreadOps {
+    fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        instruction: OpCode,
-    ) {
+        instruction: &OpCode,
+    ) -> bool {
         let function_type_info = context.types();
         match instruction {
             OpCode::Spread {
@@ -42,14 +35,11 @@ impl LoweringPass for LowerWitnessSpreadOps {
                 value,
                 bits,
             } => {
-                if function_type_info.get_value_type(value).is_witness_of() {
-                    self.lower_witness_spread(b, function_type_info, result, value, bits);
+                if function_type_info.get_value_type(*value).is_witness_of() {
+                    self.lower_witness_spread(b, function_type_info, *result, *value, *bits);
+                    true
                 } else {
-                    b.emit(OpCode::Spread {
-                        result,
-                        value,
-                        bits,
-                    });
+                    false
                 }
             }
             OpCode::Unspread {
@@ -58,25 +48,21 @@ impl LoweringPass for LowerWitnessSpreadOps {
                 value,
                 bits,
             } => {
-                if function_type_info.get_value_type(value).is_witness_of() {
+                if function_type_info.get_value_type(*value).is_witness_of() {
                     self.lower_witness_unspread(
                         b,
                         function_type_info,
-                        result_odd,
-                        result_even,
-                        value,
-                        bits,
+                        *result_odd,
+                        *result_even,
+                        *value,
+                        *bits,
                     );
+                    true
                 } else {
-                    b.emit(OpCode::Unspread {
-                        result_odd,
-                        result_even,
-                        value,
-                        bits,
-                    });
+                    false
                 }
             }
-            other => b.emit(other),
+            _ => false,
         }
     }
 }

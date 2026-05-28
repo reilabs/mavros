@@ -160,27 +160,3 @@ pub(crate) fn signed_value_from_encoded(
     let sign_shifted = b.mul(sign, sign_shift);
     b.sub(encoded_field, sign_shifted)
 }
-
-pub(crate) fn xor_bits(
-    b: &mut HLBlockEmitter<'_>,
-    lhs: ValueId,
-    rhs: ValueId,
-    lhs_is_witness: bool,
-    rhs_is_witness: bool,
-) -> ValueId {
-    let product = if lhs_is_witness && rhs_is_witness {
-        let lhs_pure = b.value_of(lhs);
-        let rhs_pure = b.value_of(rhs);
-        let product_hint = b.mul(lhs_pure, rhs_pure);
-        let product = b.write_witness(product_hint);
-        b.constrain(lhs, rhs, product);
-        product
-    } else {
-        b.mul(lhs, rhs)
-    };
-
-    let two = b.field_const(Field::from(2));
-    let two_product = b.mul(two, product);
-    let sum = b.add(lhs, rhs);
-    b.sub(sum, two_product)
-}

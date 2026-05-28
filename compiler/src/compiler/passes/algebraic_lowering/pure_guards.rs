@@ -33,27 +33,23 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::{LoweringContext, LoweringPass};
+use super::{AlgebraicLoweringRule, LoweringContext};
 
 pub struct LowerPureGuards {}
 
-impl LoweringPass for LowerPureGuards {
-    const NAME: &'static str = "lower_pure_guards";
-
-    fn process_instruction(
+impl AlgebraicLoweringRule for LowerPureGuards {
+    fn lower_instruction(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        instruction: OpCode,
-    ) {
+        instruction: &OpCode,
+    ) -> bool {
         let type_info = context.types();
         match instruction {
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(emitter, condition, *inner, type_info);
+                self.lower_guard(emitter, *condition, inner.as_ref().clone(), type_info)
             }
-            other => {
-                emitter.emit(other);
-            }
+            _ => false,
         }
     }
 }
@@ -78,7 +74,7 @@ impl LowerPureGuards {
         condition: ValueId,
         inner: OpCode,
         type_info: &FunctionTypeInfo,
-    ) {
+    ) -> bool {
         match inner {
             // -- Side-effectful / constraint-generating: always keep as Guard --
             OpCode::Store { .. }
@@ -90,24 +86,15 @@ impl LowerPureGuards {
             | OpCode::Constrain { .. }
             | OpCode::MemOp { .. }
             | OpCode::Lookup { .. }
-            | OpCode::DLookup { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            | OpCode::DLookup { .. } => false,
 
             OpCode::Rangecheck { value, max_bits }
                 if !type_info.get_value_type(value).is_witness_of() =>
             {
                 self.lower_rangecheck_guard(emitter, condition, value, max_bits, type_info);
+                true
             }
-            OpCode::Rangecheck { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            OpCode::Rangecheck { .. } => false,
 
             // -- Integer arith that can overflow: lower only if all inputs pure --
             OpCode::BinaryArithOp {
@@ -123,11 +110,13 @@ impl LowerPureGuards {
                         self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, false,
                         );
+                        true
                     }
                     TypeExpr::I(bits) if self.all_inputs_pure(&inner, type_info) => {
                         self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, true,
                         );
+                        true
                     }
                     // Field arith can't overflow — always unwrap
                     TypeExpr::Field => {
@@ -137,19 +126,10 @@ impl LowerPureGuards {
                             lhs,
                             rhs,
                         });
+                        true
                     }
-                    // Witness inputs on integer arith: keep as Guard for ExplicitWitness
-                    _ => {
-                        emitter.emit(OpCode::Guard {
-                            condition,
-                            inner: Box::new(OpCode::BinaryArithOp {
-                                kind,
-                                result,
-                                lhs,
-                                rhs,
-                            }),
-                        });
-                    }
+                    // Witness inputs on integer arith: keep as Guard for the witness arithmetic rule.
+                    _ => false,
                 }
             }
 
@@ -168,23 +148,15 @@ impl LowerPureGuards {
                         self.lower_shift_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, false,
                         );
+                        true
                     }
                     TypeExpr::I(bits) if self.all_inputs_pure(&inner, type_info) => {
                         self.lower_shift_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, true,
                         );
+                        true
                     }
-                    _ => {
-                        emitter.emit(OpCode::Guard {
-                            condition,
-                            inner: Box::new(OpCode::BinaryArithOp {
-                                kind,
-                                result,
-                                lhs,
-                                rhs,
-                            }),
-                        });
-                    }
+                    _ => false,
                 }
             }
 
@@ -203,29 +175,15 @@ impl LowerPureGuards {
                         self.lower_divmod_guard(
                             emitter, condition, kind, result, lhs, rhs, lhs_type,
                         );
+                        true
                     }
                     // Witness inputs: keep as Guard
-                    _ => {
-                        emitter.emit(OpCode::Guard {
-                            condition,
-                            inner: Box::new(OpCode::BinaryArithOp {
-                                kind,
-                                result,
-                                lhs,
-                                rhs,
-                            }),
-                        });
-                    }
+                    _ => false,
                 }
             }
 
-            // -- SExt: keep as Guard (ExplicitWitness handles it) --
-            OpCode::SExt { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            // -- SExt: keep as Guard for the witness bitwise rule. --
+            OpCode::SExt { .. } => false,
 
             // -- ArraySet: lower with OOB check if index is pure.
             OpCode::ArraySet {
@@ -237,6 +195,7 @@ impl LowerPureGuards {
                 self.lower_array_set_guard(
                     emitter, condition, result, array, index, value, type_info,
                 );
+                true
             }
 
             // -- ArrayGet: lower with OOB check if index is pure.
@@ -246,15 +205,11 @@ impl LowerPureGuards {
                 index,
             } if !type_info.get_value_type(index).is_witness_of() => {
                 self.lower_array_get_guard(emitter, condition, result, array, index, type_info);
+                true
             }
 
             // ArrayGet/ArraySet with witness index: keep as Guard
-            OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => false,
 
             // -- Pure computation, no constraints, can't fail → unwrap --
             OpCode::Const { .. }
@@ -289,6 +244,7 @@ impl LowerPureGuards {
             | OpCode::BumpD { .. }
             | OpCode::Todo { .. } => {
                 emitter.emit(inner);
+                true
             }
 
             // Guard-within-Guard should not happen

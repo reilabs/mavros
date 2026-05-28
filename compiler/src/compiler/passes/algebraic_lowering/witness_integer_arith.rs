@@ -4,8 +4,7 @@ use num_traits::{One, Signed, Zero};
 
 use crate::compiler::{
     Field,
-    analysis::{flow_analysis::FlowAnalysis, value_range_analysis::IntInterval},
-    pass_manager::AnalysisId,
+    analysis::value_range_analysis::IntInterval,
     ssa::{
         ValueId,
         hlssa::{
@@ -16,37 +15,27 @@ use crate::compiler::{
 };
 
 use super::{
-    lowering_pass::{LoweringContext, LoweringPass},
+    AlgebraicLoweringRule, LoweringContext,
     witness_integer_utils::{
         SignBitSource, extract_sign_bit, guarded_or_zero_field, guarded_rangecheck,
         integer_bits_and_signedness, narrow_rangecheck_width, one_or_condition_field,
-        range_fits_field_injectively, signed_value_from_encoded, two_pow, xor_bits,
+        range_fits_field_injectively, signed_value_from_encoded, two_pow,
     },
 };
 
 pub struct LowerWitnessIntegerArithOps {}
 
-impl LoweringPass for LowerWitnessIntegerArithOps {
-    const NAME: &'static str = "lower_witness_integer_arith_ops";
-
-    fn needs_value_ranges(&self) -> bool {
-        true
-    }
-
-    fn preserved_analyses(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
-    }
-
-    fn process_instruction(
+impl AlgebraicLoweringRule for LowerWitnessIntegerArithOps {
+    fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        instruction: OpCode,
-    ) {
+        instruction: &OpCode,
+    ) -> bool {
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_arith(b, context, Some(condition), *inner);
+            self.process_arith(b, context, Some(*condition), inner.as_ref())
         } else {
-            self.process_arith(b, context, None, instruction);
+            self.process_arith(b, context, None, instruction)
         }
     }
 }
@@ -56,70 +45,62 @@ impl LowerWitnessIntegerArithOps {
         Self {}
     }
 
-    fn emit_guarded(&self, b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-        if let Some(condition) = guard {
-            b.emit(OpCode::Guard {
-                condition,
-                inner: Box::new(op),
-            });
-        } else {
-            b.emit(op);
-        }
-    }
-
     fn process_arith(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         guard: Option<ValueId>,
-        op: OpCode,
-    ) {
+        op: &OpCode,
+    ) -> bool {
         match op {
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
                 result,
                 lhs,
                 rhs,
-            } if self.should_lower_integer_arith(context, lhs, rhs) => {
+            } if self.should_lower_integer_arith(context, *lhs, *rhs) => {
                 let (bits, signed) =
-                    integer_bits_and_signedness(context.types().get_value_type(lhs)).unwrap();
+                    integer_bits_and_signedness(context.types().get_value_type(*lhs)).unwrap();
                 if signed {
-                    self.lower_signed_addsub(b, context, guard, kind, result, lhs, rhs, bits);
+                    self.lower_signed_addsub(b, context, guard, *kind, *result, *lhs, *rhs, bits);
                 } else {
-                    self.lower_unsigned_addsub(b, context, guard, kind, result, lhs, rhs, bits);
+                    self.lower_unsigned_addsub(b, context, guard, *kind, *result, *lhs, *rhs, bits);
                 }
+                true
             }
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result,
                 lhs,
                 rhs,
-            } if self.should_lower_integer_arith(context, lhs, rhs) => {
+            } if self.should_lower_integer_arith(context, *lhs, *rhs) => {
                 let (bits, signed) =
-                    integer_bits_and_signedness(context.types().get_value_type(lhs)).unwrap();
+                    integer_bits_and_signedness(context.types().get_value_type(*lhs)).unwrap();
                 if signed {
-                    self.lower_signed_mul(b, context, guard, result, lhs, rhs, bits);
+                    self.lower_signed_mul(b, context, guard, *result, *lhs, *rhs, bits);
                 } else {
-                    self.lower_unsigned_mul(b, context, guard, result, lhs, rhs, bits);
+                    self.lower_unsigned_mul(b, context, guard, *result, *lhs, *rhs, bits);
                 }
+                true
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
                 result,
                 lhs,
                 rhs,
-            } if self.should_lower_integer_arith(context, lhs, rhs) => {
+            } if self.should_lower_integer_arith(context, *lhs, *rhs) => {
                 let (bits, signed) =
-                    integer_bits_and_signedness(context.types().get_value_type(lhs)).unwrap();
+                    integer_bits_and_signedness(context.types().get_value_type(*lhs)).unwrap();
                 if signed {
-                    self.lower_signed_divmod(b, context, guard, kind, result, lhs, rhs, bits);
+                    self.lower_signed_divmod(b, context, guard, *kind, *result, *lhs, *rhs, bits);
                 } else {
                     self.lower_unsigned_divmod_result(
-                        b, context, guard, kind, result, lhs, rhs, bits,
+                        b, context, guard, *kind, *result, *lhs, *rhs, bits,
                     );
                 }
+                true
             }
-            other => self.emit_guarded(b, guard, other),
+            _ => false,
         }
     }
 
@@ -457,7 +438,10 @@ impl LowerWitnessIntegerArithOps {
             guard_flag,
         );
 
-        let quotient_sign = xor_bits(b, sign_l, sign_r, sign_l_is_witness, sign_r_is_witness);
+        let sign_l_u1 = b.cast_to(CastTarget::U(1), sign_l);
+        let sign_r_u1 = b.cast_to(CastTarget::U(1), sign_r);
+        let quotient_sign_u1 = b.xor(sign_l_u1, sign_r_u1);
+        let quotient_sign = b.cast_to_field(quotient_sign_u1);
         let quotient_sign_is_witness = sign_l_is_witness || sign_r_is_witness;
         if quotient_sign_is_witness {
             guarded_rangecheck(b, quotient_sign, 1, guard);

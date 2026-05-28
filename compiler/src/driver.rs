@@ -26,6 +26,7 @@ use crate::{
         lowering::LowLevelReplacement,
         pass_manager::PassManager,
         passes::{
+            algebraic_lowering::AlgebraicLowering,
             common_subexpression_elimination::CSE,
             condition_propagation::ConditionPropagation,
             dead_code_elimination::{self, DCE},
@@ -33,13 +34,7 @@ use crate::{
             defunctionalize::Defunctionalize,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
-            lower_bit_range_ops::LowerBitRangeOps,
             lower_guards::LowerGuards,
-            lower_pure_guards::LowerPureGuards,
-            lower_witness_array_ops::LowerWitnessArrayOps,
-            lower_witness_bitwise_ops::LowerWitnessBitwiseOps,
-            lower_witness_integer_arith_ops::LowerWitnessIntegerArithOps,
-            lower_witness_spread_ops::LowerWitnessSpreadOps,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
@@ -268,7 +263,7 @@ impl Driver {
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(LowerPureGuards::new()),
+                Box::new(AlgebraicLowering::pure_guards_only()),
                 Box::new(FixDoubleJumps::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
@@ -291,13 +286,7 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(LowerWitnessArrayOps::new()),
-                Box::new(LowerWitnessBitwiseOps::new()),
-                Box::new(LowerWitnessSpreadOps::new()),
-                Box::new(LowerWitnessIntegerArithOps::new()),
-                Box::new(CSE::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(LowerBitRangeOps::new()),
+                Box::new(AlgebraicLowering::new()),
                 // After the last pre-explicit-witness lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
                 // that the second round can then consume.

@@ -8,8 +8,7 @@ use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
-    analysis::{flow_analysis::FlowAnalysis, types::FunctionTypeInfo},
-    pass_manager::AnalysisId,
+    analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
         hlssa::{
@@ -20,7 +19,7 @@ use crate::compiler::{
 };
 
 use super::{
-    lowering_pass::{LoweringContext, LoweringPass},
+    AlgebraicLoweringRule, LoweringContext,
     witness_integer_utils::{
         SignBitSource, cast_target_for_integer_type, extract_sign_bit, guarded_rangecheck,
         integer_bits_and_signedness, two_pow,
@@ -29,27 +28,17 @@ use super::{
 
 pub struct LowerWitnessBitwiseOps {}
 
-impl LoweringPass for LowerWitnessBitwiseOps {
-    const NAME: &'static str = "lower_witness_bitwise_ops";
-
-    fn needs_value_ranges(&self) -> bool {
-        true
-    }
-
-    fn preserved_analyses(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
-    }
-
-    fn process_instruction(
+impl AlgebraicLoweringRule for LowerWitnessBitwiseOps {
+    fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        instruction: OpCode,
-    ) {
+        instruction: &OpCode,
+    ) -> bool {
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_op(b, context, Some(condition), *inner);
+            self.process_op(b, context, Some(*condition), inner.as_ref())
         } else {
-            self.process_op(b, context, None, instruction);
+            self.process_op(b, context, None, instruction)
         }
     }
 }
@@ -75,8 +64,8 @@ impl LowerWitnessBitwiseOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         guard: Option<ValueId>,
-        op: OpCode,
-    ) {
+        op: &OpCode,
+    ) -> bool {
         let function_type_info = context.types();
         match op {
             OpCode::BinaryArithOp {
@@ -86,56 +75,52 @@ impl LowerWitnessBitwiseOps {
                 lhs,
                 rhs,
             } => {
-                let lhs_witness = function_type_info.get_value_type(lhs).is_witness_of();
-                let rhs_witness = function_type_info.get_value_type(rhs).is_witness_of();
+                let lhs_witness = function_type_info.get_value_type(*lhs).is_witness_of();
+                let rhs_witness = function_type_info.get_value_type(*rhs).is_witness_of();
                 if lhs_witness || rhs_witness {
                     self.lower_binary_bitwise(
                         b,
                         function_type_info,
-                        kind,
-                        result,
-                        lhs,
-                        rhs,
+                        *kind,
+                        *result,
+                        *lhs,
+                        *rhs,
                         lhs_witness,
                         rhs_witness,
                     );
+                    true
                 } else {
-                    self.emit_guarded(
-                        b,
-                        guard,
-                        OpCode::BinaryArithOp {
-                            kind,
-                            result,
-                            lhs,
-                            rhs,
-                        },
-                    );
+                    false
                 }
             }
             OpCode::Not { result, value } => {
-                self.lower_not(b, function_type_info, result, value);
+                self.lower_not(b, function_type_info, *result, *value);
+                true
             }
             OpCode::SExt {
                 result,
                 value,
                 from_bits,
                 to_bits,
-            } if context.types().get_value_type(value).is_witness_of()
-                && integer_bits_and_signedness(context.types().get_value_type(value)).is_some() =>
+            } if context.types().get_value_type(*value).is_witness_of()
+                && integer_bits_and_signedness(context.types().get_value_type(*value))
+                    .is_some() =>
             {
-                self.lower_integer_sext(b, context, result, value, from_bits, to_bits);
+                self.lower_integer_sext(b, context, *result, *value, *from_bits, *to_bits);
+                true
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
                 result,
                 lhs,
                 rhs,
-            } if context.types().get_value_type(lhs).is_witness_of()
-                || context.types().get_value_type(rhs).is_witness_of() =>
+            } if context.types().get_value_type(*lhs).is_witness_of()
+                || context.types().get_value_type(*rhs).is_witness_of() =>
             {
-                self.lower_shift(b, context, guard, kind, result, lhs, rhs);
+                self.lower_shift(b, context, guard, *kind, *result, *lhs, *rhs);
+                true
             }
-            other => self.emit_guarded(b, guard, other),
+            _ => false,
         }
     }
 

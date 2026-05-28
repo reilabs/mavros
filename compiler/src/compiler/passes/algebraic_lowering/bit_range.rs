@@ -5,8 +5,7 @@ use ark_ff::{AdditiveGroup as _, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::{flow_analysis::FlowAnalysis, types::FunctionTypeInfo},
-    pass_manager::AnalysisId,
+    analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
         hlssa::{
@@ -16,46 +15,28 @@ use crate::compiler::{
     },
 };
 
-use super::{
-    lowering_pass::{LoweringContext, LoweringPass},
-    witness_integer_utils::two_pow,
-};
+use super::{AlgebraicLoweringRule, LoweringContext, witness_integer_utils::two_pow};
 
 pub struct LowerBitRangeOps {}
 
-impl LoweringPass for LowerBitRangeOps {
-    const NAME: &'static str = "lower_bit_range_ops";
-
-    fn preserved_analyses(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
-    }
-
-    fn process_instruction(
+impl AlgebraicLoweringRule for LowerBitRangeOps {
+    fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        instruction: OpCode,
-    ) {
+        instruction: &OpCode,
+    ) -> bool {
         match instruction {
             OpCode::BitRange {
                 result,
                 value,
                 offset,
                 width,
-            } => self.lower_bit_range(b, context, result, value, offset, width),
-            OpCode::Guard { condition, inner } => match *inner {
-                OpCode::BitRange {
-                    result,
-                    value,
-                    offset,
-                    width,
-                } => self.lower_bit_range(b, context, result, value, offset, width),
-                other => b.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(other),
-                }),
-            },
-            other => b.emit(other),
+            } => {
+                self.lower_bit_range(b, context, *result, *value, *offset, *width);
+                true
+            }
+            _ => false,
         }
     }
 }

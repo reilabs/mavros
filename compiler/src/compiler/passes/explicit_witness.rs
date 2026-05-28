@@ -106,7 +106,7 @@ impl ExplicitWitness {
                     TypeExpr::U(_) | TypeExpr::I(_) => {
                         panic!(
                             "witness integer {:?} should have been lowered by \
-                             lower_witness_integer_arith_ops",
+                             algebraic_lowering",
                             kind
                         );
                     }
@@ -226,7 +226,7 @@ impl ExplicitWitness {
                     TypeExpr::U(_) | TypeExpr::I(_) => {
                         panic!(
                             "witness integer multiplication should have been lowered by \
-                             lower_witness_integer_arith_ops"
+                             algebraic_lowering"
                         );
                     }
                     _ => {
@@ -267,7 +267,7 @@ impl ExplicitWitness {
                     TypeExpr::U(_) | TypeExpr::I(_) => {
                         panic!(
                             "witness integer {:?} should have been lowered by \
-                             lower_witness_integer_arith_ops",
+                             algebraic_lowering",
                             kind
                         );
                     }
@@ -309,7 +309,7 @@ impl ExplicitWitness {
                 }
                 panic!(
                     "witness integer shift {:?} should have been lowered by \
-                     lower_witness_bitwise_ops",
+                     algebraic_lowering",
                     kind
                 );
             }
@@ -587,7 +587,7 @@ impl ExplicitWitness {
                 if i_taint && value_type.strip_witness().is_integer() {
                     panic!(
                         "witness integer sign-extension should have been lowered by \
-                         lower_witness_bitwise_ops"
+                         algebraic_lowering"
                     );
                 }
                 let one = b.field_const(Field::ONE);
@@ -612,7 +612,7 @@ impl ExplicitWitness {
                 b.push(OpCode::Not { result, value });
             }
             OpCode::BitRange { .. } => {
-                panic!("BitRange should have been lowered by lower_bit_range_ops");
+                panic!("BitRange should have been lowered by algebraic_lowering");
             }
             OpCode::ToBits {
                 result: _,
@@ -779,7 +779,7 @@ impl ExplicitWitness {
                 let is_witness = function_type_info.get_value_type(value).is_witness_of();
                 assert!(
                     !is_witness,
-                    "witness Spread should have been lowered by lower_witness_spread_ops"
+                    "witness Spread should have been lowered by algebraic_lowering"
                 );
                 b.push(OpCode::Spread {
                     result,
@@ -796,7 +796,7 @@ impl ExplicitWitness {
                 let is_witness = function_type_info.get_value_type(value).is_witness_of();
                 assert!(
                     !is_witness,
-                    "witness Unspread should have been lowered by lower_witness_spread_ops"
+                    "witness Unspread should have been lowered by algebraic_lowering"
                 );
                 b.push(OpCode::Unspread {
                     result_odd,
@@ -897,7 +897,7 @@ impl ExplicitWitness {
                     if value_type.strip_witness().is_integer() {
                         panic!(
                             "guarded witness integer sign-extension should have been lowered by \
-                             lower_witness_bitwise_ops"
+                             algebraic_lowering"
                         );
                     }
                     let cond_type = function_type_info.get_value_type(condition);
@@ -937,7 +937,7 @@ impl ExplicitWitness {
                     TypeExpr::U(_) | TypeExpr::I(_) if l_taint || r_taint => {
                         panic!(
                             "guarded witness integer {:?} should have been lowered by \
-                             lower_witness_integer_arith_ops",
+                             algebraic_lowering",
                             kind
                         );
                     }
@@ -960,7 +960,7 @@ impl ExplicitWitness {
                     TypeExpr::U(_) | TypeExpr::I(_) if l_taint || r_taint => {
                         panic!(
                             "guarded witness integer multiplication should have been lowered by \
-                             lower_witness_integer_arith_ops"
+                             algebraic_lowering"
                         );
                     }
                     _ if l_taint && r_taint => {
@@ -994,7 +994,7 @@ impl ExplicitWitness {
                     TypeExpr::U(_) | TypeExpr::I(_) if l_taint || r_taint => {
                         panic!(
                             "guarded witness integer {:?} should have been lowered by \
-                             lower_witness_integer_arith_ops",
+                             algebraic_lowering",
                             kind
                         );
                     }
@@ -1043,12 +1043,12 @@ impl ExplicitWitness {
                 }
                 panic!(
                     "guarded witness integer shift {:?} should have been lowered by \
-                     lower_witness_bitwise_ops",
+                     algebraic_lowering",
                     kind
                 );
             }
             OpCode::BitRange { .. } => {
-                panic!("guarded BitRange should have been lowered by lower_bit_range_ops");
+                panic!("guarded BitRange should have been lowered by algebraic_lowering");
             }
             OpCode::Cast { .. }
             | OpCode::Const { .. }
@@ -1074,7 +1074,7 @@ impl ExplicitWitness {
                 assert!(
                     function_type_info.get_value_type(value).is_witness_of(),
                     "pure Rangecheck inside Guard should have been lowered by \
-                     lower_pure_guards"
+                     algebraic_lowering"
                 );
                 let cond_field =
                     b.ensure_field(condition, function_type_info.get_value_type(condition));
