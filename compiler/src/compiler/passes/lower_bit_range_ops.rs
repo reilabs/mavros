@@ -144,14 +144,15 @@ impl LowerBitRangeOps {
         let result_field = b.cast_to_field(result);
         b.rangecheck(result_field, width);
 
-        let low = if offset == 0 {
+        let low_bits = offset;
+        let low = if low_bits == 0 {
             None
         } else {
             let low_hint =
-                lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), 0, offset);
+                lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), 0, low_bits);
             let low_hint = b.cast_to_field(low_hint);
             let low = b.write_witness(low_hint);
-            b.rangecheck(low, offset);
+            b.rangecheck(low, low_bits);
             Some(low)
         };
 
@@ -173,13 +174,9 @@ impl LowerBitRangeOps {
         };
 
         let mut reconstructed = low.unwrap_or_else(|| b.field_const(Field::ZERO));
-        if offset > 0 {
-            let result_shift = b.field_const(two_pow(offset));
-            let result_shifted = b.mul(result_field, result_shift);
-            reconstructed = b.add(reconstructed, result_shifted);
-        } else {
-            reconstructed = b.add(reconstructed, result_field);
-        }
+        let result_shift = b.field_const(two_pow(offset));
+        let result_shifted = b.mul(result_field, result_shift);
+        reconstructed = b.add(reconstructed, result_shifted);
         if let Some(high) = high {
             let high_shift = b.field_const(two_pow(offset + width));
             let high_shifted = b.mul(high, high_shift);
@@ -202,16 +199,6 @@ impl LowerBitRangeOps {
         offset: usize,
         width: usize,
     ) {
-        let source_bits = 254;
-        if offset == 0 && width == source_bits {
-            b.emit(OpCode::Cast {
-                result,
-                value,
-                target: CastTarget::Field,
-            });
-            return;
-        }
-
         let flag = b.field_const(Field::ONE);
         let bytes = decompose_canonical_field_bytes(b, value, flag);
         let selected = lower_field_bit_range_from_bytes(b, &bytes, offset, width, flag);
@@ -308,14 +295,10 @@ fn lower_field_bit_range_from_bytes(
     flag: ValueId,
 ) -> ValueId {
     let low_end = lower_field_low_bits_from_bytes(b, bytes, offset + width, flag);
-    if offset == 0 {
-        low_end
-    } else {
-        let low_start = lower_field_low_bits_from_bytes(b, bytes, offset, flag);
-        let selected_shifted = b.sub(low_end, low_start);
-        let divisor = b.field_const(two_pow(offset));
-        b.div(selected_shifted, divisor)
-    }
+    let low_start = lower_field_low_bits_from_bytes(b, bytes, offset, flag);
+    let selected_shifted = b.sub(low_end, low_start);
+    let divisor = b.field_const(two_pow(offset));
+    b.div(selected_shifted, divisor)
 }
 
 fn lower_field_low_bits_from_bytes(
@@ -387,7 +370,6 @@ fn lower_pure_bit_range_value(
     offset: usize,
     width: usize,
 ) -> ValueId {
-    let source_bits = value_type.get_bit_size();
     match value_type.strip_witness().expr {
         TypeExpr::U(bits) | TypeExpr::I(bits) => {
             assert!(
@@ -395,26 +377,16 @@ fn lower_pure_bit_range_value(
                 "pure integer BitRange lowering only supports up to 128-bit integers"
             );
             let unsigned = b.cast_to(CastTarget::U(bits), value);
-            let masked = if offset == 0 && width == source_bits {
-                unsigned
-            } else {
-                let mask = bit_mask(bits, offset, width);
-                let mask = b.u_const(bits, mask);
-                let result = b.fresh_value();
-                b.emit(OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::And,
-                    result,
-                    lhs: unsigned,
-                    rhs: mask,
-                });
-                result
-            };
-            if offset == 0 {
-                masked
-            } else {
-                let divisor = b.u_const(bits, 1u128 << offset);
-                b.div(masked, divisor)
-            }
+            let mask = b.u_const(bits, bit_mask(bits, offset, width));
+            let masked = b.fresh_value();
+            b.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::And,
+                result: masked,
+                lhs: unsigned,
+                rhs: mask,
+            });
+            let divisor = b.u_const(bits, 1u128 << offset);
+            b.div(masked, divisor)
         }
         TypeExpr::Field => lower_pure_field_bit_range_value(b, value, offset, width),
         other => panic!("BitRange expects a scalar source, got {:?}", other),
@@ -428,23 +400,16 @@ fn lower_pure_field_bit_range_value(
     width: usize,
 ) -> ValueId {
     let low_end = lower_pure_field_low_bits(b, value, offset + width);
-    if offset == 0 {
-        low_end
-    } else {
-        let low_start = lower_pure_field_low_bits(b, value, offset);
-        let selected_shifted = b.sub(low_end, low_start);
-        let divisor = b.field_const(two_pow(offset));
-        b.div(selected_shifted, divisor)
-    }
+    let low_start = lower_pure_field_low_bits(b, value, offset);
+    let selected_shifted = b.sub(low_end, low_start);
+    let divisor = b.field_const(two_pow(offset));
+    b.div(selected_shifted, divisor)
 }
 
 fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
     assert!(bits <= 254, "field BitRange exceeds canonical field width");
     if bits == 0 {
         return b.field_const(Field::ZERO);
-    }
-    if bits == 254 {
-        return value;
     }
 
     let bytes_arr = b.to_radix(value, Radix::Bytes, Endianness::Big, 32);

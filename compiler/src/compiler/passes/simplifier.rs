@@ -240,6 +240,18 @@ impl Simplifier {
                                 target: *lhs,
                             });
                         }
+                        if is_all_ones(defs, *lhs) {
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
+                        }
+                        if is_all_ones(defs, *rhs) {
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
+                        }
                     }
                     BinaryArithOpKind::Or => {
                         if is_zero(defs, *lhs) {
@@ -388,6 +400,20 @@ impl Simplifier {
                 }
                 None
             }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                if *offset == 0 && *width == types.get_value_type(*value).get_bit_size() {
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *value,
+                    });
+                }
+                None
+            }
             OpCode::Cmp {
                 kind: CmpKind::Eq,
                 result,
@@ -526,6 +552,28 @@ fn is_one(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
         }
     } else {
         false
+    }
+}
+
+fn is_all_ones(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
+    let def = defs.get_definition(v);
+    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
+        match value {
+            ConstValue::U(bits, value) | ConstValue::I(bits, value) => *value == bit_mask(*bits),
+            ConstValue::Field(_) | ConstValue::FnPtr(_) => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn bit_mask(bits: usize) -> u128 {
+    if bits == 0 {
+        0
+    } else if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
     }
 }
 
