@@ -1,7 +1,7 @@
 //! Lowers canonical `BitRange` operations after the witness integer/bitwise passes have emitted
 //! all bit selections.
 
-use ark_ff::AdditiveGroup as _;
+use ark_ff::{AdditiveGroup as _, Field as _};
 
 use crate::compiler::{
     Field,
@@ -18,7 +18,7 @@ use crate::compiler::{
 
 use super::{
     lowering_pass::{LoweringContext, LoweringPass},
-    witness_integer_utils::{guarded_rangecheck, one_or_condition_field, two_pow},
+    witness_integer_utils::two_pow,
 };
 
 pub struct LowerBitRangeOps {}
@@ -42,16 +42,14 @@ impl LoweringPass for LowerBitRangeOps {
                 value,
                 offset,
                 width,
-            } => self.lower_bit_range(b, context, None, result, value, offset, width),
+            } => self.lower_bit_range(b, context, result, value, offset, width),
             OpCode::Guard { condition, inner } => match *inner {
                 OpCode::BitRange {
                     result,
                     value,
                     offset,
                     width,
-                } => {
-                    self.lower_bit_range(b, context, Some(condition), result, value, offset, width)
-                }
+                } => self.lower_bit_range(b, context, result, value, offset, width),
                 other => b.emit(OpCode::Guard {
                     condition,
                     inner: Box::new(other),
@@ -72,7 +70,6 @@ impl LowerBitRangeOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         value: ValueId,
         offset: usize,
@@ -92,14 +89,10 @@ impl LowerBitRangeOps {
             value_type.is_witness_of(),
             value_type.strip_witness().is_field(),
         ) {
-            (true, true) => {
-                self.lower_witness_field_bit_range(b, context, guard, result, value, offset, width)
-            }
-            (true, false) => {
-                self.lower_witness_bit_range(b, context, guard, result, value, offset, width)
-            }
+            (true, true) => self.lower_witness_field_bit_range(b, result, value, offset, width),
+            (true, false) => self.lower_witness_bit_range(b, context, result, value, offset, width),
             (false, _) => {
-                self.lower_pure_bit_range(b, context.types(), guard, result, value, offset, width)
+                self.lower_pure_bit_range(b, context.types(), result, value, offset, width)
             }
         }
     }
@@ -109,7 +102,6 @@ impl LowerBitRangeOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         types: &FunctionTypeInfo,
-        guard: Option<ValueId>,
         result: ValueId,
         value: ValueId,
         offset: usize,
@@ -118,23 +110,11 @@ impl LowerBitRangeOps {
         let value_type = types.get_value_type(value);
         let extracted = lower_pure_bit_range_value(b, value, value_type, offset, width);
         let target = cast_target_for_scalar_type(types.get_value_type(result));
-
-        if let Some(condition) = guard {
-            let casted = b.cast_to(target, extracted);
-            let zero = zero_for_type(b, types.get_value_type(result));
-            b.emit(OpCode::Select {
-                result,
-                cond: condition,
-                if_t: casted,
-                if_f: zero,
-            });
-        } else {
-            b.emit(OpCode::Cast {
-                result,
-                value: extracted,
-                target,
-            });
-        }
+        b.emit(OpCode::Cast {
+            result,
+            value: extracted,
+            target,
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -142,7 +122,6 @@ impl LowerBitRangeOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         value: ValueId,
         offset: usize,
@@ -154,7 +133,6 @@ impl LowerBitRangeOps {
         let hint =
             lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), offset, width);
         let hint_field = b.cast_to_field(hint);
-        let hint_field = select_hint_when_guarded(b, context.types(), guard, hint_field);
 
         let result_witness = b.write_witness(hint_field);
         b.emit(OpCode::Cast {
@@ -164,7 +142,7 @@ impl LowerBitRangeOps {
         });
 
         let result_field = b.cast_to_field(result);
-        guarded_rangecheck(b, result_field, width, guard);
+        b.rangecheck(result_field, width);
 
         let low = if offset == 0 {
             None
@@ -172,9 +150,8 @@ impl LowerBitRangeOps {
             let low_hint =
                 lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), 0, offset);
             let low_hint = b.cast_to_field(low_hint);
-            let low_hint = select_hint_when_guarded(b, context.types(), guard, low_hint);
             let low = b.write_witness(low_hint);
-            guarded_rangecheck(b, low, offset, guard);
+            b.rangecheck(low, offset);
             Some(low)
         };
 
@@ -190,9 +167,8 @@ impl LowerBitRangeOps {
                 high_bits,
             );
             let high_hint = b.cast_to_field(high_hint);
-            let high_hint = select_hint_when_guarded(b, context.types(), guard, high_hint);
             let high = b.write_witness(high_hint);
-            guarded_rangecheck(b, high, high_bits, guard);
+            b.rangecheck(high, high_bits);
             Some(high)
         };
 
@@ -213,7 +189,7 @@ impl LowerBitRangeOps {
         let value_field = b.cast_to_field(value);
         let diff = b.sub(value_field, reconstructed);
         let zero = b.field_const(Field::ZERO);
-        let flag = one_or_condition_field(b, context.types(), guard);
+        let flag = b.field_const(Field::ONE);
         b.constrain(flag, diff, zero);
     }
 
@@ -221,8 +197,6 @@ impl LowerBitRangeOps {
     fn lower_witness_field_bit_range(
         &self,
         b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         value: ValueId,
         offset: usize,
@@ -238,8 +212,8 @@ impl LowerBitRangeOps {
             return;
         }
 
-        let flag = one_or_condition_field(b, context.types(), guard);
-        let bytes = decompose_canonical_field_bytes(b, value, flag, guard);
+        let flag = b.field_const(Field::ONE);
+        let bytes = decompose_canonical_field_bytes(b, value, flag);
         let selected = lower_field_bit_range_from_bytes(b, &bytes, offset, width, flag);
 
         b.emit(OpCode::Cast {
@@ -254,7 +228,6 @@ fn decompose_canonical_field_bytes(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
     flag: ValueId,
-    guard: Option<ValueId>,
 ) -> Vec<ValueId> {
     let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
     let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
@@ -321,8 +294,8 @@ fn decompose_canonical_field_bytes(
 
     let tmp3 = b.sub(modulus_hi, hi);
     let result_hi = b.sub(tmp3, borrow_wit);
-    guarded_rangecheck(b, result_hi, 128, guard);
-    guarded_rangecheck(b, result_lo, 128, guard);
+    b.rangecheck(result_hi, 128);
+    b.rangecheck(result_lo, 128);
 
     bytes
 }
@@ -523,33 +496,5 @@ fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
         TypeExpr::U(bits) => CastTarget::U(bits),
         TypeExpr::I(bits) => CastTarget::I(bits),
         other => panic!("BitRange result must be scalar, got {:?}", other),
-    }
-}
-
-fn zero_for_type(b: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
-    match ty.strip_witness().expr {
-        TypeExpr::Field => b.field_const(Field::ZERO),
-        TypeExpr::U(bits) => b.u_const(bits, 0),
-        TypeExpr::I(bits) => b.i_const(bits, 0),
-        other => panic!("BitRange result must be scalar, got {:?}", other),
-    }
-}
-
-fn select_hint_when_guarded(
-    b: &mut HLBlockEmitter<'_>,
-    types: &FunctionTypeInfo,
-    guard: Option<ValueId>,
-    hint_field: ValueId,
-) -> ValueId {
-    if let Some(condition) = guard {
-        let condition = if types.get_value_type(condition).is_witness_of() {
-            b.value_of(condition)
-        } else {
-            condition
-        };
-        let zero = b.field_const(Field::ZERO);
-        b.select(condition, hint_field, zero)
-    } else {
-        hint_field
     }
 }
