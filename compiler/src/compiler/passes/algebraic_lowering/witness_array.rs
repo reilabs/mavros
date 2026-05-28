@@ -11,7 +11,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, OpCode, SequenceTargetType, Type, TypeExpr,
+            CastTarget, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -57,7 +57,15 @@ impl LowerWitnessArrayOps {
             } => {
                 if self.has_witness_index(function_type_info, *arr, *idx) {
                     let flag = self.lookup_flag(b, function_type_info, guard);
-                    self.gen_witness_array_get(b, function_type_info, *arr, *idx, *result, flag);
+                    self.gen_witness_array_get(
+                        b,
+                        function_type_info,
+                        *arr,
+                        *idx,
+                        *result,
+                        flag,
+                        guard,
+                    );
                     true
                 } else {
                     false
@@ -101,6 +109,17 @@ impl LowerWitnessArrayOps {
         function_type_info.get_value_type(idx).is_witness_of()
     }
 
+    fn emit_guarded(&self, b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
+        if let Some(condition) = guard {
+            b.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(op),
+            });
+        } else {
+            b.emit(op);
+        }
+    }
+
     fn lookup_flag(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -125,15 +144,14 @@ impl LowerWitnessArrayOps {
         idx: ValueId,
         result: ValueId,
         flag: ValueId,
+        cond: Option<ValueId>,
     ) {
         let result_type_full = function_type_info.get_value_type(result).clone();
         let result_type = result_type_full.strip_all_witness();
-        let arr_type = function_type_info.get_value_type(arr);
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
-        let lookup_arr = self.lookup_array(b, arr, arr_type);
 
         let pure_idx = b.value_of(idx);
-        let hint = self.emit_array_get_hint(b, function_type_info, arr, idx, pure_idx);
+        let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
         let idx_field = b.cast_to_field(idx);
         let stride = leaf_scalar_count(&result_type);
         let base_key = if stride == 1 {
@@ -144,7 +162,7 @@ impl LowerWitnessArrayOps {
         };
         self.gen_witness_array_get_from_hint(
             b,
-            lookup_arr,
+            arr,
             base_key,
             hint,
             &arr_elem_type,
@@ -157,19 +175,21 @@ impl LowerWitnessArrayOps {
     fn emit_array_get_hint(
         &self,
         b: &mut HLBlockEmitter<'_>,
-        function_type_info: &FunctionTypeInfo,
         arr: ValueId,
-        idx: ValueId,
         pure_idx: ValueId,
+        guard: Option<ValueId>,
     ) -> ValueId {
-        let length = array_len(function_type_info.get_value_type(arr), "ArrayGet input");
-        let idx_bits = uint_bits(function_type_info.get_value_type(idx), "ArrayGet index");
-        let len = b.u_const(idx_bits, length as u128);
-        let in_bounds = b.lt(pure_idx, len);
-        let oob = b.not(in_bounds);
-        let zero = b.u_const(idx_bits, 0);
-        let safe_idx = b.select(oob, zero, pure_idx);
-        b.array_get(arr, safe_idx)
+        let hint = b.fresh_value();
+        self.emit_guarded(
+            b,
+            guard,
+            OpCode::ArrayGet {
+                result: hint,
+                array: arr,
+                index: pure_idx,
+            },
+        );
+        hint
     }
 
     fn gen_witness_array_set(
@@ -220,45 +240,6 @@ impl LowerWitnessArrayOps {
             value: updated_array,
             target: CastTarget::Nop,
         });
-    }
-
-    fn lookup_array(&self, b: &mut HLBlockEmitter<'_>, arr: ValueId, arr_type: &Type) -> ValueId {
-        if leaf_scalar_count(&arr_type.get_array_element()) == 1 {
-            return arr;
-        }
-
-        let mut leaves = Vec::new();
-        self.collect_array_leaves(b, arr, arr_type, &mut leaves);
-        let elem_type = scalar_leaf_type(arr_type);
-        b.mk_seq(
-            leaves,
-            SequenceTargetType::Array(leaf_scalar_count(arr_type)),
-            elem_type,
-        )
-    }
-
-    fn collect_array_leaves(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        value: ValueId,
-        value_type: &Type,
-        leaves: &mut Vec<ValueId>,
-    ) {
-        match &value_type.strip_witness().expr {
-            TypeExpr::Array(elem, len) => {
-                for i in 0..*len {
-                    let idx = b.u_const(32, i as u128);
-                    let child = b.array_get(value, idx);
-                    self.collect_array_leaves(b, child, elem, leaves);
-                }
-            }
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
-                leaves.push(value);
-            }
-            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
-                panic!("lookup array flattening: unsupported type {}", value_type)
-            }
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -352,16 +333,6 @@ fn leaf_scalar_count(t: &Type) -> usize {
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
         TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
             panic!("leaf_scalar_count: unsupported type {}", t)
-        }
-    }
-}
-
-fn scalar_leaf_type(t: &Type) -> Type {
-    match &t.expr {
-        TypeExpr::Array(inner, _) => scalar_leaf_type(inner),
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => t.clone(),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
-            panic!("scalar_leaf_type: unsupported type {}", t)
         }
     }
 }
