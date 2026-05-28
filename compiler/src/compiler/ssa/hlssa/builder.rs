@@ -647,7 +647,7 @@ impl HLEmitter for HLBlockEmitter<'_> {
 }
 
 impl HLBlockEmitter<'_> {
-    fn default_value(&mut self, typ: &Type) -> ValueId {
+    pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => self.field_const(ark_bn254::Fr::from(0)),
             TypeExpr::U(size) => self.u_const(*size, 0),

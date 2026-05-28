@@ -634,7 +634,7 @@ impl LowerPureGuards {
                     lhs: condition,
                     rhs: zero,
                 });
-                vec![self.default_scalar(e, &elem_type)]
+                vec![e.default_value(&elem_type)]
             },
             // In-bounds: do the get
             |e| vec![e.array_get(array, index)],
@@ -722,23 +722,6 @@ impl LowerPureGuards {
         };
         let in_bounds = emitter.lt(idx_as_u32, len_val);
         emitter.not(in_bounds)
-    }
-
-    /// Produce a default zero value for a scalar type.
-    fn default_scalar(&self, emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
-        match &ty.expr {
-            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
-            TypeExpr::U(bits) => emitter.u_const(*bits, 0),
-            TypeExpr::I(bits) => emitter.i_const(*bits, 0),
-            TypeExpr::WitnessOf(inner) => {
-                let inner_val = self.default_scalar(emitter, inner);
-                emitter.cast_to(CastTarget::WitnessOf, inner_val)
-            }
-            other => panic!(
-                "LowerPureGuards: cannot produce default for non-scalar element type: {:?}",
-                other
-            ),
-        }
     }
 
     /// Common pattern: branch on a failure condition. In the fail branch,
