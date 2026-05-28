@@ -88,19 +88,19 @@ impl LowerBitRangeOps {
             width,
             source_bits
         );
-        if value_type.strip_witness().is_field() {
-            if value_type.is_witness_of() {
-                self.lower_witness_field_bit_range(b, context, guard, result, value, offset, width);
-            } else {
-                self.lower_pure_bit_range(b, context.types(), guard, result, value, offset, width);
+        match (
+            value_type.is_witness_of(),
+            value_type.strip_witness().is_field(),
+        ) {
+            (true, true) => {
+                self.lower_witness_field_bit_range(b, context, guard, result, value, offset, width)
             }
-            return;
-        }
-
-        if value_type.is_witness_of() {
-            self.lower_witness_bit_range(b, context, guard, result, value, offset, width);
-        } else {
-            self.lower_pure_bit_range(b, context.types(), guard, result, value, offset, width);
+            (true, false) => {
+                self.lower_witness_bit_range(b, context, guard, result, value, offset, width)
+            }
+            (false, _) => {
+                self.lower_pure_bit_range(b, context.types(), guard, result, value, offset, width)
+            }
         }
     }
 
