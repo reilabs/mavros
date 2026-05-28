@@ -149,9 +149,12 @@ impl AlgebraicLowering {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
-        self.lowerers
-            .iter()
-            .any(|lowerer| lowerer.lower_instruction(b, context, instruction))
+        for lowerer in &self.lowerers {
+            if lowerer.lower_instruction(b, context, instruction) {
+                return true;
+            }
+        }
+        false
     }
 }
 
