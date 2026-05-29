@@ -240,6 +240,18 @@ impl Simplifier {
                                 target: *lhs,
                             });
                         }
+                        if is_all_ones(defs, *lhs) {
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
+                        }
+                        if is_all_ones(defs, *rhs) {
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
+                        }
                     }
                     BinaryArithOpKind::Or => {
                         if is_zero(defs, *lhs) {
@@ -284,6 +296,22 @@ impl Simplifier {
                                 result: *result,
                                 target: *lhs,
                             });
+                        }
+                        if matches!(kind, BinaryArithOpKind::Shr) {
+                            if let Some(offset) = const_as_usize(defs, *rhs) {
+                                let lhs_type = types.get_value_type(*lhs);
+                                let lhs_inner = lhs_type.strip_witness();
+                                if let TypeExpr::U(bits) = lhs_inner.expr {
+                                    if offset < bits {
+                                        return Some(Rewrite::Replace(vec![OpCode::BitRange {
+                                            result: *result,
+                                            value: *lhs,
+                                            offset,
+                                            width: bits - offset,
+                                        }]));
+                                    }
+                                }
+                            }
                         }
                     }
                     BinaryArithOpKind::Mod => {}
@@ -368,6 +396,20 @@ impl Simplifier {
                     return Some(Rewrite::Alias {
                         result: *result,
                         target: *if_t,
+                    });
+                }
+                None
+            }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                if *offset == 0 && *width == types.get_value_type(*value).get_bit_size() {
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *value,
                     });
                 }
                 None
@@ -510,5 +552,39 @@ fn is_one(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
         }
     } else {
         false
+    }
+}
+
+fn is_all_ones(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
+    let def = defs.get_definition(v);
+    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
+        match value {
+            ConstValue::U(bits, value) | ConstValue::I(bits, value) => *value == bit_mask(*bits),
+            ConstValue::Field(_) | ConstValue::FnPtr(_) => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn bit_mask(bits: usize) -> u128 {
+    if bits == 0 {
+        0
+    } else if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    }
+}
+
+fn const_as_usize(defs: &FunctionValueDefinitions, v: ValueId) -> Option<usize> {
+    let def = defs.get_definition(v);
+    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
+        match value {
+            ConstValue::U(_, value) | ConstValue::I(_, value) => (*value).try_into().ok(),
+            ConstValue::Field(_) | ConstValue::FnPtr(_) => None,
+        }
+    } else {
+        None
     }
 }

@@ -22,12 +22,22 @@ use crate::compiler::{
         FunctionId, ValueId,
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLFunction, HLSSA, OpCode, Radix,
-            RefCountOp, SequenceTargetType, Type,
+            RefCountOp, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
         },
     },
     util::{spread_bits, unspread_bits},
 };
+
+fn bit_mask(width: usize) -> Option<u128> {
+    if width == 0 || width > 128 {
+        None
+    } else if width == 128 {
+        Some(u128::MAX)
+    } else {
+        Some((1u128 << width) - 1)
+    }
+}
 
 pub struct Specializer {
     pub savings_to_code_ratio: f64,
@@ -357,35 +367,6 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         todo!()
     }
 
-    fn truncate(
-        &self,
-        from: usize,
-        to: usize,
-        _out_type: &Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
-        let self_const = ctx.const_vals.get(&self.0).cloned();
-        match self_const {
-            Some(ConstVal::U(_, v)) => {
-                let res = v & ((1 << to) - 1);
-                let res_v = ctx.u_const(to, res);
-                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
-                Self(res_v)
-            }
-            Some(ConstVal::Field(f)) => {
-                let v: u128 = f.into_bigint().as_ref()[0] as u128;
-                let res = v & ((1 << to) - 1);
-                let res_v = ctx.u_const(to, res);
-                ctx.const_vals.insert(res_v, ConstVal::U(to, res));
-                Self(res_v)
-            }
-            _ => {
-                let res = ctx.truncate(self.0, to, from);
-                Self(res)
-            }
-        }
-    }
-
     fn sext(
         &self,
         from: usize,
@@ -409,6 +390,42 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             }
             _ => {
                 let res = ctx.sext(self.0, from, to);
+                Self(res)
+            }
+        }
+    }
+
+    fn bit_range(
+        &self,
+        offset: usize,
+        width: usize,
+        out_type: &Type,
+        ctx: &mut SpecializationState,
+    ) -> Self {
+        let self_const = ctx.const_vals.get(&self.0).cloned();
+        let mask = bit_mask(width);
+        match (self_const, &out_type.strip_witness().expr, mask) {
+            (Some(ConstVal::U(bits, v)), _, Some(mask)) => {
+                let res = (v >> offset) & mask;
+                let res_v = ctx.u_const(bits, res);
+                ctx.const_vals.insert(res_v, ConstVal::U(bits, res));
+                Self(res_v)
+            }
+            (Some(ConstVal::I(bits, v)), _, Some(mask)) => {
+                let res = (v >> offset) & mask;
+                let res_v = ctx.i_const(bits, res);
+                ctx.const_vals.insert(res_v, ConstVal::I(bits, res));
+                Self(res_v)
+            }
+            (Some(ConstVal::Field(f)), TypeExpr::Field, Some(mask)) if offset < 128 => {
+                let v: u128 = f.into_bigint().as_ref()[0] as u128;
+                let res = Field::from((v >> offset) & mask);
+                let res_v = ctx.field_const(res);
+                ctx.const_vals.insert(res_v, ConstVal::Field(res));
+                Self(res_v)
+            }
+            _ => {
+                let res = ctx.bit_range(self.0, offset, width);
                 Self(res)
             }
         }

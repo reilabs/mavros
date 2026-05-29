@@ -33,11 +33,8 @@ use crate::{
             defunctionalize::Defunctionalize,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
+            instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
-            lower_pure_guards::LowerPureGuards,
-            lower_witness_array_ops::LowerWitnessArrayOps,
-            lower_witness_bitwise_ops::LowerWitnessBitwiseOps,
-            lower_witness_spread_ops::LowerWitnessSpreadOps,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
@@ -266,7 +263,7 @@ impl Driver {
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(LowerPureGuards::new()),
+                Box::new(InstructionLowering::pure_guards()),
                 Box::new(FixDoubleJumps::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
@@ -286,10 +283,20 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Specializer::new(5.0)),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(LowerWitnessArrayOps::new()),
-                Box::new(LowerWitnessBitwiseOps::new()),
-                Box::new(LowerWitnessSpreadOps::new()),
+                Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::witness_integer_ops()),
+                // After the last pre-explicit-witness lowering, run cleanup twice
+                // back-to-back. The first round exposes folds/dedup opportunities
+                // that the second round can then consume.
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(ExplicitWitness::new()),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),

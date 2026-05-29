@@ -1,75 +1,38 @@
-//! Lowers witness-tainted bitwise operations before the main explicit-witness pass.
+//! Lowers witness-tainted bitwise and bit-selection operations before the main explicit-witness pass.
 //!
 //! This pass emits `Spread`/`Unspread` operations, except for `u64` bitwise ops where it keeps a
-//! two-limb `u32` decomposition. `ExplicitWitness` is responsible for the witness writes and lookup
-//! constraints needed by those bitwise operations.
+//! two-limb `u32` decomposition. It also canonicalizes witness integer casts/shifts into the shared
+//! `BitRange` representation where possible.
 
-use ark_ff::Field as _;
+use ark_ff::{AdditiveGroup as _, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::{flow_analysis::FlowAnalysis, types::FunctionTypeInfo},
-    pass_manager::AnalysisId,
+    analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, OpCode, TypeExpr,
+            BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
-use super::lowering_pass::LoweringPass;
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessBitwiseOps {}
 
-impl LoweringPass for LowerWitnessBitwiseOps {
-    const NAME: &'static str = "lower_witness_bitwise_ops";
-
-    fn preserved_analyses(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
-    }
-
-    fn process_instruction(
+impl InstructionLoweringRule for LowerWitnessBitwiseOps {
+    fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
-        function_type_info: &FunctionTypeInfo,
-        instruction: OpCode,
-    ) {
-        match instruction {
-            OpCode::BinaryArithOp {
-                kind:
-                    kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
-                result,
-                lhs,
-                rhs,
-            } => {
-                let lhs_witness = function_type_info.get_value_type(lhs).is_witness_of();
-                let rhs_witness = function_type_info.get_value_type(rhs).is_witness_of();
-                if lhs_witness || rhs_witness {
-                    self.lower_binary_bitwise(
-                        b,
-                        function_type_info,
-                        kind,
-                        result,
-                        lhs,
-                        rhs,
-                        lhs_witness,
-                        rhs_witness,
-                    );
-                } else {
-                    b.emit(OpCode::BinaryArithOp {
-                        kind,
-                        result,
-                        lhs,
-                        rhs,
-                    });
-                }
-            }
-            OpCode::Not { result, value } => {
-                self.lower_not(b, function_type_info, result, value);
-            }
-            other => b.emit(other),
+        context: &LoweringContext<'_>,
+        instruction: &OpCode,
+    ) -> bool {
+        if let OpCode::Guard { condition, inner } = instruction {
+            self.process_op(b, context, Some(*condition), inner.as_ref())
+        } else {
+            self.process_op(b, context, None, instruction)
         }
     }
 }
@@ -77,6 +40,82 @@ impl LoweringPass for LowerWitnessBitwiseOps {
 impl LowerWitnessBitwiseOps {
     pub fn new() -> Self {
         Self {}
+    }
+
+    fn emit_guarded(&self, b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
+        if let Some(condition) = guard {
+            b.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(op),
+            });
+        } else {
+            b.emit(op);
+        }
+    }
+
+    fn process_op(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        guard: Option<ValueId>,
+        op: &OpCode,
+    ) -> bool {
+        let function_type_info = context.types();
+        match op {
+            OpCode::BinaryArithOp {
+                kind:
+                    kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
+                result,
+                lhs,
+                rhs,
+            } => {
+                let lhs_witness = function_type_info.get_value_type(*lhs).is_witness_of();
+                let rhs_witness = function_type_info.get_value_type(*rhs).is_witness_of();
+                if lhs_witness || rhs_witness {
+                    self.lower_binary_bitwise(
+                        b,
+                        function_type_info,
+                        *kind,
+                        *result,
+                        *lhs,
+                        *rhs,
+                        lhs_witness,
+                        rhs_witness,
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            OpCode::Not { result, value } => {
+                self.lower_not(b, function_type_info, *result, *value);
+                true
+            }
+            OpCode::SExt {
+                result,
+                value,
+                from_bits,
+                to_bits,
+            } if context.types().get_value_type(*value).is_witness_of()
+                && integer_bits_and_signedness(context.types().get_value_type(*value))
+                    .is_some() =>
+            {
+                self.lower_integer_sext(b, context, *result, *value, *from_bits, *to_bits);
+                true
+            }
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                result,
+                lhs,
+                rhs,
+            } if context.types().get_value_type(*lhs).is_witness_of()
+                || context.types().get_value_type(*rhs).is_witness_of() =>
+            {
+                self.lower_shift(b, context, guard, *kind, *result, *lhs, *rhs);
+                true
+            }
+            _ => false,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -171,12 +210,136 @@ impl LowerWitnessBitwiseOps {
             target: cast_target,
         });
     }
+
+    fn lower_integer_sext(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        result: ValueId,
+        value: ValueId,
+        from_bits: usize,
+        to_bits: usize,
+    ) {
+        let sign = if context.range(value).is_non_negative_in_signed(from_bits) {
+            b.field_const(Field::ZERO)
+        } else {
+            let sign_bits = b.bit_range(value, from_bits - 1, 1);
+            b.cast_to_field(sign_bits)
+        };
+        let value_field = b.cast_to_field(value);
+        let extension = b.field_const(two_pow(to_bits) - two_pow(from_bits));
+        let offset = b.mul(sign, extension);
+        let extended = b.add(value_field, offset);
+        b.emit(OpCode::Cast {
+            result,
+            value: extended,
+            target: cast_target_for_integer_type(context.types().get_value_type(result)),
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_shift(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        guard: Option<ValueId>,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) {
+        let lhs_type = context.types().get_value_type(lhs);
+        let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
+        assert!(!rhs_witness, "witness shift amounts are not supported");
+
+        let bits = match lhs_type.strip_witness().expr {
+            TypeExpr::U(bits) => bits,
+            other => panic!("witness shift on unsupported lhs type {:?}", other),
+        };
+
+        let one_u = b.u_const(bits, 1);
+        let factor = b.fresh_value();
+        b.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Shl,
+            result: factor,
+            lhs: one_u,
+            rhs,
+        });
+
+        match kind {
+            BinaryArithOpKind::Shl => {
+                let lhs_field = b.cast_to_field(lhs);
+                let factor_field = b.cast_to_field(factor);
+                let shifted = b.mul(lhs_field, factor_field);
+                guarded_rangecheck(b, shifted, bits, guard);
+                b.emit(OpCode::Cast {
+                    result,
+                    value: shifted,
+                    target: CastTarget::U(bits),
+                });
+            }
+            BinaryArithOpKind::Shr => {
+                self.emit_guarded(
+                    b,
+                    guard,
+                    OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::Div,
+                        result,
+                        lhs,
+                        rhs: factor,
+                    },
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 struct U64Limbs {
     lo: ValueId,
     hi: ValueId,
+}
+
+fn two_pow(exponent: usize) -> Field {
+    Field::from(2).pow([exponent as u64])
+}
+
+fn guarded_rangecheck(
+    b: &mut HLBlockEmitter<'_>,
+    value: ValueId,
+    bits: usize,
+    guard: Option<ValueId>,
+) {
+    assert!(bits >= 1, "rangecheck width must be at least 1 bit");
+    let rangecheck = OpCode::Rangecheck {
+        value,
+        max_bits: bits,
+    };
+    if let Some(condition) = guard {
+        b.emit(OpCode::Guard {
+            condition,
+            inner: Box::new(rangecheck),
+        });
+    } else {
+        b.emit(rangecheck);
+    }
+}
+
+fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
+    match ty.strip_witness().expr {
+        TypeExpr::U(bits) => CastTarget::U(bits),
+        TypeExpr::I(bits) => CastTarget::I(bits),
+        other => panic!("expected integer type, got {:?}", other),
+    }
+}
+
+fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
+    match ty.strip_witness().expr {
+        TypeExpr::U(bits) => Some((bits, false)),
+        TypeExpr::I(bits) => Some((bits, true)),
+        _ => None,
+    }
 }
 
 fn unsigned_bits(function_type_info: &FunctionTypeInfo, value: ValueId, context: &str) -> usize {
@@ -277,14 +440,7 @@ fn extract_u64_limbs(b: &mut impl HLEmitter, value: ValueId) -> U64Limbs {
 }
 
 fn extract_u64_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
-    let shifted = if offset == 0 {
-        value
-    } else {
-        let divisor = b.u_const(64, 1u128 << offset);
-        b.div(value, divisor)
-    };
-    let modulus = b.u_const(64, 1u128 << 32);
-    let limb = b.modulo(shifted, modulus);
+    let limb = b.bit_range(value, offset, 32);
     b.cast_to(CastTarget::U(32), limb)
 }
 

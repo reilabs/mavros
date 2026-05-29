@@ -51,17 +51,17 @@ pub enum OpCode {
         value: ValueId,
         target: CastTarget,
     },
-    Truncate {
-        result: ValueId,
-        value: ValueId,
-        to_bits: usize,
-        from_bits: usize,
-    },
     SExt {
         result: ValueId,
         value: ValueId,
         from_bits: usize,
         to_bits: usize,
+    },
+    BitRange {
+        result: ValueId,
+        value: ValueId,
+        offset: usize,
+        width: usize,
     },
     Not {
         result: ValueId,
@@ -556,21 +556,6 @@ impl Instruction for OpCode {
                     target
                 )
             }
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits: out_bits,
-                from_bits: in_bits,
-            } => {
-                format!(
-                    "v{}{} = truncate v{} from {} bits to {} bits",
-                    result.0,
-                    annotate_value(*result),
-                    value.0,
-                    in_bits,
-                    out_bits
-                )
-            }
             OpCode::SExt {
                 result,
                 value,
@@ -584,6 +569,21 @@ impl Instruction for OpCode {
                     value.0,
                     in_bits,
                     out_bits
+                )
+            }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                format!(
+                    "v{}{} = bit_range(v{}, {}, {})",
+                    result.0,
+                    annotate_value(*result),
+                    value.0,
+                    offset,
+                    width
                 )
             }
             OpCode::Not { result, value } => {
@@ -869,17 +869,17 @@ impl Instruction for OpCode {
                 value: c,
                 target: _,
             }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            }
             | Self::SExt {
                 result: _,
                 value: c,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: _,
+                value: c,
+                offset: _,
+                width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1010,8 +1010,8 @@ impl Instruction for OpCode {
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
-            | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
+            | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
@@ -1067,8 +1067,8 @@ impl Instruction for OpCode {
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
-            | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
+            | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
@@ -1197,17 +1197,17 @@ impl Instruction for OpCode {
                 value: c,
                 target: _,
             }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            }
             | Self::SExt {
                 result: _,
                 value: c,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: _,
+                value: c,
+                offset: _,
+                width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1362,17 +1362,17 @@ impl Instruction for OpCode {
                 value: b,
                 target: _,
             } => vec![a, b].into_iter(),
-            Self::Truncate {
-                result: a,
-                value: b,
-                to_bits: _,
-                from_bits: _,
-            } => vec![a, b].into_iter(),
             Self::SExt {
                 result: a,
                 value: b,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: a,
+                value: b,
+                offset: _,
+                width: _,
             } => vec![a, b].into_iter(),
             Self::ArraySet {
                 result: a,

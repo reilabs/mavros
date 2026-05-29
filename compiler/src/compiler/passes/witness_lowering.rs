@@ -410,8 +410,8 @@ impl WitnessLowering {
                         }
                         OpCode::Not { .. }
                         | OpCode::Cmp { .. }
-                        | OpCode::Truncate { .. }
                         | OpCode::SExt { .. }
+                        | OpCode::BitRange { .. }
                         | OpCode::Load { .. }
                         | OpCode::Assert { .. }
                         | OpCode::AssertCmp { .. }

@@ -208,17 +208,6 @@ pub trait HLEmitter {
         r
     }
 
-    fn truncate(&mut self, value: ValueId, to_bits: usize, from_bits: usize) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Truncate {
-            result: r,
-            value,
-            to_bits,
-            from_bits,
-        });
-        r
-    }
-
     fn sext(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::SExt {
@@ -226,6 +215,17 @@ pub trait HLEmitter {
             value,
             from_bits,
             to_bits,
+        });
+        r
+    }
+
+    fn bit_range(&mut self, value: ValueId, offset: usize, width: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BitRange {
+            result: r,
+            value,
+            offset,
+            width,
         });
         r
     }
@@ -647,7 +647,7 @@ impl HLEmitter for HLBlockEmitter<'_> {
 }
 
 impl HLBlockEmitter<'_> {
-    fn default_value(&mut self, typ: &Type) -> ValueId {
+    pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => self.field_const(ark_bn254::Fr::from(0)),
             TypeExpr::U(size) => self.u_const(*size, 0),

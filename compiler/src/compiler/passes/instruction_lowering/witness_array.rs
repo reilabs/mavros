@@ -17,23 +17,22 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::LoweringPass;
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessArrayOps {}
 
-impl LoweringPass for LowerWitnessArrayOps {
-    const NAME: &'static str = "lower_witness_array_ops";
-
-    fn process_instruction(
+impl InstructionLoweringRule for LowerWitnessArrayOps {
+    fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
-        function_type_info: &FunctionTypeInfo,
-        instruction: OpCode,
-    ) {
+        context: &LoweringContext<'_>,
+        instruction: &OpCode,
+    ) -> bool {
+        let function_type_info = context.types();
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_array_op(b, function_type_info, Some(condition), *inner);
+            self.process_array_op(b, function_type_info, Some(*condition), inner.as_ref())
         } else {
-            self.process_array_op(b, function_type_info, None, instruction);
+            self.process_array_op(b, function_type_info, None, instruction)
         }
     }
 }
@@ -48,35 +47,28 @@ impl LowerWitnessArrayOps {
         b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         guard: Option<ValueId>,
-        op: OpCode,
-    ) {
+        op: &OpCode,
+    ) -> bool {
         match op {
             OpCode::ArrayGet {
                 result,
                 array: arr,
                 index: idx,
             } => {
-                if self.has_witness_index(function_type_info, arr, idx) {
+                if self.has_witness_index(function_type_info, *arr, *idx) {
                     let flag = self.lookup_flag(b, function_type_info, guard);
                     self.gen_witness_array_get(
                         b,
                         function_type_info,
-                        arr,
-                        idx,
-                        result,
+                        *arr,
+                        *idx,
+                        *result,
                         flag,
                         guard,
                     );
+                    true
                 } else {
-                    self.emit_guarded(
-                        b,
-                        guard,
-                        OpCode::ArrayGet {
-                            result,
-                            array: arr,
-                            index: idx,
-                        },
-                    );
+                    false
                 }
             }
             OpCode::ArraySet {
@@ -89,25 +81,21 @@ impl LowerWitnessArrayOps {
                     panic!(
                         "ArraySet inside Guard not supported yet: {:?}",
                         OpCode::ArraySet {
-                            result,
-                            array: arr,
-                            index: idx,
-                            value,
+                            result: *result,
+                            array: *arr,
+                            index: *idx,
+                            value: *value,
                         }
                     );
                 }
-                if self.has_witness_index(function_type_info, arr, idx) {
-                    self.gen_witness_array_set(b, function_type_info, arr, idx, value, result);
+                if self.has_witness_index(function_type_info, *arr, *idx) {
+                    self.gen_witness_array_set(b, function_type_info, *arr, *idx, *value, *result);
+                    true
                 } else {
-                    b.emit(OpCode::ArraySet {
-                        result,
-                        array: arr,
-                        index: idx,
-                        value,
-                    });
+                    false
                 }
             }
-            _ => self.emit_guarded(b, guard, op),
+            _ => false,
         }
     }
 

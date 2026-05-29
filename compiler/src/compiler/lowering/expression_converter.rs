@@ -906,9 +906,9 @@ impl<'a> ExpressionConverter<'a> {
 
         let mut e = b.block(self.current_block);
 
-        // Narrowing cast: truncate first, then cast
+        // Narrowing cast: select the low bits first, then cast.
         let value = if src_bits > 0 && target_bits < src_bits {
-            e.truncate(value, target_bits, src_bits)
+            e.bit_range(value, 0, target_bits)
         } else {
             value
         };

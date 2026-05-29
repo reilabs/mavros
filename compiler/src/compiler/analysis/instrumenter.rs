@@ -680,30 +680,31 @@ impl Value {
         }
     }
 
-    fn truncate_op(
+    fn bit_range_op(
         &self,
-        _from: usize,
-        to: usize,
+        offset: usize,
+        width: usize,
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {
-                Value::WitnessOf(Box::new(inner.truncate_op(_from, to, _instrumenter)))
+                Value::WitnessOf(Box::new(inner.bit_range_op(offset, width, _instrumenter)))
             }
-            Value::U(_, v) => Value::U(to, v & ((1 << to) - 1)),
-            Value::I(_, v) => Value::I(to, v & ((1 << to) - 1)),
+            Value::U(bits, v) => Value::U(*bits, (v >> offset) & Self::bit_mask(width)),
+            Value::I(bits, v) => Value::I(*bits, (v >> offset) & Self::bit_mask(width)),
             Value::Field(f) => {
                 let bits = f
                     .into_bigint()
                     .to_bits_le()
                     .into_iter()
-                    .take(to)
+                    .skip(offset)
+                    .take(width)
                     .collect::<Vec<_>>();
                 let r = Field::from_bigint(BigInt::from_bits_le(&bits));
                 Value::Field(r.unwrap())
             }
-            _ => panic!("Cannot truncate {:?}", self),
+            _ => panic!("Cannot extract bit range from {:?}", self),
         }
     }
 
@@ -1143,22 +1144,24 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn truncate(
+    fn bit_range(
         &self,
-        from: usize,
-        to: usize,
+        offset: usize,
+        width: usize,
         _tp: &Type,
         instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized: self.unspecialized.truncate_op(
-                from,
-                to,
+            unspecialized: self.unspecialized.bit_range_op(
+                offset,
+                width,
                 instrumenter.get_unspecialized(),
             ),
-            specialized: self
-                .specialized
-                .truncate_op(from, to, instrumenter.get_specialized()),
+            specialized: self.specialized.bit_range_op(
+                offset,
+                width,
+                instrumenter.get_specialized(),
+            ),
         }
     }
 

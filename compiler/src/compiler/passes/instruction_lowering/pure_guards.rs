@@ -7,7 +7,7 @@
 //! Classification:
 //!
 //! - **Always unwrap** (no constraints, no side effects, can't fail): Const, Cmp, Not, And, Or,
-//!   Xor, Cast, Truncate, ExtractTupleField, MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
+//!   Xor, Cast, BitRange, ExtractTupleField, MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 //! - **Lower with OOB check** (can fail if given an out-of-bounds index): ArrayGet — if OOB, assert
 //!   !cond and produce default; else array_get.
 //! - **Lower with OOB check + passthrough** (RC-tracked allocation): ArraySet — if OOB, assert
@@ -33,26 +33,23 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::LoweringPass;
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerPureGuards {}
 
-impl LoweringPass for LowerPureGuards {
-    const NAME: &'static str = "lower_pure_guards";
-
-    fn process_instruction(
+impl InstructionLoweringRule for LowerPureGuards {
+    fn lower_instruction(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
-        type_info: &FunctionTypeInfo,
-        instruction: OpCode,
-    ) {
+        context: &LoweringContext<'_>,
+        instruction: &OpCode,
+    ) -> bool {
+        let type_info = context.types();
         match instruction {
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(emitter, condition, *inner, type_info);
+                self.lower_guard(emitter, *condition, inner.as_ref().clone(), type_info)
             }
-            other => {
-                emitter.emit(other);
-            }
+            _ => false,
         }
     }
 }
@@ -77,7 +74,7 @@ impl LowerPureGuards {
         condition: ValueId,
         inner: OpCode,
         type_info: &FunctionTypeInfo,
-    ) {
+    ) -> bool {
         match inner {
             // -- Side-effectful / constraint-generating: always keep as Guard --
             OpCode::Store { .. }
@@ -89,24 +86,15 @@ impl LowerPureGuards {
             | OpCode::Constrain { .. }
             | OpCode::MemOp { .. }
             | OpCode::Lookup { .. }
-            | OpCode::DLookup { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            | OpCode::DLookup { .. } => false,
 
             OpCode::Rangecheck { value, max_bits }
                 if !type_info.get_value_type(value).is_witness_of() =>
             {
                 self.lower_rangecheck_guard(emitter, condition, value, max_bits, type_info);
+                true
             }
-            OpCode::Rangecheck { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            OpCode::Rangecheck { .. } => false,
 
             // -- Integer arith that can overflow: lower only if all inputs pure --
             OpCode::BinaryArithOp {
@@ -122,11 +110,13 @@ impl LowerPureGuards {
                         self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, false,
                         );
+                        true
                     }
                     TypeExpr::I(bits) if self.all_inputs_pure(&inner, type_info) => {
                         self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, true,
                         );
+                        true
                     }
                     // Field arith can't overflow — always unwrap
                     TypeExpr::Field => {
@@ -136,19 +126,10 @@ impl LowerPureGuards {
                             lhs,
                             rhs,
                         });
+                        true
                     }
-                    // Witness inputs on integer arith: keep as Guard for ExplicitWitness
-                    _ => {
-                        emitter.emit(OpCode::Guard {
-                            condition,
-                            inner: Box::new(OpCode::BinaryArithOp {
-                                kind,
-                                result,
-                                lhs,
-                                rhs,
-                            }),
-                        });
-                    }
+                    // Witness inputs on integer arith: keep as Guard for the witness arithmetic rule.
+                    _ => false,
                 }
             }
 
@@ -167,23 +148,15 @@ impl LowerPureGuards {
                         self.lower_shift_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, false,
                         );
+                        true
                     }
                     TypeExpr::I(bits) if self.all_inputs_pure(&inner, type_info) => {
                         self.lower_shift_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, true,
                         );
+                        true
                     }
-                    _ => {
-                        emitter.emit(OpCode::Guard {
-                            condition,
-                            inner: Box::new(OpCode::BinaryArithOp {
-                                kind,
-                                result,
-                                lhs,
-                                rhs,
-                            }),
-                        });
-                    }
+                    _ => false,
                 }
             }
 
@@ -202,34 +175,15 @@ impl LowerPureGuards {
                         self.lower_divmod_guard(
                             emitter, condition, kind, result, lhs, rhs, lhs_type,
                         );
+                        true
                     }
                     // Witness inputs: keep as Guard
-                    _ => {
-                        emitter.emit(OpCode::Guard {
-                            condition,
-                            inner: Box::new(OpCode::BinaryArithOp {
-                                kind,
-                                result,
-                                lhs,
-                                rhs,
-                            }),
-                        });
-                    }
+                    _ => false,
                 }
             }
 
-            // -- Truncate: pure bit-narrowing, can't fail → always unwrap --
-            OpCode::Truncate { .. } => {
-                emitter.emit(inner);
-            }
-
-            // -- SExt: keep as Guard (ExplicitWitness handles it) --
-            OpCode::SExt { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            // -- SExt: keep as Guard for the witness bitwise rule. --
+            OpCode::SExt { .. } => false,
 
             // -- ArraySet: lower with OOB check if index is pure.
             OpCode::ArraySet {
@@ -241,6 +195,7 @@ impl LowerPureGuards {
                 self.lower_array_set_guard(
                     emitter, condition, result, array, index, value, type_info,
                 );
+                true
             }
 
             // -- ArrayGet: lower with OOB check if index is pure.
@@ -250,15 +205,11 @@ impl LowerPureGuards {
                 index,
             } if !type_info.get_value_type(index).is_witness_of() => {
                 self.lower_array_get_guard(emitter, condition, result, array, index, type_info);
+                true
             }
 
             // ArrayGet/ArraySet with witness index: keep as Guard
-            OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => {
-                emitter.emit(OpCode::Guard {
-                    condition,
-                    inner: Box::new(inner),
-                });
-            }
+            OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => false,
 
             // -- Pure computation, no constraints, can't fail → unwrap --
             OpCode::Const { .. }
@@ -269,6 +220,7 @@ impl LowerPureGuards {
                 ..
             }
             | OpCode::Cast { .. }
+            | OpCode::BitRange { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
             | OpCode::MkTuple { .. }
@@ -292,6 +244,7 @@ impl LowerPureGuards {
             | OpCode::BumpD { .. }
             | OpCode::Todo { .. } => {
                 emitter.emit(inner);
+                true
             }
 
             // Guard-within-Guard should not happen
@@ -681,7 +634,7 @@ impl LowerPureGuards {
                     lhs: condition,
                     rhs: zero,
                 });
-                vec![self.default_scalar(e, &elem_type)]
+                vec![e.default_value(&elem_type)]
             },
             // In-bounds: do the get
             |e| vec![e.array_get(array, index)],
@@ -769,23 +722,6 @@ impl LowerPureGuards {
         };
         let in_bounds = emitter.lt(idx_as_u32, len_val);
         emitter.not(in_bounds)
-    }
-
-    /// Produce a default zero value for a scalar type.
-    fn default_scalar(&self, emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
-        match &ty.expr {
-            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
-            TypeExpr::U(bits) => emitter.u_const(*bits, 0),
-            TypeExpr::I(bits) => emitter.i_const(*bits, 0),
-            TypeExpr::WitnessOf(inner) => {
-                let inner_val = self.default_scalar(emitter, inner);
-                emitter.cast_to(CastTarget::WitnessOf, inner_val)
-            }
-            other => panic!(
-                "LowerPureGuards: cannot produce default for non-scalar element type: {:?}",
-                other
-            ),
-        }
     }
 
     /// Common pattern: branch on a failure condition. In the fail branch,

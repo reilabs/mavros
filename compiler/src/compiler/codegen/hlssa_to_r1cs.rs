@@ -643,13 +643,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(new_array)
     }
 
-    fn truncate(&self, _from: usize, to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let new_value = self
             .expect_constant()
             .into_bigint()
             .to_bits_le()
             .iter()
-            .take(to)
+            .skip(offset)
+            .take(width)
             .cloned()
             .collect::<Vec<_>>();
         Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
@@ -811,13 +812,32 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn to_radix(
         &self,
-        _radix: &Radix<Self>,
-        _endianness: crate::compiler::ssa::hlssa::Endianness,
-        _size: usize,
+        radix: &Radix<Self>,
+        endianness: crate::compiler::ssa::hlssa::Endianness,
+        size: usize,
         _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
-        todo!("ToRadix R1CS generation not yet implemented")
+        match radix {
+            Radix::Bytes => {
+                let mut bytes = self.expect_constant().into_bigint().to_bytes_le();
+                if bytes.len() > size {
+                    bytes.truncate(size);
+                } else {
+                    bytes.resize(size, 0);
+                }
+                if matches!(endianness, crate::compiler::ssa::hlssa::Endianness::Big) {
+                    bytes.reverse();
+                }
+                Value::mk_array(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Value::Const(ark_bn254::Fr::from(byte)))
+                        .collect(),
+                )
+            }
+            Radix::Dyn(_) => todo!("dynamic ToRadix R1CS generation not yet implemented"),
+        }
     }
 
     fn spread(&self, bits: u8, _ctx: &mut R1CGen) -> Self {

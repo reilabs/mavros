@@ -577,26 +577,6 @@ impl ValueRangeAnalysis {
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }
 
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits,
-                ..
-            } => {
-                let in_r = get(bounds, *value);
-                // Truncate semantics: result = value mod 2^to_bits, in [0, 2^to_bits).
-                // If the input is already inside that range, preserve it; otherwise
-                // saturate to the full unsigned range. (`in_r ⊆ cap` already
-                // implies non-negativity since `cap.lo == 0`.)
-                let cap = IntInterval::unsigned_full(*to_bits);
-                let r = if cap.intersect(&in_r) == in_r {
-                    in_r
-                } else {
-                    cap
-                };
-                Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
-            }
-
             OpCode::SExt {
                 result,
                 value,
@@ -610,6 +590,15 @@ impl ValueRangeAnalysis {
                     IntInterval::signed_full(*from_bits)
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
+            }
+
+            OpCode::BitRange { result, width, .. } => {
+                let result_ty = types.get_value_type(*result);
+                let raw = match result_ty.strip_witness().expr {
+                    TypeExpr::I(bits) if *width >= bits => IntInterval::for_type(result_ty),
+                    _ => IntInterval::unsigned_full(*width),
+                };
+                Self::overwrite(bounds, *result, cap_to_type(*result, raw), changed);
             }
 
             OpCode::WriteWitness {

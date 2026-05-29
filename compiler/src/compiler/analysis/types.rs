@@ -485,20 +485,6 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits: _,
-                from_bits: _,
-            } => {
-                let value_type = function_info
-                    .values
-                    .get(value)
-                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-
-                function_info.values.insert(*result, value_type.clone());
-                Ok(())
-            }
             OpCode::SExt {
                 result,
                 value,
@@ -523,6 +509,29 @@ impl Types {
                     widened
                 };
                 function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                if *width == 0 {
+                    return Err("BitRange width must be at least 1".to_string());
+                }
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let value_bits = value_type.get_bit_size();
+                if *offset + *width > value_bits {
+                    return Err(format!(
+                        "BitRange({}, {}) exceeds source width {} for {}",
+                        offset, width, value_bits, value_type
+                    ));
+                }
+                function_info.values.insert(*result, value_type.clone());
                 Ok(())
             }
             OpCode::Not { result, value } => {
