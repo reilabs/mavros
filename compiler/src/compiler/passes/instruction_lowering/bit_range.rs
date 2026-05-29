@@ -15,7 +15,7 @@ use crate::compiler::{
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext, witness_integer_utils::two_pow};
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerBitRangeOps {}
 
@@ -423,6 +423,10 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
     let high = b.div(byte, divisor);
     let high_shifted = b.mul(high, divisor);
     b.sub(byte, high_shifted)
+}
+
+fn two_pow(exponent: usize) -> Field {
+    Field::from(2).pow([exponent as u64])
 }
 
 fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {

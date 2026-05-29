@@ -3,7 +3,6 @@ mod pure_guards;
 mod witness_array;
 mod witness_bitwise;
 mod witness_integer_arith;
-mod witness_integer_utils;
 mod witness_spread;
 
 use crate::compiler::{

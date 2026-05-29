@@ -12,18 +12,13 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, OpCode, TypeExpr,
+            BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
-use super::{
-    InstructionLoweringRule, LoweringContext,
-    witness_integer_utils::{
-        cast_target_for_integer_type, guarded_rangecheck, integer_bits_and_signedness, two_pow,
-    },
-};
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessBitwiseOps {}
 
@@ -304,6 +299,47 @@ impl LowerWitnessBitwiseOps {
 struct U64Limbs {
     lo: ValueId,
     hi: ValueId,
+}
+
+fn two_pow(exponent: usize) -> Field {
+    Field::from(2).pow([exponent as u64])
+}
+
+fn guarded_rangecheck(
+    b: &mut HLBlockEmitter<'_>,
+    value: ValueId,
+    bits: usize,
+    guard: Option<ValueId>,
+) {
+    assert!(bits >= 1, "rangecheck width must be at least 1 bit");
+    let rangecheck = OpCode::Rangecheck {
+        value,
+        max_bits: bits,
+    };
+    if let Some(condition) = guard {
+        b.emit(OpCode::Guard {
+            condition,
+            inner: Box::new(rangecheck),
+        });
+    } else {
+        b.emit(rangecheck);
+    }
+}
+
+fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
+    match ty.strip_witness().expr {
+        TypeExpr::U(bits) => CastTarget::U(bits),
+        TypeExpr::I(bits) => CastTarget::I(bits),
+        other => panic!("expected integer type, got {:?}", other),
+    }
+}
+
+fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
+    match ty.strip_witness().expr {
+        TypeExpr::U(bits) => Some((bits, false)),
+        TypeExpr::I(bits) => Some((bits, true)),
+        _ => None,
+    }
 }
 
 fn unsigned_bits(function_type_info: &FunctionTypeInfo, value: ValueId, context: &str) -> usize {
