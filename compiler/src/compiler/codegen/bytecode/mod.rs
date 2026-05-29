@@ -519,14 +519,18 @@ impl CodeGen {
                     };
                     let result = layouter.alloc_int(*val, result_bits);
                     let lhs_type = &type_info.get_value_type(*op1).expr;
+                    let lhs_bits = integer_bits_if_integer(type_info.get_value_type(*op1))
+                        .unwrap_or(u64::BITS as usize);
+                    let rhs_bits = integer_bits_if_integer(type_info.get_value_type(*op2))
+                        .unwrap_or(u64::BITS as usize);
                     push_int_lt(
                         emitter,
                         matches!(lhs_type, TypeExpr::I(_)),
                         result,
                         layouter.get_value(*op1),
                         layouter.get_value(*op2),
-                        integer_bits(type_info.get_value_type(*op1)),
-                        integer_bits(type_info.get_value_type(*op2)),
+                        lhs_bits,
+                        rhs_bits,
                     );
                 }
                 hlssa::OpCode::Cmp {
@@ -537,14 +541,26 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::U(bits) | TypeExpr::I(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        push_int_eq(
-                            emitter,
-                            result,
-                            layouter.get_value(*op1),
-                            layouter.get_value(*op2),
-                            integer_bits(type_info.get_value_type(*op1)),
-                            integer_bits(type_info.get_value_type(*op2)),
-                        );
+                        match (
+                            integer_bits_if_integer(type_info.get_value_type(*op1)),
+                            integer_bits_if_integer(type_info.get_value_type(*op2)),
+                        ) {
+                            (Some(lhs_bits), Some(rhs_bits)) => {
+                                push_int_eq(
+                                    emitter,
+                                    result,
+                                    layouter.get_value(*op1),
+                                    layouter.get_value(*op2),
+                                    lhs_bits,
+                                    rhs_bits,
+                                );
+                            }
+                            _ => emitter.push_op(bytecode::OpCode::EqU64 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            }),
+                        }
                     }
                     t => panic!("Unsupported type for comparison: {:?}", t),
                 },
@@ -1341,13 +1357,18 @@ impl EmitterState {
 // ================================================================================================
 
 fn integer_bits(tp: &Type) -> usize {
+    integer_bits_if_integer(tp)
+        .unwrap_or_else(|| panic!("Expected integer type, got {:?}", tp.strip_witness().expr))
+}
+
+fn integer_bits_if_integer(tp: &Type) -> Option<usize> {
     match tp.strip_witness().expr {
-        TypeExpr::U(bits) => bits,
+        TypeExpr::U(bits) => Some(bits),
         TypeExpr::I(bits) => {
             assert!(bits <= 64, "signed integers wider than i64 are unsupported");
-            bits
+            Some(bits)
         }
-        other => panic!("Expected integer type, got {:?}", other),
+        _ => None,
     }
 }
 
