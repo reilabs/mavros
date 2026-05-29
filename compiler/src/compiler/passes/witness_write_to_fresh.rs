@@ -93,7 +93,6 @@ impl WitnessWriteToFresh {
                         | OpCode::TupleProj { .. }
                         | OpCode::MkTuple { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::Const { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. }
                         | OpCode::Guard { .. } => instruction.clone(),

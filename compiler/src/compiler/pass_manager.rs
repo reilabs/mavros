@@ -3,12 +3,13 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     fs,
+    hash::Hash,
     path::PathBuf,
 };
 
 use crate::compiler::ssa::{
     DefaultSSAAnnotator, Instruction, SSA, SSAType,
-    hlssa::{Constants, OpCode, Type},
+    hlssa::{Constant, OpCode, Type},
 };
 
 // ---------------------------------------------------------------------------
@@ -24,8 +25,12 @@ pub struct AnalysisId {
 }
 
 impl AnalysisId {
-    pub fn of<A: Analysis<Op, Ty, C>, Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>()
-    -> Self {
+    pub fn of<
+        A: Analysis<Op, Ty, C>,
+        Op: Instruction,
+        Ty: SSAType,
+        C: Clone + Debug + Eq + Hash + 'static,
+    >() -> Self {
         Self {
             type_id: TypeId::of::<A>(),
             type_name: std::any::type_name::<A>(),
@@ -73,7 +78,7 @@ impl std::fmt::Debug for AnalysisId {
 pub trait Analysis<
     Op: Instruction = OpCode,
     Ty: SSAType = Type,
-    C: Clone + Debug + 'static = Constants,
+    C: Clone + Debug + Eq + Hash + 'static = Constant,
 >: Any + 'static
 {
     fn id() -> AnalysisId
@@ -172,7 +177,11 @@ impl AnalysisStore {
 // Pass trait — parametric
 // ---------------------------------------------------------------------------
 
-pub trait Pass<Op: Instruction = OpCode, Ty: SSAType = Type, C: Clone + Debug + 'static = Constants>
+pub trait Pass<
+    Op: Instruction = OpCode,
+    Ty: SSAType = Type,
+    C: Clone + Debug + Eq + Hash + 'static = Constant,
+>
 {
     fn name(&self) -> &'static str;
     fn needs(&self) -> Vec<AnalysisId> {
@@ -220,7 +229,7 @@ fn topo_sort(roots: Vec<AnalysisId>, store: &AnalysisStore) -> Vec<AnalysisId> {
 pub struct PassManager<
     Op: Instruction = OpCode,
     Ty: SSAType = Type,
-    C: Clone + Debug + 'static = Constants,
+    C: Clone + Debug + Eq + Hash + 'static = Constant,
 > {
     passes: Vec<Box<dyn Pass<Op, Ty, C>>>,
     analyses: AnalysisStore,
@@ -229,7 +238,7 @@ pub struct PassManager<
     phase_label: String,
 }
 
-impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static> PassManager<Op, Ty, C> {
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassManager<Op, Ty, C> {
     pub fn new(phase_label: String, draw_cfg: bool, passes: Vec<Box<dyn Pass<Op, Ty, C>>>) -> Self {
         Self {
             passes,
