@@ -99,21 +99,18 @@ impl SSAConverter {
                 let ssa_func_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
                 let converted =
                     self.convert_function(&mut ssa, ast_func, &self.unconstrained_mapper, true);
-                // Safe as we do an in-place replacement of a unique function by ID.
                 *ssa.get_function_mut(ssa_func_id) = converted;
             } else {
                 // Constrained version
                 let constrained_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
                 let converted =
                     self.convert_function(&mut ssa, ast_func, &self.constrained_mapper, false);
-                // Safe as we do an in-place replacement of a unique function by ID.
                 *ssa.get_function_mut(constrained_id) = converted;
 
                 // Unconstrained variant (for calls from unconstrained context)
                 let unconstrained_id = *self.unconstrained_mapper.get(&ast_func.id).unwrap();
                 let converted =
                     self.convert_function(&mut ssa, ast_func, &self.unconstrained_mapper, true);
-                // Safe as we do an in-place replacement of a unique function by ID.
                 *ssa.get_function_mut(unconstrained_id) = converted;
             }
         }

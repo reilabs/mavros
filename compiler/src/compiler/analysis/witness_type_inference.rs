@@ -227,8 +227,6 @@ impl WitnessTypeInference {
                 ssa,
             );
 
-            // Safe as we put the processed function back under the same ID and thus avoid any
-            // dangling references.
             let mut specialized_func = ssa.take_function(spec_value.specialized_func_id);
 
             // Build call site index: for each block, collect calls in order

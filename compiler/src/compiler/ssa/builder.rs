@@ -345,8 +345,6 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSABuilder<
         fid: FunctionId,
         body: impl FnOnce(&mut FunctionBuilder<'_, Op, Ty, C>) -> R,
     ) -> R {
-        // Safe as we are guaranteed to replace the function under the same ID, so no references are
-        // left dangling.
         let mut function = self.ssa.take_function(fid);
         let result = {
             let mut fb = FunctionBuilder::new(&mut function, self.ssa);

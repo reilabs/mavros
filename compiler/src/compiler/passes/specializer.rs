@@ -863,9 +863,6 @@ impl Specializer {
 
         // Take the empty body out so the state can mutate it while the symbolic executor
         // holds a shared `&HLSSA`.
-        //
-        // Safe because it either a new function exists under the same ID that respects the calling
-        // contract, or the body is replaced.
         let mut body = ssa.take_function(candidate_id);
         for ret in &original_return_types {
             body.add_return_type(ret.clone());

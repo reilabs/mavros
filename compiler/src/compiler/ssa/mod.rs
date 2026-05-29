@@ -152,11 +152,6 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     }
 
     /// Inserts the provided `function` into the SSA.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure that `function` does not reference any value that is not available in the
-    /// SSA, and that all values in the function have unique identifiers.
     pub fn insert_function(&mut self, function: Function<Op, Ty>) -> FunctionId {
         let new_id = FunctionId(self.next_function_id);
         self.next_function_id += 1;
@@ -165,21 +160,11 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     }
 
     /// Remove a function from the SSA, returning it if present.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure no surviving instruction, constant, or SSA-level reference still
-    /// references `id`.
     pub fn delete_function(&mut self, id: FunctionId) -> Option<Function<Op, Ty>> {
         self.functions.remove(&id)
     }
 
     /// Drop functions for which `f` returns `false`.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure no surviving instruction, constant, or SSA-level reference still
-    /// references the identifier of any removed function.
     pub fn retain_functions(&mut self, mut f: impl FnMut(FunctionId, &Function<Op, Ty>) -> bool) {
         self.functions.retain(|id, fun| f(*id, fun));
     }
@@ -193,10 +178,6 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     }
 
     /// Gets a mutable reference to the main function or panics if no main function exists.
-    ///
-    /// # Safety
-    ///
-    /// All mutations made to the main function must ensure the internal consistency of the SSA.
     pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
             .get_mut(&self.main_id)
@@ -215,20 +196,11 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     }
 
     /// Gets a mutable reference to a function in the SSA or panics if no such function exists.
-    ///
-    /// # Safety
-    ///
-    /// Any mutations made to the returned function must ensure the internal consistency of the SSA.
     pub fn get_function_mut(&mut self, id: FunctionId) -> &mut Function<Op, Ty> {
         self.functions.get_mut(&id).expect("Function should exist")
     }
 
     /// Removes the provided function from the SSA or panics if it does not exist.
-    ///
-    /// # Safety
-    ///
-    /// The caller is responsible for fixing any references to this function in the SSA that may be
-    /// left dangling by this operation.
     pub fn take_function(&mut self, id: FunctionId) -> Function<Op, Ty> {
         self.functions.remove(&id).expect("Function should exist")
     }
@@ -436,10 +408,6 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
 
     /// Remove the constant bound to `vid` from the table, returning its value if present and
     /// panicking if not.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure the SSA no longer references `vid` lest a dangling reference be created.
     pub fn remove_const_by_id(&self, vid: ValueId) -> Arc<C> {
         self.constants
             .write()
@@ -450,11 +418,6 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     }
 
     /// Drop constants for which `f` returns `false`.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure the SSA does not reference any removed value ids to avoid creating
-    /// dangling references.
     pub fn retain_constants(&self, mut f: impl FnMut(&ValueId, &Arc<C>) -> bool) {
         self.constants.write().unwrap().retain(|vid, cv| f(vid, cv));
     }

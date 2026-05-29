@@ -154,8 +154,6 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
         let func = ssa.get_function(fid);
         let block_ids: Vec<BlockId> = func.get_blocks().map(|(bid, _)| *bid).collect();
-        // Safe as we only take and replace contents, and never duplicate them, ensuring the
-        // uniqueness of value identifiers.
         let func = ssa.get_function_mut(fid);
         for bid in block_ids {
             let block = func.get_block_mut(bid);
@@ -209,8 +207,6 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     // 3c. Replace TypeExpr::Function → TypeExpr::U(32) everywhere
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
-        // Safe as we only take and replace contents of the function and never duplicate them,
-        // ensuring the uniqueness of value identifiers.
         let func = ssa.get_function_mut(fid);
 
         let mut returns = func.take_returns();

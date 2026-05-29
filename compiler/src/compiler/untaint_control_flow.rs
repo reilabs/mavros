@@ -239,8 +239,6 @@ impl UntaintControlFlow {
                 } else {
                     None
                 };
-                // Safe as we put the modified function back under the same ID, avoiding any
-                // dangling references.
                 let mut function = ssa.take_function(function_id);
                 self.run_function(
                     function_id,
