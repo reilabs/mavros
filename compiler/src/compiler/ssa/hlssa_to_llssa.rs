@@ -3028,73 +3028,6 @@ fn load_pure_lookup_elem_as_field(
     }
 }
 
-fn lookup_leaf_count(ty: &HLType) -> usize {
-    match &ty.expr {
-        HLTypeExpr::Array(inner, count) => count * lookup_leaf_count(inner),
-        HLTypeExpr::Field | HLTypeExpr::U(_) | HLTypeExpr::I(_) | HLTypeExpr::WitnessOf(_) => 1,
-        _ => panic!("Unsupported array element type in lookup: {}", ty),
-    }
-}
-
-fn store_forward_lookup_leaf(
-    e: &mut LLBlockEmitter<'_>,
-    a_base: ValueId,
-    inv_cnst_off: ValueId,
-    leaf_index_i64: ValueId,
-    elem_ptr: ValueId,
-    elem_type: &HLType,
-) {
-    let elem_field = load_pure_lookup_elem_as_field(e, elem_ptr, elem_type);
-    let leaf_index_i32 = e.truncate(leaf_index_i64, 32);
-    let two_i32 = e.int_const(32, 2);
-    let doubled_index = e.int_arith(IntArithOp::Mul, leaf_index_i32, two_i32);
-    let table_slot_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, doubled_index);
-    let table_slot = e.array_elem_ptr(a_base, LLStruct::field_elem(), table_slot_idx);
-    e.ll_store(table_slot, elem_field);
-}
-
-fn emit_forward_array_lookup_entries(
-    e: &mut LLBlockEmitter<'_>,
-    a_base: ValueId,
-    inv_cnst_off: ValueId,
-    array: ValueId,
-    array_type: &HLType,
-    base_index_i64: ValueId,
-) {
-    let (elem_type, count) = array_info(array_type);
-    let elem_struct = elem_struct(elem_type);
-    let rc_struct = rc_array_struct(elem_type, count);
-    let data = e.struct_field_ptr(array, rc_struct, 2);
-    let elem_leaf_count = lookup_leaf_count(elem_type);
-
-    e.build_counted_loop(count, vec![], |e, i_i64, _| {
-        let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
-        let leaf_index = if elem_leaf_count == 1 {
-            e.int_arith(IntArithOp::Add, base_index_i64, i_i64)
-        } else {
-            let stride = e.int_const(64, elem_leaf_count as u64);
-            let offset = e.int_arith(IntArithOp::Mul, i_i64, stride);
-            e.int_arith(IntArithOp::Add, base_index_i64, offset)
-        };
-
-        if matches!(&elem_type.expr, HLTypeExpr::Array(_, _)) {
-            let child_array = e.ll_load(elem_ptr, LLType::Ptr);
-            emit_forward_array_lookup_entries(
-                e,
-                a_base,
-                inv_cnst_off,
-                child_array,
-                elem_type,
-                leaf_index,
-            );
-        } else {
-            store_forward_lookup_leaf(e, a_base, inv_cnst_off, leaf_index, elem_ptr, elem_type);
-        }
-
-        vec![]
-    });
-}
-
 fn ad_bump_lookup_elem_db(
     e: &mut LLBlockEmitter<'_>,
     elem_ptr: ValueId,
@@ -3125,44 +3058,11 @@ fn ad_bump_lookup_elem_db(
     }
 }
 
-fn ad_bump_flat_lookup_elem_db(
-    e: &mut LLBlockEmitter<'_>,
-    array: ValueId,
-    array_type: &HLType,
-    flat_index_i64: ValueId,
-    coeff: ValueId,
-    bump_db_fn: FunctionId,
-) {
-    let (elem_type, count) = array_info(array_type);
-    let rc_struct = rc_array_struct(elem_type, count);
-    let elem_struct = elem_struct(elem_type);
-    let data = e.struct_field_ptr(array, rc_struct, 2);
-    let elem_leaf_count = lookup_leaf_count(elem_type);
-
-    if !matches!(&elem_type.expr, HLTypeExpr::Array(_, _)) {
-        let elem_ptr = e.array_elem_ptr(data, elem_struct, flat_index_i64);
-        ad_bump_lookup_elem_db(e, elem_ptr, elem_type, coeff, bump_db_fn);
-        return;
-    }
-
-    let (elem_index, child_index) = if elem_leaf_count == 1 {
-        let zero = e.int_const(64, 0);
-        (flat_index_i64, zero)
-    } else {
-        let stride = e.int_const(64, elem_leaf_count as u64);
-        let elem_index = e.int_arith(IntArithOp::UDiv, flat_index_i64, stride);
-        let child_index = e.int_arith(IntArithOp::URem, flat_index_i64, stride);
-        (elem_index, child_index)
-    };
-    let elem_ptr = e.array_elem_ptr(data, elem_struct, elem_index);
-    let child_array = e.ll_load(elem_ptr, LLType::Ptr);
-    ad_bump_flat_lookup_elem_db(e, child_array, elem_type, child_index, coeff, bump_db_fn);
-}
-
 fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLFunction {
     let (elem_type, count) = array_info(array_type);
-    let lookup = LookupTableSpec::array(lookup_leaf_count(array_type));
+    let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
+    let elem_struct = elem_struct(elem_type);
     let mut func = new_ll_function(llssa, format!("__array_lookup_{}", array_type));
     let entry = func.get_entry_id();
 
@@ -3195,8 +3095,18 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         |e, inv_cnst_off| {
             let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
             let a_base = e.ll_load(a_base_slot, LLType::Ptr);
-            let zero_i64 = e.int_const(64, 0);
-            emit_forward_array_lookup_entries(e, a_base, inv_cnst_off, array, array_type, zero_i64);
+            let data = e.struct_field_ptr(array, rc_struct.clone(), 2);
+            e.build_counted_loop(count, vec![], |e, i_i64, _| {
+                let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
+                let elem_field = load_pure_lookup_elem_as_field(e, elem_ptr, elem_type);
+                let i_i32 = e.truncate(i_i64, 32);
+                let two_i32 = e.int_const(32, 2);
+                let doubled_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
+                let table_slot_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, doubled_i);
+                let table_slot = e.array_elem_ptr(a_base, LLStruct::field_elem(), table_slot_idx);
+                e.ll_store(table_slot, elem_field);
+                vec![]
+            });
         },
     );
 
@@ -3646,9 +3556,11 @@ fn emit_array_ad_init_body(
     bump_db_fn: FunctionId,
     witness_layout: WitnessLayout,
 ) -> ValueId {
-    let lookup = LookupTableSpec::array(lookup_leaf_count(array_type));
     let (elem_type, count) = array_info(array_type);
+    let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
+    let elem_struct = elem_struct(elem_type);
+    let data = e.struct_field_ptr(array, rc_struct.clone(), 2);
 
     emit_key_value_ad_table_init_body(
         e,
@@ -3662,7 +3574,8 @@ fn emit_array_ad_init_body(
             e.ll_store(table_id_ptr, snap_u64);
         },
         |e, i_i64, x_coeff| {
-            ad_bump_flat_lookup_elem_db(e, array, array_type, i_i64, x_coeff, bump_db_fn);
+            let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
+            ad_bump_lookup_elem_db(e, elem_ptr, elem_type, x_coeff, bump_db_fn);
         },
     )
 }
@@ -3676,7 +3589,7 @@ fn generate_darray_ad_call(
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
     let (elem_type, count) = array_info(array_type);
-    let lookup = LookupTableSpec::array(lookup_leaf_count(array_type));
+    let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
     let mut func = new_ll_function(llssa, format!("__darray_lookup_{}_ad_call", array_type));
     let entry = func.get_entry_id();
