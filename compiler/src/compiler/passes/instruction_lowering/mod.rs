@@ -66,9 +66,9 @@ pub(super) trait InstructionLoweringRule {
 }
 
 impl InstructionLowering {
-    pub fn new() -> Self {
+    pub fn witness_integer_ops() -> Self {
         Self::with_lowerers(
-            "instruction_lowering",
+            "instruction_lowering_witness_integer_ops",
             vec![
                 Box::new(LowerWitnessIntegerArithOps::new()),
                 Box::new(LowerWitnessBitwiseOps::new()),
@@ -79,7 +79,7 @@ impl InstructionLowering {
         )
     }
 
-    pub fn pure_guards_only() -> Self {
+    pub fn pure_guards() -> Self {
         Self::with_lowerers(
             "instruction_lowering_pure_guards",
             vec![Box::new(LowerPureGuards::new())],
@@ -87,9 +87,9 @@ impl InstructionLowering {
         )
     }
 
-    pub fn arrays_only() -> Self {
+    pub fn witness_array_access() -> Self {
         Self::with_lowerers(
-            "instruction_lowering_arrays",
+            "instruction_lowering_witness_array_access",
             vec![Box::new(LowerWitnessArrayOps::new())],
             false,
         )

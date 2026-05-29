@@ -263,7 +263,7 @@ impl Driver {
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(InstructionLowering::pure_guards_only()),
+                Box::new(InstructionLowering::pure_guards()),
                 Box::new(FixDoubleJumps::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
@@ -286,8 +286,8 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(InstructionLowering::arrays_only()),
-                Box::new(InstructionLowering::new()),
+                Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-explicit-witness lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
                 // that the second round can then consume.
