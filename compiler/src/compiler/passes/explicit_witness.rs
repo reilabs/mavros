@@ -583,15 +583,12 @@ impl ExplicitWitness {
                 to_bits,
             } => {
                 let value_type = function_type_info.get_value_type(value);
-                let i_taint = value_type.is_witness_of();
-                if i_taint && value_type.strip_witness().is_integer() {
-                    panic!(
-                        "witness integer sign-extension should have been lowered by \
-                         instruction_lowering"
-                    );
-                }
+                assert!(
+                    !value_type.is_witness_of(),
+                    "witness sign-extension should have been lowered by instruction_lowering"
+                );
                 let one = b.field_const(Field::ONE);
-                let value_field = if value_type.strip_witness().is_field() {
+                let value_field = if value_type.is_field() {
                     value
                 } else {
                     b.cast_to_field(value)
@@ -603,7 +600,7 @@ impl ExplicitWitness {
                     from_bits,
                     to_bits,
                     one,
-                    i_taint,
+                    false,
                     result,
                     &value_range,
                 );
@@ -806,13 +803,7 @@ impl ExplicitWitness {
                 });
             }
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(
-                    b,
-                    function_type_info,
-                    function_value_ranges,
-                    condition,
-                    *inner,
-                );
+                self.lower_guard(b, function_type_info, condition, *inner);
             }
         }
     }
@@ -821,7 +812,6 @@ impl ExplicitWitness {
         &self,
         b: &mut HLInstrBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
-        function_value_ranges: &FunctionValueRanges,
         condition: ValueId,
         inner: OpCode,
     ) {
@@ -884,45 +874,17 @@ impl ExplicitWitness {
                 from_bits,
                 to_bits,
             } => {
-                let value_type = function_type_info.get_value_type(value);
-                let value_taint = value_type.is_witness_of();
-                if !value_taint {
-                    b.push(OpCode::SExt {
-                        result,
-                        value,
-                        from_bits,
-                        to_bits,
-                    });
-                } else {
-                    if value_type.strip_witness().is_integer() {
-                        panic!(
-                            "guarded witness integer sign-extension should have been lowered by \
-                             instruction_lowering"
-                        );
-                    }
-                    let cond_type = function_type_info.get_value_type(condition);
-                    let cond_field = if cond_type.strip_witness().is_field() {
-                        condition
-                    } else {
-                        b.cast_to_field(condition)
-                    };
-                    let value_field = if value_type.strip_witness().is_field() {
-                        value
-                    } else {
-                        b.cast_to_field(value)
-                    };
-                    let value_range = function_value_ranges.get(value);
-                    self.gen_sext(
-                        b,
-                        value_field,
-                        from_bits,
-                        to_bits,
-                        cond_field,
-                        true,
-                        result,
-                        &value_range,
-                    );
-                }
+                assert!(
+                    !function_type_info.get_value_type(value).is_witness_of(),
+                    "guarded witness sign-extension should have been lowered by \
+                     instruction_lowering"
+                );
+                b.push(OpCode::SExt {
+                    result,
+                    value,
+                    from_bits,
+                    to_bits,
+                });
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
