@@ -30,6 +30,7 @@ const ITERATION_LIMIT: usize = 32;
 pub struct AlgebraicLowering {
     name: &'static str,
     lowerers: Vec<Box<dyn AlgebraicLoweringRule>>,
+    fixed_point: bool,
 }
 
 pub(super) struct LoweringContext<'a> {
@@ -70,13 +71,12 @@ impl AlgebraicLowering {
         Self::with_lowerers(
             "algebraic_lowering",
             vec![
-                Box::new(LowerPureGuards::new()),
-                Box::new(LowerWitnessArrayOps::new()),
                 Box::new(LowerWitnessIntegerArithOps::new()),
                 Box::new(LowerWitnessBitwiseOps::new()),
                 Box::new(LowerWitnessSpreadOps::new()),
                 Box::new(LowerBitRangeOps::new()),
             ],
+            true,
         )
     }
 
@@ -84,11 +84,28 @@ impl AlgebraicLowering {
         Self::with_lowerers(
             "algebraic_lowering_pure_guards",
             vec![Box::new(LowerPureGuards::new())],
+            false,
         )
     }
 
-    fn with_lowerers(name: &'static str, lowerers: Vec<Box<dyn AlgebraicLoweringRule>>) -> Self {
-        Self { name, lowerers }
+    pub fn arrays_only() -> Self {
+        Self::with_lowerers(
+            "algebraic_lowering_arrays",
+            vec![Box::new(LowerWitnessArrayOps::new())],
+            false,
+        )
+    }
+
+    fn with_lowerers(
+        name: &'static str,
+        lowerers: Vec<Box<dyn AlgebraicLoweringRule>>,
+        fixed_point: bool,
+    ) -> Self {
+        Self {
+            name,
+            lowerers,
+            fixed_point,
+        }
     }
 
     fn run_iteration(&self, ssa: &mut HLSSA) -> bool {
@@ -164,6 +181,11 @@ impl Pass for AlgebraicLowering {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+        if !self.fixed_point {
+            self.run_iteration(ssa);
+            return;
+        }
+
         for _ in 0..ITERATION_LIMIT {
             if !self.run_iteration(ssa) {
                 return;

@@ -159,8 +159,6 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
-        let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
         let product_range = context.range(lhs).mul(&context.range(rhs));
@@ -169,16 +167,7 @@ impl LowerWitnessIntegerArithOps {
             "unsigned multiplication product range is too wide for a single-field product"
         );
 
-        let value = if lhs_witness && rhs_witness {
-            let lhs_pure = b.value_of(lhs_field);
-            let rhs_pure = b.value_of(rhs_field);
-            let hint = b.mul(lhs_pure, rhs_pure);
-            let witness = b.write_witness(hint);
-            b.constrain(lhs_field, rhs_field, witness);
-            witness
-        } else {
-            b.mul(lhs_field, rhs_field)
-        };
+        let value = b.mul(lhs_field, rhs_field);
         let rc_bits = narrow_rangecheck_width(&product_range, bits);
         guarded_rangecheck(b, value, rc_bits, guard);
         let value = guarded_or_zero_field(b, value, guard);
@@ -324,25 +313,11 @@ impl LowerWitnessIntegerArithOps {
         };
         let result_signed = signed_value_from_encoded(b, result_wit, sign_result, bits);
 
-        let use_product_witness = lhs_witness && rhs_witness;
-        if guard.is_some() || use_product_witness {
-            let product = if use_product_witness {
-                let lhs_signed_pure = b.value_of(lhs_signed);
-                let rhs_signed_pure = b.value_of(rhs_signed);
-                let product_hint = b.mul(lhs_signed_pure, rhs_signed_pure);
-                let product_wit = b.write_witness(product_hint);
-                b.constrain(lhs_signed, rhs_signed, product_wit);
-                product_wit
-            } else {
-                b.mul(lhs_signed, rhs_signed)
-            };
-            let diff = b.sub(product, result_signed);
-            let zero = b.field_const(Field::ZERO);
-            let flag = one_or_condition_field(b, context.types(), guard);
-            b.constrain(flag, diff, zero);
-        } else {
-            b.constrain(lhs_signed, rhs_signed, result_signed);
-        }
+        let product = b.mul(lhs_signed, rhs_signed);
+        let diff = b.sub(product, result_signed);
+        let zero = b.field_const(Field::ZERO);
+        let flag = one_or_condition_field(b, context.types(), guard);
+        b.constrain(flag, diff, zero);
 
         b.emit(OpCode::Cast {
             result,
@@ -688,16 +663,7 @@ fn lower_unsigned_divmod(
     let divisor_field = b.cast_to_field(divisor);
     let dividend_minus_r = b.sub(dividend_field, r_wit);
     if guard.is_some() {
-        let product = if divisor_is_witness {
-            let q_pure = b.value_of(q_wit);
-            let divisor_pure = b.value_of(divisor_field);
-            let product_hint = b.mul(q_pure, divisor_pure);
-            let product = b.write_witness(product_hint);
-            b.constrain(q_wit, divisor_field, product);
-            product
-        } else {
-            b.mul(q_wit, divisor_field)
-        };
+        let product = b.mul(q_wit, divisor_field);
         let diff = b.sub(product, dividend_minus_r);
         let zero = b.field_const(Field::ZERO);
         b.constrain(guard_flag, diff, zero);

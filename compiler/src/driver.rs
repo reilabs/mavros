@@ -286,6 +286,7 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(AlgebraicLowering::arrays_only()),
                 Box::new(AlgebraicLowering::new()),
                 // After the last pre-explicit-witness lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
