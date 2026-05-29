@@ -19,7 +19,7 @@ use crate::compiler::{
 };
 
 use super::{
-    AlgebraicLoweringRule, LoweringContext,
+    InstructionLoweringRule, LoweringContext,
     witness_integer_utils::{
         cast_target_for_integer_type, guarded_rangecheck, integer_bits_and_signedness, two_pow,
     },
@@ -27,7 +27,7 @@ use super::{
 
 pub struct LowerWitnessBitwiseOps {}
 
-impl AlgebraicLoweringRule for LowerWitnessBitwiseOps {
+impl InstructionLoweringRule for LowerWitnessBitwiseOps {
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,

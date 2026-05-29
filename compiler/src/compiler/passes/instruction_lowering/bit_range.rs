@@ -15,11 +15,11 @@ use crate::compiler::{
     },
 };
 
-use super::{AlgebraicLoweringRule, LoweringContext, witness_integer_utils::two_pow};
+use super::{InstructionLoweringRule, LoweringContext, witness_integer_utils::two_pow};
 
 pub struct LowerBitRangeOps {}
 
-impl AlgebraicLoweringRule for LowerBitRangeOps {
+impl InstructionLoweringRule for LowerBitRangeOps {
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,

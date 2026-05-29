@@ -15,7 +15,7 @@ use crate::compiler::{
 };
 
 use super::{
-    AlgebraicLoweringRule, LoweringContext,
+    InstructionLoweringRule, LoweringContext,
     witness_integer_utils::{
         guarded_or_zero_field, guarded_rangecheck, integer_bits_and_signedness,
         narrow_rangecheck_width, one_or_condition_field, range_fits_field_injectively,
@@ -25,7 +25,7 @@ use super::{
 
 pub struct LowerWitnessIntegerArithOps {}
 
-impl AlgebraicLoweringRule for LowerWitnessIntegerArithOps {
+impl InstructionLoweringRule for LowerWitnessIntegerArithOps {
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,

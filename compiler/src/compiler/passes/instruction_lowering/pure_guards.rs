@@ -33,11 +33,11 @@ use crate::compiler::{
     },
 };
 
-use super::{AlgebraicLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerPureGuards {}
 
-impl AlgebraicLoweringRule for LowerPureGuards {
+impl InstructionLoweringRule for LowerPureGuards {
     fn lower_instruction(
         &self,
         emitter: &mut HLBlockEmitter<'_>,

@@ -26,7 +26,6 @@ use crate::{
         lowering::LowLevelReplacement,
         pass_manager::PassManager,
         passes::{
-            algebraic_lowering::AlgebraicLowering,
             common_subexpression_elimination::CSE,
             condition_propagation::ConditionPropagation,
             dead_code_elimination::{self, DCE},
@@ -34,6 +33,7 @@ use crate::{
             defunctionalize::Defunctionalize,
             explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
+            instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
@@ -263,7 +263,7 @@ impl Driver {
             "explictize_witness".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(AlgebraicLowering::pure_guards_only()),
+                Box::new(InstructionLowering::pure_guards_only()),
                 Box::new(FixDoubleJumps::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
@@ -286,8 +286,8 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(AlgebraicLowering::arrays_only()),
-                Box::new(AlgebraicLowering::new()),
+                Box::new(InstructionLowering::arrays_only()),
+                Box::new(InstructionLowering::new()),
                 // After the last pre-explicit-witness lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
                 // that the second round can then consume.

@@ -17,11 +17,11 @@ use crate::compiler::{
     },
 };
 
-use super::{AlgebraicLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessArrayOps {}
 
-impl AlgebraicLoweringRule for LowerWitnessArrayOps {
+impl InstructionLoweringRule for LowerWitnessArrayOps {
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,

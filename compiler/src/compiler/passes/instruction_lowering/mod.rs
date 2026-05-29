@@ -27,9 +27,9 @@ use self::{
 
 const ITERATION_LIMIT: usize = 32;
 
-pub struct AlgebraicLowering {
+pub struct InstructionLowering {
     name: &'static str,
-    lowerers: Vec<Box<dyn AlgebraicLoweringRule>>,
+    lowerers: Vec<Box<dyn InstructionLoweringRule>>,
     fixed_point: bool,
 }
 
@@ -57,7 +57,7 @@ impl<'a> LoweringContext<'a> {
     }
 }
 
-pub(super) trait AlgebraicLoweringRule {
+pub(super) trait InstructionLoweringRule {
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -66,10 +66,10 @@ pub(super) trait AlgebraicLoweringRule {
     ) -> bool;
 }
 
-impl AlgebraicLowering {
+impl InstructionLowering {
     pub fn new() -> Self {
         Self::with_lowerers(
-            "algebraic_lowering",
+            "instruction_lowering",
             vec![
                 Box::new(LowerWitnessIntegerArithOps::new()),
                 Box::new(LowerWitnessBitwiseOps::new()),
@@ -82,7 +82,7 @@ impl AlgebraicLowering {
 
     pub fn pure_guards_only() -> Self {
         Self::with_lowerers(
-            "algebraic_lowering_pure_guards",
+            "instruction_lowering_pure_guards",
             vec![Box::new(LowerPureGuards::new())],
             false,
         )
@@ -90,7 +90,7 @@ impl AlgebraicLowering {
 
     pub fn arrays_only() -> Self {
         Self::with_lowerers(
-            "algebraic_lowering_arrays",
+            "instruction_lowering_arrays",
             vec![Box::new(LowerWitnessArrayOps::new())],
             false,
         )
@@ -98,7 +98,7 @@ impl AlgebraicLowering {
 
     fn with_lowerers(
         name: &'static str,
-        lowerers: Vec<Box<dyn AlgebraicLoweringRule>>,
+        lowerers: Vec<Box<dyn InstructionLoweringRule>>,
         fixed_point: bool,
     ) -> Self {
         Self {
@@ -175,7 +175,7 @@ impl AlgebraicLowering {
     }
 }
 
-impl Pass for AlgebraicLowering {
+impl Pass for InstructionLowering {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -191,7 +191,7 @@ impl Pass for AlgebraicLowering {
                 return;
             }
         }
-        panic!("algebraic lowering did not reach a fixed point");
+        panic!("instruction lowering did not reach a fixed point");
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

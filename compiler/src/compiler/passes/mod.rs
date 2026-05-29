@@ -1,4 +1,3 @@
-pub mod algebraic_lowering;
 pub mod common_subexpression_elimination;
 pub mod condition_propagation;
 pub mod dead_code_elimination;
@@ -6,6 +5,7 @@ pub mod deduplicate_phis;
 pub mod defunctionalize;
 pub mod explicit_witness;
 pub mod fix_double_jumps;
+pub mod instruction_lowering;
 pub mod lower_guards;
 mod lowering_pass;
 pub mod mem2reg;
