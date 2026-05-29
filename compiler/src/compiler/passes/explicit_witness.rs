@@ -19,8 +19,8 @@ use crate::compiler::{
     ssa::{
         BlockId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLBlock, HLSSA, LookupTarget,
-            OpCode, Radix, SequenceTargetType, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, Endianness, HLBlock, HLSSA, LookupTarget, OpCode, Radix,
+            SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
         },
     },
@@ -136,76 +136,17 @@ impl ExplicitWitness {
             } => {
                 let l_taint = function_type_info.get_value_type(lhs).is_witness_of();
                 let r_taint = function_type_info.get_value_type(rhs).is_witness_of();
-                if !(!l_taint && !r_taint) {
-                    assert!(function_type_info.get_value_type(rhs).is_numeric());
-                    assert!(function_type_info.get_value_type(lhs).is_numeric());
-                    match kind {
-                        CmpKind::Eq => {
-                            let u1 = CastTarget::U(1);
-                            // Conditionally cast operands to Field (skip if already Field)
-                            let l_field = if function_type_info
-                                .get_value_type(lhs)
-                                .strip_witness()
-                                .is_field()
-                            {
-                                lhs
-                            } else {
-                                b.cast_to_field(lhs)
-                            };
-                            let r_field = if function_type_info
-                                .get_value_type(rhs)
-                                .strip_witness()
-                                .is_field()
-                            {
-                                rhs
-                            } else {
-                                b.cast_to_field(rhs)
-                            };
-                            let lr_diff = b.sub(l_field, r_field);
-
-                            let lr_diff_pure = b.value_of(lr_diff);
-                            let field_one_for_div = b.field_const(Field::ONE);
-                            let div_hint = b.div(field_one_for_div, lr_diff_pure);
-                            let div_hint_witness = b.write_witness(div_hint);
-
-                            let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
-                            let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
-                            let out_hint = b.eq(lhs_pure, rhs_pure);
-                            let out_hint_field = b.cast_to_field(out_hint);
-                            let out_hint_witness = b.write_witness(out_hint_field);
-                            b.push(OpCode::Cast {
-                                result,
-                                value: out_hint_witness,
-                                target: u1,
-                            });
-
-                            let result_field = b.cast_to_field(result);
-                            let field_one = b.field_const(Field::ONE);
-                            let not_res = b.sub(field_one, result_field);
-
-                            b.constrain(lr_diff, div_hint_witness, not_res);
-                            let field_zero = b.field_const(Field::ZERO);
-                            b.constrain(lr_diff, result_field, field_zero);
-                        }
-                        CmpKind::Lt => {
-                            let l_range = function_value_ranges.get(lhs);
-                            let r_range = function_value_ranges.get(rhs);
-                            self.lower_witness_lt(
-                                b,
-                                function_type_info,
-                                lhs,
-                                rhs,
-                                result,
-                                l_taint,
-                                r_taint,
-                                &l_range,
-                                &r_range,
-                            );
-                        }
-                    }
-                } else {
-                    b.push(instruction);
-                }
+                assert!(
+                    !l_taint && !r_taint,
+                    "witness cmp {:?} should have been lowered by instruction_lowering",
+                    kind
+                );
+                b.push(OpCode::Cmp {
+                    kind,
+                    result,
+                    lhs,
+                    rhs,
+                });
             }
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
@@ -755,6 +696,29 @@ impl ExplicitWitness {
             OpCode::Assert { .. } | OpCode::AssertCmp { .. } | OpCode::AssertR1C { .. } => {
                 panic!("guarded assert should have been lowered by instruction_lowering");
             }
+            OpCode::Cmp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } => {
+                let l_taint = function_type_info.get_value_type(lhs).is_witness_of();
+                let r_taint = function_type_info.get_value_type(rhs).is_witness_of();
+                assert!(
+                    !l_taint && !r_taint,
+                    "guarded witness cmp {:?} should have been lowered by instruction_lowering",
+                    kind
+                );
+                b.push(OpCode::Guard {
+                    condition,
+                    inner: Box::new(OpCode::Cmp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs,
+                    }),
+                });
+            }
             OpCode::Store { ptr, value: v } => {
                 // Guard(cond, Store(ptr, v)) → old = Load(ptr); new = Select(cond, v, old); Store(ptr, new)
                 let old_value = b.load(ptr);
@@ -1022,102 +986,6 @@ impl ExplicitWitness {
             let bound = b.field_const(Field::from((1u128 << leftover_bits) - 1));
             let gap = b.sub(bound, top);
             b.lookup_rngchk_8(gap, flag);
-        }
-    }
-
-    /// Lower a witness-tainted Lt comparison, emitting the result into `result`.
-    /// Generates range-check constraints to prove the comparison.
-    fn lower_witness_lt(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        lhs: ValueId,
-        rhs: ValueId,
-        result: ValueId,
-        l_taint: bool,
-        r_taint: bool,
-        l_range: &IntInterval,
-        r_range: &IntInterval,
-    ) {
-        let rhs_stripped = function_type_info.get_value_type(rhs).strip_witness().expr;
-        let (s, is_signed) = match rhs_stripped {
-            TypeExpr::U(s) => (s, false),
-            TypeExpr::I(s) => (s, true),
-            _ => panic!("ICE: rhs is not an integer type"),
-        };
-        let u1 = CastTarget::U(1);
-        // `b.lt` lowers to `lt_u64`/`lt_s64`, which read a single 64-bit frame
-        // cell. Field-typed operands would read a Montgomery limb instead of
-        // the value, so the comparison would be nonsense — reject those at the
-        // pass boundary rather than silently emitting broken code.
-        assert!(
-            !matches!(
-                function_type_info.get_value_type(lhs).strip_witness().expr,
-                TypeExpr::Field
-            ),
-            "ICE: lower_witness_lt got Field-typed lhs; integer-typed operands required"
-        );
-        assert!(
-            !matches!(
-                function_type_info.get_value_type(rhs).strip_witness().expr,
-                TypeExpr::Field
-            ),
-            "ICE: lower_witness_lt got Field-typed rhs; integer-typed operands required"
-        );
-        let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
-        let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
-        let res_hint = b.lt(lhs_pure, rhs_pure);
-        let res_hint_field = b.cast_to_field(res_hint);
-        let res_witness = b.write_witness(res_hint_field);
-        b.push(OpCode::Cast {
-            result,
-            value: res_witness,
-            target: u1,
-        });
-
-        let l_field = b.cast_to_field(lhs);
-        let r_field = b.cast_to_field(rhs);
-        let lr_diff = b.sub(l_field, r_field);
-
-        let two = b.field_const(Field::from(2));
-        let result_field = b.cast_to_field(result);
-        let two_res = b.mul(result_field, two);
-        let one = b.field_const(Field::ONE);
-        let adjustment = b.sub(one, two_res);
-
-        // adjusted_diff_wit's hint = |lr_diff| computed from pure values; the
-        // constraint side enforces lr_diff * adjustment = adjusted_diff_wit.
-        let lr_diff_pure = b.value_of(lr_diff);
-        let adjustment_pure = b.value_of(adjustment);
-        let adjusted_diff_hint = b.mul(lr_diff_pure, adjustment_pure);
-        let adjusted_diff_wit = b.write_witness(adjusted_diff_hint);
-        b.constrain(lr_diff, adjustment, adjusted_diff_wit);
-
-        if is_signed {
-            let always_flag = b.field_const(Field::ONE);
-
-            let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint, &l_range);
-            let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint, &r_range);
-
-            let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
-            let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
-            let sa_sb_hint = b.mul(sa_pure, sb_pure);
-            let sa_sb = b.write_witness(sa_sb_hint);
-            b.constrain(sign_a, sign_b, sa_sb);
-
-            let two_sa_sb = b.mul(sa_sb, two);
-            let sa_plus_sb = b.add(sign_a, sign_b);
-            let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
-            let signs_same = b.sub(one, signs_differ);
-
-            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, signs_same);
-
-            let zero = b.field_const(Field::ZERO);
-            let diff_r_sa = b.sub(result_field, sign_a);
-            b.constrain(signs_differ, diff_r_sa, zero);
-        } else {
-            let rc_flag = b.field_const(Field::from(1));
-            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, rc_flag);
         }
     }
 
