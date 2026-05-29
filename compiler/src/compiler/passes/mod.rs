@@ -17,7 +17,6 @@ pub mod simplifier;
 pub mod simplify_asserts;
 pub mod specializer;
 pub mod strip_witness_of;
-mod witness_algebra;
 pub mod witness_lowering;
 pub mod witness_write_to_fresh;
 pub mod witness_write_to_void;

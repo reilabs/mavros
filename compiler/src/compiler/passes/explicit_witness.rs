@@ -16,7 +16,6 @@ use crate::compiler::{
         value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    passes::witness_algebra,
     ssa::{
         BlockId, ValueId,
         hlssa::{
@@ -191,7 +190,7 @@ impl ExplicitWitness {
                         CmpKind::Lt => {
                             let l_range = function_value_ranges.get(lhs);
                             let r_range = function_value_ranges.get(rhs);
-                            witness_algebra::lower_witness_lt(
+                            self.lower_witness_lt(
                                 b,
                                 function_type_info,
                                 lhs,
@@ -659,7 +658,7 @@ impl ExplicitWitness {
                     b.push(instruction);
                 } else {
                     let one = b.field_const(Field::from(1));
-                    witness_algebra::gen_witness_rangecheck_bits(b, value, max_bits, one);
+                    self.gen_witness_rangecheck_bits(b, value, max_bits, one);
                 }
             }
             OpCode::ReadGlobal {
@@ -934,13 +933,278 @@ impl ExplicitWitness {
                 );
                 let cond_field =
                     b.ensure_field(condition, function_type_info.get_value_type(condition));
-                witness_algebra::gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
+                self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
             }
             inner => b.push(OpCode::Guard {
                 condition,
                 inner: Box::new(inner),
             }),
         }
+    }
+
+    /// Rangecheck `value ∈ [0, 2^bits)` for any `bits ≥ 1`.
+    ///
+    /// Cost:
+    ///   bits == 1                     → 0 lookups (boolean check, 2 algebraic constraints)
+    ///   bits == 8q (byte-aligned)     → q lookups
+    ///   bits == 8q + r, r ∈ (0, 8)    → q + 2 lookups
+    ///
+    /// The non-byte-aligned case extends the byte-decomposition trick: rangecheck all
+    /// q+1 byte chunks normally, then add a single byte rangecheck of
+    /// `(2^r - 1) - top_chunk` to prove `top_chunk < 2^r`.
+    fn gen_witness_rangecheck_bits(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        bits: usize,
+        flag: ValueId,
+    ) {
+        assert!(bits >= 1, "rangecheck width must be at least 1 bit");
+
+        if bits == 1 {
+            // Boolean check: flag * (value² - value) = 0
+            // Split into: t = value * value (constrained), then flag * (t - value) = 0
+            let v_plain = b.value_of(value);
+            let t_hint = b.mul(v_plain, v_plain);
+            let t = b.write_witness(t_hint);
+            b.constrain(value, value, t);
+            let diff = b.sub(t, value);
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(flag, diff, zero);
+            return;
+        }
+
+        let full_bytes = bits / 8;
+        let leftover_bits = bits % 8;
+        let total_chunks = full_bytes + if leftover_bits > 0 { 1 } else { 0 };
+        // total_chunks ≥ 1 since bits ≥ 2 here.
+
+        let pure_value = b.value_of(value);
+        let bytes_val = b.fresh_value();
+        b.push(OpCode::ToRadix {
+            result: bytes_val,
+            value: pure_value,
+            radix: Radix::Bytes,
+            endianness: Endianness::Big,
+            count: total_chunks,
+        });
+        let two_to_8 = b.field_const(Field::from(256));
+
+        // Witness and rangecheck upper total_chunks-1 chunks, accumulate partial sum.
+        // The top chunk is the first iteration when leftover_bits > 0 (big-endian).
+        let mut partial = b.field_const(Field::ZERO);
+        let mut top_chunk: Option<ValueId> = None;
+        for i in 0..total_chunks - 1 {
+            let idx = b.u_const(32, i as u128);
+            let byte = b.array_get(bytes_val, idx);
+            let byte_field = b.cast_to_field(byte);
+            let byte_wit = b.write_witness(byte_field);
+            b.lookup_rngchk_8(byte_wit, flag);
+            if i == 0 {
+                top_chunk = Some(byte_wit);
+            }
+            let shift_prev = b.mul(partial, two_to_8);
+            partial = b.add(shift_prev, byte_wit);
+        }
+        // Compute the LSB chunk as value - partial*256; rangecheck proves it's a byte,
+        // which implicitly constrains the reconstruction (no separate constraint needed).
+        let partial_shifted = b.mul(partial, two_to_8);
+        let lsb = b.sub(value, partial_shifted);
+        b.lookup_rngchk_8(lsb, flag);
+        if total_chunks == 1 {
+            top_chunk = Some(lsb);
+        }
+
+        // For non-byte-aligned widths, constrain the top chunk to leftover_bits bits
+        // by rangechecking (2^r - 1) - top_chunk to 8 bits.
+        if leftover_bits > 0 {
+            let top = top_chunk.expect("top_chunk set when total_chunks ≥ 1");
+            let bound = b.field_const(Field::from((1u128 << leftover_bits) - 1));
+            let gap = b.sub(bound, top);
+            b.lookup_rngchk_8(gap, flag);
+        }
+    }
+
+    /// Lower a witness-tainted Lt comparison, emitting the result into `result`.
+    /// Generates range-check constraints to prove the comparison.
+    fn lower_witness_lt(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        function_type_info: &FunctionTypeInfo,
+        lhs: ValueId,
+        rhs: ValueId,
+        result: ValueId,
+        l_taint: bool,
+        r_taint: bool,
+        l_range: &IntInterval,
+        r_range: &IntInterval,
+    ) {
+        let rhs_stripped = function_type_info.get_value_type(rhs).strip_witness().expr;
+        let (s, is_signed) = match rhs_stripped {
+            TypeExpr::U(s) => (s, false),
+            TypeExpr::I(s) => (s, true),
+            _ => panic!("ICE: rhs is not an integer type"),
+        };
+        let u1 = CastTarget::U(1);
+        // `b.lt` lowers to `lt_u64`/`lt_s64`, which read a single 64-bit frame
+        // cell. Field-typed operands would read a Montgomery limb instead of
+        // the value, so the comparison would be nonsense — reject those at the
+        // pass boundary rather than silently emitting broken code.
+        assert!(
+            !matches!(
+                function_type_info.get_value_type(lhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            "ICE: lower_witness_lt got Field-typed lhs; integer-typed operands required"
+        );
+        assert!(
+            !matches!(
+                function_type_info.get_value_type(rhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            "ICE: lower_witness_lt got Field-typed rhs; integer-typed operands required"
+        );
+        let lhs_pure = if l_taint { b.value_of(lhs) } else { lhs };
+        let rhs_pure = if r_taint { b.value_of(rhs) } else { rhs };
+        let res_hint = b.lt(lhs_pure, rhs_pure);
+        let res_hint_field = b.cast_to_field(res_hint);
+        let res_witness = b.write_witness(res_hint_field);
+        b.push(OpCode::Cast {
+            result,
+            value: res_witness,
+            target: u1,
+        });
+
+        let l_field = b.cast_to_field(lhs);
+        let r_field = b.cast_to_field(rhs);
+        let lr_diff = b.sub(l_field, r_field);
+
+        let two = b.field_const(Field::from(2));
+        let result_field = b.cast_to_field(result);
+        let two_res = b.mul(result_field, two);
+        let one = b.field_const(Field::ONE);
+        let adjustment = b.sub(one, two_res);
+
+        // adjusted_diff_wit's hint = |lr_diff| computed from pure values; the
+        // constraint side enforces lr_diff * adjustment = adjusted_diff_wit.
+        let lr_diff_pure = b.value_of(lr_diff);
+        let adjustment_pure = b.value_of(adjustment);
+        let adjusted_diff_hint = b.mul(lr_diff_pure, adjustment_pure);
+        let adjusted_diff_wit = b.write_witness(adjusted_diff_hint);
+        b.constrain(lr_diff, adjustment, adjusted_diff_wit);
+
+        if is_signed {
+            let always_flag = b.field_const(Field::ONE);
+
+            let sign_a = self.extract_sign_bit(b, l_field, s, always_flag, l_taint, &l_range);
+            let sign_b = self.extract_sign_bit(b, r_field, s, always_flag, r_taint, &r_range);
+
+            let sa_pure = if l_taint { b.value_of(sign_a) } else { sign_a };
+            let sb_pure = if r_taint { b.value_of(sign_b) } else { sign_b };
+            let sa_sb_hint = b.mul(sa_pure, sb_pure);
+            let sa_sb = b.write_witness(sa_sb_hint);
+            b.constrain(sign_a, sign_b, sa_sb);
+
+            let two_sa_sb = b.mul(sa_sb, two);
+            let sa_plus_sb = b.add(sign_a, sign_b);
+            let signs_differ = b.sub(sa_plus_sb, two_sa_sb);
+            let signs_same = b.sub(one, signs_differ);
+
+            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, signs_same);
+
+            let zero = b.field_const(Field::ZERO);
+            let diff_r_sa = b.sub(result_field, sign_a);
+            b.constrain(signs_differ, diff_r_sa, zero);
+        } else {
+            let rc_flag = b.field_const(Field::from(1));
+            self.gen_witness_rangecheck_bits(b, adjusted_diff_wit, s, rc_flag);
+        }
+    }
+
+    /// Extract the sign bit (MSB) of an n-bit value.
+    /// Requires: `value` is already rangechecked to n bits.
+    /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
+    ///
+    /// `value_range` is the analyzer's bound on the underlying integer; if it
+    /// proves the sign bit is 0 (i.e. value ∈ [0, 2^(n-1))), this short-circuits
+    /// to the field constant 0 and emits no witness, rangecheck, or constraint.
+    ///
+    /// For witness inputs: writes sign as a witness with a boolean check, then
+    /// computes low = value - sign * 2^(n-1) and rangechecks low ∈ [0, 2^(n-1))
+    /// directly via `gen_witness_rangecheck_bits`. For byte-aligned `bits` this
+    /// costs `bits/8 + 1` lookups (e.g. n=64 → 9, n=32 → 5, n=16 → 3).
+    ///
+    /// For pure inputs: computes sign as a pure hint (no witnesses or constraints).
+    fn extract_sign_bit(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        bits: usize,
+        flag: ValueId,
+        is_witness: bool,
+        value_range: &IntInterval,
+    ) -> ValueId {
+        if value_range.is_non_negative_in_signed(bits) {
+            return b.field_const(Field::ZERO);
+        }
+
+        let two_n_minus_1 = b.field_const(Field::from(1u128 << (bits - 1)));
+        let pure_val = if is_witness { b.value_of(value) } else { value };
+        let low_hint = self.pure_low_bits_hint(b, pure_val, bits - 1);
+        let high_hint = b.sub(pure_val, low_hint);
+        let sign_hint = b.div(high_hint, two_n_minus_1);
+
+        if !is_witness {
+            return sign_hint;
+        }
+
+        let sign_wit = b.write_witness(sign_hint);
+
+        // sign ∈ {0, 1}
+        self.gen_witness_rangecheck_bits(b, sign_wit, 1, flag);
+
+        // Compute low = value - sign * 2^(n-1) (saves 1 witness + 1 constraint)
+        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
+        let low = b.sub(value, sign_shifted);
+
+        // low ∈ [0, 2^(n-1)) — proves the sign bit is correctly extracted.
+        // For byte-aligned `bits`, this is bits/8 lookups for low's bytes plus
+        // 1 lookup of (127 - top_byte) to constrain the top byte to 7 bits.
+        self.gen_witness_rangecheck_bits(b, low, bits - 1, flag);
+
+        sign_wit
+    }
+
+    fn pure_low_bits_hint(
+        &self,
+        b: &mut HLInstrBuilder<'_>,
+        value: ValueId,
+        bits: usize,
+    ) -> ValueId {
+        if bits == 0 {
+            return b.field_const(Field::ZERO);
+        }
+
+        let full_bytes = bits / 8;
+        let partial_bits = bits % 8;
+        let byte_count = full_bytes + usize::from(partial_bits > 0);
+        let bytes = b.to_radix(value, Radix::Bytes, Endianness::Big, byte_count);
+        let two_to_8 = b.field_const(Field::from(256u128));
+        let mut result = b.field_const(Field::ZERO);
+
+        for i in 0..byte_count {
+            let idx = b.u_const(32, i as u128);
+            let mut byte = b.array_get(bytes, idx);
+            if i == 0 && partial_bits > 0 {
+                let mask = b.u_const(8, (1u128 << partial_bits) - 1);
+                byte = b.and(byte, mask);
+            }
+            let byte_field = b.cast_to_field(byte);
+            let shifted = b.mul(result, two_to_8);
+            result = b.add(shifted, byte_field);
+        }
+
+        result
     }
 
     /// Sign-extend a value from `from_bits` to `to_bits`.
@@ -957,8 +1221,7 @@ impl ExplicitWitness {
         result: ValueId,
         value_range: &IntInterval,
     ) {
-        let sign_bit =
-            witness_algebra::extract_sign_bit(b, value, from_bits, flag, is_witness, value_range);
+        let sign_bit = self.extract_sign_bit(b, value, from_bits, flag, is_witness, value_range);
         let extension =
             b.field_const(Field::from(1u128 << to_bits) - Field::from(1u128 << from_bits));
         let offset = b.mul(sign_bit, extension);
