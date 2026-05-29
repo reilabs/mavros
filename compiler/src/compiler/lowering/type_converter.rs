@@ -20,7 +20,11 @@ impl TypeConverter {
             NoirType::Bool => Type::bool(),
             NoirType::Integer(signedness, bit_size) => match signedness {
                 Signedness::Unsigned => Type::u(bit_size.bit_size() as usize),
-                Signedness::Signed => Type::i(bit_size.bit_size() as usize),
+                Signedness::Signed => {
+                    let bits = bit_size.bit_size() as usize;
+                    assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+                    Type::i(bits)
+                }
             },
             NoirType::Unit => {
                 // Unit type is represented as an empty tuple

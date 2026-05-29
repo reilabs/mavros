@@ -379,7 +379,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(ConstVal::U(_, v)) => {
                 let sign_bit = if from > 0 { (v >> (from - 1)) & 1 } else { 0 };
                 let res = if sign_bit == 1 {
-                    let mask = ((1u128 << to) - 1) ^ ((1u128 << from) - 1);
+                    let mask = bit_mask(to).unwrap() ^ bit_mask(from).unwrap();
                     v | mask
                 } else {
                     v
@@ -441,7 +441,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         match self_const {
             Some(ConstVal::U(_, v)) => match cast_target {
                 CastTarget::U(s) | CastTarget::I(s) => {
-                    let res = v & ((1 << *s) - 1);
+                    let res = v & bit_mask(*s).unwrap();
                     let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
@@ -457,7 +457,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
             Some(ConstVal::Field(f)) => match cast_target {
                 CastTarget::U(s) | CastTarget::I(s) => {
                     let v: u128 = f.into_bigint().as_ref()[0] as u128;
-                    let res = v & ((1 << *s) - 1);
+                    let res = v & bit_mask(*s).unwrap();
                     let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
@@ -499,7 +499,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
         let const_val = ctx.const_vals.get(&self.0).cloned();
         match const_val {
             Some(ConstVal::U(s, v)) => {
-                let res = !v & ((1 << s) - 1);
+                let res = !v & bit_mask(s).unwrap();
                 let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)

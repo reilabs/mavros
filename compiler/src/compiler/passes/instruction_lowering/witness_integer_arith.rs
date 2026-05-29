@@ -154,6 +154,22 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        if bits == 128 {
+            let lhs_is_witness = context.types().get_value_type(lhs).is_witness_of();
+            let rhs_is_witness = context.types().get_value_type(rhs).is_witness_of();
+            let product =
+                lower_u128_mul_limbs(b, lhs, rhs, lhs_is_witness, rhs_is_witness, guard, false);
+            enforce_zero(b, product.p2, guard);
+            enforce_zero(b, product.p3, guard);
+            let value = guarded_or_zero_field(b, product.low_field, guard);
+            b.emit(OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::U(bits),
+            });
+            return;
+        }
+
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
         let product_range = context.range(lhs).mul(&context.range(rhs));
@@ -187,6 +203,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
         let sign_l = match known_sign(&lhs_range, bits) {
@@ -261,6 +278,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
         let product_range = lhs_range.mul(&rhs_range);
@@ -364,6 +382,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_range = context.range(lhs);
@@ -700,6 +719,362 @@ struct DivModResult {
     r_is_witness: bool,
 }
 
+#[derive(Clone, Copy)]
+struct U128Limbs {
+    lo: ValueId,
+    hi: ValueId,
+}
+
+struct U128Product {
+    p0: ValueId,
+    p1: ValueId,
+    p2: ValueId,
+    p3: ValueId,
+    p0_hint: ValueId,
+    p1_hint: ValueId,
+    low_field: ValueId,
+}
+
+fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
+    let value = b.cast_to(CastTarget::U(128), value);
+    U128Limbs {
+        lo: split_u128_limb(b, value, 0),
+        hi: split_u128_limb(b, value, 64),
+    }
+}
+
+fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
+    let limb = b.bit_range(value, offset, 64);
+    b.cast_to(CastTarget::U(64), limb)
+}
+
+fn limb_field(b: &mut impl HLEmitter, value: ValueId) -> ValueId {
+    b.cast_to_field(value)
+}
+
+fn combine_u128_field_from_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> ValueId {
+    let shift = b.field_const(two_pow(64));
+    let shifted_hi = b.mul(hi, shift);
+    b.add(lo, shifted_hi)
+}
+
+fn enforce_zero(b: &mut HLBlockEmitter<'_>, value: ValueId, guard: Option<ValueId>) {
+    let zero = b.field_const(Field::ZERO);
+    let flag = guard
+        .map(|condition| b.cast_to_field(condition))
+        .unwrap_or_else(|| b.field_const(Field::ONE));
+    b.constrain(flag, value, zero);
+}
+
+fn enforce_equal_zero(b: &mut HLBlockEmitter<'_>, value: ValueId, guard: Option<ValueId>) {
+    enforce_zero(b, value, guard);
+}
+
+fn write_u128_product_witnesses(
+    b: &mut HLBlockEmitter<'_>,
+    lhs_hint: ValueId,
+    rhs_hint: ValueId,
+    guard: Option<ValueId>,
+) -> (
+    ValueId,
+    ValueId,
+    ValueId,
+    ValueId,
+    ValueId,
+    ValueId,
+    ValueId,
+    ValueId,
+) {
+    let lhs_limbs = split_u128_value(b, lhs_hint);
+    let rhs_limbs = split_u128_value(b, rhs_hint);
+    let a0 = b.cast_to(CastTarget::U(128), lhs_limbs.lo);
+    let a1 = b.cast_to(CastTarget::U(128), lhs_limbs.hi);
+    let b0 = b.cast_to(CastTarget::U(128), rhs_limbs.lo);
+    let b1 = b.cast_to(CastTarget::U(128), rhs_limbs.hi);
+
+    let p00 = b.mul(a0, b0);
+    let p0_hint = split_u128_limb(b, p00, 0);
+    let c0_hint = split_u128_limb(b, p00, 64);
+
+    let cross0 = b.mul(a0, b1);
+    let cross1 = b.mul(a1, b0);
+    let cross0_f = b.cast_to_field(cross0);
+    let cross1_f = b.cast_to_field(cross1);
+    let c0_f = b.cast_to_field(c0_hint);
+    let cross_sum = b.add(cross0_f, cross1_f);
+    let t1 = b.add(cross_sum, c0_f);
+    let p1_hint = b.bit_range(t1, 0, 64);
+    let p1_hint = b.cast_to(CastTarget::U(64), p1_hint);
+    let p1_f = b.cast_to_field(p1_hint);
+    let t1_without_p1 = b.sub(t1, p1_f);
+    let shift = b.field_const(two_pow(64));
+    let c1_hint = b.div(t1_without_p1, shift);
+
+    let p11 = b.mul(a1, b1);
+    let p11_f = b.cast_to_field(p11);
+    let t2 = b.add(p11_f, c1_hint);
+    let p2_hint = b.bit_range(t2, 0, 64);
+    let p2_hint = b.cast_to(CastTarget::U(64), p2_hint);
+    let p2_f = b.cast_to_field(p2_hint);
+    let t2_without_p2 = b.sub(t2, p2_f);
+    let p3_hint = b.div(t2_without_p2, shift);
+
+    let p0_hint_field = b.cast_to_field(p0_hint);
+    let c0_hint_field = b.cast_to_field(c0_hint);
+    let p1_hint_field = b.cast_to_field(p1_hint);
+    let p0 = b.write_witness(p0_hint_field);
+    let c0 = b.write_witness(c0_hint_field);
+    let p1 = b.write_witness(p1_hint_field);
+    let c1 = b.write_witness(c1_hint);
+    let p2_hint_field = b.cast_to_field(p2_hint);
+    let p2 = b.write_witness(p2_hint_field);
+    let p3 = b.write_witness(p3_hint);
+
+    guarded_rangecheck(b, p0, 64, guard);
+    guarded_rangecheck(b, c0, 64, guard);
+    guarded_rangecheck(b, p1, 64, guard);
+    guarded_rangecheck(b, c1, 65, guard);
+    guarded_rangecheck(b, p2, 64, guard);
+    guarded_rangecheck(b, p3, 64, guard);
+
+    (p0, c0, p1, c1, p2, p3, p0_hint, p1_hint)
+}
+
+fn lower_u128_mul_limbs(
+    b: &mut HLBlockEmitter<'_>,
+    lhs: ValueId,
+    rhs: ValueId,
+    lhs_is_witness: bool,
+    rhs_is_witness: bool,
+    guard: Option<ValueId>,
+    guard_is_witness: bool,
+) -> U128Product {
+    let lhs_hint = if lhs_is_witness { b.value_of(lhs) } else { lhs };
+    let rhs_hint = if rhs_is_witness { b.value_of(rhs) } else { rhs };
+    let mut lhs_hint = b.cast_to(CastTarget::U(128), lhs_hint);
+    let mut rhs_hint = b.cast_to(CastTarget::U(128), rhs_hint);
+    if let Some(condition) = guard {
+        let condition = if guard_is_witness {
+            b.value_of(condition)
+        } else {
+            condition
+        };
+        let zero = b.u_const(128, 0);
+        lhs_hint = b.select(condition, lhs_hint, zero);
+        rhs_hint = b.select(condition, rhs_hint, zero);
+    }
+
+    let (p0, c0, p1, c1, p2, p3, p0_hint, p1_hint) =
+        write_u128_product_witnesses(b, lhs_hint, rhs_hint, guard);
+
+    let lhs_limbs = split_u128_value(b, lhs);
+    let rhs_limbs = split_u128_value(b, rhs);
+    let a0 = limb_field(b, lhs_limbs.lo);
+    let a1 = limb_field(b, lhs_limbs.hi);
+    let b0 = limb_field(b, rhs_limbs.lo);
+    let b1 = limb_field(b, rhs_limbs.hi);
+    let shift = b.field_const(two_pow(64));
+    let flag = guard
+        .map(|condition| b.cast_to_field(condition))
+        .unwrap_or_else(|| b.field_const(Field::ONE));
+    let zero = b.field_const(Field::ZERO);
+
+    let p00 = b.mul(a0, b0);
+    let shifted_c0 = b.mul(c0, shift);
+    let p0_plus_carry = b.add(p0, shifted_c0);
+    let diff0 = b.sub(p00, p0_plus_carry);
+    b.constrain(flag, diff0, zero);
+
+    let cross0 = b.mul(a0, b1);
+    let cross1 = b.mul(a1, b0);
+    let cross_sum = b.add(cross0, cross1);
+    let cross_sum = b.add(cross_sum, c0);
+    let shifted_c1 = b.mul(c1, shift);
+    let p1_plus_carry = b.add(p1, shifted_c1);
+    let diff1 = b.sub(cross_sum, p1_plus_carry);
+    b.constrain(flag, diff1, zero);
+
+    let p11 = b.mul(a1, b1);
+    let t2 = b.add(p11, c1);
+    let shifted_p3 = b.mul(p3, shift);
+    let p2_plus_p3 = b.add(p2, shifted_p3);
+    let diff2 = b.sub(t2, p2_plus_p3);
+    b.constrain(flag, diff2, zero);
+
+    let low_field = combine_u128_field_from_fields(b, p0, p1);
+    U128Product {
+        p0,
+        p1,
+        p2,
+        p3,
+        p0_hint,
+        p1_hint,
+        low_field,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_unsigned_divmod_128(
+    b: &mut HLBlockEmitter<'_>,
+    dividend: ValueId,
+    divisor: ValueId,
+    dividend_is_witness: bool,
+    divisor_is_witness: bool,
+    dividend_range: &IntInterval,
+    divisor_range: &IntInterval,
+    guard: Option<ValueId>,
+    guard_is_witness: bool,
+) -> DivModResult {
+    if dividend == divisor {
+        let active = if let Some(condition) = guard {
+            b.cast_to_field(condition)
+        } else {
+            b.field_const(Field::ONE)
+        };
+        let zero = b.field_const(Field::ZERO);
+        let one = b.field_const(Field::ONE);
+        let divisor_field = b.cast_to_field(divisor);
+        let divisor_minus_one = b.sub(divisor_field, one);
+        guarded_rangecheck(b, divisor_minus_one, 128, guard);
+        return DivModResult {
+            q: active,
+            r: zero,
+            q_is_witness: guard_is_witness,
+            r_is_witness: false,
+        };
+    }
+
+    let dividend_pure = if dividend_is_witness {
+        b.value_of(dividend)
+    } else {
+        dividend
+    };
+    let divisor_pure = if divisor_is_witness {
+        b.value_of(divisor)
+    } else {
+        divisor
+    };
+
+    let mut dividend_hint = b.cast_to(CastTarget::U(128), dividend_pure);
+    let mut divisor_hint = b.cast_to(CastTarget::U(128), divisor_pure);
+    if let Some(condition) = guard {
+        let condition = if guard_is_witness {
+            b.value_of(condition)
+        } else {
+            condition
+        };
+        let zero = b.u_const(128, 0);
+        let one = b.u_const(128, 1);
+        dividend_hint = b.select(condition, dividend_hint, zero);
+        divisor_hint = b.select(condition, divisor_hint, one);
+    }
+
+    let q_hint = b.div(dividend_hint, divisor_hint);
+    let r_hint = b.modulo(dividend_hint, divisor_hint);
+    let q_hint_field = b.cast_to_field(q_hint);
+    let r_hint_field = b.cast_to_field(r_hint);
+    let q_wit = b.write_witness(q_hint_field);
+    let r_wit = b.write_witness(r_hint_field);
+    guarded_rangecheck(
+        b,
+        q_wit,
+        narrow_rangecheck_width(&quotient_bound(dividend_range, divisor_range), 128),
+        guard,
+    );
+    guarded_rangecheck(
+        b,
+        r_wit,
+        narrow_rangecheck_width(&remainder_bound(divisor_range), 128),
+        guard,
+    );
+
+    let q_u128 = q_wit_cast(b, q_wit);
+    let product = lower_u128_mul_limbs(
+        b,
+        divisor,
+        q_u128,
+        divisor_is_witness,
+        true,
+        guard,
+        guard_is_witness,
+    );
+    let r_u128 = q_wit_cast(b, r_wit);
+    let r_limbs = split_u128_value(b, r_u128);
+    let r_hint_limbs = split_u128_value(b, r_hint);
+    let r0 = b.cast_to_field(r_limbs.lo);
+    let r1 = b.cast_to_field(r_limbs.hi);
+    let dividend_limbs = split_u128_value(b, dividend);
+    let d0 = b.cast_to_field(dividend_limbs.lo);
+    let d1 = b.cast_to_field(dividend_limbs.hi);
+
+    let c0_hint_bit = {
+        let p0 = b.cast_to(CastTarget::U(128), product.p0_hint);
+        let r0_hint = b.cast_to(CastTarget::U(128), r_hint_limbs.lo);
+        let sum = b.add(p0, r0_hint);
+        b.bit_range(sum, 64, 1)
+    };
+    let c0_hint = b.cast_to_field(c0_hint_bit);
+    let c0 = b.write_witness(c0_hint);
+    guarded_rangecheck(b, c0, 1, guard);
+
+    let c1_hint_bit = {
+        let p1 = b.cast_to(CastTarget::U(128), product.p1_hint);
+        let r1_hint = b.cast_to(CastTarget::U(128), r_hint_limbs.hi);
+        let c0_u128 = b.cast_to(CastTarget::U(128), c0_hint_bit);
+        let sum0 = b.add(p1, r1_hint);
+        let sum = b.add(sum0, c0_u128);
+        b.bit_range(sum, 64, 1)
+    };
+    let c1_hint = b.cast_to_field(c1_hint_bit);
+    let c1 = b.write_witness(c1_hint);
+    guarded_rangecheck(b, c1, 1, guard);
+
+    let shift = b.field_const(two_pow(64));
+    let flag = guard
+        .map(|condition| b.cast_to_field(condition))
+        .unwrap_or_else(|| b.field_const(Field::ONE));
+    let zero = b.field_const(Field::ZERO);
+
+    let sum0 = b.add(product.p0, r0);
+    let shifted_c0 = b.mul(c0, shift);
+    let expected0 = b.add(d0, shifted_c0);
+    let diff0 = b.sub(sum0, expected0);
+    b.constrain(flag, diff0, zero);
+
+    let sum1 = b.add(product.p1, r1);
+    let sum1 = b.add(sum1, c0);
+    let shifted_c1 = b.mul(c1, shift);
+    let expected1 = b.add(d1, shifted_c1);
+    let diff1 = b.sub(sum1, expected1);
+    b.constrain(flag, diff1, zero);
+
+    let high = b.add(product.p2, c1);
+    enforce_equal_zero(b, high, guard);
+    enforce_zero(b, product.p3, guard);
+
+    let divisor_field = b.cast_to_field(divisor);
+    let one = b.field_const(Field::ONE);
+    let divisor_minus_r = b.sub(divisor_field, r_wit);
+    let divisor_minus_r_minus_one = b.sub(divisor_minus_r, one);
+    guarded_rangecheck(
+        b,
+        divisor_minus_r_minus_one,
+        narrow_rangecheck_width(&remainder_bound(divisor_range), 128),
+        guard,
+    );
+
+    DivModResult {
+        q: guarded_or_zero_field(b, q_wit, guard),
+        r: guarded_or_zero_field(b, r_wit, guard),
+        q_is_witness: true,
+        r_is_witness: true,
+    }
+}
+
+fn q_wit_cast(b: &mut impl HLEmitter, value: ValueId) -> ValueId {
+    b.cast_to(CastTarget::U(128), value)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_unsigned_divmod(
     b: &mut HLBlockEmitter<'_>,
@@ -713,6 +1088,20 @@ fn lower_unsigned_divmod(
     guard: Option<ValueId>,
     guard_is_witness: bool,
 ) -> DivModResult {
+    if bits == 128 {
+        return lower_unsigned_divmod_128(
+            b,
+            dividend,
+            divisor,
+            dividend_is_witness,
+            divisor_is_witness,
+            dividend_range,
+            divisor_range,
+            guard,
+            guard_is_witness,
+        );
+    }
+
     if dividend == divisor {
         let active = if let Some(condition) = guard {
             b.cast_to_field(condition)

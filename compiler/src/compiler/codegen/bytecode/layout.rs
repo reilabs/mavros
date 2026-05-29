@@ -38,11 +38,11 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
-    pub fn alloc_u64(&mut self, value: ValueId, size: usize) -> bytecode::FramePosition {
-        assert!(size <= 64);
+    pub fn alloc_int(&mut self, value: ValueId, size: usize) -> bytecode::FramePosition {
+        assert!(size > 0 && size <= 128);
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
-        self.next_free += 1;
+        self.next_free += int_cell_count(size);
         bytecode::FramePosition(r)
     }
 
@@ -70,8 +70,12 @@ impl FrameLayouter {
     pub fn type_size(&self, tp: &Type) -> usize {
         match tp.expr {
             TypeExpr::Field => bytecode::FELT_LIMBS,
-            TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                assert!(bits <= 64);
+            TypeExpr::U(bits) => {
+                assert!(bits <= 128);
+                int_cell_count(bits)
+            }
+            TypeExpr::I(bits) => {
+                assert!(bits <= 64, "signed integers wider than i64 are unsupported");
                 1
             }
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
@@ -161,8 +165,15 @@ impl GlobalFrameLayouter {
     fn type_frame_size(typ: &Type) -> usize {
         match &typ.expr {
             TypeExpr::Field => bytecode::FELT_LIMBS,
-            TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                assert!(*bits <= 64);
+            TypeExpr::U(bits) => {
+                assert!(*bits <= 128);
+                int_cell_count(*bits)
+            }
+            TypeExpr::I(bits) => {
+                assert!(
+                    *bits <= 64,
+                    "signed integers wider than i64 are unsupported"
+                );
                 1
             }
             // Heap-allocated types are pointers (1 word)
@@ -177,4 +188,9 @@ impl GlobalFrameLayouter {
     pub fn get_size(&self, global: usize) -> usize {
         self.sizes[global]
     }
+}
+
+pub fn int_cell_count(bits: usize) -> usize {
+    assert!(bits > 0 && bits <= 128);
+    bits.div_ceil(64)
 }

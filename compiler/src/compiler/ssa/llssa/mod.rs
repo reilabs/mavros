@@ -36,7 +36,7 @@ pub enum LLOp {
     IntConst {
         result: ValueId,
         bits: u32,
-        value: u64,
+        value: u128,
     },
     NullPtr {
         result: ValueId,
@@ -983,6 +983,8 @@ pub enum IntArithOp {
     Mul,
     UDiv,
     URem,
+    SDiv,
+    SRem,
     And,
     Or,
     Xor,
@@ -998,6 +1000,8 @@ impl Display for IntArithOp {
             IntArithOp::Mul => "mul",
             IntArithOp::UDiv => "udiv",
             IntArithOp::URem => "urem",
+            IntArithOp::SDiv => "sdiv",
+            IntArithOp::SRem => "srem",
             IntArithOp::And => "and",
             IntArithOp::Or => "or",
             IntArithOp::Xor => "xor",

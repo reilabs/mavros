@@ -130,11 +130,15 @@ impl LowerWitnessBitwiseOps {
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        let bits = unsigned_bits(function_type_info, lhs, "bitwise operand");
+        let (bits, result_cast) =
+            integer_bits_and_cast(function_type_info, result, "bitwise result");
         assert!(
             bits <= 128,
             "bitwise spread width too large for natural-width Spread lowering: {bits}"
         );
+
+        let lhs = b.cast_to(CastTarget::U(bits), lhs);
+        let rhs = b.cast_to(CastTarget::U(bits), rhs);
 
         if bits == 1 {
             self.lower_u1_bitwise(b, kind, result, lhs, rhs);
@@ -146,6 +150,18 @@ impl LowerWitnessBitwiseOps {
             let rhs_limbs = decompose_u64_input(b, rhs, rhs_witness);
             let result_limbs = lower_u64_limb_bitwise(b, kind, lhs_limbs, rhs_limbs);
             combine_u32_limbs(b, result_limbs)
+        } else if bits == 128 {
+            let lhs_limbs = extract_u128_limbs(b, lhs);
+            let rhs_limbs = extract_u128_limbs(b, rhs);
+            let lhs_lo = decompose_u64_input(b, lhs_limbs.lo, lhs_witness);
+            let rhs_lo = decompose_u64_input(b, rhs_limbs.lo, rhs_witness);
+            let lo = lower_u64_limb_bitwise(b, kind, lhs_lo, rhs_lo);
+            let lhs_hi = decompose_u64_input(b, lhs_limbs.hi, lhs_witness);
+            let rhs_hi = decompose_u64_input(b, rhs_limbs.hi, rhs_witness);
+            let hi = lower_u64_limb_bitwise(b, kind, lhs_hi, rhs_hi);
+            let lo = combine_u32_limbs(b, lo);
+            let hi = combine_u32_limbs(b, hi);
+            combine_u64_fields(b, lo, hi)
         } else {
             lower_word_bitwise(b, kind, lhs, rhs, bits as u8)
         };
@@ -153,7 +169,7 @@ impl LowerWitnessBitwiseOps {
         b.emit(OpCode::Cast {
             result,
             value: result_word,
-            target: CastTarget::U(bits),
+            target: result_cast,
         });
     }
 
@@ -220,6 +236,10 @@ impl LowerWitnessBitwiseOps {
         from_bits: usize,
         to_bits: usize,
     ) {
+        assert!(
+            to_bits <= 64,
+            "signed integers wider than i64 are unsupported"
+        );
         let sign = if context.range(value).is_non_negative_in_signed(from_bits) {
             b.field_const(Field::ZERO)
         } else {
@@ -301,6 +321,12 @@ struct U64Limbs {
     hi: ValueId,
 }
 
+#[derive(Clone, Copy)]
+struct U128Limbs {
+    lo: ValueId,
+    hi: ValueId,
+}
+
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
@@ -329,7 +355,10 @@ fn guarded_rangecheck(
 fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
     match ty.strip_witness().expr {
         TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        TypeExpr::I(bits) => {
+            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+            CastTarget::I(bits)
+        }
         other => panic!("expected integer type, got {:?}", other),
     }
 }
@@ -339,17 +368,6 @@ fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
         TypeExpr::U(bits) => Some((bits, false)),
         TypeExpr::I(bits) => Some((bits, true)),
         _ => None,
-    }
-}
-
-fn unsigned_bits(function_type_info: &FunctionTypeInfo, value: ValueId, context: &str) -> usize {
-    match function_type_info
-        .get_value_type(value)
-        .strip_witness()
-        .expr
-    {
-        TypeExpr::U(bits) => bits,
-        other => panic!("{context}: expected unsigned integer type, got {:?}", other),
     }
 }
 
@@ -364,7 +382,10 @@ fn integer_bits_and_cast(
         .expr
     {
         TypeExpr::U(bits) => (bits, CastTarget::U(bits)),
-        TypeExpr::I(bits) => (bits, CastTarget::I(bits)),
+        TypeExpr::I(bits) => {
+            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+            (bits, CastTarget::I(bits))
+        }
         other => panic!("{context}: expected integer type, got {:?}", other),
     }
 }
@@ -413,6 +434,26 @@ fn combine_u32_limbs(b: &mut impl HLEmitter, limbs: U64Limbs) -> ValueId {
     let shift = b.field_const(Field::from(1u128 << 32));
     let shifted_hi = b.mul(hi, shift);
     b.add(lo, shifted_hi)
+}
+
+fn combine_u64_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> ValueId {
+    let lo = b.cast_to_field(lo);
+    let hi = b.cast_to_field(hi);
+    let shift = b.field_const(two_pow(64));
+    let shifted_hi = b.mul(hi, shift);
+    b.add(lo, shifted_hi)
+}
+
+fn extract_u128_limbs(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
+    U128Limbs {
+        lo: extract_u128_limb(b, value, 0),
+        hi: extract_u128_limb(b, value, 64),
+    }
+}
+
+fn extract_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
+    let limb = b.bit_range(value, offset, 64);
+    b.cast_to(CastTarget::U(64), limb)
 }
 
 fn decompose_u64_input(b: &mut impl HLEmitter, value: ValueId, is_witness: bool) -> U64Limbs {

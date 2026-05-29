@@ -22,6 +22,8 @@
 //!   Assert, AssertCmp, AssertR1C, Constrain, Rangecheck, and failable ops with witness inputs
 //!   (SExt, integer arith).
 
+use ark_ff::Field as _;
+
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::{
@@ -269,11 +271,48 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
+        if signed && bits > 64 {
+            panic!("signed integers wider than i64 are unsupported");
+        }
         if !signed && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
             self.lower_unsigned_add_sub_guard(
                 emitter,
                 condition,
                 kind,
+                original_result,
+                lhs,
+                rhs,
+                bits,
+            );
+            return;
+        }
+        if signed && bits == 64 && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
+            self.lower_signed_add_sub_guard_native_width(
+                emitter,
+                condition,
+                kind,
+                original_result,
+                lhs,
+                rhs,
+                bits,
+            );
+            return;
+        }
+        if signed && bits == 64 && matches!(kind, BinaryArithOpKind::Mul) {
+            self.lower_signed_mul_guard_native_width(
+                emitter,
+                condition,
+                original_result,
+                lhs,
+                rhs,
+                bits,
+            );
+            return;
+        }
+        if !signed && bits == 128 && matches!(kind, BinaryArithOpKind::Mul) {
+            self.lower_unsigned_mul_guard_native_width(
+                emitter,
+                condition,
                 original_result,
                 lhs,
                 rhs,
@@ -387,6 +426,149 @@ impl LowerPureGuards {
             false,
             bits,
         );
+    }
+
+    fn lower_signed_add_sub_guard_native_width(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        kind: BinaryArithOpKind,
+        original_result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        let result_type = Type {
+            expr: TypeExpr::I(bits),
+        };
+        let native_result = emitter.fresh_value();
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result: native_result,
+            lhs,
+            rhs,
+        });
+
+        let sign_l = self.sign_bit(emitter, lhs, bits);
+        let sign_r = self.sign_bit(emitter, rhs, bits);
+        let sign_result = self.sign_bit(emitter, native_result, bits);
+        let sign_l_xor_r = emitter.xor(sign_l, sign_r);
+        let signs_same = emitter.not(sign_l_xor_r);
+        let sign_l_xor_result = emitter.xor(sign_l, sign_result);
+        let signs_differ = sign_l_xor_r;
+        let overflow = match kind {
+            BinaryArithOpKind::Add => emitter.and(signs_same, sign_l_xor_result),
+            BinaryArithOpKind::Sub => emitter.and(signs_differ, sign_l_xor_result),
+            _ => unreachable!("native signed add/sub guard called for {:?}", kind),
+        };
+
+        self.emit_guarded_branch(
+            emitter,
+            condition,
+            overflow,
+            original_result,
+            &result_type,
+            |_| native_result,
+            true,
+            bits,
+        );
+    }
+
+    fn lower_unsigned_mul_guard_native_width(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        original_result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        let result_type = Type {
+            expr: TypeExpr::U(bits),
+        };
+        let zero = emitter.u_const(bits, 0);
+        let rhs_zero = emitter.eq(rhs, zero);
+        emitter.build_if_else_into(
+            rhs_zero,
+            vec![(original_result, result_type.clone())],
+            |e| vec![e.mul(lhs, rhs)],
+            |e| {
+                let max = e.u_const(bits, bit_mask(bits));
+                let limit = e.div(max, rhs);
+                let overflow = e.lt(limit, lhs);
+                let value = e.build_if_else(
+                    overflow,
+                    vec![result_type.clone()],
+                    |e| vec![self.emit_guard_failure_default(e, condition, false, bits)],
+                    |e| vec![e.mul(lhs, rhs)],
+                );
+                value
+            },
+        );
+    }
+
+    fn lower_signed_mul_guard_native_width(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        original_result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        let result_type = Type {
+            expr: TypeExpr::I(bits),
+        };
+        let sign_l = self.sign_bit(emitter, lhs, bits);
+        let sign_r = self.sign_bit(emitter, rhs, bits);
+        let result_sign = emitter.xor(sign_l, sign_r);
+        let abs_l = self.abs_as_u(emitter, lhs, sign_l, bits);
+        let abs_r = self.abs_as_u(emitter, rhs, sign_r, bits);
+        let zero = emitter.u_const(bits, 0);
+        let abs_r_zero = emitter.eq(abs_r, zero);
+        emitter.build_if_else_into(
+            abs_r_zero,
+            vec![(original_result, result_type.clone())],
+            |e| vec![e.mul(lhs, rhs)],
+            |e| {
+                let positive_max = e.u_const(bits, (1u128 << (bits - 1)) - 1);
+                let negative_max = e.u_const(bits, 1u128 << (bits - 1));
+                let max_mag = e.select(result_sign, negative_max, positive_max);
+                let limit = e.div(max_mag, abs_r);
+                let overflow = e.lt(limit, abs_l);
+                e.build_if_else(
+                    overflow,
+                    vec![result_type.clone()],
+                    |e| vec![self.emit_guard_failure_default(e, condition, true, bits)],
+                    |e| vec![e.mul(lhs, rhs)],
+                )
+            },
+        );
+    }
+
+    fn sign_bit(&self, emitter: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
+        let sign = emitter.bit_range(value, bits - 1, 1);
+        emitter.cast_to(CastTarget::U(1), sign)
+    }
+
+    fn abs_as_u(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        value: ValueId,
+        sign_u1: ValueId,
+        bits: usize,
+    ) -> ValueId {
+        let value_field = emitter.cast_to_field(value);
+        let sign = emitter.cast_to_field(sign_u1);
+        let sign_shift = emitter.field_const(two_pow(bits));
+        let sign_shifted = emitter.mul(sign, sign_shift);
+        let signed_value = emitter.sub(value_field, sign_shifted);
+        let two = emitter.field_const(ark_bn254::Fr::from(2));
+        let two_sign = emitter.mul(two, sign);
+        let one = emitter.field_const(ark_bn254::Fr::from(1));
+        let factor = emitter.sub(one, two_sign);
+        let abs = emitter.mul(signed_value, factor);
+        emitter.cast_to(CastTarget::U(bits), abs)
     }
 
     /// Lower `Guard(cond, shift(lhs, rhs) -> result)`.
@@ -533,9 +715,20 @@ impl LowerPureGuards {
             _ => unreachable!(),
         };
         let is_zero = emitter.eq(rhs, zero_val);
+        let failure = match &lhs_type.expr {
+            TypeExpr::I(bits) => {
+                let min_val = emitter.i_const(*bits, 1u128 << (*bits - 1));
+                let minus_one = emitter.i_const(*bits, bit_mask(*bits));
+                let lhs_is_min = emitter.eq(lhs, min_val);
+                let rhs_is_minus_one = emitter.eq(rhs, minus_one);
+                let signed_overflow = emitter.and(lhs_is_min, rhs_is_minus_one);
+                emitter.or(is_zero, signed_overflow)
+            }
+            _ => is_zero,
+        };
 
         emitter.build_if_else_into(
-            is_zero,
+            failure,
             vec![(original_result, lhs_type.clone())],
             // Divisor is zero: assert condition is false, produce default
             |e| {
@@ -665,12 +858,10 @@ impl LowerPureGuards {
         if val_bits <= max_bits {
             return;
         }
-        // The bytecode VM compares integers in u64 slots, so both the value
-        // and `1 << max_bits` must fit there.
         assert!(
-            val_bits <= 64 && max_bits < 64,
+            val_bits <= 128 && max_bits < 128,
             "LowerPureGuards: pure rangecheck on {val_type} with max_bits = \
-             {max_bits} needs wider-than-u64 comparison; not yet supported"
+             {max_bits} needs wider-than-u128 comparison; not yet supported"
         );
         let cmp_bits = val_bits.max(max_bits + 1);
         let v_cmp = if val_bits == cmp_bits {
@@ -778,4 +969,16 @@ fn wider_bits(bits: usize) -> usize {
         33..=64 => 128,
         _ => bits * 2,
     }
+}
+
+fn bit_mask(bits: usize) -> u128 {
+    if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    }
+}
+
+fn two_pow(exponent: usize) -> ark_bn254::Fr {
+    ark_bn254::Fr::from(2).pow([exponent as u64])
 }

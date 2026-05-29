@@ -18,6 +18,10 @@ use tracing::{instrument, warn};
 
 pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 
+fn two_pow(exponent: usize) -> ark_bn254::Fr {
+    ark_bn254::Fr::from(2).pow([exponent as u64])
+}
+
 // #[derive(Clone, Debug, Copy, PartialEq, PartialOrd, Eq, Ord)]
 // pub enum WitnessIndex {
 //     PreCommitment(usize),
@@ -65,21 +69,21 @@ impl Value {
     }
 
     fn decode_signed(v: u128, bits: usize) -> i128 {
-        assert!(bits > 0 && bits <= 128, "invalid signed width: {bits}");
+        assert!(
+            bits > 0 && bits <= 64,
+            "signed integers wider than i64 are unsupported"
+        );
         let masked = Self::wrap_unsigned(v, bits);
-        if bits == 128 {
+        let sign_bit = 1u128 << (bits - 1);
+        if masked & sign_bit == 0 {
             masked as i128
         } else {
-            let sign_bit = 1u128 << (bits - 1);
-            if masked & sign_bit == 0 {
-                masked as i128
-            } else {
-                (masked as i128) - ((1u128 << bits) as i128)
-            }
+            (masked as i128) - ((1u128 << bits) as i128)
         }
     }
 
     fn encode_signed(v: i128, bits: usize) -> u128 {
+        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
         Self::wrap_unsigned(v as u128, bits)
     }
 
@@ -545,9 +549,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Shr => {
                         Self::wrap_unsigned(a as u128, *bits).wrapping_shr(b_bits)
                     }
-                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
-                        panic!("Signed div/mod not yet implemented")
-                    }
+                    BinaryArithOpKind::Div => Self::encode_signed(a / b, *bits),
+                    BinaryArithOpKind::Mod => Self::encode_signed(a % b, *bits),
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -666,7 +669,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
             false
         };
         if sign_bit {
-            let extension = ark_bn254::Fr::from(1u128 << _to) - ark_bn254::Fr::from(1u128 << from);
+            let extension = two_pow(_to) - two_pow(from);
             Value::Const(val + extension)
         } else {
             self.clone()

@@ -17,6 +17,10 @@ pub trait LLEmitter {
     // -- Constants --
 
     fn int_const(&mut self, bits: u32, value: u64) -> ValueId {
+        self.int_const_u128(bits, value as u128)
+    }
+
+    fn int_const_u128(&mut self, bits: u32, value: u128) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::IntConst {
             result: r,

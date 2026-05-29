@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 
 use crate::{ConstraintsLayout, Field, WitnessLayout};
-use ark_ff::{AdditiveGroup as _, BigInteger as _};
+use ark_ff::{AdditiveGroup as _, BigInteger as _, Field as _};
 use mavros_opcode_gen::interpreter;
 
 use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
@@ -47,6 +47,38 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
         ELEM_WORD => Field::from(unsafe { *(ptr as *const u64) }),
         ELEM_FIELD => unsafe { *(ptr as *const Field) },
         _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn int_mask(bits: u64) -> u128 {
+    if bits >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    }
+}
+
+#[inline(always)]
+unsafe fn read_u128_words(ptr: *const u64) -> u128 {
+    unsafe { (*ptr as u128) | ((*ptr.add(1) as u128) << 64) }
+}
+
+#[inline(always)]
+unsafe fn read_uint_words(ptr: *const u64, bits: u64) -> u128 {
+    let value = if bits <= 64 {
+        unsafe { *ptr as u128 }
+    } else {
+        unsafe { read_u128_words(ptr) }
+    };
+    value & int_mask(bits)
+}
+
+#[inline(always)]
+unsafe fn write_u128_words(ptr: *mut u64, value: u128) {
+    unsafe {
+        *ptr = value as u64;
+        *ptr.add(1) = (value >> 64) as u64;
     }
 }
 
@@ -607,6 +639,60 @@ mod def {
     }
 
     #[opcode]
+    fn add_int_wide(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            let sum = a.wrapping_add(b) & int_mask(bits);
+            write_u128_words(frame.data.add(res.0), sum);
+        }
+    }
+
+    #[opcode]
+    fn sub_int_wide(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            let diff = a.wrapping_sub(b) & int_mask(bits);
+            write_u128_words(frame.data.add(res.0), diff);
+        }
+    }
+
+    #[opcode]
+    fn mul_int_wide(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            let prod = a.wrapping_mul(b) & int_mask(bits);
+            write_u128_words(frame.data.add(res.0), prod);
+        }
+    }
+
+    #[opcode]
     fn div_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a / b;
@@ -617,6 +703,86 @@ mod def {
     fn mod_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a % b;
+        }
+    }
+
+    #[opcode]
+    fn div_s64(
+        #[out] res: *mut u64,
+        #[frame] a: u64,
+        #[frame] b: u64,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a_shift = 64 - a_bits;
+            let b_shift = 64 - b_bits;
+            let a = ((a << a_shift) as i64) >> a_shift;
+            let b = ((b << b_shift) as i64) >> b_shift;
+            *res = (a / b) as u64
+                & if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+        }
+    }
+
+    #[opcode]
+    fn mod_s64(
+        #[out] res: *mut u64,
+        #[frame] a: u64,
+        #[frame] b: u64,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a_shift = 64 - a_bits;
+            let b_shift = 64 - b_bits;
+            let a = ((a << a_shift) as i64) >> a_shift;
+            let b = ((b << b_shift) as i64) >> b_shift;
+            *res = (a % b) as u64
+                & if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+        }
+    }
+
+    #[opcode]
+    fn div_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            write_u128_words(frame.data.add(res.0), (a / b) & int_mask(bits));
+        }
+    }
+
+    #[opcode]
+    fn mod_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            write_u128_words(frame.data.add(res.0), (a % b) & int_mask(bits));
         }
     }
 
@@ -642,6 +808,54 @@ mod def {
     }
 
     #[opcode]
+    fn and_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            write_u128_words(frame.data.add(res.0), a & b);
+        }
+    }
+
+    #[opcode]
+    fn or_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            write_u128_words(frame.data.add(res.0), a | b);
+        }
+    }
+
+    #[opcode]
+    fn xor_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            write_u128_words(frame.data.add(res.0), a ^ b);
+        }
+    }
+
+    #[opcode]
     fn shl_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let shifted = a << b;
@@ -661,9 +875,51 @@ mod def {
     }
 
     #[opcode]
+    fn shl_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        bits: u64,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits) as u32;
+            let shifted = a.wrapping_shl(b) & int_mask(bits);
+            write_u128_words(frame.data.add(res.0), shifted);
+        }
+    }
+
+    #[opcode]
+    fn ushr_u128(
+        frame: Frame,
+        res: FramePosition,
+        a: FramePosition,
+        b: FramePosition,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits) as u32;
+            write_u128_words(frame.data.add(res.0), a.wrapping_shr(b));
+        }
+    }
+
+    #[opcode]
     fn not_u64(#[out] res: *mut u64, #[frame] a: u64) {
         unsafe {
             *res = !a;
+        }
+    }
+
+    #[opcode]
+    fn not_u128(frame: Frame, res: FramePosition, a: FramePosition, bits: u64) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), bits);
+            write_u128_words(frame.data.add(res.0), !a & int_mask(bits));
         }
     }
 
@@ -682,12 +938,44 @@ mod def {
     }
 
     #[opcode]
-    fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+    fn eq_u128(
+        #[out] res: *mut u64,
+        frame: Frame,
+        a: FramePosition,
+        b: FramePosition,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
         unsafe {
-            // Sign-extend from `bits` to 64 bits, then compare as signed
-            let shift = 64 - bits;
-            let sa = ((a << shift) as i64) >> shift;
-            let sb = ((b << shift) as i64) >> shift;
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            *res = (a == b) as u64;
+        }
+    }
+
+    #[opcode]
+    fn lt_u128(
+        #[out] res: *mut u64,
+        frame: Frame,
+        a: FramePosition,
+        b: FramePosition,
+        a_bits: u64,
+        b_bits: u64,
+    ) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            *res = (a < b) as u64;
+        }
+    }
+
+    #[opcode]
+    fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, a_bits: u64, b_bits: u64) {
+        unsafe {
+            let a_shift = 64 - a_bits;
+            let b_shift = 64 - b_bits;
+            let sa = ((a << a_shift) as i64) >> a_shift;
+            let sb = ((b << b_shift) as i64) >> b_shift;
             *res = (sa < sb) as u64;
         }
     }
@@ -701,6 +989,14 @@ mod def {
                 (1u64 << to_bits) - 1
             };
             *res = a & mask;
+        }
+    }
+
+    #[opcode]
+    fn truncate_u128(frame: Frame, res: FramePosition, a: FramePosition, to_bits: u64) {
+        unsafe {
+            let value = read_u128_words(frame.data.add(a.0)) & int_mask(to_bits);
+            write_u128_words(frame.data.add(res.0), value);
         }
     }
 
@@ -754,9 +1050,27 @@ mod def {
     }
 
     #[opcode]
+    fn cast_field_to_u128(frame: Frame, res: FramePosition, #[frame] a: Field) {
+        let limbs = ark_ff::PrimeField::into_bigint(a).0;
+        unsafe {
+            *frame.data.add(res.0) = limbs[0];
+            *frame.data.add(res.0 + 1) = limbs[1];
+        }
+    }
+
+    #[opcode]
     fn cast_u64_to_field(#[out] res: *mut Field, #[frame] a: u64) {
         unsafe {
             *res = From::from(a);
+        }
+    }
+
+    #[opcode]
+    fn cast_u128_to_field(#[out] res: *mut Field, frame: Frame, a: FramePosition) {
+        unsafe {
+            let lo = *frame.data.add(a.0);
+            let hi = *frame.data.add(a.0 + 1);
+            *res = Field::from(lo) + Field::from(hi) * Field::from(2).pow([64]);
         }
     }
 
@@ -1081,6 +1395,15 @@ mod def {
     #[opcode]
     fn assert_eq_u64(#[frame] a: u64, #[frame] b: u64) {
         assert_eq!(a, b);
+    }
+
+    #[opcode]
+    fn assert_eq_u128(frame: Frame, a: FramePosition, b: FramePosition, a_bits: u64, b_bits: u64) {
+        unsafe {
+            let a = read_uint_words(frame.data.add(a.0), a_bits);
+            let b = read_uint_words(frame.data.add(b.0), b_bits);
+            assert_eq!(a, b);
+        }
     }
 
     #[opcode]

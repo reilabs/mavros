@@ -612,7 +612,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
                     )
                     .expect("A basic integer type can be created");
-                let val = int_type.const_int(*value, false);
+                let words = [*value as u64, (*value >> 64) as u64];
+                let val = int_type.const_int_arbitrary_precision(&words);
                 self.value_map.insert(*result, val.into());
             }
 
@@ -631,6 +632,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::URem => {
                         self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap()
                     }
+                    IntArithOp::SDiv => self.builder.build_int_signed_div(lhs, rhs, name).unwrap(),
+                    IntArithOp::SRem => self.builder.build_int_signed_rem(lhs, rhs, name).unwrap(),
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),

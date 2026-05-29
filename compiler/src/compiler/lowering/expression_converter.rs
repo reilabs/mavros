@@ -960,6 +960,7 @@ impl<'a> ExpressionConverter<'a> {
                         use noirc_frontend::shared::Signedness;
                         let bits: usize = bit_size.bit_size() as usize;
                         if *signedness == Signedness::Signed {
+                            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
                             let signed_val = signed_field.to_i128();
                             let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
                             Some(self.get_or_create_const(b, ConstValue::I(bits, twos_complement)))
