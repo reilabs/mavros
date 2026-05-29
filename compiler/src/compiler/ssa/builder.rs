@@ -59,6 +59,11 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash>
         self.ssa.fresh_value()
     }
 
+    /// Intern a constant into the SSA and return its `ValueId`.
+    pub fn emit_const(&mut self, value: C) -> ValueId {
+        self.ssa.add_const(value)
+    }
+
     /// Escape hatch for direct function access.
     pub fn function(&mut self) -> &mut Function<Op, Ty> {
         self.function
