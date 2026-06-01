@@ -19,18 +19,49 @@ pub use super::hlssa::DMatrix;
 /// integer/field arithmetic split, and explicit memory management.
 pub type LLSSA = SSA<LLOp, Type, Constant>;
 
+// CONSTANTS
+// ================================================================================================
+
+/// The constant used to signal that an object is immortal for the purposes of reference counting.
+///
+/// The word used to track the refcount for that object should be set to this value, and every
+/// refcount operation should check for this value before attempting to modify the refcount.
+pub const RC_IMMORTAL_OBJECT: u64 = u64::MAX;
+
+/// The size of the refcount in bytes.
+pub const RC_SIZE_BYTES: usize = 8;
+
+/// The size of the refcount in bits.
+pub const RC_SIZE_BITS: usize = RC_SIZE_BYTES * 8;
+
+const _: () = assert!(
+    size_of_val(&RC_IMMORTAL_OBJECT) == RC_SIZE_BYTES,
+    "Size of the immortal refcount constant does not match the size of the refcount value"
+);
+
 // CONSTANT STORAGE
 // ================================================================================================
 
 /// The value type stored in the low-level SSA's constants table.
-///
-/// LLSSA constants are scalar leaves: integers of a given bit width and the null pointer. Aggregate
-/// constants (e.g. the four-limb field element struct) remain as `LLOp::MkStruct` instructions for
-/// now, but this will be changed in subsequent work (#184).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
+    /// A scalar integer constant of `bits` bits with the provided `value`, treated as a scalar.
     Int { bits: u32, value: u64 },
+
+    /// A null pointer constant, treated as a scalar.
     NullPtr,
+
+    /// A field-element constant consisting of four limbs in montgomery form, treated as a scalar.
+    Felt([u64; 4]),
+}
+
+impl Constant {
+    /// Build a BN254 field-element constant from its four Montgomery-form limbs.
+    ///
+    /// They are value types.
+    pub fn make_felt(limbs: [u64; 4]) -> Constant {
+        Constant::Felt(limbs)
+    }
 }
 
 /// The constants table type for LLSSA.
@@ -697,18 +728,28 @@ impl LLStruct {
         ])
     }
 
-    /// RC header: { Int(64) } — just a refcount.
+    /// RC header struct
     pub fn rc_header() -> Self {
-        Self::new(vec![LLFieldType::Int(64)])
+        Self::new(vec![LLFieldType::RCHeaderStruct])
     }
 
-    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
+    /// Prepend the RC header field, marking this as an RC'd heap object.
+    ///
+    /// Idempotent: does nothing if the struct already begins with an RC header.
+    pub fn with_rc(mut self) -> Self {
+        if !matches!(self.fields.first(), Some(LLFieldType::RCHeaderStruct)) {
+            self.fields.insert(0, LLFieldType::RCHeaderStruct);
+        }
+        self
+    }
+
+    /// RC'd fixed-size array: { RcHeader, Int(64) table_id, InlineArray(elem_struct, count) }
     pub fn rc_array(elem: LLStruct, count: usize) -> Self {
         Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(64),
             LLFieldType::InlineArray(elem, count),
         ])
+        .with_rc()
     }
 
     // ── AD node structs ────────────────────────────────────────────────
@@ -717,34 +758,26 @@ impl LLStruct {
 
     /// Common prefix for all AD nodes: { RC, tag }.
     pub fn ad_node_base() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-        ])
+        Self::new(vec![LLFieldType::Int(32)]).with_rc()
     }
 
     /// AD constant node: { RC, tag, FieldElem(value) }
     pub fn ad_const_node() -> Self {
         Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(32),
             LLFieldType::Inline(Self::field_elem()),
         ])
+        .with_rc()
     }
 
     /// AD witness node: { RC, tag, Int(64)(index) }
     pub fn ad_witness_node() -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(32),
-            LLFieldType::Int(64),
-        ])
+        Self::new(vec![LLFieldType::Int(32), LLFieldType::Int(64)]).with_rc()
     }
 
     /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db), FieldElem(dc) }
     pub fn ad_sum_node() -> Self {
         Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(32),
             LLFieldType::Ptr,
             LLFieldType::Ptr,
@@ -752,6 +785,7 @@ impl LLStruct {
             LLFieldType::Inline(Self::field_elem()),
             LLFieldType::Inline(Self::field_elem()),
         ])
+        .with_rc()
     }
 
     /// Per-slot table-info record. Mirrors the byte layout of
@@ -786,7 +820,6 @@ impl LLStruct {
     /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
     pub fn ad_mul_const_node() -> Self {
         Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(32),
             LLFieldType::Inline(Self::field_elem()),
             LLFieldType::Ptr,
@@ -794,6 +827,7 @@ impl LLStruct {
             LLFieldType::Inline(Self::field_elem()),
             LLFieldType::Inline(Self::field_elem()),
         ])
+        .with_rc()
     }
 
     /// VM struct used by the forward-pass/witgen entrypoint.
@@ -892,7 +926,7 @@ impl LLStruct {
     /// Value-safe structs can be used as SSA values (`Type::Struct`).
     pub fn is_value_safe(&self) -> bool {
         self.fields.iter().all(|f| match f {
-            LLFieldType::Int(_) | LLFieldType::Ptr => true,
+            LLFieldType::Int(_) | LLFieldType::Ptr | LLFieldType::RCHeaderStruct => true,
             LLFieldType::Inline(inner) => inner.is_value_safe(),
             LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => false,
         })
@@ -917,6 +951,11 @@ impl Display for LLStruct {
 pub enum LLFieldType {
     Int(u32),
     Ptr,
+    /// RC header.
+    ///
+    /// This is implicitly treated as `Inline(Struct(Int(64)))` but under its own name to make it
+    /// easier to manage.
+    RCHeaderStruct,
     /// Nested struct embedded in place.
     Inline(LLStruct),
     /// Fixed-count contiguous array of identical structs.
@@ -931,6 +970,7 @@ impl LLFieldType {
     pub fn to_ll_type(&self) -> Type {
         match self {
             LLFieldType::Int(bits) => Type::Int(*bits),
+            LLFieldType::RCHeaderStruct => Type::Struct(LLStruct::rc_header()),
             LLFieldType::Ptr => Type::Ptr,
             LLFieldType::Inline(s) => Type::Struct(s.clone()),
             LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => {
@@ -944,6 +984,7 @@ impl Display for LLFieldType {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             LLFieldType::Int(bits) => write!(f, "i{}", bits),
+            LLFieldType::RCHeaderStruct => write!(f, "rc"),
             LLFieldType::Ptr => write!(f, "ptr"),
             LLFieldType::Inline(s) => write!(f, "{}", s),
             LLFieldType::InlineArray(s, count) => write!(f, "[{} x {}]", count, s),
@@ -1049,6 +1090,12 @@ mod tests {
             LLFieldType::Int(64),
         ]);
         assert!(field_elem.is_value_safe());
+    }
+
+    #[test]
+    fn felt_constant_is_a_felt_variant() {
+        let limbs = [1u64, 2, 3, 4];
+        assert_eq!(Constant::make_felt(limbs), Constant::Felt(limbs));
     }
 
     #[test]

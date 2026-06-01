@@ -24,7 +24,7 @@ use super::{
     },
     llssa::{
         Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
-        LLSSA, LLStruct, Type as LLType,
+        LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
         builder::{LLBlockEmitter, LLEmitter},
     },
 };
@@ -84,20 +84,14 @@ fn tuple_field_type(ty: &HLType) -> LLFieldType {
 
 /// Build the LLStruct layout for the heap-allocated RC'd cell `Ref<T>`.
 fn rc_ref_cell_struct(inner_type: &HLType) -> LLStruct {
-    LLStruct::new(vec![
-        LLFieldType::Inline(LLStruct::rc_header()),
-        tuple_field_type(inner_type),
-    ])
+    LLStruct::new(vec![tuple_field_type(inner_type)]).with_rc()
 }
 
 /// Build the LLStruct layout for a heap-allocated RC'd tuple.
-/// Layout: { Inline(RcHeader), field0, field1, ... }
+/// Layout: { RcHeader, field0, field1, ... }
 fn rc_tuple_struct(element_types: &[HLType]) -> LLStruct {
-    let mut fields = vec![LLFieldType::Inline(LLStruct::rc_header())];
-    for elem_ty in element_types {
-        fields.push(tuple_field_type(elem_ty));
-    }
-    LLStruct::new(fields)
+    let fields = element_types.iter().map(tuple_field_type).collect();
+    LLStruct::new(fields).with_rc()
 }
 
 /// Extract (element_type, count) from an HLSSA array type.
@@ -493,17 +487,13 @@ fn lower_inner(
 
 /// Lower every HLSSA constant `ValueId` referenced by `function` into LLSSA.
 ///
-/// Scalar HLSSA constants (`U`/`I`/`nullptr`) are interned into LLSSA's module-level constants
-/// table. Field constants don't fit in the LLSSA constants table (which only stores scalars), so
-/// they're materialized as an `LLOp::MkStruct` in this function's entry block, with the four limbs
-/// themselves drawn from the LLSSA constants table. This restriction is will be lifted in the
-/// future (#184).
+/// All HLSSA constants are interned into LLSSA's module-level constants table: scalar constants
+/// (`U`/`I`/`nullptr`) as integer/null leaves, and field constants as `Constant::felt` struct
+/// constants (the four Montgomery limbs).
 fn lower_constants_llssa(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
-    ll_func: &mut LLFunction,
     llssa: &mut LLSSA,
-    ll_entry_id: BlockId,
     val_map: &mut HashMap<ValueId, ValueId>,
 ) {
     let mut referenced = HashSet::new();
@@ -540,37 +530,17 @@ fn lower_constants_llssa(
     let mut referenced: Vec<ValueId> = referenced.into_iter().collect();
     referenced.sort_by_key(|v| v.0);
 
-    let mut field_constants: Vec<(ValueId, [u64; 4])> = Vec::new();
     for vid in referenced {
-        match constants.get(&vid).expect("vid is in constants").as_ref() {
-            Constant::U(bits, val) | Constant::I(bits, val) => {
-                let ll_val = llssa.add_const(LLConstant::Int {
-                    bits: *bits as u32,
-                    value: *val as u64,
-                });
-                val_map.insert(vid, ll_val);
-            }
-            Constant::Field(fr) => {
-                field_constants.push((vid, fr.0.0));
-            }
+        let ll_val = match constants.get(&vid).expect("vid is in constants").as_ref() {
+            Constant::U(bits, val) | Constant::I(bits, val) => llssa.add_const(LLConstant::Int {
+                bits: *bits as u32,
+                value: *val as u64,
+            }),
+            Constant::Field(fr) => llssa.add_const(LLConstant::make_felt(fr.0.0)),
             Constant::FnPtr(_) => {
                 panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
             }
-        }
-    }
-
-    if field_constants.is_empty() {
-        return;
-    }
-
-    let mut emitter = LLBlockEmitter::new(ll_func, llssa, ll_entry_id);
-    for (vid, limbs) in field_constants {
-        let field_struct = LLStruct::field_elem();
-        let l0 = emitter.emit_int_const(64, limbs[0]);
-        let l1 = emitter.emit_int_const(64, limbs[1]);
-        let l2 = emitter.emit_int_const(64, limbs[2]);
-        let l3 = emitter.emit_int_const(64, limbs[3]);
-        let ll_val = emitter.mk_struct(field_struct, vec![l0, l1, l2, l3]);
+        };
         val_map.insert(vid, ll_val);
     }
 }
@@ -624,14 +594,7 @@ fn lower_function(
         }
     }
 
-    lower_constants_llssa(
-        function,
-        constants,
-        &mut ll_func,
-        llssa,
-        ll_entry_id,
-        &mut val_map,
-    );
+    lower_constants_llssa(function, constants, llssa, &mut val_map);
 
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
@@ -1864,7 +1827,81 @@ fn lower_array_set(
     val_map.insert(result, merge_results[0]);
 }
 
-/// Lower MemOp::Bump(n) -- increment refcount by n.
+/// Gets the pointer to the refcount word of the provided `rc_struct` at `ptr`.
+///
+/// The RC header struct is always field 0 of the struct, and the refcount word is in turn field 0
+/// of the header struct.
+fn get_rc_word_ptr(e: &mut LLBlockEmitter<'_>, ptr: ValueId, rc_struct: LLStruct) -> ValueId {
+    let hdr = e.struct_field_ptr(ptr, rc_struct, 0);
+    e.struct_field_ptr(hdr, LLStruct::rc_header(), 0)
+}
+
+/// Emit a guarded RC increment.
+///
+/// Bump the refcount word at `rc_ptr` by `n`, unless the object is immortal (its refcount equals
+/// `RC_IMMORTAL_OBJECT`), in which case it is left untouched.
+fn emit_guarded_rc_bump(e: &mut LLBlockEmitter<'_>, rc_ptr: ValueId, n: u64) {
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    // This constant will get interned by LLVM, so emitting it each time is fine.
+    let immortal = e.emit_int_const(64, RC_IMMORTAL_OBJECT);
+    let is_immortal = e.int_eq(rc, immortal);
+    // IntCmpOp has no Ne, so the "not immortal" path is the else branch.
+    e.build_if_else(
+        is_immortal,
+        vec![],
+        // Immortal: leave the refcount unchanged.
+        |_| vec![],
+        move |e| {
+            let n_val = e.emit_int_const(64, n);
+            let new_rc = e.int_add(rc, n_val);
+            e.ll_store(rc_ptr, new_rc);
+            vec![]
+        },
+    );
+}
+
+/// Emit a guarded RC decrement-and-teardown.
+///
+/// Will only decrement (and potentially perform teardown) if the object is not immortal (its
+/// refcount equals `RC_IMMORTAL_OBJECT`). If the RC ever reaches zero, `teardown` runs to drop the
+/// object's children and free it.
+fn emit_guarded_rc_drop(
+    e: &mut LLBlockEmitter<'_>,
+    rc_ptr: ValueId,
+    teardown: impl FnOnce(&mut LLBlockEmitter<'_>),
+) {
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let immortal = e.emit_int_const(64, RC_IMMORTAL_OBJECT);
+    let is_immortal = e.int_eq(rc, immortal);
+    // IntCmpOp has no Ne, so the "not immortal" path is the else branch.
+    e.build_if_else(
+        is_immortal,
+        vec![],
+        // Immortal: leave the refcount unchanged and never free.
+        |_| vec![],
+        move |e| {
+            let one = e.emit_int_const(64, 1);
+            let new_rc = e.int_sub(rc, one);
+            e.ll_store(rc_ptr, new_rc);
+
+            // If RC hit zero, tear down the object.
+            let zero = e.emit_int_const(64, 0);
+            let dead = e.int_eq(new_rc, zero);
+            e.build_if_else(
+                dead,
+                vec![],
+                move |e| {
+                    teardown(e);
+                    vec![]
+                },
+                |_| vec![],
+            );
+            vec![]
+        },
+    );
+}
+
+/// Lower MemOp::Bump(n) -- increment refcount by n if not immortal.
 fn lower_rc_bump(
     e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
@@ -1883,12 +1920,8 @@ fn lower_rc_bump(
 
     let ll_arr = val_map[&value];
 
-    let hdr = e.struct_field_ptr(ll_arr, rc_struct, 0);
-    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let n_val = e.emit_int_const(64, n as u64);
-    let new_rc = e.int_add(rc, n_val);
-    e.ll_store(rc_ptr, new_rc);
+    let rc_ptr = get_rc_word_ptr(e, ll_arr, rc_struct);
+    emit_guarded_rc_bump(e, rc_ptr, n as u64);
 }
 
 /// Lower MemOp::Drop -- call the generated drop function.
@@ -2251,104 +2284,89 @@ fn generate_ad_drop_function(
     let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let node = e.add_parameter(LLType::Ptr);
 
-    // Decrement RC
-    let rc_hdr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 0);
-    let rc_ptr = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    // Decrement RC; if it hits zero, dispatch on tag and tear down. Immortal nodes are skipped.
+    let rc_ptr = get_rc_word_ptr(&mut e, node, LLStruct::ad_node_base());
+    emit_guarded_rc_drop(&mut e, rc_ptr, |e| {
+        // Read tag
+        let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+        let tag = e.ll_load(tag_ptr, LLType::i32());
 
-    // If RC hit zero, dispatch on tag and tear down
-    let zero = e.emit_int_const(64, 0);
-    let dead = e.int_eq(new_rc, zero);
-    e.build_if_else(
-        dead,
-        vec![],
-        |e| {
-            // Read tag
-            let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
-            let tag = e.ll_load(tag_ptr, LLType::i32());
+        // CONST or WITNESS (tag < 2) → just free
+        let two = e.emit_int_const(32, 2);
+        let is_simple = e.int_ult(tag, two);
+        e.build_if_else(
+            is_simple,
+            vec![],
+            |e| {
+                e.free(node);
+                vec![]
+            },
+            |e| {
+                // SUM or MUL_CONST
+                let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
+                let tag = e.ll_load(tag_ptr, LLType::i32());
+                let sum_tag = e.emit_int_const(32, LLStruct::AD_TAG_SUM);
+                let is_sum = e.int_eq(tag, sum_tag);
+                e.build_if_else(
+                    is_sum,
+                    vec![],
+                    |e| {
+                        // SUM: propagate da/db/dc to both children
+                        let sum = LLStruct::ad_sum_node();
+                        let a_ptr = e.struct_field_ptr(node, sum.clone(), 2);
+                        let a = e.ll_load(a_ptr, LLType::Ptr);
+                        let b_ptr = e.struct_field_ptr(node, sum.clone(), 3);
+                        let b = e.ll_load(b_ptr, LLType::Ptr);
 
-            // CONST or WITNESS (tag < 2) → just free
-            let two = e.emit_int_const(32, 2);
-            let is_simple = e.int_ult(tag, two);
-            e.build_if_else(
-                is_simple,
-                vec![],
-                |e| {
-                    e.free(node);
-                    vec![]
-                },
-                |e| {
-                    // SUM or MUL_CONST
-                    let tag_ptr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 1);
-                    let tag = e.ll_load(tag_ptr, LLType::i32());
-                    let sum_tag = e.emit_int_const(32, LLStruct::AD_TAG_SUM);
-                    let is_sum = e.int_eq(tag, sum_tag);
-                    e.build_if_else(
-                        is_sum,
-                        vec![],
-                        |e| {
-                            // SUM: propagate da/db/dc to both children
-                            let sum = LLStruct::ad_sum_node();
-                            let a_ptr = e.struct_field_ptr(node, sum.clone(), 2);
-                            let a = e.ll_load(a_ptr, LLType::Ptr);
-                            let b_ptr = e.struct_field_ptr(node, sum.clone(), 3);
-                            let b = e.ll_load(b_ptr, LLType::Ptr);
+                        let da_ptr = e.struct_field_ptr(node, sum.clone(), 4);
+                        let da = e.ll_load(da_ptr, field_type.clone());
+                        let db_ptr = e.struct_field_ptr(node, sum.clone(), 5);
+                        let db = e.ll_load(db_ptr, field_type.clone());
+                        let dc_ptr = e.struct_field_ptr(node, sum, 6);
+                        let dc = e.ll_load(dc_ptr, field_type.clone());
 
-                            let da_ptr = e.struct_field_ptr(node, sum.clone(), 4);
-                            let da = e.ll_load(da_ptr, field_type.clone());
-                            let db_ptr = e.struct_field_ptr(node, sum.clone(), 5);
-                            let db = e.ll_load(db_ptr, field_type.clone());
-                            let dc_ptr = e.struct_field_ptr(node, sum, 6);
-                            let dc = e.ll_load(dc_ptr, field_type.clone());
+                        e.call(bump_da, vec![a, da], 0);
+                        e.call(bump_db, vec![a, db], 0);
+                        e.call(bump_dc, vec![a, dc], 0);
+                        e.call(bump_da, vec![b, da], 0);
+                        e.call(bump_db, vec![b, db], 0);
+                        e.call(bump_dc, vec![b, dc], 0);
+                        e.call(ad_drop_id, vec![a], 0);
+                        e.call(ad_drop_id, vec![b], 0);
+                        e.free(node);
+                        vec![]
+                    },
+                    |e| {
+                        // MUL_CONST: scale sensitivities by coeff, propagate
+                        let mul = LLStruct::ad_mul_const_node();
+                        let coeff_ptr = e.struct_field_ptr(node, mul.clone(), 2);
+                        let coeff = e.ll_load(coeff_ptr, field_type.clone());
+                        let val_ptr = e.struct_field_ptr(node, mul.clone(), 3);
+                        let child = e.ll_load(val_ptr, LLType::Ptr);
 
-                            e.call(bump_da, vec![a, da], 0);
-                            e.call(bump_db, vec![a, db], 0);
-                            e.call(bump_dc, vec![a, dc], 0);
-                            e.call(bump_da, vec![b, da], 0);
-                            e.call(bump_db, vec![b, db], 0);
-                            e.call(bump_dc, vec![b, dc], 0);
-                            e.call(ad_drop_id, vec![a], 0);
-                            e.call(ad_drop_id, vec![b], 0);
-                            e.free(node);
-                            vec![]
-                        },
-                        |e| {
-                            // MUL_CONST: scale sensitivities by coeff, propagate
-                            let mul = LLStruct::ad_mul_const_node();
-                            let coeff_ptr = e.struct_field_ptr(node, mul.clone(), 2);
-                            let coeff = e.ll_load(coeff_ptr, field_type.clone());
-                            let val_ptr = e.struct_field_ptr(node, mul.clone(), 3);
-                            let child = e.ll_load(val_ptr, LLType::Ptr);
+                        let da_ptr = e.struct_field_ptr(node, mul.clone(), 4);
+                        let da = e.ll_load(da_ptr, field_type.clone());
+                        let db_ptr = e.struct_field_ptr(node, mul.clone(), 5);
+                        let db = e.ll_load(db_ptr, field_type.clone());
+                        let dc_ptr = e.struct_field_ptr(node, mul, 6);
+                        let dc = e.ll_load(dc_ptr, field_type.clone());
 
-                            let da_ptr = e.struct_field_ptr(node, mul.clone(), 4);
-                            let da = e.ll_load(da_ptr, field_type.clone());
-                            let db_ptr = e.struct_field_ptr(node, mul.clone(), 5);
-                            let db = e.ll_load(db_ptr, field_type.clone());
-                            let dc_ptr = e.struct_field_ptr(node, mul, 6);
-                            let dc = e.ll_load(dc_ptr, field_type.clone());
+                        let scaled_da = e.field_arith(FieldArithOp::Mul, da, coeff);
+                        let scaled_db = e.field_arith(FieldArithOp::Mul, db, coeff);
+                        let scaled_dc = e.field_arith(FieldArithOp::Mul, dc, coeff);
 
-                            let scaled_da = e.field_arith(FieldArithOp::Mul, da, coeff);
-                            let scaled_db = e.field_arith(FieldArithOp::Mul, db, coeff);
-                            let scaled_dc = e.field_arith(FieldArithOp::Mul, dc, coeff);
-
-                            e.call(bump_da, vec![child, scaled_da], 0);
-                            e.call(bump_db, vec![child, scaled_db], 0);
-                            e.call(bump_dc, vec![child, scaled_dc], 0);
-                            e.call(ad_drop_id, vec![child], 0);
-                            e.free(node);
-                            vec![]
-                        },
-                    );
-                    vec![]
-                },
-            );
-            vec![]
-        },
-        |_| vec![],
-    );
+                        e.call(bump_da, vec![child, scaled_da], 0);
+                        e.call(bump_db, vec![child, scaled_db], 0);
+                        e.call(bump_dc, vec![child, scaled_dc], 0);
+                        e.call(ad_drop_id, vec![child], 0);
+                        e.free(node);
+                        vec![]
+                    },
+                );
+                vec![]
+            },
+        );
+    });
 
     e.terminate_return(vec![]);
     // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.
@@ -2417,41 +2435,26 @@ fn generate_drop_function_for_array(
 
     let ptr = e.add_parameter(LLType::Ptr);
 
-    // Decrement RC
-    let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
-    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    // Decrement RC; if it hits zero, drop inner elements and free. Immortal arrays are skipped.
+    let rc_ptr = get_rc_word_ptr(&mut e, ptr, rc_struct.clone());
+    emit_guarded_rc_drop(&mut e, rc_ptr, |e| {
+        if elem_is_rc {
+            let inner_drop_fn = drop_fns
+                .iter()
+                .find(|entry| entry.ty == *et)
+                .expect("inner drop fn should exist")
+                .fn_id;
 
-    // If RC hit zero, drop inner elements and free
-    let zero = e.emit_int_const(64, 0);
-    let dead = e.int_eq(new_rc, zero);
-    e.build_if_else(
-        dead,
-        vec![],
-        |e| {
-            if elem_is_rc {
-                let inner_drop_fn = drop_fns
-                    .iter()
-                    .find(|entry| entry.ty == *et)
-                    .expect("inner drop fn should exist")
-                    .fn_id;
-
-                let data = e.struct_field_ptr(ptr, rc_struct, 2);
-                e.build_counted_loop(count, vec![], |e, i_val, _| {
-                    let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
-                    let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
-                    e.call(inner_drop_fn, vec![elem_val], 0);
-                    vec![]
-                });
-            }
-            e.free(ptr);
-            vec![]
-        },
-        |_| vec![],
-    );
+            let data = e.struct_field_ptr(ptr, rc_struct, 2);
+            e.build_counted_loop(count, vec![], |e, i_val, _| {
+                let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
+                let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
+                e.call(inner_drop_fn, vec![elem_val], 0);
+                vec![]
+            });
+        }
+        e.free(ptr);
+    });
 
     e.terminate_return(vec![]);
     // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.
@@ -2484,40 +2487,24 @@ fn generate_drop_function_for_tuple(
     let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let ptr = e.add_parameter(LLType::Ptr);
 
-    // Decrement RC
-    let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
-    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    let rc_ptr = get_rc_word_ptr(&mut e, ptr, rc_struct.clone());
+    emit_guarded_rc_drop(&mut e, rc_ptr, |e| {
+        for (i, elem_ty) in element_types.iter().enumerate() {
+            if needs_drop(&elem_ty.expr) {
+                let inner_drop_fn = drop_fns
+                    .iter()
+                    .find(|entry| entry.ty == *elem_ty)
+                    .expect("inner drop fn should exist for tuple element")
+                    .fn_id;
 
-    // If RC hit zero, drop inner heap-allocated elements and free
-    let zero = e.emit_int_const(64, 0);
-    let dead = e.int_eq(new_rc, zero);
-    e.build_if_else(
-        dead,
-        vec![],
-        |e| {
-            for (i, elem_ty) in element_types.iter().enumerate() {
-                if needs_drop(&elem_ty.expr) {
-                    let inner_drop_fn = drop_fns
-                        .iter()
-                        .find(|entry| entry.ty == *elem_ty)
-                        .expect("inner drop fn should exist for tuple element")
-                        .fn_id;
-
-                    // Field is at index i + 1 (field 0 is RC header)
-                    let field_ptr = e.struct_field_ptr(ptr, rc_struct.clone(), i + 1);
-                    let field_val = e.ll_load(field_ptr, LLType::Ptr);
-                    e.call(inner_drop_fn, vec![field_val], 0);
-                }
+                // Field is at index i + 1 (field 0 is RC header)
+                let field_ptr = e.struct_field_ptr(ptr, rc_struct.clone(), i + 1);
+                let field_val = e.ll_load(field_ptr, LLType::Ptr);
+                e.call(inner_drop_fn, vec![field_val], 0);
             }
-            e.free(ptr);
-            vec![]
-        },
-        |_| vec![],
-    );
+        }
+        e.free(ptr);
+    });
 
     e.terminate_return(vec![]);
     // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.
@@ -2553,45 +2540,31 @@ fn generate_drop_function_for_ref(
     let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
     let ptr = e.add_parameter(LLType::Ptr);
 
-    let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
-    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    let rc_ptr = get_rc_word_ptr(&mut e, ptr, rc_struct.clone());
+    emit_guarded_rc_drop(&mut e, rc_ptr, |e| {
+        if inner_is_rc {
+            let inner_drop_fn = drop_fns
+                .iter()
+                .find(|entry| entry.ty == *inner_type)
+                .expect("inner drop fn should exist for ref")
+                .fn_id;
 
-    let zero = e.emit_int_const(64, 0);
-    let dead = e.int_eq(new_rc, zero);
-    e.build_if_else(
-        dead,
-        vec![],
-        |e| {
-            if inner_is_rc {
-                let inner_drop_fn = drop_fns
-                    .iter()
-                    .find(|entry| entry.ty == *inner_type)
-                    .expect("inner drop fn should exist for ref")
-                    .fn_id;
-
-                let slot = e.struct_field_ptr(ptr, rc_struct.clone(), 1);
-                let inner_val = e.ll_load(slot, LLType::Ptr);
-                let null = e.emit_nullptr_const();
-                let is_null = e.int_eq(inner_val, null);
-                e.build_if_else(
-                    is_null,
-                    vec![],
-                    |_| vec![],
-                    |be| {
-                        be.call(inner_drop_fn, vec![inner_val], 0);
-                        vec![]
-                    },
-                );
-            }
-            e.free(ptr);
-            vec![]
-        },
-        |_| vec![],
-    );
+            let slot = e.struct_field_ptr(ptr, rc_struct.clone(), 1);
+            let inner_val = e.ll_load(slot, LLType::Ptr);
+            let null = e.emit_nullptr_const();
+            let is_null = e.int_eq(inner_val, null);
+            e.build_if_else(
+                is_null,
+                vec![],
+                |_| vec![],
+                |be| {
+                    be.call(inner_drop_fn, vec![inner_val], 0);
+                    vec![]
+                },
+            );
+        }
+        e.free(ptr);
+    });
 
     e.terminate_return(vec![]);
     // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.

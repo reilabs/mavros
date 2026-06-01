@@ -25,7 +25,7 @@ use crate::compiler::analysis::flow_analysis;
 use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::ssa::llssa::{
     Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
-    Type,
+    RC_SIZE_BYTES, Type,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -48,6 +48,7 @@ fn ll_struct_size_bytes(s: &LLStruct) -> u32 {
 fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
     match ft {
         LLFieldType::Int(bits) => bits.div_ceil(8),
+        LLFieldType::RCHeaderStruct => RC_SIZE_BYTES as u32,
         LLFieldType::Ptr => WASM_PTR_SIZE,
         LLFieldType::Inline(s) => ll_struct_size_bytes(s),
         LLFieldType::InlineArray(s, n) => ll_struct_size_bytes(s) * *n as u32,
@@ -260,6 +261,37 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.widen_or_trunc_int(x, result_bits, name)
     }
 
+    /// Materialise an LLSSA `Constant` as an LLVM constant value.
+    fn to_llvm_const(&self, c: &Constant) -> BasicValueEnum<'ctx> {
+        match c {
+            Constant::Int { bits, value } => {
+                let int_type = self
+                    .context
+                    .custom_width_int_type(
+                        NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
+                    )
+                    .expect("A basic integer type can be created");
+                int_type.const_int(*value, false).into()
+            }
+            Constant::NullPtr => self
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+            Constant::Felt(limbs) => {
+                let i64_type = self.context.i64_type();
+                let vals: Vec<BasicValueEnum<'ctx>> = limbs
+                    .iter()
+                    .map(|&limb| i64_type.const_int(limb, false).into())
+                    .collect();
+                self.convert_struct_type(&LLStruct::field_elem())
+                    .into_struct_type()
+                    .const_named_struct(&vals)
+                    .into()
+            }
+        }
+    }
+
     /// Convert an LLStruct to an LLVM struct type.
     fn convert_struct_type(&self, s: &LLStruct) -> BasicTypeEnum<'ctx> {
         let fields: Vec<BasicTypeEnum<'ctx>> = s
@@ -279,6 +311,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
                 )
                 .expect("A basic integer type can be created")
+                .into(),
+            LLFieldType::RCHeaderStruct => self
+                .context
+                .struct_type(&[self.context.i64_type().into()], false)
                 .into(),
             LLFieldType::Ptr => self.context.ptr_type(AddressSpace::default()).into(),
             LLFieldType::Inline(s) => self.convert_struct_type(s),
@@ -390,28 +426,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
 
         // Materialise module-level LLSSA constants once; each function body will re-seed its
-        // `value_map` from this table. This is a HACK, to be removed once we compile to proper
-        // LLVM constants (#184).
-        self.constant_values.clear();
-        for (vid, c) in llssa.const_snapshot().iter() {
-            let val: BasicValueEnum<'ctx> = match c.as_ref() {
-                Constant::Int { bits, value } => {
-                    let int_type = self
-                        .context
-                        .custom_width_int_type(
-                            NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
-                        )
-                        .expect("A basic integer type can be created");
-                    int_type.const_int(*value, false).into()
-                }
-                Constant::NullPtr => self
-                    .context
-                    .ptr_type(AddressSpace::default())
-                    .const_null()
-                    .into(),
-            };
-            self.constant_values.insert(*vid, val);
-        }
+        // `value_map` from this table.
+        self.constant_values = llssa
+            .const_snapshot()
+            .into_iter()
+            .map(|(vid, c)| (vid, self.to_llvm_const(c.as_ref())))
+            .collect();
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
