@@ -1139,8 +1139,8 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let x = e.add_int_const(64, 42);
-            let y = e.add_int_const(64, 7);
+            let x = e.emit_int_const(64, 42);
+            let y = e.emit_int_const(64, 7);
             let z = e.int_add(x, y);
             e.terminate_return(vec![z]);
         });
@@ -1169,10 +1169,10 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let l0 = e.add_int_const(64, 1);
-            let l1 = e.add_int_const(64, 0);
-            let l2 = e.add_int_const(64, 0);
-            let l3 = e.add_int_const(64, 0);
+            let l0 = e.emit_int_const(64, 1);
+            let l1 = e.emit_int_const(64, 0);
+            let l2 = e.emit_int_const(64, 0);
+            let l3 = e.emit_int_const(64, 0);
             let s = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
             let f0 = e.extract_field(s, field_elem, 0);
             e.terminate_return(vec![f0, s]);
@@ -1207,11 +1207,11 @@ mod tests {
             let arr = e.heap_alloc(rc_array.clone(), None);
             let rc_ptr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_word = e.struct_field_ptr(rc_ptr, rc_header, 0);
-            let one = e.add_int_const(64, 1);
+            let one = e.emit_int_const(64, 1);
             e.ll_store(rc_word, one);
 
             let data = e.struct_field_ptr(arr, rc_array, 1);
-            let idx = e.add_int_const(64, 0);
+            let idx = e.emit_int_const(64, 0);
             let elem_ptr = e.array_elem_ptr(data, field_elem, idx);
             let loaded = e.ll_load(elem_ptr, Type::i64());
             e.free(arr);
@@ -1236,8 +1236,8 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let a = e.add_int_const(64, 1);
-            let b = e.add_int_const(64, 2);
+            let a = e.emit_int_const(64, 1);
+            let b = e.emit_int_const(64, 2);
             let results = e.call(helper_id, vec![a, b], 1);
             let cond = e.int_eq(results[0], a);
             let selected = e.select(cond, a, b);
@@ -1266,10 +1266,10 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let l0 = e.add_int_const(64, 1);
-            let l1 = e.add_int_const(64, 0);
-            let l2 = e.add_int_const(64, 0);
-            let l3 = e.add_int_const(64, 0);
+            let l0 = e.emit_int_const(64, 1);
+            let l1 = e.emit_int_const(64, 0);
+            let l2 = e.emit_int_const(64, 0);
+            let l3 = e.emit_int_const(64, 0);
             let a = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
             let b = e.mk_struct(field_elem, vec![l0, l1, l2, l3]);
 
@@ -1297,7 +1297,7 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let x = e.add_int_const(64, 256);
+            let x = e.emit_int_const(64, 256);
             let narrow = e.truncate(x, 8);
             let wide = e.zext(narrow, 64);
             let gp = e.global_addr(3);
@@ -1325,19 +1325,19 @@ mod tests {
 
             {
                 let mut e = fb.block(entry);
-                let x = e.add_int_const(64, 42);
-                let zero = e.add_int_const(64, 0);
+                let x = e.emit_int_const(64, 42);
+                let zero = e.emit_int_const(64, 0);
                 let cond = e.int_eq(x, zero);
                 e.terminate_jmp_if(cond, then_blk, else_blk);
             }
             {
                 let mut e = fb.block(then_blk);
-                let one = e.add_int_const(64, 1);
+                let one = e.emit_int_const(64, 1);
                 e.terminate_jmp(merge_blk, vec![one]);
             }
             {
                 let mut e = fb.block(else_blk);
-                let two = e.add_int_const(64, 2);
+                let two = e.emit_int_const(64, 2);
                 e.terminate_jmp(merge_blk, vec![two]);
             }
 
@@ -1360,9 +1360,9 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let dst = e.add_nullptr_const();
-            let src = e.add_nullptr_const();
-            let count = e.add_int_const(64, 10);
+            let dst = e.emit_nullptr_const();
+            let src = e.emit_nullptr_const();
+            let count = e.emit_int_const(64, 10);
             e.memcpy(dst, src, elem, Some(count));
             e.terminate_return(vec![]);
         });
