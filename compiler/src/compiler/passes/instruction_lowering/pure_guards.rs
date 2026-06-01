@@ -214,8 +214,7 @@ impl LowerPureGuards {
             OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => false,
 
             // -- Pure computation, no constraints, can't fail → unwrap --
-            OpCode::Const { .. }
-            | OpCode::Cmp { .. }
+            OpCode::Cmp { .. }
             | OpCode::Not { .. }
             | OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor,
@@ -496,13 +495,12 @@ impl LowerPureGuards {
                 let max = e.u_const(bits, bit_mask(bits));
                 let limit = e.div(max, rhs);
                 let overflow = e.lt(limit, lhs);
-                let value = e.build_if_else(
+                e.build_if_else(
                     overflow,
                     vec![result_type.clone()],
                     |e| vec![self.emit_guard_failure_default(e, condition, false, bits)],
                     |e| vec![e.mul(lhs, rhs)],
-                );
-                value
+                )
             },
         );
     }

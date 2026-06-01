@@ -38,7 +38,9 @@ impl Pass for RemoveUnreachableFunctions {
         let all_function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in all_function_ids {
             if !reachable.contains(&function_id) {
-                ssa.take_function(function_id);
+                // If we get here then the function is not reachable so there will be no dangling
+                // references to it.
+                ssa.delete_function(function_id);
             }
         }
     }

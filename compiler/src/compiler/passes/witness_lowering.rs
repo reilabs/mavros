@@ -434,7 +434,6 @@ impl WitnessLowering {
                         | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::Const { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);

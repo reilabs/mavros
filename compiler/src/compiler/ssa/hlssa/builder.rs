@@ -2,8 +2,8 @@ use crate::compiler::ssa::{
     ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, ConstValue, Constants, Endianness,
-        LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, LookupTarget,
+        OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
     },
 };
 
@@ -14,6 +14,10 @@ use crate::compiler::ssa::{
 pub trait HLEmitter {
     fn fresh_value(&mut self) -> ValueId;
     fn emit(&mut self, op: OpCode);
+
+    /// Intern a constant value into the SSA's constants side-table, returning the `ValueId` that
+    /// names it. Identical `Constant`s collapse to the same `ValueId`.
+    fn emit_constant(&mut self, value: Constant) -> ValueId;
 
     // -- Arithmetic --
 
@@ -233,30 +237,15 @@ pub trait HLEmitter {
     // -- Constants --
 
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::Field(value),
-        });
-        r
+        self.emit_constant(Constant::Field(value))
     }
 
     fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::U(bits, value),
-        });
-        r
+        self.emit_constant(Constant::U(bits, value))
     }
 
     fn i_const(&mut self, bits: usize, value: u128) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::I(bits, value),
-        });
-        r
+        self.emit_constant(Constant::I(bits, value))
     }
 
     // -- Witness --
@@ -617,10 +606,10 @@ pub trait HLEmitter {
 // Type aliases
 // ---------------------------------------------------------------------------
 
-pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type, Constants>;
-pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type, Constants>;
-pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type, Constants>;
-pub type HLSSABuilder<'a> = SSABuilder<'a, OpCode, Type, Constants>;
+pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type, Constant>;
+pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type, Constant>;
+pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type, Constant>;
+pub type HLSSABuilder<'a> = SSABuilder<'a, OpCode, Type, Constant>;
 
 // ---------------------------------------------------------------------------
 // HLEmitter impls
@@ -634,6 +623,10 @@ impl HLEmitter for HLInstrBuilder<'_> {
     fn emit(&mut self, op: OpCode) {
         self.instructions.push(op);
     }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
 }
 
 impl HLEmitter for HLBlockEmitter<'_> {
@@ -643,6 +636,10 @@ impl HLEmitter for HLBlockEmitter<'_> {
 
     fn emit(&mut self, op: OpCode) {
         self.block.push_instruction(op);
+    }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
     }
 }
 

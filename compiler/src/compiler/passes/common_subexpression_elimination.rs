@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
     ssa::{
-        BlockId, ValueId,
+        BlockId, SSAConstantsSnapshot, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, Endianness, HLFunction, HLSSA,
+            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
             OpCode, Radix,
         },
     },
@@ -298,9 +298,11 @@ impl CSE {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+        let constants = ssa.const_snapshot();
+
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let (exprs, assertions) = self.gather_expressions(function, cfg);
+            let (exprs, assertions) = self.gather_expressions(function, cfg, &constants);
             let mut value_replacements = ValueReplacements::new();
             for (_, occurrences) in exprs {
                 if occurrences.len() <= 1 {
@@ -432,6 +434,7 @@ impl CSE {
         &self,
         ssa: &HLFunction,
         cfg: &CFG,
+        constants: &SSAConstantsSnapshot<Constant>,
     ) -> (
         HashMap<ExprId, Vec<(BlockId, usize, ValueId)>>,
         HashMap<Assertion, Vec<(BlockId, usize)>>,
@@ -439,7 +442,20 @@ impl CSE {
         let mut interner = ExprInterner::default();
         let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
         let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::new();
-        let mut exprs = HashMap::<ValueId, ExprId>::new();
+
+        // Seed the value->expr map with the SSA's constants so they can be referenced as operands.
+        // They are not recorded into `result`: the constant store already dedups them, so CSE must
+        // not try to dedup the constants themselves.
+        let mut exprs: HashMap<ValueId, ExprId> = HashMap::new();
+        for (vid, cv) in constants {
+            let id = match cv.as_ref() {
+                Constant::U(bits, value) => interner.uconst(*bits, *value),
+                Constant::I(bits, value) => interner.iconst(*bits, *value),
+                Constant::Field(value) => interner.fconst(*value),
+                Constant::FnPtr(_) => continue,
+            };
+            exprs.insert(*vid, id);
+        }
 
         fn get_expr(
             exprs: &HashMap<ValueId, ExprId>,
@@ -991,45 +1007,6 @@ impl CSE {
                             result_expr,
                         );
                     }
-                    OpCode::Const {
-                        result: r,
-                        value: cv,
-                    } => match cv {
-                        ConstValue::U(size, val) => {
-                            let expr = interner.uconst(*size, *val);
-                            record_expr(
-                                &mut exprs,
-                                &mut result,
-                                block_id,
-                                instruction_idx,
-                                *r,
-                                expr,
-                            );
-                        }
-                        ConstValue::I(size, val) => {
-                            let expr = interner.iconst(*size, *val);
-                            record_expr(
-                                &mut exprs,
-                                &mut result,
-                                block_id,
-                                instruction_idx,
-                                *r,
-                                expr,
-                            );
-                        }
-                        ConstValue::Field(val) => {
-                            let expr = interner.fconst(*val);
-                            record_expr(
-                                &mut exprs,
-                                &mut result,
-                                block_id,
-                                instruction_idx,
-                                *r,
-                                expr,
-                            );
-                        }
-                        ConstValue::FnPtr(_) => {}
-                    },
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }

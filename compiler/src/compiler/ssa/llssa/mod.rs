@@ -22,9 +22,11 @@ pub type LLSSA = SSA<LLOp, Type, Constants>;
 // CONSTANT STORAGE
 // ================================================================================================
 
-/// Constant storage for the low-level SSA. Currently a placeholder while constants still live
-/// inline as `LLOp::IntConst` / `LLOp::NullPtr` instructions; future work moves the constant data
-/// into this side-table for the LLVM backend.
+/// The value type stored in the low-level SSA's constants table.
+///
+/// Currently a unit placeholder while constants still live inline as `LLOp::IntConst` /
+/// `LLOp::NullPtr` instructions; future work is planned to move the constant data into this table
+/// for use by the LLVM backend and other LLSSA clients.
 pub type Constants = ();
 
 // LLSSA OPCODES
@@ -1158,7 +1160,7 @@ mod tests {
 
     #[test]
     fn build_simple_function() {
-        let mut ssa = LLSSA::with_main("test_main".to_string(), ());
+        let mut ssa = LLSSA::with_main("test_main".to_string());
         let main_id = ssa.get_main_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
@@ -1179,7 +1181,7 @@ mod tests {
 
     #[test]
     fn build_struct_ops() {
-        let mut ssa = LLSSA::with_main("struct_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("struct_test".to_string());
         let main_id = ssa.get_main_id();
 
         let field_elem = LLStruct::new(vec![
@@ -1209,7 +1211,7 @@ mod tests {
 
     #[test]
     fn build_memory_ops() {
-        let mut ssa = LLSSA::with_main("memory_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("memory_test".to_string());
         let main_id = ssa.get_main_id();
 
         let rc_header = LLStruct::new(vec![LLFieldType::Int(64)]);
@@ -1253,7 +1255,7 @@ mod tests {
 
     #[test]
     fn build_call_and_select() {
-        let mut ssa = LLSSA::with_main("call_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("call_test".to_string());
         let helper_id = ssa.add_function("helper".to_string());
         let main_id = ssa.get_main_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
@@ -1276,7 +1278,7 @@ mod tests {
 
     #[test]
     fn build_field_ops() {
-        let mut ssa = LLSSA::with_main("field_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("field_test".to_string());
         let main_id = ssa.get_main_id();
 
         let field_elem = LLStruct::new(vec![
@@ -1315,7 +1317,7 @@ mod tests {
 
     #[test]
     fn build_width_and_global() {
-        let mut ssa = LLSSA::with_main("width_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("width_test".to_string());
         let main_id = ssa.get_main_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
@@ -1338,7 +1340,7 @@ mod tests {
 
     #[test]
     fn build_branching() {
-        let mut ssa = LLSSA::with_main("branch_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("branch_test".to_string());
         let main_id = ssa.get_main_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
@@ -1375,7 +1377,7 @@ mod tests {
 
     #[test]
     fn build_memcpy() {
-        let mut ssa = LLSSA::with_main("memcpy_test".to_string(), ());
+        let mut ssa = LLSSA::with_main("memcpy_test".to_string());
         let main_id = ssa.get_main_id();
 
         let elem = LLStruct::new(vec![LLFieldType::Int(64)]);

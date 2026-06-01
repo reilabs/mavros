@@ -5,7 +5,7 @@
 //! in defunctionalization wherever needed. In some cases, we can call the specialized version
 //! directly instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
 use tracing::{info, instrument};
@@ -19,10 +19,10 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        FunctionId, ValueId,
+        BlockId, FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLFunction, HLSSA, OpCode, Radix,
-            RefCountOp, SequenceTargetType, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
+            OpCode, Radix, RefCountOp, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
         },
     },
@@ -56,37 +56,36 @@ enum ConstVal {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Val(ValueId);
 
-struct SpecializationState {
-    function: HLFunction,
-    /// Transient counter for `ValueId`s allocated during specialization. Starts at the SSA's
-    /// `value_num_bound` and is reconciled back into the SSA only if specialization is accepted.
-    transient_counter: u64,
+struct SpecializationState<'a> {
+    /// Shared reference to the SSA, used to mint fresh `ValueId`s via `fresh_value(&self)` while
+    /// the symbolic executor holds its own shared `&HLSSA` borrow.
+    ssa: &'a HLSSA,
+
+    /// The candidate function body, mutated in place during symbolic execution. The candidate's
+    /// `FunctionId` is owned by the caller. This is just the body slot, taken out of the SSA so it
+    /// can be modified while the executor holds the SSA shared.
+    body: HLFunction,
+
+    /// Constant values created during specialization, usually by constant folding.
     const_vals: HashMap<ValueId, ConstVal>,
 }
 
-impl SpecializationState {
-    fn add_entry_parameter(&mut self, ty: Type) -> ValueId {
-        let id = self.fresh_value();
-        let entry = self.function.get_entry_id();
-        self.function.get_block_mut(entry).push_parameter(id, ty);
-        id
-    }
-}
-
-impl HLEmitter for SpecializationState {
+impl HLEmitter for SpecializationState<'_> {
     fn fresh_value(&mut self) -> ValueId {
-        let id = ValueId(self.transient_counter);
-        self.transient_counter += 1;
-        id
+        self.ssa.fresh_value()
     }
 
     fn emit(&mut self, op: OpCode) {
-        let entry = self.function.get_entry_id();
-        self.function.get_block_mut(entry).push_instruction(op);
+        let entry = self.body.get_entry_id();
+        self.body.get_block_mut(entry).push_instruction(op);
+    }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
     }
 }
 
-impl symbolic_executor::Value<SpecializationState> for Val {
+impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     fn ult(&self, b: &Self, ctx: &mut SpecializationState) -> Self {
         let l_const = ctx.const_vals.get(&self.0).cloned();
         let r_const = ctx.const_vals.get(&b.0).cloned();
@@ -98,7 +97,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::hlssa::CmpKind::Lt);
+                let res = ctx.cmp(self.0, b.0, CmpKind::Lt);
                 Self(res)
             }
             _ => todo!(),
@@ -116,7 +115,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::hlssa::CmpKind::Lt);
+                let res = ctx.cmp(self.0, b.0, CmpKind::Lt);
                 Self(res)
             }
             _ => todo!(),
@@ -134,7 +133,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
                 Self(res)
             }
             (None, _) | (_, None) => {
-                let res = ctx.cmp(self.0, b.0, crate::compiler::ssa::hlssa::CmpKind::Eq);
+                let res = ctx.cmp(self.0, b.0, CmpKind::Eq);
                 Self(res)
             }
             _ => todo!(),
@@ -144,7 +143,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     fn arith(
         &self,
         b: &Self,
-        binary_arith_op_kind: crate::compiler::ssa::hlssa::BinaryArithOpKind,
+        binary_arith_op_kind: BinaryArithOpKind,
         _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
@@ -433,7 +432,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
 
     fn cast(
         &self,
-        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
+        cast_target: &CastTarget,
         _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
@@ -699,7 +698,7 @@ impl symbolic_executor::Value<SpecializationState> for Val {
     }
 }
 
-impl symbolic_executor::Context<Val> for SpecializationState {
+impl symbolic_executor::Context<Val> for SpecializationState<'_> {
     fn on_call(
         &mut self,
         func: FunctionId,
@@ -719,19 +718,13 @@ impl symbolic_executor::Context<Val> for SpecializationState {
     }
 
     fn on_return(&mut self, returns: &mut [Val], _return_types: &[Type]) {
-        self.function.terminate_block_with_return(
-            self.function.get_entry_id(),
+        self.body.terminate_block_with_return(
+            self.body.get_entry_id(),
             returns.iter().map(|v| v.0).collect(),
         );
     }
 
-    fn on_jmp(
-        &mut self,
-        _target: crate::compiler::ssa::BlockId,
-        _params: &mut [Val],
-        _param_types: &[&Type],
-    ) {
-    }
+    fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
@@ -751,12 +744,13 @@ impl symbolic_executor::Context<Val> for SpecializationState {
 
     fn on_guard(
         &mut self,
-        inner: &crate::compiler::ssa::hlssa::OpCode,
+        inner: &OpCode,
         condition: &Val,
         inputs: Vec<&Val>,
         _result_types: Vec<&Type>,
     ) -> Vec<Val> {
         use crate::compiler::ssa::Instruction;
+
         // Build a mapping from old ValueIds to new ValueIds
         let orig_inputs: Vec<_> = inner.get_inputs().cloned().collect();
         let orig_results: Vec<_> = inner.get_results().cloned().collect();
@@ -796,11 +790,27 @@ impl Pass for Specializer {
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let summary = store.get::<Summary>();
+        let mut speculative_ids: HashSet<FunctionId> = HashSet::new();
+        let mut accepted_ids: HashSet<FunctionId> = HashSet::new();
+
         for (sig, summary) in summary.functions.iter() {
             if summary.specialization_total_savings > 0 {
-                self.try_spec(ssa, store.get::<TypeInfo>(), summary, sig.clone());
+                self.try_spec(
+                    ssa,
+                    store.get::<TypeInfo>(),
+                    summary,
+                    sig.clone(),
+                    &mut speculative_ids,
+                    &mut accepted_ids,
+                );
             }
         }
+
+        // Drop any speculative candidate (and its `#unspecialized` clone, if it had one)
+        // that wasn't accepted. Constants the rejected candidates left behind become
+        // unreferenced and are cleaned up by the DCE pass that runs immediately after the
+        // specializer.
+        ssa.retain_functions(|id, _| !speculative_ids.contains(&id) || accepted_ids.contains(&id));
     }
 }
 
@@ -818,6 +828,8 @@ impl Specializer {
         type_info: &TypeInfo,
         summary: &SpecializationSummary,
         signature: FunctionSignature,
+        speculative_ids: &mut HashSet<FunctionId>,
+        accepted_ids: &mut HashSet<FunctionId>,
     ) {
         let name = signature.pretty_print(ssa, true);
 
@@ -831,18 +843,37 @@ impl Specializer {
             return;
         }
 
-        let original_fn = ssa.get_function(signature.get_fun_id());
+        // Snapshot what we need from the original before any mutation: param types, return
+        // types, and its name (for the #specialized / #unspecialized derived names).
+        let original_param_types: Vec<Type>;
+        let original_return_types: Vec<Type>;
+        let original_name: String;
+        {
+            let original_fn = ssa.get_function(signature.get_fun_id());
+            original_param_types = original_fn.get_param_types();
+            original_return_types = original_fn.get_returns().to_vec();
+            original_name = original_fn.get_name().to_string();
+        }
 
-        let mut state = SpecializationState {
-            function: HLFunction::empty(name),
-            transient_counter: ssa.value_num_bound() as u64,
-            const_vals: HashMap::new(),
-        };
+        // Mint the candidate's FunctionId up-front. The empty body lives in the SSA at this
+        // id until we put the filled-in one back. Track it as speculative so the end-of-pass
+        // cleanup drops it if the specialization is ultimately rejected.
+        let candidate_id = ssa.add_function(name.clone());
+        speculative_ids.insert(candidate_id);
 
+        // Take the empty body out so the state can mutate it while the symbolic executor
+        // holds a shared `&HLSSA`.
+        let mut body = ssa.take_function(candidate_id);
+        for ret in &original_return_types {
+            body.add_return_type(ret.clone());
+        }
+
+        // Build call params and the initial `const_vals` map. Routes through `add_const`
+        // (still `&mut ssa` here) so the constants for `Field`/`U`/`I` signature params are
+        // interned eagerly.
         let mut call_params: Vec<Val> = vec![];
-
-        for (param, sig) in original_fn
-            .get_param_types()
+        let mut const_vals: HashMap<ValueId, ConstVal> = HashMap::new();
+        for (param, sig) in original_param_types
             .iter()
             .zip(signature.get_params().iter())
         {
@@ -858,26 +889,24 @@ impl Specializer {
                 ValueSignature::Unknown(_)
                 | ValueSignature::UnknownSlice
                 | ValueSignature::WitnessOf(_) => {
-                    call_params.push(Val(state.add_entry_parameter(param.clone())));
+                    let id = ssa.fresh_value();
+                    body.get_entry_mut().push_parameter(id, param.clone());
+                    call_params.push(Val(id));
                 }
                 ValueSignature::Field(f) => {
-                    let val = state.field_const(*f);
+                    let val = ssa.add_const(Constant::Field(*f));
                     call_params.push(Val(val));
-                    state.const_vals.insert(val, ConstVal::Field(*f));
+                    const_vals.insert(val, ConstVal::Field(*f));
                 }
                 ValueSignature::U { bits_size, value } => {
-                    let val = state.u_const(*bits_size, *value);
+                    let val = ssa.add_const(Constant::U(*bits_size, *value));
                     call_params.push(Val(val));
-                    state
-                        .const_vals
-                        .insert(val, ConstVal::U(*bits_size, *value));
+                    const_vals.insert(val, ConstVal::U(*bits_size, *value));
                 }
                 ValueSignature::I { bits_size, value } => {
-                    let val = state.i_const(*bits_size, *value);
+                    let val = ssa.add_const(Constant::I(*bits_size, *value));
                     call_params.push(Val(val));
-                    state
-                        .const_vals
-                        .insert(val, ConstVal::I(*bits_size, *value));
+                    const_vals.insert(val, ConstVal::I(*bits_size, *value));
                 }
                 ValueSignature::Tuple(_) => {
                     info!("TODO: Aborting specialization on a tuple value");
@@ -886,45 +915,55 @@ impl Specializer {
             }
         }
 
-        for ret in original_fn.get_returns() {
-            state.function.add_return_type(ret.clone());
-        }
+        let body = {
+            let mut state = SpecializationState {
+                ssa: &*ssa,
+                body,
+                const_vals,
+            };
 
-        SymbolicExecutor::new().run(
-            ssa,
-            type_info,
-            signature.get_fun_id(),
-            call_params,
-            &mut state,
-        );
+            SymbolicExecutor::new().run(
+                &*ssa,
+                type_info,
+                signature.get_fun_id(),
+                call_params,
+                &mut state,
+            );
 
-        let code_bloat = state.function.code_size();
+            state.body
+        };
+
+        let code_bloat = body.code_size();
         let savings_to_code_ratio = summary.specialization_total_savings as f64 / code_bloat as f64;
+
+        // Put the body back unconditionally. On rejection it stays at `candidate_id` only
+        // until the end-of-pass `retain_functions` call drops it.
+        ssa.put_function(candidate_id, body);
 
         if savings_to_code_ratio > self.savings_to_code_ratio {
             info!(message = %"Specialization accepted", code_bloat = code_bloat,  savings_to_code_ratio = savings_to_code_ratio, threshold_ratio = self.savings_to_code_ratio);
-            ssa.reserve_values_up_to(state.transient_counter);
-            let original_fn = ssa.take_function(signature.get_fun_id());
-            let new_fn_id = ssa.add_function("".to_string());
-            let new_original_id = ssa.add_function("".to_string()); // Temporary
 
-            let original_params = original_fn.get_param_types();
-            let original_returns = original_fn.get_returns().to_vec();
+            // Clone the original via the SSA helper. The clone has fresh `ValueId`s and
+            // becomes the dispatcher's fallback target; the original's slot is then
+            // overwritten with the dispatcher itself.
+            let unspecialized_id = ssa.duplicate_function(signature.get_fun_id());
+            ssa.get_function_mut(unspecialized_id)
+                .set_name(format!("{}#unspecialized", original_name));
 
             let dispatcher = self.build_dispatcher_for(
                 ssa,
-                original_params,
-                original_returns,
+                original_param_types,
+                original_return_types,
                 &signature,
-                original_fn.get_name().to_string() + "#specialized",
-                new_fn_id,
-                new_original_id,
+                format!("{}#specialized", original_name),
+                candidate_id,
+                unspecialized_id,
             );
-            ssa.put_function(new_original_id, original_fn);
-            ssa.put_function(signature.get_fun_id(), dispatcher);
-            ssa.put_function(new_fn_id, state.function);
+            *ssa.get_function_mut(signature.get_fun_id()) = dispatcher;
+
+            accepted_ids.insert(candidate_id);
+            accepted_ids.insert(unspecialized_id);
         } else {
-            // TODO: run some passes to see if it decreases
             info!(message = %"Specialization rejected", code_bloat = code_bloat,  savings_to_code_ratio = savings_to_code_ratio, threshold_ratio = self.savings_to_code_ratio);
         }
     }

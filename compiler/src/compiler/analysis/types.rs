@@ -10,9 +10,18 @@ use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
     ssa::{
         FunctionId, ValueId,
-        hlssa::{CallTarget, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+        hlssa::{CallTarget, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
     },
 };
+
+pub fn const_value_type(value: &Constant) -> Type {
+    match value {
+        Constant::U(size, _) => Type::u(*size),
+        Constant::I(size, _) => Type::i(*size),
+        Constant::Field(_) => Type::field(),
+        Constant::FnPtr(_) => Type::function(),
+    }
+}
 
 fn push_witness_of_to_leaves(t: Type) -> Type {
     match t.expr {
@@ -68,9 +77,17 @@ impl Types {
             .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
             .collect::<HashMap<_, _>>();
 
+        // The constants side-table is module-level; pre-compute types for every constant
+        // `ValueId` so `run_function` can seed `function_info` with them.
+        let constant_types: HashMap<ValueId, Type> = ssa
+            .const_snapshot()
+            .iter()
+            .map(|(vid, cv)| (*vid, const_value_type(cv)))
+            .collect();
+
         for (function_id, function) in ssa.iter_functions() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let function_info = self.run_function(function, &function_types, cfg);
+            let function_info = self.run_function(function, &function_types, &constant_types, cfg);
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
@@ -144,10 +161,11 @@ impl Types {
         &self,
         function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+        constant_types: &HashMap<ValueId, Type>,
         cfg: &CFG,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
-            values: HashMap::new(),
+            values: constant_types.clone(),
         };
 
         for block_id in cfg.get_domination_pre_order() {
@@ -673,16 +691,6 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
-            OpCode::Const { result, value } => {
-                let ty = match value {
-                    ConstValue::U(size, _) => Type::u(*size),
-                    ConstValue::I(size, _) => Type::i(*size),
-                    ConstValue::Field(_) => Type::field(),
-                    ConstValue::FnPtr(_) => Type::function(),
-                };
-                function_info.values.insert(*result, ty);
-                Ok(())
-            }
             OpCode::Spread { result, value, .. } => {
                 let value_type = function_info
                     .values

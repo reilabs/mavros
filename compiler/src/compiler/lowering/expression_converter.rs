@@ -11,7 +11,7 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::ssa::{
     BlockId, FunctionId, ValueId,
     hlssa::{
-        CastTarget, ConstValue, Endianness, OpCode, Radix, SequenceTargetType, Type,
+        CastTarget, Constant, Endianness, Radix, SequenceTargetType, Type,
         builder::{HLEmitter, HLFunctionBuilder},
     },
 };
@@ -61,8 +61,6 @@ pub struct ExpressionConverter<'a> {
     in_unconstrained: bool,
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
-    /// Dedup cache for constants
-    const_cache: HashMap<ConstValue, ValueId>,
     /// Maps LowLevel function name to its replacement
     lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
     /// Current block being emitted into
@@ -88,27 +86,12 @@ impl<'a> ExpressionConverter<'a> {
             in_unconstrained,
             global_slots,
             lowlevel_replacements,
-            const_cache: HashMap::new(),
             current_block: entry_block,
         }
     }
 
     pub fn current_block(&self) -> BlockId {
         self.current_block
-    }
-
-    fn get_or_create_const(&mut self, b: &mut HLFunctionBuilder<'_>, cv: ConstValue) -> ValueId {
-        if let Some(&vid) = self.const_cache.get(&cv) {
-            return vid;
-        }
-        let vid = b.fresh_value();
-        let entry = b.function().get_entry_id();
-        b.block(entry).emit(OpCode::Const {
-            result: vid,
-            value: cv.clone(),
-        });
-        self.const_cache.insert(cv, vid);
-        vid
     }
 
     /// Bind an immutable local variable to a value
@@ -190,7 +173,7 @@ impl<'a> ExpressionConverter<'a> {
                 let for_loop_index = ctx.for_loop_index;
                 if let Some((loop_index, index_bit_size)) = for_loop_index {
                     // For loop: increment index and jump back to header
-                    let one = self.get_or_create_const(b, ConstValue::U(index_bit_size, 1));
+                    let one = b.emit_const(Constant::U(index_bit_size, 1));
                     let mut e = b.block(self.current_block);
                     let next_index = e.add(loop_index, one);
                     e.terminate_jmp(loop_header, vec![next_index]);
@@ -236,7 +219,7 @@ impl<'a> ExpressionConverter<'a> {
                     .get(func_id)
                     .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
                 // Return a function pointer constant
-                let value_id = self.get_or_create_const(b, ConstValue::FnPtr(*ssa_func_id));
+                let value_id = b.emit_const(Constant::FnPtr(*ssa_func_id));
                 Some(value_id)
             }
             Definition::Builtin(name) => {
@@ -527,7 +510,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // if range is inclusive, bump by one
         let end = if for_expr.inclusive {
-            let one = self.get_or_create_const(b, ConstValue::U(index_type.get_bit_size(), 1));
+            let one = b.emit_const(Constant::U(index_type.get_bit_size(), 1));
             b.block(self.current_block).add(end_raw, one)
         } else {
             end_raw
@@ -575,7 +558,7 @@ impl<'a> ExpressionConverter<'a> {
         // Increment the index and jump back to header
         // (only if current block is not already terminated by break/continue)
         if !b.block(self.current_block).is_terminated() {
-            let one = self.get_or_create_const(b, ConstValue::U(index_bit_size, 1));
+            let one = b.emit_const(Constant::U(index_bit_size, 1));
             let mut body_end = b.block(self.current_block);
             let next_index = body_end.add(loop_index, one);
             body_end.terminate_jmp(loop_header, vec![next_index]);
@@ -818,14 +801,14 @@ impl<'a> ExpressionConverter<'a> {
                             Some(AstType::Integer(
                                 noirc_frontend::shared::Signedness::Signed,
                                 bit_size,
-                            )) => ConstValue::I(bit_size.bit_size() as usize, 0),
+                            )) => Constant::I(bit_size.bit_size() as usize, 0),
                             Some(AstType::Integer(
                                 noirc_frontend::shared::Signedness::Unsigned,
                                 bit_size,
-                            )) => ConstValue::U(bit_size.bit_size() as usize, 0),
-                            _ => ConstValue::Field(ark_bn254::Fr::from(0u64)),
+                            )) => Constant::U(bit_size.bit_size() as usize, 0),
+                            _ => Constant::Field(ark_bn254::Fr::from(0u64)),
                         };
-                        let zero = self.get_or_create_const(b, zero_const);
+                        let zero = b.emit_const(zero_const);
                         b.block(self.current_block).sub(zero, value)
                     }
                     _ => unreachable!(),
@@ -944,7 +927,7 @@ impl<'a> ExpressionConverter<'a> {
         match lit {
             Literal::Bool(bv) => {
                 let value = if *bv { 1 } else { 0 };
-                Some(self.get_or_create_const(b, ConstValue::U(1, value)))
+                Some(b.emit_const(Constant::U(1, value)))
             }
             Literal::Integer(signed_field, typ, _location) => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
@@ -954,7 +937,7 @@ impl<'a> ExpressionConverter<'a> {
                         // Convert SignedField to ark_bn254::Fr directly (both backed by same type)
                         let field_element = signed_field.to_field_element();
                         let field_val = field_element.into_repr();
-                        Some(self.get_or_create_const(b, ConstValue::Field(field_val)))
+                        Some(b.emit_const(Constant::Field(field_val)))
                     }
                     AstType::Integer(signedness, bit_size) => {
                         use noirc_frontend::shared::Signedness;
@@ -963,16 +946,16 @@ impl<'a> ExpressionConverter<'a> {
                             assert!(bits <= 64, "signed integers wider than i64 are unsupported");
                             let signed_val = signed_field.to_i128();
                             let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
-                            Some(self.get_or_create_const(b, ConstValue::I(bits, twos_complement)))
+                            Some(b.emit_const(Constant::I(bits, twos_complement)))
                         } else {
                             // Get the value as u128
                             let value = signed_field.to_u128();
-                            Some(self.get_or_create_const(b, ConstValue::U(bits, value)))
+                            Some(b.emit_const(Constant::U(bits, value)))
                         }
                     }
                     AstType::Bool => {
                         let value = signed_field.to_u128();
-                        Some(self.get_or_create_const(b, ConstValue::U(1, value)))
+                        Some(b.emit_const(Constant::U(1, value)))
                     }
                     _ => panic!("Unexpected type for integer literal: {:?}", typ),
                 }
@@ -1015,7 +998,7 @@ impl<'a> ExpressionConverter<'a> {
                 let len = s.len();
                 let elems: Vec<ValueId> = s
                     .bytes()
-                    .map(|byte| self.get_or_create_const(b, ConstValue::U(8, byte as u128)))
+                    .map(|byte| b.emit_const(Constant::U(8, byte as u128)))
                     .collect();
                 let arr = b.block(self.current_block).mk_seq(
                     elems,
@@ -1036,7 +1019,7 @@ impl<'a> ExpressionConverter<'a> {
                         FmtStrFragment::Interpolation(name, _) => format!("{{{name}}}"),
                     };
                     for c in text.chars() {
-                        codepoints.push(self.get_or_create_const(b, ConstValue::U(32, c as u128)));
+                        codepoints.push(b.emit_const(Constant::U(32, c as u128)));
                     }
                 }
                 let cp_len = codepoints.len();
@@ -1255,7 +1238,7 @@ impl<'a> ExpressionConverter<'a> {
                         // function call that emits constraints), then return the
                         // compile-time-known length.
                         self.convert_expression(&call.arguments[0], b);
-                        let value = self.get_or_create_const(b, ConstValue::U(32, *len as u128));
+                        let value = b.emit_const(Constant::U(32, *len as u128));
                         Some(value)
                     }
                     noirc_frontend::monomorphization::ast::Type::Vector(_) => {
@@ -1319,10 +1302,9 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "is_unconstrained" => {
-                let value = self.get_or_create_const(
-                    b,
-                    ConstValue::U(1, if self.in_unconstrained { 1 } else { 0 }),
-                );
+                let value = b
+                    .ssa
+                    .add_const(Constant::U(1, if self.in_unconstrained { 1 } else { 0 }));
                 Some(value)
             }
             "as_witness" => {

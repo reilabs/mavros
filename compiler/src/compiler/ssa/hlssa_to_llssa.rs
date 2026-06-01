@@ -21,8 +21,8 @@ use crate::compiler::analysis::{
 use super::{
     BlockId, FunctionId, Terminator, ValueId,
     hlssa::{
-        BinaryArithOpKind, CmpKind, DMatrix, HLFunction, HLSSA, Type as HLType,
-        TypeExpr as HLTypeExpr,
+        BinaryArithOpKind, CmpKind, Constant, DMatrix, HLFunction, HLSSA, HLSSAConstantsSnapshot,
+        Type as HLType, TypeExpr as HLTypeExpr,
     },
     llssa::{
         FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
@@ -442,7 +442,7 @@ fn lower_inner(
 ) -> LLSSA {
     let main_id = hlssa.get_main_id();
     let main_name = hlssa.get_main().get_name().to_string();
-    let mut llssa = LLSSA::with_main(main_name, ());
+    let mut llssa = LLSSA::with_main(main_name);
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
@@ -464,7 +464,9 @@ fn lower_inner(
         fn_map.insert(*fn_id, ll_fn_id);
     }
 
-    // Second pass: lower each function body
+    // Second pass: lower each function body. Snapshot the constants once; every function lowering
+    // reads from the same lock-free view.
+    let constants = hlssa.const_snapshot();
     for (fn_id, function) in hlssa.iter_functions() {
         let ll_fn_id = fn_map[fn_id];
         let fn_type_info = type_info.get_function(*fn_id);
@@ -480,9 +482,9 @@ fn lower_inner(
             &mut ad_fns,
             &mut lookup_fns,
             &hlssa_global_types,
+            &constants,
         );
 
-        let _old = llssa.take_function(ll_fn_id);
         llssa.put_function(ll_fn_id, ll_func);
     }
 
@@ -510,6 +512,85 @@ fn lower_inner(
 // Per-function lowering
 // =============================================================================
 
+/// Materialize every HLSSA constant `ValueId` referenced by `function` into the LLSSA function's
+/// entry block.
+///
+/// This is mostly a temporary hack to keep LLSSA working as before while adjusting constant
+/// handling in HLSSA. It will be removed.
+fn materialize_constants_llssa(
+    function: &HLFunction,
+    constants: &HLSSAConstantsSnapshot,
+    ll_func: &mut LLFunction,
+    llssa: &mut LLSSA,
+    ll_entry_id: crate::compiler::ssa::BlockId,
+    val_map: &mut HashMap<ValueId, ValueId>,
+) {
+    use crate::compiler::ssa::Instruction;
+    use crate::compiler::ssa::llssa::builder::LLEmitter;
+
+    let mut referenced: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
+    for (_, block) in function.get_blocks() {
+        for instr in block.get_instructions() {
+            for vid in instr.get_inputs() {
+                if constants.contains_key(vid) {
+                    referenced.insert(*vid);
+                }
+            }
+        }
+        if let Some(term) = block.get_terminator() {
+            match term {
+                crate::compiler::ssa::Terminator::Jmp(_, args)
+                | crate::compiler::ssa::Terminator::Return(args) => {
+                    for vid in args {
+                        if constants.contains_key(vid) {
+                            referenced.insert(*vid);
+                        }
+                    }
+                }
+                crate::compiler::ssa::Terminator::JmpIf(cond, _, _) => {
+                    if constants.contains_key(cond) {
+                        referenced.insert(*cond);
+                    }
+                }
+            }
+        }
+    }
+
+    if referenced.is_empty() {
+        return;
+    }
+
+    let mut referenced: Vec<ValueId> = referenced.into_iter().collect();
+    referenced.sort_by_key(|v| v.0);
+
+    let mut emitter = LLBlockEmitter::new(ll_func, llssa, ll_entry_id);
+    for vid in referenced {
+        let ll_val = match constants.get(&vid).expect("vid is in constants").as_ref() {
+            Constant::U(bits, val) => emitter.int_const_u128(*bits as u32, *val),
+            Constant::I(bits, val) => {
+                assert!(
+                    *bits <= 64,
+                    "signed integers wider than i64 are unsupported"
+                );
+                emitter.int_const_u128(*bits as u32, *val)
+            }
+            Constant::Field(fr) => {
+                let field_struct = LLStruct::field_elem();
+                let limbs = fr.0.0;
+                let l0 = emitter.int_const(64, limbs[0]);
+                let l1 = emitter.int_const(64, limbs[1]);
+                let l2 = emitter.int_const(64, limbs[2]);
+                let l3 = emitter.int_const(64, limbs[3]);
+                emitter.mk_struct(field_struct, vec![l0, l1, l2, l3])
+            }
+            Constant::FnPtr(_) => {
+                panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
+            }
+        };
+        val_map.insert(vid, ll_val);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_function(
     function: &HLFunction,
@@ -521,6 +602,7 @@ fn lower_function(
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
+    constants: &HLSSAConstantsSnapshot,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -557,6 +639,16 @@ fn lower_function(
             val_map.insert(*param_id, ll_param_id);
         }
     }
+
+    // TODO Temporary, until we can handle constants properly in LLSSA.
+    materialize_constants_llssa(
+        function,
+        constants,
+        &mut ll_func,
+        llssa,
+        ll_entry_id,
+        &mut val_map,
+    );
 
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
@@ -628,7 +720,7 @@ fn lower_instruction(
     hlssa_global_types: &[HLType],
 ) {
     use crate::compiler::ssa::hlssa::{
-        CallTarget, CastTarget, ConstValue, OpCode, Radix, RefCountOp, SequenceTargetType,
+        CallTarget, CastTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
     };
 
     match instruction {
@@ -789,26 +881,6 @@ fn lower_instruction(
             let ll_result = e.select(ll_cond, ll_if_t, ll_if_f);
             val_map.insert(*result, ll_result);
         }
-
-        OpCode::Const { result, value } => match value {
-            ConstValue::U(bits, val) | ConstValue::I(bits, val) => {
-                let ll_val = e.int_const_u128(*bits as u32, *val);
-                val_map.insert(*result, ll_val);
-            }
-            ConstValue::Field(fr) => {
-                let field_struct = LLStruct::field_elem();
-                let limbs = fr.0.0;
-                let l0 = e.int_const(64, limbs[0]);
-                let l1 = e.int_const(64, limbs[1]);
-                let l2 = e.int_const(64, limbs[2]);
-                let l3 = e.int_const(64, limbs[3]);
-                let mk = e.mk_struct(field_struct, vec![l0, l1, l2, l3]);
-                val_map.insert(*result, mk);
-            }
-            ConstValue::FnPtr(_) => {
-                panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
-            }
-        },
 
         // -- Array operations --
         OpCode::MkSeq {
@@ -2136,7 +2208,6 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
         for matrix in [DMatrix::A, DMatrix::B, DMatrix::C] {
             let id = bumps.get(matrix);
             let func = generate_ad_bump_function(llssa, matrix);
-            let _old = llssa.take_function(id);
             llssa.put_function(id, func);
         }
     }
@@ -2147,7 +2218,6 @@ fn generate_all_ad_functions(llssa: &mut LLSSA, ad_fns: &AdFunctions) {
              This is a bug in AdFunctions — get_drop_fn must call ensure_bumps.",
         );
         let func = generate_ad_drop_function(llssa, bumps, drop_id);
-        let _old = llssa.take_function(drop_id);
         llssa.put_function(drop_id, func);
     }
 }
@@ -2400,7 +2470,6 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
             HLTypeExpr::WitnessOf(_) => continue,
             other => panic!("No drop function generator for type: {:?}", other),
         };
-        let _old = llssa.take_function(entry.fn_id);
         llssa.put_function(entry.fn_id, func);
     }
 }
