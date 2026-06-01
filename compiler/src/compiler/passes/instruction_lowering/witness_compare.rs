@@ -22,11 +22,7 @@ impl InstructionLoweringRule for LowerWitnessCompareOps {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
-            self.process_cmp(b, context, Some(*condition), inner.as_ref())
-        } else {
-            self.process_cmp(b, context, None, instruction)
-        }
+        self.process_cmp(b, context, instruction)
     }
 }
 
@@ -39,7 +35,6 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         op: &OpCode,
     ) -> bool {
         let OpCode::Cmp {
@@ -59,26 +54,8 @@ impl LowerWitnessCompareOps {
         }
 
         match kind {
-            CmpKind::Eq => self.lower_eq(
-                b,
-                context,
-                guard,
-                *result,
-                *lhs,
-                *rhs,
-                lhs_witness,
-                rhs_witness,
-            ),
-            CmpKind::Lt => self.lower_lt(
-                b,
-                context,
-                guard,
-                *result,
-                *lhs,
-                *rhs,
-                lhs_witness,
-                rhs_witness,
-            ),
+            CmpKind::Eq => self.lower_eq(b, context, *result, *lhs, *rhs, lhs_witness, rhs_witness),
+            CmpKind::Lt => self.lower_lt(b, context, *result, *lhs, *rhs, lhs_witness, rhs_witness),
         }
         true
     }
@@ -88,7 +65,6 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        _guard: Option<ValueId>,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
@@ -125,7 +101,6 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
@@ -133,28 +108,12 @@ impl LowerWitnessCompareOps {
         rhs_witness: bool,
     ) {
         match context.types().get_value_type(rhs).strip_witness().expr {
-            TypeExpr::U(bits) => self.lower_unsigned_lt(
-                b,
-                context,
-                guard,
-                result,
-                lhs,
-                rhs,
-                bits,
-                lhs_witness,
-                rhs_witness,
-            ),
-            TypeExpr::I(bits) => self.lower_signed_lt(
-                b,
-                context,
-                guard,
-                result,
-                lhs,
-                rhs,
-                bits,
-                lhs_witness,
-                rhs_witness,
-            ),
+            TypeExpr::U(bits) => {
+                self.lower_unsigned_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
+            }
+            TypeExpr::I(bits) => {
+                self.lower_signed_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
+            }
             _ => panic!("ICE: Cmp Lt rhs is not an integer type"),
         }
     }
@@ -164,7 +123,6 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
@@ -180,7 +138,6 @@ impl LowerWitnessCompareOps {
         self.lower_unsigned_lt(
             b,
             context,
-            guard,
             unsigned_result,
             lhs,
             rhs,
@@ -190,21 +147,11 @@ impl LowerWitnessCompareOps {
         );
 
         let signed_result = b.select(signs_differ, sign_l, unsigned_result);
-        if let Some(condition) = guard {
-            let zero = b.u_const(1, 0);
-            b.emit(OpCode::Select {
-                result,
-                cond: condition,
-                if_t: signed_result,
-                if_f: zero,
-            });
-        } else {
-            b.emit(OpCode::Cast {
-                result,
-                value: signed_result,
-                target: CastTarget::U(1),
-            });
-        }
+        b.emit(OpCode::Cast {
+            result,
+            value: signed_result,
+            target: CastTarget::U(1),
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -212,7 +159,6 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
@@ -236,7 +182,7 @@ impl LowerWitnessCompareOps {
         });
 
         let result_field = b.cast_to_field(result);
-        self.emit_rangecheck(b, None, result_field, 1);
+        self.emit_rangecheck(b, result_field, 1);
 
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
@@ -249,7 +195,7 @@ impl LowerWitnessCompareOps {
         let delta_diff = b.sub(true_delta, false_delta);
         let selected_adjustment = b.mul(result_field, delta_diff);
         let selected_delta = b.add(false_delta, selected_adjustment);
-        self.emit_rangecheck(b, guard, selected_delta, bits);
+        self.emit_rangecheck(b, selected_delta, bits);
     }
 
     fn sign_bit(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
@@ -257,24 +203,10 @@ impl LowerWitnessCompareOps {
         b.cast_to(CastTarget::U(1), sign)
     }
 
-    fn emit_rangecheck(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        guard: Option<ValueId>,
-        value: ValueId,
-        bits: usize,
-    ) {
-        let rangecheck = OpCode::Rangecheck {
+    fn emit_rangecheck(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) {
+        b.emit(OpCode::Rangecheck {
             value,
             max_bits: bits,
-        };
-        if let Some(condition) = guard {
-            b.emit(OpCode::Guard {
-                condition,
-                inner: Box::new(rangecheck),
-            });
-        } else {
-            b.emit(rangecheck);
-        }
+        });
     }
 }

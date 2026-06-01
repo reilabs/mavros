@@ -31,7 +31,7 @@ impl InstructionLoweringRule for LowerWitnessBitwiseOps {
         instruction: &OpCode,
     ) -> bool {
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_op(b, context, Some(*condition), inner.as_ref())
+            self.process_guarded_op(b, context, *condition, inner.as_ref())
         } else {
             self.process_op(b, context, None, instruction)
         }
@@ -110,6 +110,29 @@ impl LowerWitnessBitwiseOps {
                 || context.types().get_value_type(*rhs).is_witness_of() =>
             {
                 self.lower_shift(b, context, guard, *kind, *result, *lhs, *rhs);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn process_guarded_op(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        condition: ValueId,
+        op: &OpCode,
+    ) -> bool {
+        match op {
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                result,
+                lhs,
+                rhs,
+            } if context.types().get_value_type(*lhs).is_witness_of()
+                || context.types().get_value_type(*rhs).is_witness_of() =>
+            {
+                self.lower_shift(b, context, Some(condition), *kind, *result, *lhs, *rhs);
                 true
             }
             _ => false,

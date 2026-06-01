@@ -1,5 +1,6 @@
 mod bit_range;
 mod pure_guards;
+mod unrefutable_guards;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
@@ -23,7 +24,8 @@ use crate::compiler::{
 };
 
 use self::{
-    bit_range::LowerBitRangeOps, pure_guards::LowerPureGuards, witness_array::LowerWitnessArrayOps,
+    bit_range::LowerBitRangeOps, pure_guards::LowerPureGuards,
+    unrefutable_guards::LowerUnrefutableGuards, witness_array::LowerWitnessArrayOps,
     witness_assert::LowerWitnessAssertOps, witness_bitwise::LowerWitnessBitwiseOps,
     witness_compare::LowerWitnessCompareOps, witness_field::LowerWitnessFieldOps,
     witness_integer_arith::LowerWitnessIntegerArithOps, witness_memory::LowerWitnessMemoryOps,
@@ -76,6 +78,7 @@ impl InstructionLowering {
         Self::with_lowerers(
             "instruction_lowering_witness_integer_ops",
             vec![
+                Box::new(LowerUnrefutableGuards::new()),
                 Box::new(LowerWitnessIntegerArithOps::new()),
                 Box::new(LowerWitnessBitwiseOps::new()),
                 Box::new(LowerWitnessSpreadOps::new()),
@@ -91,7 +94,10 @@ impl InstructionLowering {
     pub fn pure_guards() -> Self {
         Self::with_lowerers(
             "instruction_lowering_pure_guards",
-            vec![Box::new(LowerPureGuards::new())],
+            vec![
+                Box::new(LowerUnrefutableGuards::new()),
+                Box::new(LowerPureGuards::new()),
+            ],
             false,
         )
     }

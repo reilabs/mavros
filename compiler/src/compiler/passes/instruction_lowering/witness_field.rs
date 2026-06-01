@@ -24,7 +24,7 @@ impl InstructionLoweringRule for LowerWitnessFieldOps {
         instruction: &OpCode,
     ) -> bool {
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_op(b, context, Some(*condition), inner.as_ref())
+            self.process_guarded_op(b, context, *condition, inner.as_ref())
         } else {
             self.process_op(b, context, None, instruction)
         }
@@ -70,6 +70,30 @@ impl LowerWitnessFieldOps {
                 if context.types().get_value_type(*value).is_witness_of() =>
             {
                 self.lower_rangecheck(b, context, guard, *value, *max_bits);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn process_guarded_op(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        condition: ValueId,
+        op: &OpCode,
+    ) -> bool {
+        match op {
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
+                result,
+                lhs,
+                rhs,
+            } => self.lower_divmod(b, context, Some(condition), *kind, *result, *lhs, *rhs),
+            OpCode::Rangecheck { value, max_bits }
+                if context.types().get_value_type(*value).is_witness_of() =>
+            {
+                self.lower_rangecheck(b, context, Some(condition), *value, *max_bits);
                 true
             }
             _ => false,

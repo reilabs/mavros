@@ -84,42 +84,10 @@ impl DegreeSpilling {
                     });
                 }
             }
-            OpCode::Guard { condition, inner } => {
-                self.process_guard(b, function_type_info, condition, *inner);
+            OpCode::Guard { .. } => {
+                panic!("Guard should have been lowered before degree_spilling");
             }
             instruction => b.push(instruction),
-        }
-    }
-
-    fn process_guard(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        condition: ValueId,
-        inner: OpCode,
-    ) {
-        match inner {
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result,
-                lhs,
-                rhs,
-            } => {
-                if self.lower_mul(b, function_type_info, result, lhs, rhs) {
-                    return;
-                }
-
-                b.push(OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Mul,
-                    result,
-                    lhs,
-                    rhs,
-                });
-            }
-            inner => b.push(OpCode::Guard {
-                condition,
-                inner: Box::new(inner),
-            }),
         }
     }
 
