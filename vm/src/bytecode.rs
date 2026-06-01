@@ -845,6 +845,13 @@ mod def {
     }
 
     #[opcode]
+    fn field_eq(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
+        unsafe {
+            *res = (a == b) as u64;
+        }
+    }
+
+    #[opcode]
     fn lt_u128(#[out] res: *mut u64, frame: Frame, a: FramePosition, b: FramePosition) {
         unsafe {
             let a = read_u128_words(frame.data.add(a.0));

@@ -750,29 +750,11 @@ impl CodeGen {
                             });
                         }
                         (TypeExpr::Field, TypeExpr::Field) => {
-                            let a = layouter.get_value(*op1);
-                            let b = layouter.get_value(*op2);
-                            let mut acc = layouter.alloc_scratch(1);
-                            emitter.push_op(bytecode::OpCode::EqU64 { res: acc, a, b });
-                            for limb in 1..bytecode::FELT_LIMBS {
-                                let limb_eq = layouter.alloc_scratch(1);
-                                emitter.push_op(bytecode::OpCode::EqU64 {
-                                    res: limb_eq,
-                                    a: a.offset(limb as isize),
-                                    b: b.offset(limb as isize),
-                                });
-                                let next = if limb + 1 == bytecode::FELT_LIMBS {
-                                    result
-                                } else {
-                                    layouter.alloc_scratch(1)
-                                };
-                                emitter.push_op(bytecode::OpCode::AndU64 {
-                                    res: next,
-                                    a: acc,
-                                    b: limb_eq,
-                                });
-                                acc = next;
-                            }
+                            emitter.push_op(bytecode::OpCode::FieldEq {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
                         }
                         _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                     }
