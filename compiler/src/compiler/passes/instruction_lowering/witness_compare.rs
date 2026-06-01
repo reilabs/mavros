@@ -1,4 +1,4 @@
-use ark_ff::{AdditiveGroup as _, Field as _};
+use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,
@@ -112,18 +112,12 @@ impl LowerWitnessCompareOps {
             target: CastTarget::U(1),
         });
 
-        let diff_pure = b.value_of(diff);
-        let one = b.field_const(Field::ONE);
-        let div_hint = b.div(one, diff_pure);
-        let div_hint_witness = b.write_witness(div_hint);
-
         let result_field = b.cast_to_field(result);
         let one = b.field_const(Field::ONE);
         let not_result = b.sub(one, result_field);
-        b.constrain(diff, div_hint_witness, not_result);
-
-        let zero = b.field_const(Field::ZERO);
-        b.constrain(diff, result_field, zero);
+        let quotient = b.div(not_result, diff);
+        let quotient_plus_result = b.add(quotient, result_field);
+        b.constrain(diff, quotient_plus_result, not_result);
     }
 
     #[allow(clippy::too_many_arguments)]
