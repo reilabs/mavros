@@ -639,10 +639,7 @@ impl ExplicitWitness {
                 assert!(!tuple_taint);
                 b.push(instruction);
             }
-            OpCode::InitGlobal { .. }
-            | OpCode::DropGlobal { .. }
-            | OpCode::ValueOf { .. }
-            | OpCode::Const { .. } => {
+            OpCode::InitGlobal { .. } | OpCode::DropGlobal { .. } | OpCode::ValueOf { .. } => {
                 b.push(instruction);
             }
             OpCode::Spread {
@@ -870,7 +867,6 @@ impl ExplicitWitness {
                 panic!("guarded BitRange should have been lowered by instruction_lowering");
             }
             OpCode::Cast { .. }
-            | OpCode::Const { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
             | OpCode::MkTuple { .. }

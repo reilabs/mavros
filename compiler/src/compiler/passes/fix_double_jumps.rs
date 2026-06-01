@@ -10,9 +10,17 @@ use crate::compiler::{
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     ssa::{
         BlockId, Instruction, Terminator, ValueId,
-        hlssa::{HLSSA, OpCode},
+        hlssa::{HLFunction, HLSSA, OpCode},
     },
 };
+
+/// Selects which value references a [`ValueReplacements`] sweep rewrites.
+pub enum ReplaceScope {
+    /// Only instruction *inputs* (the values an instruction reads).
+    Inputs,
+    /// All instruction *operands*, both inputs and results.
+    Operands,
+}
 
 pub struct ValueReplacements {
     replacements: HashMap<ValueId, ValueId>,
@@ -68,6 +76,21 @@ impl ValueReplacements {
             }
         }
         panic!("ValueReplacements: cycle starting at {:?}", value)
+    }
+
+    /// Walks every instruction and terminator in `function`, applying the collected replacements.
+    ///
+    /// `scope` selects whether instruction results are rewritten alongside inputs.
+    pub fn apply_to_function(&self, function: &mut HLFunction, scope: ReplaceScope) {
+        for (_, block) in function.get_blocks_mut() {
+            for instr in block.get_instructions_mut() {
+                match scope {
+                    ReplaceScope::Inputs => self.replace_inputs(instr),
+                    ReplaceScope::Operands => self.replace_instruction(instr),
+                }
+            }
+            self.replace_terminator(block.get_terminator_mut());
+        }
     }
 }
 
@@ -125,14 +148,7 @@ impl FixDoubleJumps {
                 replacements.insert(target, source);
             }
 
-            for (_, block) in function.get_blocks_mut() {
-                for instruction in block.get_instructions_mut() {
-                    value_replacements.replace_instruction(instruction);
-                }
-                let mut terminator = block.take_terminator().unwrap();
-                value_replacements.replace_terminator(&mut terminator);
-                block.set_terminator(terminator);
-            }
+            value_replacements.apply_to_function(function, ReplaceScope::Operands);
         }
     }
 }

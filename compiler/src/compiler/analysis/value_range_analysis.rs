@@ -18,7 +18,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, Instruction, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
         },
     },
 };
@@ -336,8 +336,8 @@ fn opt_mul(a: Option<&BigInt>, b: Option<&BigInt>) -> Option<BigInt> {
     }
 }
 
-/// Convert a `ConstValue::I(bits, encoded)` u128 bit pattern back to a
-/// signed `BigInt`. Two's-complement decode for any `bits ∈ [1, 128]`.
+/// Convert a `Constant::I(bits, encoded)` u128 bit pattern back to a signed
+/// `BigInt`. Two's-complement decode for any `bits ∈ [1, 128]`.
 fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
     if bits == 0 {
         return BigInt::zero();
@@ -367,6 +367,26 @@ fn field_to_bigint(f: &Field) -> BigInt {
     let limbs = f.into_bigint().0; // [u64; 4]
     let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
+}
+
+/// Pre-compute the singleton interval for every constant in the SSA's constant
+/// storage. Constants are module-level singletons shared across functions, so
+/// this runs once before the per-function fixed-point.
+fn compute_constant_bounds(ssa: &HLSSA) -> HashMap<ValueId, IntInterval> {
+    ssa.const_snapshot()
+        .iter()
+        .map(|(vid, cv)| {
+            let r = match cv.as_ref() {
+                Constant::U(_, v) => IntInterval::singleton(*v),
+                Constant::I(bits, encoded) => {
+                    IntInterval::singleton(signed_const_to_bigint(*bits, *encoded))
+                }
+                Constant::Field(f) => IntInterval::singleton(field_to_bigint(f)),
+                Constant::FnPtr(_) => IntInterval::top(),
+            };
+            (*vid, r)
+        })
+        .collect()
 }
 
 pub struct FunctionValueRanges {
@@ -415,10 +435,15 @@ impl ValueRangeAnalysis {
         let mut result = ValueRanges {
             functions: HashMap::new(),
         };
+
+        // Constants are module-level singletons; pre-compute their bounds once.
+        let constant_bounds = compute_constant_bounds(ssa);
+
         for (function_id, function) in ssa.iter_functions() {
             let func_cfg = cfg.get_function_cfg(*function_id);
             let func_types = types.get_function(*function_id);
-            let function_ranges = self.run_function(function, func_cfg, func_types);
+            let function_ranges =
+                self.run_function(function, func_cfg, func_types, &constant_bounds);
             result.functions.insert(*function_id, function_ranges);
         }
         result
@@ -430,8 +455,9 @@ impl ValueRangeAnalysis {
         function: &HLFunction,
         cfg: &CFG,
         types: &FunctionTypeInfo,
+        constant_bounds: &HashMap<ValueId, IntInterval>,
     ) -> FunctionValueRanges {
-        let mut bounds: HashMap<ValueId, IntInterval> = HashMap::new();
+        let mut bounds: HashMap<ValueId, IntInterval> = constant_bounds.clone();
 
         // Initial state: every value's bound is its declared type's full range.
         // Iteration only narrows from there.
@@ -525,18 +551,6 @@ impl ValueRangeAnalysis {
         };
 
         match instr {
-            OpCode::Const { result, value } => {
-                let r = match value {
-                    ConstValue::U(_, v) => IntInterval::singleton(*v),
-                    ConstValue::I(bits, encoded) => {
-                        IntInterval::singleton(signed_const_to_bigint(*bits, *encoded))
-                    }
-                    ConstValue::Field(f) => IntInterval::singleton(field_to_bigint(f)),
-                    ConstValue::FnPtr(_) => IntInterval::top(),
-                };
-                Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
-            }
-
             OpCode::Cast {
                 result,
                 value,

@@ -6,27 +6,32 @@ pub mod type_system;
 use itertools::Itertools;
 use std::fmt::Display;
 
-use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+use crate::compiler::ssa::{
+    Block, Function, FunctionId, Instruction, SSA, SSAConstants, SSAConstantsSnapshot, ValueId,
+};
 pub use type_system::{Type, TypeExpr};
 
 // HLSSA
 // ================================================================================================
 
 /// The high-level SSA is designed for domain-level analysis without concretizing runtime details.
-pub type HLSSA = SSA<OpCode, Type, Constants>;
+pub type HLSSA = SSA<OpCode, Type, Constant>;
 
 impl HLSSA {
     pub fn new() -> Self {
-        Self::with_main("main".to_string(), ())
+        Self::with_main("main".to_string())
     }
 }
 
 // CONSTANT STORAGE
 // ================================================================================================
 
-/// Constant storage for the high-level SSA. Currently a placeholder while constants still live
-/// inline as `OpCode::Const` instructions.
-pub type Constants = ();
+/// Concrete constants side-table type for the high-level SSA.
+pub type HLSSAConstants = SSAConstants<Constant>;
+
+/// Owned, lock-free snapshot of the high-level SSA's constants, as handed out by
+/// [`SSA::const_snapshot`](crate::compiler::ssa::SSA::const_snapshot).
+pub type HLSSAConstantsSnapshot = SSAConstantsSnapshot<Constant>;
 
 // HLSSA OPCODES
 // ================================================================================================
@@ -226,10 +231,6 @@ pub enum OpCode {
     },
     DropGlobal {
         global: usize,
-    },
-    Const {
-        result: ValueId,
-        value: ConstValue,
     },
     Spread {
         result: ValueId,
@@ -707,43 +708,6 @@ impl Instruction for OpCode {
             OpCode::DropGlobal { global } => {
                 format!("drop_global({})", global)
             }
-            OpCode::Const { result, value } => match value {
-                ConstValue::U(size, val) => {
-                    format!(
-                        "v{}{} = u_const({}, {})",
-                        result.0,
-                        annotate_value(*result),
-                        size,
-                        val
-                    )
-                }
-                ConstValue::I(size, val) => {
-                    format!(
-                        "v{}{} = i_const({}, {})",
-                        result.0,
-                        annotate_value(*result),
-                        size,
-                        val
-                    )
-                }
-                ConstValue::Field(val) => {
-                    format!(
-                        "v{}{} = field_const({})",
-                        result.0,
-                        annotate_value(*result),
-                        val
-                    )
-                }
-                ConstValue::FnPtr(fn_id) => {
-                    format!(
-                        "v{}{} = fn_ptr_const({}@{})",
-                        result.0,
-                        annotate_value(*result),
-                        func_name(*fn_id),
-                        fn_id.0
-                    )
-                }
-            },
             OpCode::Spread {
                 result,
                 value,
@@ -791,8 +755,7 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ }
-            | Self::Const { .. } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -998,7 +961,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc { result: r, .. }
             | Self::FreshWitness { result: r, .. }
-            | Self::Const { result: r, .. }
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
@@ -1055,7 +1017,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc { result: r, .. }
             | Self::FreshWitness { result: r, .. }
-            | Self::Const { result: r, .. }
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
@@ -1118,8 +1079,7 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ }
-            | Self::Const { .. } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -1333,8 +1293,7 @@ impl Instruction for OpCode {
                 result: r,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: r }
-            | Self::Const { result: r, .. } => vec![r].into_iter(),
+            | Self::NextDCoeff { result: r } => vec![r].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: a,
@@ -1676,11 +1635,12 @@ pub enum SliceOpDir {
     Back,
 }
 
-// CONST VALUES
+// CONSTANTS
 // ================================================================================================
 
+/// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ConstValue {
+pub enum Constant {
     U(usize, u128),
     I(usize, u128),
     Field(ark_bn254::Fr),

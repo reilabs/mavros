@@ -142,7 +142,6 @@ impl StripWitnessOf {
             | OpCode::TupleProj { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
-            | OpCode::Const { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => {}
             OpCode::Guard { .. } => {
