@@ -84,9 +84,6 @@ impl DegreeSpilling {
                     });
                 }
             }
-            OpCode::Guard { .. } => {
-                panic!("Guard should have been lowered before degree_spilling");
-            }
             instruction => b.push(instruction),
         }
     }
