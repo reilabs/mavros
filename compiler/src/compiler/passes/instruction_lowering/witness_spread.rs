@@ -1,6 +1,6 @@
 //! Lowers witness-tainted `Spread` and `Unspread` into witness hints plus spread lookups.
 //!
-//! The later `ExplicitWitness` pass lowers wide spread lookups into word-sized lookups. This keeps
+//! The later `LookupSpilling` pass lowers wide spread lookups into word-sized lookups. This keeps
 //! word splitting in one place without making witness spread/unspread special there.
 
 use ark_ff::Field as _;

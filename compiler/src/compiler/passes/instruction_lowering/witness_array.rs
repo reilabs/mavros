@@ -1,7 +1,7 @@
-//! Lowers array operations whose index is witness-tainted before the main explicit-witness pass.
+//! Lowers array operations whose index is witness-tainted before witness spilling.
 //!
 //! This pass deliberately emits ordinary arithmetic/comparison/rangecheck operations and leaves
-//! their constraint-level lowering to `ExplicitWitness`.
+//! their constraint-level lowering to the later spilling passes.
 
 use ark_ff::Field as _;
 
