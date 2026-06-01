@@ -692,8 +692,6 @@ impl CodeGen {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
-                                a_bits: *lhs_bits as u64,
-                                b_bits: *rhs_bits as u64,
                             });
                         }
                         (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
@@ -1234,8 +1232,6 @@ impl CodeGen {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
-                                    a_bits: *lhs_bits as u64,
-                                    b_bits: *rhs_bits as u64,
                                 });
                             }
                             (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
