@@ -264,6 +264,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(InstructionLowering::pure_guards()),
+                Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE

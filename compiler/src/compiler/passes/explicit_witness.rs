@@ -19,7 +19,7 @@ use crate::compiler::{
         BlockId, ValueId,
         hlssa::{
             BinaryArithOpKind, CastTarget, Endianness, HLBlock, HLSSA, LookupTarget, OpCode, Radix,
-            SequenceTargetType, Type, TypeExpr,
+            TypeExpr,
             builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
         },
     },
@@ -209,7 +209,18 @@ impl ExplicitWitness {
                             kind == BinaryArithOpKind::Div,
                             "Modulo is not defined on field elements"
                         );
-                        self.gen_witness_field_div(b, l, r, l_taint, r_taint, res);
+                        if r_taint {
+                            panic!(
+                                "witness field division should have been lowered by \
+                                 instruction_lowering"
+                            );
+                        }
+                        b.push(OpCode::BinaryArithOp {
+                            kind,
+                            result: res,
+                            lhs: l,
+                            rhs: r,
+                        });
                     }
                     _ => unreachable!("DivMod on non-numeric type: {:?}", l_type),
                 }
@@ -320,108 +331,16 @@ impl ExplicitWitness {
                 b.push(instruction);
             }
             OpCode::Select {
-                result: res,
+                result: _,
                 cond,
-                if_t: l,
-                if_f: r,
+                if_t: _,
+                if_f: _,
             } => {
                 let cond_taint = function_type_info.get_value_type(cond).is_witness_of();
-                let l_taint = function_type_info.get_value_type(l).is_witness_of();
-                let r_taint = function_type_info.get_value_type(r).is_witness_of();
-                // The result is cond * l + (1 - cond) * r = cond * (l - r) + r
-                // If cond is pure, this is just a conditional move
-                if !cond_taint {
-                    b.push(instruction);
-                    return;
+                if cond_taint {
+                    panic!("witness select should have been lowered by instruction_lowering");
                 }
-                // Cast branches to field for arithmetic (they may be U(n)/I(n))
-                let l_type = function_type_info.get_value_type(l);
-                let r_type = function_type_info.get_value_type(r);
-                let l_field = if l_type.strip_witness().is_field() {
-                    l
-                } else {
-                    b.cast_to_field(l)
-                };
-                let r_field = if r_type.strip_witness().is_field() {
-                    r
-                } else {
-                    b.cast_to_field(r)
-                };
-
-                // If both branches are pure, result is a linear combination
-                // of cond and constants: cond * (l - r) + r. No constraint needed.
-                if !l_taint && !r_taint {
-                    let l_sub_r = b.sub(l_field, r_field);
-                    // cond * (l - r): l_sub_r is a constant, cond is witness
-                    let cond_field = if function_type_info
-                        .get_value_type(cond)
-                        .strip_witness()
-                        .is_field()
-                    {
-                        cond
-                    } else {
-                        b.cast_to_field(cond)
-                    };
-                    let cond_times_diff = b.mul(l_sub_r, cond_field);
-                    // result = cond * (l - r) + r
-                    b.push(OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Add,
-                        result: res,
-                        lhs: cond_times_diff,
-                        rhs: r_field,
-                    });
-                    return;
-                }
-                // At least one branch is witness: full lowering with constraint.
-                let cond_pure = b.value_of(cond);
-                let l_pure = if l_taint { b.value_of(l) } else { l };
-                let r_pure = if r_taint { b.value_of(r) } else { r };
-                let select_hint_value = b.select(cond_pure, l_pure, r_pure);
-                let is_field = l_type.strip_witness().is_field();
-                let select_hint = if is_field {
-                    select_hint_value
-                } else {
-                    b.cast_to_field(select_hint_value)
-                };
-                if is_field {
-                    b.push(OpCode::WriteWitness {
-                        result: Some(res),
-                        value: select_hint,
-                        pinned: false,
-                    });
-                } else {
-                    // WriteWitness value is Field, but res must keep its original
-                    // type (e.g. u32) for downstream consumers like MkSeq.
-                    // Use a fresh ID for the WriteWitness result, then cast back.
-                    let ww_res = b.fresh_value();
-                    b.push(OpCode::WriteWitness {
-                        result: Some(ww_res),
-                        value: select_hint,
-                        pinned: false,
-                    });
-                    let cast_target = match l_type.strip_witness().expr {
-                        TypeExpr::U(n) => CastTarget::U(n),
-                        TypeExpr::I(n) => CastTarget::I(n),
-                        _ => unreachable!("non-field scalar must be U or I"),
-                    };
-                    b.push(OpCode::Cast {
-                        result: res,
-                        value: ww_res,
-                        target: cast_target,
-                    });
-                }
-                // Goal is to assert 0 = cond * l + (1 - cond) * r - res
-                // This is equivalent to 0 = cond * (l - r) + r - res = cond * (l - r) - (res - r)
-                let l_sub_r = b.sub(l_field, r_field);
-                let res_field = b.cast_to_field(res);
-                let res_sub_r = b.sub(res_field, r_field);
-                let cond_type = function_type_info.get_value_type(cond);
-                let cond_field = if cond_type.strip_witness().is_field() {
-                    cond
-                } else {
-                    b.cast_to_field(cond)
-                };
-                b.constrain(cond_field, l_sub_r, res_sub_r);
+                b.push(instruction);
             }
 
             OpCode::MkSeq {
@@ -476,82 +395,18 @@ impl ExplicitWitness {
                 endianness,
                 count,
             } => {
-                // `Radix::Dyn(rv)` only reaches mavros via Noir's
-                // `to_be_radix` / `to_le_radix` builtins, which Noir doesn't
-                // currently expose to user code; the stdlib only ever calls
-                // them with `256`. Codegen also only has a specialised
-                // bytecode op for `Radix::Bytes`. Pin the assumption with a
-                // runtime `assert(rv == 256)` and proceed as Bytes.
-                let radix = match radix {
-                    Radix::Dyn(rv) => {
-                        let const_256 = b.u_const(32, 256);
-                        b.assert_eq(rv, const_256);
-                        Radix::Bytes
-                    }
-                    Radix::Bytes => Radix::Bytes,
-                };
-                let value_taint = function_type_info.get_value_type(value).is_witness_of();
-                if !value_taint {
-                    b.push(OpCode::ToRadix {
-                        result,
-                        value,
-                        radix,
-                        endianness,
-                        count,
-                    });
-                } else {
-                    let pure_value = b.value_of(value);
-                    // Compute digit hints in the caller's requested endianness;
-                    // the reconstruction below visits them MSB-first either way.
-                    let hint = b.fresh_value();
-                    b.push(OpCode::ToRadix {
-                        result: hint,
-                        value: pure_value,
-                        radix,
-                        endianness,
-                        count,
-                    });
-                    let mut witnesses = vec![ValueId(0); count];
-                    let mut current_sum = b.field_const(Field::ZERO);
-                    let radix_val = match radix {
-                        Radix::Bytes => b.field_const(Field::from(256)),
-                        Radix::Dyn(radix) => b.cast_to(CastTarget::Field, radix),
-                    };
-                    let rangecheck_type = match radix {
-                        Radix::Bytes => LookupTarget::Rangecheck(8),
-                        Radix::Dyn(radix) => LookupTarget::DynRangecheck(radix),
-                    };
-                    // Walk hint indices MSB-first so the Horner accumulator
-                    // ends up equal to the reconstructed value.
-                    // TODO this should probably be an SSA loop for codesize reasons.
-                    let visit_order: Box<dyn Iterator<Item = usize>> = match endianness {
-                        Endianness::Little => Box::new((0..count).rev()),
-                        Endianness::Big => Box::new(0..count),
-                    };
-                    for i in visit_order {
-                        let idx = b.u_const(32, i as u128);
-                        let byte = b.array_get(hint, idx);
-                        let byte_field = b.cast_to_field(byte);
-                        let byte_wit = b.write_witness(byte_field);
-                        let one = b.field_const(Field::from(1));
-                        b.lookup_rngchk(rangecheck_type, byte_wit, one);
-                        let shift_prev_res = b.mul(current_sum, radix_val);
-                        current_sum = b.add(shift_prev_res, byte_wit);
-                        witnesses[i] = byte_wit;
-                    }
-                    let constrain_one = b.field_const(Field::from(1));
-                    b.constrain(current_sum, constrain_one, value);
-                    let byte_elems: Vec<ValueId> = witnesses
-                        .iter()
-                        .map(|&w| b.cast_to(CastTarget::U(8), w))
-                        .collect();
-                    b.push(OpCode::MkSeq {
-                        result,
-                        elems: byte_elems,
-                        seq_type: SequenceTargetType::Array(count),
-                        elem_type: Type::witness_of(Type::u(8)),
-                    });
+                if function_type_info.get_value_type(value).is_witness_of()
+                    || matches!(radix, Radix::Dyn(_))
+                {
+                    panic!("ToRadix should have been lowered by instruction_lowering");
                 }
+                b.push(OpCode::ToRadix {
+                    result,
+                    value,
+                    radix,
+                    endianness,
+                    count,
+                });
             }
 
             OpCode::MemOp { kind: _, value: _ } => {
@@ -566,12 +421,10 @@ impl ExplicitWitness {
             }
             OpCode::Rangecheck { value, max_bits } => {
                 let v_taint = function_type_info.get_value_type(value).is_witness_of();
-                if !v_taint {
-                    b.push(instruction);
-                } else {
-                    let one = b.field_const(Field::from(1));
-                    self.gen_witness_rangecheck_bits(b, value, max_bits, one);
+                if v_taint {
+                    panic!("witness rangecheck should have been lowered by instruction_lowering");
                 }
+                b.push(OpCode::Rangecheck { value, max_bits });
             }
             OpCode::ReadGlobal {
                 result: _,
@@ -579,6 +432,14 @@ impl ExplicitWitness {
                 result_type: _,
             } => {
                 b.push(instruction);
+            }
+            OpCode::Lookup {
+                target: LookupTarget::Rangecheck(bits),
+                args,
+                flag,
+            } => {
+                assert_eq!(args.len(), 1, "Rangecheck lookup must have exactly one key");
+                self.gen_witness_rangecheck_bits(b, args[0], bits as usize, flag);
             }
             OpCode::Lookup {
                 target: LookupTarget::Spread(bits),
@@ -687,11 +548,8 @@ impl ExplicitWitness {
                     }),
                 });
             }
-            OpCode::Store { ptr, value: v } => {
-                // Guard(cond, Store(ptr, v)) → old = Load(ptr); new = Select(cond, v, old); Store(ptr, new)
-                let old_value = b.load(ptr);
-                let new_value = b.select(condition, v, old_value);
-                b.store(ptr, new_value);
+            OpCode::Store { ptr: _, value: _ } => {
+                panic!("guarded store should have been lowered by instruction_lowering");
             }
             OpCode::SExt {
                 result: _,
@@ -760,7 +618,7 @@ impl ExplicitWitness {
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
-                result: res,
+                result: _,
                 lhs: l,
                 rhs: r,
             } => {
@@ -785,19 +643,9 @@ impl ExplicitWitness {
                             "Modulo is not defined on field elements"
                         );
                         if l_taint || r_taint {
-                            let cond_field = b.ensure_field(
-                                condition,
-                                function_type_info.get_value_type(condition),
-                            );
-                            self.gen_witness_field_div_guarded(
-                                b,
-                                l,
-                                r,
-                                l_taint,
-                                r_taint,
-                                function_type_info.get_value_type(condition).is_witness_of(),
-                                cond_field,
-                                res,
+                            panic!(
+                                "guarded witness field division should have been lowered by \
+                                 instruction_lowering"
                             );
                         } else {
                             b.push(inner);
@@ -846,15 +694,11 @@ impl ExplicitWitness {
                     pinned,
                 });
             }
-            OpCode::Rangecheck { value, max_bits } => {
-                assert!(
-                    function_type_info.get_value_type(value).is_witness_of(),
-                    "pure Rangecheck inside Guard should have been lowered by \
-                     instruction_lowering"
-                );
-                let cond_field =
-                    b.ensure_field(condition, function_type_info.get_value_type(condition));
-                self.gen_witness_rangecheck_bits(b, value, max_bits, cond_field);
+            OpCode::Rangecheck {
+                value: _,
+                max_bits: _,
+            } => {
+                panic!("guarded rangecheck should have been lowered by instruction_lowering");
             }
             inner => b.push(OpCode::Guard {
                 condition,
@@ -892,6 +736,10 @@ impl ExplicitWitness {
             let diff = b.sub(t, value);
             let zero = b.field_const(Field::ZERO);
             b.constrain(flag, diff, zero);
+            return;
+        }
+        if bits == 8 {
+            b.lookup_rngchk_8(value, flag);
             return;
         }
 
@@ -944,92 +792,6 @@ impl ExplicitWitness {
             let gap = b.sub(bound, top);
             b.lookup_rngchk_8(gap, flag);
         }
-    }
-
-    /// Field division with witnesses: q * b = a
-    fn gen_witness_field_div(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        a: ValueId,
-        divisor: ValueId,
-        l_taint: bool,
-        r_taint: bool,
-        result: ValueId,
-    ) {
-        if !l_taint && r_taint {
-            // Only rhs is witness: q = a / b is non-linear
-            let a_pure = b.value_of(a);
-            let b_pure = b.value_of(divisor);
-            let q_hint = b.div(a_pure, b_pure);
-            let q_hint_field = b.cast_to_field(q_hint);
-            b.push(OpCode::WriteWitness {
-                result: Some(result),
-                value: q_hint_field,
-                pinned: false,
-            });
-            b.constrain(result, divisor, a);
-        } else if l_taint && !r_taint {
-            // Only lhs is witness: q = a * (1/b) is linear, pass through
-            b.push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
-                result,
-                lhs: a,
-                rhs: divisor,
-            });
-        } else {
-            // Both witness: q * b = a
-            let a_pure = b.value_of(a);
-            let b_pure = b.value_of(divisor);
-            let q_hint = b.div(a_pure, b_pure);
-            let q_hint_field = b.cast_to_field(q_hint);
-            b.push(OpCode::WriteWitness {
-                result: Some(result),
-                value: q_hint_field,
-                pinned: false,
-            });
-            b.constrain(result, divisor, a);
-        }
-    }
-
-    fn gen_witness_field_div_guarded(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        a: ValueId,
-        divisor: ValueId,
-        l_taint: bool,
-        r_taint: bool,
-        cond_taint: bool,
-        cond_field: ValueId,
-        result: ValueId,
-    ) {
-        if l_taint && !r_taint {
-            b.push(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
-                result,
-                lhs: a,
-                rhs: divisor,
-            });
-            return;
-        }
-        let a_pure = if l_taint { b.value_of(a) } else { a };
-        let b_pure = b.value_of(divisor);
-        let q_hint = b.div(a_pure, b_pure);
-        let q_hint_field = b.cast_to_field(q_hint);
-        b.push(OpCode::WriteWitness {
-            result: Some(result),
-            value: q_hint_field,
-            pinned: false,
-        });
-        let a_gated = if l_taint && cond_taint {
-            let cond_pure = b.value_of(cond_field);
-            let a_gated_hint = b.mul(a_pure, cond_pure);
-            let a_gated_wit = b.write_witness(a_gated_hint);
-            b.constrain(a, cond_field, a_gated_wit);
-            a_gated_wit
-        } else {
-            b.mul(a, cond_field)
-        };
-        b.constrain(result, divisor, a_gated);
     }
 
     fn lower_wide_spread_lookup(
