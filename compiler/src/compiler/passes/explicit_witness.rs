@@ -727,6 +727,11 @@ impl ExplicitWitness {
         assert!(bits >= 1, "rangecheck width must be at least 1 bit");
 
         if bits == 1 {
+            let one = b.field_const(Field::ONE);
+            if flag == one {
+                b.constrain(value, value, value);
+                return;
+            }
             // Boolean check: flag * (value² - value) = 0
             // Split into: t = value * value (constrained), then flag * (t - value) = 0
             let v_plain = b.value_of(value);

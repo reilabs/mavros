@@ -236,7 +236,7 @@ impl LowerWitnessCompareOps {
         });
 
         let result_field = b.cast_to_field(result);
-        self.emit_rangecheck(b, guard, result_field, 1);
+        self.emit_rangecheck(b, None, result_field, 1);
 
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);

@@ -209,8 +209,6 @@ impl LowerWitnessFieldOps {
         if_t: ValueId,
         if_f: ValueId,
     ) {
-        let l_taint = context.types().get_value_type(if_t).is_witness_of();
-        let r_taint = context.types().get_value_type(if_f).is_witness_of();
         let l_type = context.types().get_value_type(if_t);
         let r_type = context.types().get_value_type(if_f);
         let l_field = if l_type.strip_witness().is_field() {
@@ -224,60 +222,25 @@ impl LowerWitnessFieldOps {
             b.cast_to_field(if_f)
         };
 
-        if !l_taint && !r_taint {
-            let l_sub_r = b.sub(l_field, r_field);
-            let cond_field = b.ensure_field(cond, context.types().get_value_type(cond));
-            let cond_times_diff = b.mul(l_sub_r, cond_field);
-            let result_type = context.types().get_value_type(result);
-            if result_type.strip_witness().is_field() {
-                b.emit(OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Add,
-                    result,
-                    lhs: cond_times_diff,
-                    rhs: r_field,
-                });
-            } else {
-                let selected = b.add(cond_times_diff, r_field);
-                b.emit(OpCode::Cast {
-                    result,
-                    value: selected,
-                    target: cast_target_for_integer_type(result_type),
-                });
-            }
-            return;
-        }
-
-        let cond_pure = b.value_of(cond);
-        let l_pure = if l_taint { b.value_of(if_t) } else { if_t };
-        let r_pure = if r_taint { b.value_of(if_f) } else { if_f };
-        let select_hint_value = b.select(cond_pure, l_pure, r_pure);
-        let is_field = l_type.strip_witness().is_field();
-        let select_hint = if is_field {
-            select_hint_value
-        } else {
-            b.cast_to_field(select_hint_value)
-        };
-
-        if is_field {
-            b.emit(OpCode::WriteWitness {
-                result: Some(result),
-                value: select_hint,
-                pinned: false,
+        let l_sub_r = b.sub(l_field, r_field);
+        let cond_field = b.ensure_field(cond, context.types().get_value_type(cond));
+        let cond_times_diff = b.mul(l_sub_r, cond_field);
+        let result_type = context.types().get_value_type(result);
+        if result_type.strip_witness().is_field() {
+            b.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result,
+                lhs: cond_times_diff,
+                rhs: r_field,
             });
         } else {
-            let ww_res = b.write_witness(select_hint);
+            let selected = b.add(cond_times_diff, r_field);
             b.emit(OpCode::Cast {
                 result,
-                value: ww_res,
-                target: cast_target_for_integer_type(l_type),
+                value: selected,
+                target: cast_target_for_integer_type(result_type),
             });
         }
-
-        let l_sub_r = b.sub(l_field, r_field);
-        let res_field = b.cast_to_field(result);
-        let res_sub_r = b.sub(res_field, r_field);
-        let cond_field = b.ensure_field(cond, context.types().get_value_type(cond));
-        b.constrain(cond_field, l_sub_r, res_sub_r);
     }
 
     fn lower_to_radix(
