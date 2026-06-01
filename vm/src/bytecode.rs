@@ -673,19 +673,11 @@ mod def {
     }
 
     #[opcode]
-    fn div_s64(
-        #[out] res: *mut u64,
-        #[frame] a: u64,
-        #[frame] b: u64,
-        bits: u64,
-        a_bits: u64,
-        b_bits: u64,
-    ) {
+    fn div_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let a_shift = 64 - a_bits;
-            let b_shift = 64 - b_bits;
-            let a = ((a << a_shift) as i64) >> a_shift;
-            let b = ((b << b_shift) as i64) >> b_shift;
+            let shift = 64 - bits;
+            let a = ((a << shift) as i64) >> shift;
+            let b = ((b << shift) as i64) >> shift;
             *res = (a / b) as u64
                 & if bits >= 64 {
                     u64::MAX
@@ -696,19 +688,11 @@ mod def {
     }
 
     #[opcode]
-    fn mod_s64(
-        #[out] res: *mut u64,
-        #[frame] a: u64,
-        #[frame] b: u64,
-        bits: u64,
-        a_bits: u64,
-        b_bits: u64,
-    ) {
+    fn mod_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let a_shift = 64 - a_bits;
-            let b_shift = 64 - b_bits;
-            let a = ((a << a_shift) as i64) >> a_shift;
-            let b = ((b << b_shift) as i64) >> b_shift;
+            let shift = 64 - bits;
+            let a = ((a << shift) as i64) >> shift;
+            let b = ((b << shift) as i64) >> shift;
             *res = (a % b) as u64
                 & if bits >= 64 {
                     u64::MAX

@@ -455,8 +455,6 @@ impl CodeGen {
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                             bits: *bits as u64,
-                            a_bits: *bits as u64,
-                            b_bits: *bits as u64,
                         });
                     }
                     TypeExpr::U(128) => {
@@ -493,8 +491,6 @@ impl CodeGen {
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                             bits: *bits as u64,
-                            a_bits: *bits as u64,
-                            b_bits: *bits as u64,
                         });
                     }
                     TypeExpr::U(128) => {
