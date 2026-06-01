@@ -13,7 +13,6 @@ use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo},
-        value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
@@ -36,11 +35,11 @@ impl Pass for ExplicitWitness {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id(), ValueRanges::id()]
+        vec![TypeInfo::id()]
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>(), store.get::<ValueRanges>());
+        self.do_run(ssa, store.get::<TypeInfo>());
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -53,12 +52,11 @@ impl ExplicitWitness {
         Self {}
     }
 
-    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo, value_ranges: &ValueRanges) {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
         let fids: Vec<_> = ssa.get_function_ids().collect();
         let mut sb = HLSSABuilder::new(ssa);
         for function_id in fids {
             let function_type_info = type_info.get_function(function_id);
-            let function_value_ranges = value_ranges.get_function(function_id);
             sb.modify_function(function_id, |fb| {
                 let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
                 for (bid, mut block) in fb.function.take_blocks().into_iter() {
@@ -66,12 +64,7 @@ impl ExplicitWitness {
                     for instruction in block.take_instructions().into_iter() {
                         let b =
                             &mut HLInstrBuilder::new(fb.function, fb.ssa, &mut new_instructions);
-                        self.process_instruction(
-                            b,
-                            function_type_info,
-                            function_value_ranges,
-                            instruction,
-                        );
+                        self.process_instruction(b, function_type_info, instruction);
                     }
                     block.put_instructions(new_instructions);
                     new_blocks.insert(bid, block);
@@ -85,7 +78,6 @@ impl ExplicitWitness {
         &self,
         b: &mut HLInstrBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
-        function_value_ranges: &FunctionValueRanges,
         instruction: OpCode,
     ) {
         match instruction {
@@ -454,33 +446,12 @@ impl ExplicitWitness {
                 b.push(instruction);
             }
             OpCode::SExt {
-                result,
-                value,
-                from_bits,
-                to_bits,
+                result: _,
+                value: _,
+                from_bits: _,
+                to_bits: _,
             } => {
-                let value_type = function_type_info.get_value_type(value);
-                assert!(
-                    !value_type.is_witness_of(),
-                    "witness sign-extension should have been lowered by instruction_lowering"
-                );
-                let one = b.field_const(Field::ONE);
-                let value_field = if value_type.is_field() {
-                    value
-                } else {
-                    b.cast_to_field(value)
-                };
-                let value_range = function_value_ranges.get(value);
-                self.gen_sext(
-                    b,
-                    value_field,
-                    from_bits,
-                    to_bits,
-                    one,
-                    false,
-                    result,
-                    &value_range,
-                );
+                panic!("SExt should have been lowered by instruction_lowering");
             }
             OpCode::Not { result, value } => {
                 b.push(OpCode::Not { result, value });
@@ -723,22 +694,12 @@ impl ExplicitWitness {
                 b.store(ptr, new_value);
             }
             OpCode::SExt {
-                result,
-                value,
-                from_bits,
-                to_bits,
+                result: _,
+                value: _,
+                from_bits: _,
+                to_bits: _,
             } => {
-                assert!(
-                    !function_type_info.get_value_type(value).is_witness_of(),
-                    "guarded witness sign-extension should have been lowered by \
-                     instruction_lowering"
-                );
-                b.push(OpCode::SExt {
-                    result,
-                    value,
-                    from_bits,
-                    to_bits,
-                });
+                panic!("guarded SExt should have been lowered by instruction_lowering");
             }
             OpCode::BinaryArithOp {
                 kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
@@ -983,120 +944,6 @@ impl ExplicitWitness {
             let gap = b.sub(bound, top);
             b.lookup_rngchk_8(gap, flag);
         }
-    }
-
-    /// Extract the sign bit (MSB) of an n-bit value.
-    /// Requires: `value` is already rangechecked to n bits.
-    /// Returns: sign ∈ {0,1} such that value = sign * 2^(n-1) + low, low ∈ [0, 2^(n-1)).
-    ///
-    /// `value_range` is the analyzer's bound on the underlying integer; if it
-    /// proves the sign bit is 0 (i.e. value ∈ [0, 2^(n-1))), this short-circuits
-    /// to the field constant 0 and emits no witness, rangecheck, or constraint.
-    ///
-    /// For witness inputs: writes sign as a witness with a boolean check, then
-    /// computes low = value - sign * 2^(n-1) and rangechecks low ∈ [0, 2^(n-1))
-    /// directly via `gen_witness_rangecheck_bits`. For byte-aligned `bits` this
-    /// costs `bits/8 + 1` lookups (e.g. n=64 → 9, n=32 → 5, n=16 → 3).
-    ///
-    /// For pure inputs: computes sign as a pure hint (no witnesses or constraints).
-    fn extract_sign_bit(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        bits: usize,
-        flag: ValueId,
-        is_witness: bool,
-        value_range: &IntInterval,
-    ) -> ValueId {
-        if value_range.is_non_negative_in_signed(bits) {
-            return b.field_const(Field::ZERO);
-        }
-
-        let two_n_minus_1 = b.field_const(Field::from(1u128 << (bits - 1)));
-        let pure_val = if is_witness { b.value_of(value) } else { value };
-        let low_hint = self.pure_low_bits_hint(b, pure_val, bits - 1);
-        let high_hint = b.sub(pure_val, low_hint);
-        let sign_hint = b.div(high_hint, two_n_minus_1);
-
-        if !is_witness {
-            return sign_hint;
-        }
-
-        let sign_wit = b.write_witness(sign_hint);
-
-        // sign ∈ {0, 1}
-        self.gen_witness_rangecheck_bits(b, sign_wit, 1, flag);
-
-        // Compute low = value - sign * 2^(n-1) (saves 1 witness + 1 constraint)
-        let sign_shifted = b.mul(sign_wit, two_n_minus_1);
-        let low = b.sub(value, sign_shifted);
-
-        // low ∈ [0, 2^(n-1)) — proves the sign bit is correctly extracted.
-        // For byte-aligned `bits`, this is bits/8 lookups for low's bytes plus
-        // 1 lookup of (127 - top_byte) to constrain the top byte to 7 bits.
-        self.gen_witness_rangecheck_bits(b, low, bits - 1, flag);
-
-        sign_wit
-    }
-
-    fn pure_low_bits_hint(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        bits: usize,
-    ) -> ValueId {
-        if bits == 0 {
-            return b.field_const(Field::ZERO);
-        }
-
-        let full_bytes = bits / 8;
-        let partial_bits = bits % 8;
-        let byte_count = full_bytes + usize::from(partial_bits > 0);
-        let bytes = b.to_radix(value, Radix::Bytes, Endianness::Big, byte_count);
-        let two_to_8 = b.field_const(Field::from(256u128));
-        let mut result = b.field_const(Field::ZERO);
-
-        for i in 0..byte_count {
-            let idx = b.u_const(32, i as u128);
-            let mut byte = b.array_get(bytes, idx);
-            if i == 0 && partial_bits > 0 {
-                let mask = b.u_const(8, (1u128 << partial_bits) - 1);
-                byte = b.and(byte, mask);
-            }
-            let byte_field = b.cast_to_field(byte);
-            let shifted = b.mul(result, two_to_8);
-            result = b.add(shifted, byte_field);
-        }
-
-        result
-    }
-
-    /// Sign-extend a value from `from_bits` to `to_bits`.
-    ///
-    /// result = value + sign_bit * (2^to_bits - 2^from_bits)
-    fn gen_sext(
-        &self,
-        b: &mut HLInstrBuilder<'_>,
-        value: ValueId,
-        from_bits: usize,
-        to_bits: usize,
-        flag: ValueId,
-        is_witness: bool,
-        result: ValueId,
-        value_range: &IntInterval,
-    ) {
-        let sign_bit = self.extract_sign_bit(b, value, from_bits, flag, is_witness, value_range);
-        let extension =
-            b.field_const(Field::from(1u128 << to_bits) - Field::from(1u128 << from_bits));
-        let offset = b.mul(sign_bit, extension);
-        let extended = b.add(value, offset);
-
-        // Cast back to target integer type
-        b.push(OpCode::Cast {
-            result,
-            value: extended,
-            target: CastTarget::I(to_bits),
-        });
     }
 
     /// Field division with witnesses: q * b = a
