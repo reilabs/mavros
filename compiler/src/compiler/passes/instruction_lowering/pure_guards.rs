@@ -12,8 +12,8 @@
 //!   !cond and produce default; else array_get.
 //! - **Lower with OOB check + passthrough** (RC-tracked allocation): ArraySet — if OOB, assert
 //!   !cond and pass through array; else array_set.
-//! - **Lower with overflow check** (pure inputs only, can fail): Integer Add/Sub/Mul — widen,
-//!   compute, if overflow assert !cond and produce 0; else narrow.
+//! - **Lower with overflow check** (pure inputs only, can fail): Integer Add/Sub/Mul — compute,
+//!   check overflow with native-width predicates, if overflow assert !cond and produce 0.
 //! - **Lower with shift check** (pure inputs only, can fail): Integer Shl/Shr — validate shift
 //!   amount before shifting; Shl also checks overflow so we fail there too.
 //! - **Lower with div-zero check** (pure inputs only, can fail): Div/Mod — if divisor==0 assert
@@ -257,8 +257,8 @@ impl LowerPureGuards {
 
     /// Lower `Guard(cond, arith_op(lhs, rhs) -> result)` for integer overflow.
     ///
-    /// Widens to double-width, performs the op, checks if it fits in the original width.
-    /// On overflow: constrains !cond, produces a default 0.
+    /// Computes at the original width, checks overflow with native-width predicates, and on
+    /// overflow constrains !cond and produces a default 0.
     fn lower_overflow_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -273,118 +273,36 @@ impl LowerPureGuards {
         if signed && bits > 64 {
             panic!("signed integers wider than i64 are unsupported");
         }
-        if !signed && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
-            self.lower_unsigned_add_sub_guard(
-                emitter,
-                condition,
-                kind,
-                original_result,
-                lhs,
-                rhs,
-                bits,
-            );
-            return;
-        }
-        if signed && bits == 64 && matches!(kind, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) {
-            self.lower_signed_add_sub_guard_native_width(
-                emitter,
-                condition,
-                kind,
-                original_result,
-                lhs,
-                rhs,
-                bits,
-            );
-            return;
-        }
-        if signed && bits == 64 && matches!(kind, BinaryArithOpKind::Mul) {
-            self.lower_signed_mul_guard_native_width(
-                emitter,
-                condition,
-                original_result,
-                lhs,
-                rhs,
-                bits,
-            );
-            return;
-        }
-        if !signed && bits == 128 && matches!(kind, BinaryArithOpKind::Mul) {
-            self.lower_unsigned_mul_guard_native_width(
-                emitter,
-                condition,
-                original_result,
-                lhs,
-                rhs,
-                bits,
-            );
-            return;
-        }
-        let wide_bits = wider_bits(bits);
 
-        // Widen operands
-        let wide_target = if signed {
-            CastTarget::I(wide_bits)
-        } else {
-            CastTarget::U(wide_bits)
-        };
-        let lhs_wide = emitter.cast_to(wide_target, lhs);
-        let rhs_wide = emitter.cast_to(wide_target, rhs);
-
-        // Perform the op in wider type
-        let wide_result = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind,
-            result: wide_result,
-            lhs: lhs_wide,
-            rhs: rhs_wide,
-        });
-
-        // Check overflow: does the result fit in the original type?
-        let overflow = if signed {
-            // Signed: check result < -(2^(bits-1)) || result >= 2^(bits-1)
-            let min_val = emitter.i_const(wide_bits, (-(1i128 << (bits - 1))) as u128);
-            let max_val = emitter.i_const(wide_bits, 1u128 << (bits - 1));
-            let too_low = emitter.lt(wide_result, min_val);
-            let too_high = emitter.cmp(
-                max_val,
-                wide_result,
-                crate::compiler::ssa::hlssa::CmpKind::Lt,
-            );
-            emitter.or(too_low, too_high)
-        } else {
-            // Unsigned: check result >= 2^bits
-            let max_val = emitter.u_const(wide_bits, 1u128 << bits);
-            let fits = emitter.lt(wide_result, max_val);
-            emitter.not(fits)
-        };
-
-        let result_type = if signed {
-            Type {
-                expr: TypeExpr::I(bits),
+        match (signed, kind) {
+            (false, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) => self
+                .lower_unsigned_add_sub_guard(
+                    emitter,
+                    condition,
+                    kind,
+                    original_result,
+                    lhs,
+                    rhs,
+                    bits,
+                ),
+            (false, BinaryArithOpKind::Mul) => {
+                self.lower_unsigned_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
             }
-        } else {
-            Type {
-                expr: TypeExpr::U(bits),
+            (true, BinaryArithOpKind::Add | BinaryArithOpKind::Sub) => self
+                .lower_signed_add_sub_guard(
+                    emitter,
+                    condition,
+                    kind,
+                    original_result,
+                    lhs,
+                    rhs,
+                    bits,
+                ),
+            (true, BinaryArithOpKind::Mul) => {
+                self.lower_signed_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
             }
-        };
-
-        self.emit_guarded_branch(
-            emitter,
-            condition,
-            overflow,
-            original_result,
-            &result_type,
-            |e| {
-                let narrow_target = if signed {
-                    CastTarget::I(bits)
-                } else {
-                    CastTarget::U(bits)
-                };
-                e.cast_to(narrow_target, wide_result)
-            },
-            signed,
-            bits,
-        );
+            _ => unreachable!("lower_overflow_guard called for {:?}", kind),
+        }
     }
 
     fn lower_unsigned_add_sub_guard(
@@ -427,7 +345,7 @@ impl LowerPureGuards {
         );
     }
 
-    fn lower_signed_add_sub_guard_native_width(
+    fn lower_signed_add_sub_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -458,7 +376,7 @@ impl LowerPureGuards {
         let overflow = match kind {
             BinaryArithOpKind::Add => emitter.and(signs_same, sign_l_xor_result),
             BinaryArithOpKind::Sub => emitter.and(signs_differ, sign_l_xor_result),
-            _ => unreachable!("native signed add/sub guard called for {:?}", kind),
+            _ => unreachable!("signed add/sub guard called for {:?}", kind),
         };
 
         self.emit_guarded_branch(
@@ -473,7 +391,7 @@ impl LowerPureGuards {
         );
     }
 
-    fn lower_unsigned_mul_guard_native_width(
+    fn lower_unsigned_mul_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -505,7 +423,7 @@ impl LowerPureGuards {
         );
     }
 
-    fn lower_signed_mul_guard_native_width(
+    fn lower_signed_mul_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
@@ -955,17 +873,6 @@ impl LowerPureGuards {
         } else {
             emitter.u_const(bits, 0)
         }
-    }
-}
-
-/// Pick the next wider integer size that can hold overflow results.
-fn wider_bits(bits: usize) -> usize {
-    match bits {
-        1..=8 => 16,
-        9..=16 => 32,
-        17..=32 => 64,
-        33..=64 => 128,
-        _ => bits * 2,
     }
 }
 
