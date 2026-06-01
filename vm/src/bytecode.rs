@@ -870,9 +870,12 @@ mod def {
     }
 
     #[opcode]
-    fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            *res = ((a as i64) < (b as i64)) as u64;
+            let shift = 64 - bits;
+            let a = ((a << shift) as i64) >> shift;
+            let b = ((b << shift) as i64) >> shift;
+            *res = (a < b) as u64;
         }
     }
 

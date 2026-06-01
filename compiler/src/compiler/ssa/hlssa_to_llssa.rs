@@ -819,30 +819,33 @@ fn lower_instruction(
             let ll_lhs = val_map[lhs];
             let ll_rhs = val_map[rhs];
             let lhs_type = fn_type_info.get_value_type(*lhs);
+            let rhs_type = fn_type_info.get_value_type(*rhs);
+            let lhs_stripped = lhs_type.strip_witness();
+            let rhs_stripped = rhs_type.strip_witness();
 
-            let ll_result = match &lhs_type.strip_witness().expr {
-                HLTypeExpr::U(_) => {
-                    let op = match kind {
-                        CmpKind::Lt => IntCmpOp::ULt,
-                        CmpKind::Eq => IntCmpOp::Eq,
-                    };
-                    e.int_cmp(op, ll_lhs, ll_rhs)
+            let ll_result = match (kind, &lhs_stripped.expr, &rhs_stripped.expr) {
+                (CmpKind::Eq, HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits))
+                    if lhs_bits == rhs_bits =>
+                {
+                    e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                 }
-                HLTypeExpr::I(bits) => {
-                    assert!(
-                        *bits <= 64,
-                        "signed integers wider than i64 are unsupported"
-                    );
-                    match kind {
-                        CmpKind::Eq => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
-                        CmpKind::Lt => e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs),
-                    }
+                (CmpKind::Lt, HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits))
+                    if lhs_bits == rhs_bits =>
+                {
+                    e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs)
                 }
-                HLTypeExpr::Field => match kind {
-                    CmpKind::Eq => e.field_eq(ll_lhs, ll_rhs),
-                    _ => panic!("Unsupported field comparison: {:?}", kind),
-                },
-                _ => panic!("Unsupported type for Cmp in lowering: {:?}", lhs_type),
+                (CmpKind::Eq, HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
+                    if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                {
+                    e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
+                }
+                (CmpKind::Lt, HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
+                    if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                {
+                    e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
+                }
+                (CmpKind::Eq, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
+                _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
             };
             val_map.insert(*result, ll_result);
         }
@@ -1182,36 +1185,31 @@ fn lower_instruction(
             let ll_lhs = val_map[lhs];
             let ll_rhs = val_map[rhs];
             let lhs_type = fn_type_info.get_value_type(*lhs);
+            let rhs_type = fn_type_info.get_value_type(*rhs);
 
             let cmp_result = match kind {
-                CmpKind::Eq => match &lhs_type.expr {
-                    HLTypeExpr::Field => e.field_eq(ll_lhs, ll_rhs),
-                    HLTypeExpr::U(_) => e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs),
-                    HLTypeExpr::I(bits) => {
-                        assert!(
-                            *bits <= 64,
-                            "signed integers wider than i64 are unsupported"
-                        );
+                CmpKind::Eq => match (&lhs_type.expr, &rhs_type.expr) {
+                    (HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
+                    (HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits)) if lhs_bits == rhs_bits => {
                         e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                     }
-                    _ => panic!(
-                        "Unsupported type for AssertCmp Eq in HLSSA->LLSSA lowering: {:?}",
-                        lhs_type
-                    ),
+                    (HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
+                        if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                    {
+                        e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
+                    }
+                    _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                 },
-                CmpKind::Lt => match &lhs_type.expr {
-                    HLTypeExpr::U(_) => e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs),
-                    HLTypeExpr::I(bits) => {
-                        assert!(
-                            *bits <= 64,
-                            "signed integers wider than i64 are unsupported"
-                        );
+                CmpKind::Lt => match (&lhs_type.expr, &rhs_type.expr) {
+                    (HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits)) if lhs_bits == rhs_bits => {
+                        e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs)
+                    }
+                    (HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
+                        if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                    {
                         e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
                     }
-                    _ => panic!(
-                        "Unsupported type for AssertCmp Lt in HLSSA->LLSSA lowering: {:?}",
-                        lhs_type
-                    ),
+                    _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                 },
             };
 
