@@ -6,7 +6,7 @@ pub mod type_system;
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 
-use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, SSAConstants, ValueId};
 pub use type_system::Type;
 
 // Re-export DMatrix for use by other LLSSA modules.
@@ -17,33 +17,30 @@ pub use super::hlssa::DMatrix;
 
 /// The low-level SSA exposes runtime details: explicit struct layouts, pointer arithmetic,
 /// integer/field arithmetic split, and explicit memory management.
-pub type LLSSA = SSA<LLOp, Type, Constants>;
+pub type LLSSA = SSA<LLOp, Type, Constant>;
 
 // CONSTANT STORAGE
 // ================================================================================================
 
 /// The value type stored in the low-level SSA's constants table.
 ///
-/// Currently a unit placeholder while constants still live inline as `LLOp::IntConst` /
-/// `LLOp::NullPtr` instructions; future work is planned to move the constant data into this table
-/// for use by the LLVM backend and other LLSSA clients.
-pub type Constants = ();
+/// LLSSA constants are scalar leaves: integers of a given bit width and the null pointer. Aggregate
+/// constants (e.g. the four-limb field element struct) remain as `LLOp::MkStruct` instructions for
+/// now, but this will be changed in subsequent work (#184).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Constant {
+    Int { bits: u32, value: u64 },
+    NullPtr,
+}
+
+/// The constants table type for LLSSA.
+pub type LLSSAConstants = SSAConstants<Constant>;
 
 // LLSSA OPCODES
 // ================================================================================================
 
 #[derive(Clone, Debug)]
 pub enum LLOp {
-    // ── Constants ────────────────────────────────────────────────────────
-    IntConst {
-        result: ValueId,
-        bits: u32,
-        value: u64,
-    },
-    NullPtr {
-        result: ValueId,
-    },
-
     // ── Integer Arithmetic ──────────────────────────────────────────────
     IntArith {
         kind: IntArithOp,
@@ -198,10 +195,8 @@ pub enum LLOp {
 impl Instruction for LLOp {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
-            // No inputs (constants / traps / etc.)
-            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
-                vec![].into_iter()
-            }
+            // No inputs (globals / traps / etc.)
+            LLOp::GlobalAddr { .. } | LLOp::Trap => vec![].into_iter(),
 
             // Unary
             LLOp::Not { value, .. }
@@ -253,9 +248,7 @@ impl Instruction for LLOp {
     fn get_results(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             // Single result
-            LLOp::IntConst { result, .. }
-            | LLOp::NullPtr { result }
-            | LLOp::IntArith { result, .. }
+            LLOp::IntArith { result, .. }
             | LLOp::Not { result, .. }
             | LLOp::Spread { result, .. }
             | LLOp::IntCmp { result, .. }
@@ -293,9 +286,7 @@ impl Instruction for LLOp {
 
     fn get_results_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
-            LLOp::IntConst { result, .. }
-            | LLOp::NullPtr { result }
-            | LLOp::IntArith { result, .. }
+            LLOp::IntArith { result, .. }
             | LLOp::Not { result, .. }
             | LLOp::Spread { result, .. }
             | LLOp::IntCmp { result, .. }
@@ -330,9 +321,7 @@ impl Instruction for LLOp {
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             // No inputs
-            LLOp::IntConst { .. } | LLOp::NullPtr { .. } | LLOp::GlobalAddr { .. } | LLOp::Trap => {
-                vec![].into_iter()
-            }
+            LLOp::GlobalAddr { .. } | LLOp::Trap => vec![].into_iter(),
 
             // Unary
             LLOp::Not { value, .. }
@@ -385,9 +374,7 @@ impl Instruction for LLOp {
 
     fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
-            LLOp::IntConst { result, .. }
-            | LLOp::NullPtr { result }
-            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
 
@@ -477,16 +464,6 @@ impl Instruction for LLOp {
         let v = |id: ValueId| format!("v{}{}", id.0, annotate_value(id));
         let vr = |id: ValueId| format!("v{}", id.0); // raw, no annotation (for inputs)
         match self {
-            LLOp::IntConst {
-                result,
-                bits,
-                value,
-            } => {
-                format!("{} = int_const i{} {}", v(*result), bits, value)
-            }
-            LLOp::NullPtr { result } => {
-                format!("{} = null_ptr", v(*result))
-            }
             LLOp::IntArith { kind, result, a, b } => {
                 format!("{} = {} {}, {}", v(*result), kind, vr(*a), vr(*b))
             }
@@ -1174,15 +1151,16 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let x = e.int_const(64, 42);
-            let y = e.int_const(64, 7);
+            let x = e.emit_int_const(64, 42);
+            let y = e.emit_int_const(64, 7);
             let z = e.int_add(x, y);
             e.terminate_return(vec![z]);
         });
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
-        assert!(dump.contains("int_const i64 42"));
-        assert!(dump.contains("int_const i64 7"));
+        assert!(dump.contains("constants:"));
+        assert!(dump.contains("Int { bits: 64, value: 42 }"));
+        assert!(dump.contains("Int { bits: 64, value: 7 }"));
         assert!(dump.contains("add"));
         assert!(dump.contains("return"));
     }
@@ -1203,10 +1181,10 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let l0 = e.int_const(64, 1);
-            let l1 = e.int_const(64, 0);
-            let l2 = e.int_const(64, 0);
-            let l3 = e.int_const(64, 0);
+            let l0 = e.emit_int_const(64, 1);
+            let l1 = e.emit_int_const(64, 0);
+            let l2 = e.emit_int_const(64, 0);
+            let l3 = e.emit_int_const(64, 0);
             let s = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
             let f0 = e.extract_field(s, field_elem, 0);
             e.terminate_return(vec![f0, s]);
@@ -1241,11 +1219,11 @@ mod tests {
             let arr = e.heap_alloc(rc_array.clone(), None);
             let rc_ptr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_word = e.struct_field_ptr(rc_ptr, rc_header, 0);
-            let one = e.int_const(64, 1);
+            let one = e.emit_int_const(64, 1);
             e.ll_store(rc_word, one);
 
             let data = e.struct_field_ptr(arr, rc_array, 1);
-            let idx = e.int_const(64, 0);
+            let idx = e.emit_int_const(64, 0);
             let elem_ptr = e.array_elem_ptr(data, field_elem, idx);
             let loaded = e.ll_load(elem_ptr, Type::i64());
             e.free(arr);
@@ -1270,8 +1248,8 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let a = e.int_const(64, 1);
-            let b = e.int_const(64, 2);
+            let a = e.emit_int_const(64, 1);
+            let b = e.emit_int_const(64, 2);
             let results = e.call(helper_id, vec![a, b], 1);
             let cond = e.int_eq(results[0], a);
             let selected = e.select(cond, a, b);
@@ -1300,10 +1278,10 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let l0 = e.int_const(64, 1);
-            let l1 = e.int_const(64, 0);
-            let l2 = e.int_const(64, 0);
-            let l3 = e.int_const(64, 0);
+            let l0 = e.emit_int_const(64, 1);
+            let l1 = e.emit_int_const(64, 0);
+            let l2 = e.emit_int_const(64, 0);
+            let l3 = e.emit_int_const(64, 0);
             let a = e.mk_struct(field_elem.clone(), vec![l0, l1, l2, l3]);
             let b = e.mk_struct(field_elem, vec![l0, l1, l2, l3]);
 
@@ -1331,7 +1309,7 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let x = e.int_const(64, 256);
+            let x = e.emit_int_const(64, 256);
             let narrow = e.truncate(x, 8);
             let wide = e.zext(narrow, 64);
             let gp = e.global_addr(3);
@@ -1359,19 +1337,19 @@ mod tests {
 
             {
                 let mut e = fb.block(entry);
-                let x = e.int_const(64, 42);
-                let zero = e.int_const(64, 0);
+                let x = e.emit_int_const(64, 42);
+                let zero = e.emit_int_const(64, 0);
                 let cond = e.int_eq(x, zero);
                 e.terminate_jmp_if(cond, then_blk, else_blk);
             }
             {
                 let mut e = fb.block(then_blk);
-                let one = e.int_const(64, 1);
+                let one = e.emit_int_const(64, 1);
                 e.terminate_jmp(merge_blk, vec![one]);
             }
             {
                 let mut e = fb.block(else_blk);
-                let two = e.int_const(64, 2);
+                let two = e.emit_int_const(64, 2);
                 e.terminate_jmp(merge_blk, vec![two]);
             }
 
@@ -1394,9 +1372,9 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let dst = e.null_ptr();
-            let src = e.null_ptr();
-            let count = e.int_const(64, 10);
+            let dst = e.emit_nullptr_const();
+            let src = e.emit_nullptr_const();
+            let count = e.emit_int_const(64, 10);
             e.memcpy(dst, src, elem, Some(count));
             e.terminate_return(vec![]);
         });

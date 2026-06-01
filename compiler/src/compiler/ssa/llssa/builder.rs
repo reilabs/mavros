@@ -2,7 +2,7 @@ use crate::compiler::ssa::{
     FunctionId, ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::DMatrix,
-    llssa::{Constants, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, Type},
+    llssa::{Constant, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, Type},
 };
 
 // ---------------------------------------------------------------------------
@@ -13,23 +13,16 @@ pub trait LLEmitter {
     fn fresh_value(&mut self) -> ValueId;
     fn emit_ll(&mut self, op: LLOp);
     fn vm_ptr(&mut self) -> ValueId;
+    fn emit_constant(&mut self, value: Constant) -> ValueId;
 
-    // -- Constants --
+    // -- Constant --
 
-    fn int_const(&mut self, bits: u32, value: u64) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::IntConst {
-            result: r,
-            bits,
-            value,
-        });
-        r
+    fn emit_int_const(&mut self, bits: u32, value: u64) -> ValueId {
+        self.emit_constant(Constant::Int { bits, value })
     }
 
-    fn null_ptr(&mut self) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::NullPtr { result: r });
-        r
+    fn emit_nullptr_const(&mut self) -> ValueId {
+        self.emit_constant(Constant::NullPtr)
     }
 
     // -- Integer Arithmetic --
@@ -326,7 +319,7 @@ pub trait LLEmitter {
         let coeffs_slot = self.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS);
         let coeffs = self.ll_load(coeffs_slot, Type::Ptr);
         let value = self.ll_load(coeffs, Type::Struct(LLStruct::field_elem()));
-        let one = self.int_const(32, 1);
+        let one = self.emit_int_const(32, 1);
         let next_coeffs = self.array_elem_ptr(coeffs, LLStruct::field_elem(), one);
         self.ll_store(coeffs_slot, next_coeffs);
         value
@@ -353,7 +346,7 @@ pub trait LLEmitter {
     fn ad_fresh_witness(&mut self) -> ValueId {
         let slot = self.ad_vm_field_ptr(LLStruct::AD_VM_CURRENT_WIT_OFF);
         let index = self.ll_load(slot, Type::i32());
-        let one = self.int_const(32, 1);
+        let one = self.emit_int_const(32, 1);
         let next = self.int_add(index, one);
         self.ll_store(slot, next);
         index
@@ -375,7 +368,7 @@ pub trait LLEmitter {
         let cursor_slot = self.witgen_vm_field_ptr(cursor_field);
         let cursor = self.ll_load(cursor_slot, Type::Ptr);
         self.ll_store(cursor, value);
-        let one = self.int_const(32, 1);
+        let one = self.emit_int_const(32, 1);
         let next = self.array_elem_ptr(cursor, LLStruct::field_elem(), one);
         self.ll_store(cursor_slot, next);
     }
@@ -393,10 +386,10 @@ fn ad_out_field(matrix: DMatrix) -> usize {
 // Type aliases
 // ---------------------------------------------------------------------------
 
-pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, Type, Constants>;
-pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, Type, Constants>;
-pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type, Constants>;
-pub type LLSSABuilder<'a> = SSABuilder<'a, LLOp, Type, Constants>;
+pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, Type, Constant>;
+pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, Type, Constant>;
+pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type, Constant>;
+pub type LLSSABuilder<'a> = SSABuilder<'a, LLOp, Type, Constant>;
 
 // ---------------------------------------------------------------------------
 // LLEmitter impls
@@ -418,6 +411,10 @@ impl LLEmitter for LLInstrBuilder<'_> {
             .next()
             .expect("LLSSA functions must have a VM pointer entry parameter")
             .0
+    }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
     }
 }
 
@@ -446,6 +443,10 @@ impl LLEmitter for LLBlockEmitter<'_> {
                 .0
         }
     }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
 }
 
 impl LLBlockEmitter<'_> {
@@ -458,9 +459,9 @@ impl LLBlockEmitter<'_> {
         accumulators: Vec<(ValueId, Type)>,
         body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
-        let const_0 = self.int_const(64, 0);
-        let const_1 = self.int_const(64, 1);
-        let const_len = self.int_const(64, count as u64);
+        let const_0 = self.emit_int_const(64, 0);
+        let const_1 = self.emit_int_const(64, 1);
+        let const_len = self.emit_int_const(64, count as u64);
 
         let mut params = vec![(const_0, Type::i64())];
         params.extend(accumulators);
