@@ -69,7 +69,7 @@ enum LookupAssertionTarget {
     Spread(u8),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Config {
     deduplicate_lookups: bool,
 }
@@ -78,6 +78,12 @@ impl Config {
     pub fn pre_r1c() -> Self {
         Self {
             deduplicate_lookups: true,
+        }
+    }
+
+    pub fn post_r1c() -> Self {
+        Self {
+            deduplicate_lookups: false,
         }
     }
 }
@@ -316,18 +322,16 @@ impl Pass for CSE {
 }
 
 impl CSE {
-    pub fn new() -> Self {
-        Self {
-            config: Config::default(),
-        }
-    }
-
     pub fn with_config(config: Config) -> Self {
         Self { config }
     }
 
     pub fn pre_r1c() -> Self {
         Self::with_config(Config::pre_r1c())
+    }
+
+    pub fn post_r1c() -> Self {
+        Self::with_config(Config::post_r1c())
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
