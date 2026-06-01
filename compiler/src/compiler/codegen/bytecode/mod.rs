@@ -377,13 +377,10 @@ impl CodeGen {
                     }
                     TypeExpr::U(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::AddIntWide {
+                        emitter.push_op(bytecode::OpCode::AddU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            bits: 128,
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     TypeExpr::WitnessOf(_) => {
@@ -421,13 +418,10 @@ impl CodeGen {
                     }
                     TypeExpr::U(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::SubIntWide {
+                        emitter.push_op(bytecode::OpCode::SubU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            bits: 128,
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for subtraction: {:?}", t),
@@ -471,9 +465,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            bits: 128,
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for division: {:?}", t),
@@ -512,9 +503,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            bits: 128,
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for modulo: {:?}", t),
@@ -544,13 +532,10 @@ impl CodeGen {
                     }
                     TypeExpr::U(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::MulIntWide {
+                        emitter.push_op(bytecode::OpCode::MulU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            bits: 128,
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for multiplication: {:?}", t),
@@ -578,8 +563,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for bitwise and: {:?}", t),
@@ -604,8 +587,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for bitwise or: {:?}", t),
@@ -630,8 +611,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for bitwise xor: {:?}", t),
@@ -657,9 +636,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            bits: 128,
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for shift left: {:?}", t),
@@ -684,8 +660,6 @@ impl CodeGen {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
-                            a_bits: 128,
-                            b_bits: 128,
                         });
                     }
                     t => panic!("Unsupported type for shift right: {:?}", t),
@@ -731,18 +705,15 @@ impl CodeGen {
                                 b: layouter.get_value(*op2),
                             });
                         }
-                        (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits) | TypeExpr::I(rhs_bits))
-                            if (*lhs_bits <= 64 || *lhs_bits == 128)
-                                && (*rhs_bits <= 64 || *rhs_bits == 128)
-                                && (*lhs_bits == 128 || *rhs_bits == 128) =>
-                        {
+                        (TypeExpr::U(128), TypeExpr::U(128)) => {
                             emitter.push_op(bytecode::OpCode::LtU128 {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
-                                a_bits: *lhs_bits as u64,
-                                b_bits: *rhs_bits as u64,
                             });
+                        }
+                        (TypeExpr::U(128), _) | (_, TypeExpr::U(128)) => {
+                            panic!("Unsupported mixed-width u128 less-than comparison")
                         }
                         (TypeExpr::Field, _) => emitter.push_op(bytecode::OpCode::LtU64 {
                             res: result,
@@ -787,40 +758,15 @@ impl CodeGen {
                                     b: layouter.get_value(*op2),
                                 });
                             }
-                            (
-                                TypeExpr::U(lhs_bits) | TypeExpr::I(lhs_bits),
-                                TypeExpr::U(rhs_bits),
-                            ) if *lhs_bits <= 64 && *rhs_bits == 128 => {
+                            (TypeExpr::U(128), TypeExpr::U(128)) => {
                                 emitter.push_op(bytecode::OpCode::EqU128 {
                                     res: result,
                                     a: layouter.get_value(*op1),
                                     b: layouter.get_value(*op2),
-                                    a_bits: *lhs_bits as u64,
-                                    b_bits: *rhs_bits as u64,
                                 });
                             }
-                            (
-                                TypeExpr::U(lhs_bits),
-                                TypeExpr::U(rhs_bits) | TypeExpr::I(rhs_bits),
-                            ) if *lhs_bits == 128 && *rhs_bits <= 64 => {
-                                emitter.push_op(bytecode::OpCode::EqU128 {
-                                    res: result,
-                                    a: layouter.get_value(*op1),
-                                    b: layouter.get_value(*op2),
-                                    a_bits: *lhs_bits as u64,
-                                    b_bits: *rhs_bits as u64,
-                                });
-                            }
-                            (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
-                                if *lhs_bits == 128 && *rhs_bits == 128 =>
-                            {
-                                emitter.push_op(bytecode::OpCode::EqU128 {
-                                    res: result,
-                                    a: layouter.get_value(*op1),
-                                    b: layouter.get_value(*op2),
-                                    a_bits: 128,
-                                    b_bits: 128,
-                                });
+                            (TypeExpr::U(128), _) | (_, TypeExpr::U(128)) => {
+                                panic!("Unsupported mixed-width u128 equality comparison")
                             }
                             (TypeExpr::U(bits), _) | (_, TypeExpr::U(bits)) => {
                                 panic!("Unsupported unsigned integer width: u{bits}")
@@ -987,7 +933,6 @@ impl CodeGen {
                             emitter.push_op(bytecode::OpCode::NotU128 {
                                 res: result,
                                 a: layouter.get_value(*v),
-                                bits: 128,
                             });
                         }
                         t => panic!("Unsupported type for not: {:?}", t),
@@ -1237,37 +1182,14 @@ impl CodeGen {
                                             b: layouter.get_value(*rhs),
                                         });
                                     }
-                                    (
-                                        TypeExpr::U(lhs_bits) | TypeExpr::I(lhs_bits),
-                                        TypeExpr::U(rhs_bits),
-                                    ) if *lhs_bits <= 64 && *rhs_bits == 128 => {
+                                    (TypeExpr::U(128), TypeExpr::U(128)) => {
                                         emitter.push_op(bytecode::OpCode::AssertEqU128 {
                                             a: layouter.get_value(*lhs),
                                             b: layouter.get_value(*rhs),
-                                            a_bits: *lhs_bits as u64,
-                                            b_bits: *rhs_bits as u64,
                                         });
                                     }
-                                    (
-                                        TypeExpr::U(lhs_bits),
-                                        TypeExpr::U(rhs_bits) | TypeExpr::I(rhs_bits),
-                                    ) if *lhs_bits == 128 && *rhs_bits <= 64 => {
-                                        emitter.push_op(bytecode::OpCode::AssertEqU128 {
-                                            a: layouter.get_value(*lhs),
-                                            b: layouter.get_value(*rhs),
-                                            a_bits: *lhs_bits as u64,
-                                            b_bits: *rhs_bits as u64,
-                                        });
-                                    }
-                                    (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
-                                        if *lhs_bits == 128 && *rhs_bits == 128 =>
-                                    {
-                                        emitter.push_op(bytecode::OpCode::AssertEqU128 {
-                                            a: layouter.get_value(*lhs),
-                                            b: layouter.get_value(*rhs),
-                                            a_bits: 128,
-                                            b_bits: 128,
-                                        });
+                                    (TypeExpr::U(128), _) | (_, TypeExpr::U(128)) => {
+                                        panic!("Unsupported mixed-width u128 equality assertion")
                                     }
                                     (TypeExpr::U(bits), _) | (_, TypeExpr::U(bits)) => {
                                         panic!("Unsupported unsigned integer width: u{bits}")
@@ -1315,20 +1237,15 @@ impl CodeGen {
                                     b: layouter.get_value(*rhs),
                                 });
                             }
-                            (
-                                TypeExpr::U(lhs_bits),
-                                TypeExpr::U(rhs_bits) | TypeExpr::I(rhs_bits),
-                            ) if (*lhs_bits <= 64 || *lhs_bits == 128)
-                                && (*rhs_bits <= 64 || *rhs_bits == 128)
-                                && (*lhs_bits == 128 || *rhs_bits == 128) =>
-                            {
+                            (TypeExpr::U(128), TypeExpr::U(128)) => {
                                 emitter.push_op(bytecode::OpCode::LtU128 {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
-                                    a_bits: *lhs_bits as u64,
-                                    b_bits: *rhs_bits as u64,
                                 });
+                            }
+                            (TypeExpr::U(128), _) | (_, TypeExpr::U(128)) => {
+                                panic!("Unsupported mixed-width u128 less-than assertion")
                             }
                             (TypeExpr::U(bits), _) | (_, TypeExpr::U(bits)) => {
                                 panic!("Unsupported unsigned integer width: u{bits}")
