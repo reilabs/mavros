@@ -448,8 +448,8 @@ impl LowerPureGuards {
             |e| vec![e.mul(lhs, rhs)],
             |e| {
                 let positive_max = e.u_const(bits, (1u128 << (bits - 1)) - 1);
-                let negative_max = e.u_const(bits, 1u128 << (bits - 1));
-                let max_mag = e.select(result_sign, negative_max, positive_max);
+                let result_sign = e.cast_to(CastTarget::U(bits), result_sign);
+                let max_mag = e.add(positive_max, result_sign);
                 let limit = e.div(max_mag, abs_r);
                 let overflow = e.lt(limit, abs_l);
                 e.build_if_else(
