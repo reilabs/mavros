@@ -8,7 +8,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -745,10 +745,6 @@ fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> Val
     b.cast_to(CastTarget::U(64), limb)
 }
 
-fn q_wit_cast(b: &mut impl HLEmitter, value: ValueId) -> ValueId {
-    b.cast_to(CastTarget::U(128), value)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn lower_unsigned_divmod(
     b: &mut HLBlockEmitter<'_>,
@@ -826,8 +822,8 @@ fn lower_unsigned_divmod(
             guard,
         );
 
-        let r_u128 = q_wit_cast(b, r_wit);
-        let q_u128 = q_wit_cast(b, q_wit);
+        let r_u128 = b.cast_to(CastTarget::U(128), r_wit);
+        let q_u128 = b.cast_to(CastTarget::U(128), q_wit);
         let product = b.fresh_value();
         emit_guarded(
             b,
@@ -854,21 +850,19 @@ fn lower_unsigned_divmod(
             b,
             guard,
             OpCode::AssertCmp {
-                kind: crate::compiler::ssa::hlssa::CmpKind::Eq,
+                kind: CmpKind::Eq,
                 lhs: sum,
                 rhs: dividend,
             },
         );
-
-        let divisor_field = b.cast_to_field(divisor);
-        let one = b.field_const(Field::ONE);
-        let divisor_minus_r = b.sub(divisor_field, r_wit);
-        let divisor_minus_r_minus_one = b.sub(divisor_minus_r, one);
-        guarded_rangecheck(
+        emit_guarded(
             b,
-            divisor_minus_r_minus_one,
-            narrow_rangecheck_width(&remainder_bound(divisor_range), 128),
             guard,
+            OpCode::AssertCmp {
+                kind: CmpKind::Lt,
+                lhs: r_u128,
+                rhs: divisor,
+            },
         );
 
         return DivModResult {
