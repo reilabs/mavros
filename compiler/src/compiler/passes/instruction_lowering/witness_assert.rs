@@ -103,13 +103,10 @@ impl LowerWitnessAssertOps {
         guard: Option<ValueId>,
         value_field: ValueId,
     ) {
-        if let Some(condition) = guard {
-            let cond_field = b.ensure_field(condition, context.types().get_value_type(condition));
-            b.constrain(cond_field, value_field, cond_field);
-        } else {
-            let one = b.field_const(Field::ONE);
-            b.constrain(value_field, one, one);
-        }
+        let cond_field = guard
+            .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)))
+            .unwrap_or_else(|| b.field_const(Field::ONE));
+        b.constrain(cond_field, value_field, cond_field);
     }
 
     fn lower_assert_eq(

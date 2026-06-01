@@ -88,7 +88,7 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
+        _guard: Option<ValueId>,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
@@ -104,7 +104,6 @@ impl LowerWitnessCompareOps {
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
         let result_hint = b.eq(lhs_pure, rhs_pure);
-        let result_hint = self.guard_hint(b, context, guard, result_hint);
         let result_hint_field = b.cast_to_field(result_hint);
         let result_witness = b.write_witness(result_hint_field);
         b.emit(OpCode::Cast {
@@ -119,9 +118,9 @@ impl LowerWitnessCompareOps {
         let div_hint_witness = b.write_witness(div_hint);
 
         let result_field = b.cast_to_field(result);
-        let active = self.active_field(b, context, guard);
-        let active_minus_result = b.sub(active, result_field);
-        b.constrain(diff, div_hint_witness, active_minus_result);
+        let one = b.field_const(Field::ONE);
+        let not_result = b.sub(one, result_field);
+        b.constrain(diff, div_hint_witness, not_result);
 
         let zero = b.field_const(Field::ZERO);
         b.constrain(diff, result_field, zero);
@@ -234,7 +233,6 @@ impl LowerWitnessCompareOps {
         let lhs_hint = b.cast_to(CastTarget::U(bits), lhs_pure);
         let rhs_hint = b.cast_to(CastTarget::U(bits), rhs_pure);
         let result_hint = b.lt(lhs_hint, rhs_hint);
-        let result_hint = self.guard_hint(b, context, guard, result_hint);
         let result_hint_field = b.cast_to_field(result_hint);
         let result_witness = b.write_witness(result_hint_field);
         b.emit(OpCode::Cast {
@@ -244,8 +242,7 @@ impl LowerWitnessCompareOps {
         });
 
         let result_field = b.cast_to_field(result);
-        self.emit_rangecheck(b, None, result_field, 1);
-        self.constrain_result_inactive_zero(b, context, guard, result_field);
+        self.emit_rangecheck(b, guard, result_field, 1);
 
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
@@ -264,56 +261,6 @@ impl LowerWitnessCompareOps {
     fn sign_bit(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
         let sign = b.bit_range(value, bits - 1, 1);
         b.cast_to(CastTarget::U(1), sign)
-    }
-
-    fn guard_hint(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
-        value: ValueId,
-    ) -> ValueId {
-        if let Some(condition) = guard {
-            let condition = if context.types().get_value_type(condition).is_witness_of() {
-                b.value_of(condition)
-            } else {
-                condition
-            };
-            let zero = b.u_const(1, 0);
-            b.select(condition, value, zero)
-        } else {
-            value
-        }
-    }
-
-    fn active_field(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
-    ) -> ValueId {
-        if let Some(condition) = guard {
-            b.ensure_field(condition, context.types().get_value_type(condition))
-        } else {
-            b.field_const(Field::ONE)
-        }
-    }
-
-    fn constrain_result_inactive_zero(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
-        result_field: ValueId,
-    ) {
-        if let Some(condition) = guard {
-            let condition_field =
-                b.ensure_field(condition, context.types().get_value_type(condition));
-            let one = b.field_const(Field::ONE);
-            let inactive = b.sub(one, condition_field);
-            let zero = b.field_const(Field::ZERO);
-            b.constrain(result_field, inactive, zero);
-        }
     }
 
     fn emit_rangecheck(
