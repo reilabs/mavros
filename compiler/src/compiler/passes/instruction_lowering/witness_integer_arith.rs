@@ -158,98 +158,27 @@ impl LowerWitnessIntegerArithOps {
         if bits == 128 && !range_fits_field_injectively(&product_range) {
             let lhs_limbs = split_u128_value(b, lhs);
             let rhs_limbs = split_u128_value(b, rhs);
-            let lhs_lo = b.cast_to(CastTarget::U(128), lhs_limbs.lo);
-            let lhs_hi = b.cast_to(CastTarget::U(128), lhs_limbs.hi);
-            let rhs_lo = b.cast_to(CastTarget::U(128), rhs_limbs.lo);
-            let rhs_hi = b.cast_to(CastTarget::U(128), rhs_limbs.hi);
+            let lhs_lo = b.cast_to_field(lhs_limbs.lo);
+            let lhs_hi = b.cast_to_field(lhs_limbs.hi);
+            let rhs_lo = b.cast_to_field(rhs_limbs.lo);
+            let rhs_hi = b.cast_to_field(rhs_limbs.hi);
 
-            let lo_product = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Mul,
-                    result: lo_product,
-                    lhs: lhs_lo,
-                    rhs: rhs_lo,
-                },
-            );
-            let lhs_cross = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Mul,
-                    result: lhs_cross,
-                    lhs: lhs_lo,
-                    rhs: rhs_hi,
-                },
-            );
-            let rhs_cross = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Mul,
-                    result: rhs_cross,
-                    lhs: lhs_hi,
-                    rhs: rhs_lo,
-                },
-            );
-            let cross = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Add,
-                    result: cross,
-                    lhs: lhs_cross,
-                    rhs: rhs_cross,
-                },
-            );
-            let shift = b.u_const(128, 64);
-            let shifted_cross = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Shl,
-                    result: shifted_cross,
-                    lhs: cross,
-                    rhs: shift,
-                },
-            );
-            let value = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Add,
-                    result: value,
-                    lhs: lo_product,
-                    rhs: shifted_cross,
-                },
-            );
-            let high_product = b.fresh_value();
-            emit_guarded(
-                b,
-                guard,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Mul,
-                    result: high_product,
-                    lhs: lhs_hi,
-                    rhs: rhs_hi,
-                },
-            );
-            let high_product = b.cast_to_field(high_product);
-            enforce_zero(b, high_product, guard);
+            let lo_product = b.mul(lhs_lo, rhs_lo);
+            let lhs_cross = b.mul(lhs_lo, rhs_hi);
+            let rhs_cross = b.mul(lhs_hi, rhs_lo);
+            let high_product = b.mul(lhs_hi, rhs_hi);
+            let zero = b.field_const(Field::ZERO);
+            let flag = guard
+                .map(|condition| b.cast_to_field(condition))
+                .unwrap_or_else(|| b.field_const(Field::ONE));
+            b.constrain(flag, high_product, zero);
 
-            let value = if let Some(condition) = guard {
-                let zero = b.u_const(128, 0);
-                b.select(condition, value, zero)
-            } else {
-                value
-            };
+            let cross = b.add(lhs_cross, rhs_cross);
+            let shift = b.field_const(two_pow(64));
+            let shifted_cross = b.mul(cross, shift);
+            let value = b.add(lo_product, shifted_cross);
+            guarded_rangecheck(b, value, bits, guard);
+            let value = guarded_or_zero_field(b, value, guard);
             b.emit(OpCode::Cast {
                 result,
                 value,
@@ -814,14 +743,6 @@ fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
 fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
     let limb = b.bit_range(value, offset, 64);
     b.cast_to(CastTarget::U(64), limb)
-}
-
-fn enforce_zero(b: &mut HLBlockEmitter<'_>, value: ValueId, guard: Option<ValueId>) {
-    let zero = b.field_const(Field::ZERO);
-    let flag = guard
-        .map(|condition| b.cast_to_field(condition))
-        .unwrap_or_else(|| b.field_const(Field::ONE));
-    b.constrain(flag, value, zero);
 }
 
 fn q_wit_cast(b: &mut impl HLEmitter, value: ValueId) -> ValueId {
