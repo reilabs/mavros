@@ -337,14 +337,12 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
 
-    fn lookup(
-        &mut self,
-        target: hlssa::LookupTarget<Value>,
-        keys: Vec<Value>,
-        results: Vec<Value>,
-        flag: Value,
-    ) {
+    fn lookup(&mut self, target: hlssa::LookupTarget<Value>, args: Vec<Value>, flag: Value) {
         let flag_lc = flag.expect_linear_combination();
+        let els: Vec<_> = args
+            .into_iter()
+            .map(|e| e.expect_linear_combination())
+            .collect();
         match target {
             hlssa::LookupTarget::Rangecheck(i) => {
                 // TODO this will become table resolution logic eventually
@@ -357,11 +355,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
@@ -381,11 +374,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
                     }
                 }
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id: 0,
                     elements: els,
@@ -405,11 +393,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                         self.tables.len() - 1
                     }
                 };
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,
@@ -428,11 +411,6 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 } else {
                     arr.borrow().table_id.unwrap()
                 };
-                let els = keys
-                    .into_iter()
-                    .chain(results)
-                    .map(|e| e.expect_linear_combination())
-                    .collect();
                 self.lookups.push(LookupConstraint {
                     table_id,
                     elements: els,
@@ -665,13 +643,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(new_array)
     }
 
-    fn truncate(&self, _from: usize, to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let new_value = self
             .expect_constant()
             .into_bigint()
             .to_bits_le()
             .iter()
-            .take(to)
+            .skip(offset)
+            .take(width)
             .cloned()
             .collect::<Vec<_>>();
         Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
@@ -833,13 +812,32 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn to_radix(
         &self,
-        _radix: &Radix<Self>,
-        _endianness: crate::compiler::ssa::hlssa::Endianness,
-        _size: usize,
+        radix: &Radix<Self>,
+        endianness: crate::compiler::ssa::hlssa::Endianness,
+        size: usize,
         _out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
-        todo!("ToRadix R1CS generation not yet implemented")
+        match radix {
+            Radix::Bytes => {
+                let mut bytes = self.expect_constant().into_bigint().to_bytes_le();
+                if bytes.len() > size {
+                    bytes.truncate(size);
+                } else {
+                    bytes.resize(size, 0);
+                }
+                if matches!(endianness, crate::compiler::ssa::hlssa::Endianness::Big) {
+                    bytes.reverse();
+                }
+                Value::mk_array(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Value::Const(ark_bn254::Fr::from(byte)))
+                        .collect(),
+                )
+            }
+            Radix::Dyn(_) => todo!("dynamic ToRadix R1CS generation not yet implemented"),
+        }
     }
 
     fn spread(&self, bits: u8, _ctx: &mut R1CGen) -> Self {

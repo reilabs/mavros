@@ -8,15 +8,15 @@ use num_traits::{One, Zero};
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, Types},
+        types::{FunctionTypeInfo, Types, const_value_type},
         value_definitions::{FunctionValueDefinitions, ValueDefinition},
     },
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
+    passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
     ssa::{
         FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, ConstValue, HLSSA, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLFunctionBuilder, HLSSABuilder},
         },
     },
@@ -83,7 +83,18 @@ impl Simplifier {
                 for _ in 0..self.max_iterations {
                     // Recompute locally so newly emitted opcodes (the Const+Cast
                     // pair from `materialize_const`) appear with the right types.
-                    let fti = Types::new().run_function(fb.function, &function_types, cfg);
+                    let constant_types: HashMap<ValueId, Type> = fb
+                        .ssa
+                        .const_snapshot()
+                        .iter()
+                        .map(|(vid, cv)| (*vid, const_value_type(cv)))
+                        .collect();
+                    let fti = Types::new().run_function(
+                        fb.function,
+                        &function_types,
+                        &constant_types,
+                        cfg,
+                    );
                     if !self.run_function(fb, &fti) {
                         break;
                     }
@@ -98,7 +109,7 @@ impl Simplifier {
         fb: &mut HLFunctionBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
     ) -> bool {
-        let definitions = FunctionValueDefinitions::from_ssa(fb.function);
+        let definitions = FunctionValueDefinitions::from_function(fb.function);
         let mut aliases = ValueReplacements::new();
         let mut changed = false;
 
@@ -106,8 +117,8 @@ impl Simplifier {
         for (bid, mut block) in fb.function.take_blocks().into_iter() {
             let mut new_instructions = Vec::new();
             for instruction in block.take_instructions().into_iter() {
-                // Apply aliases collected so far in this iteration before
-                // pattern-matching, so we see up-to-date operand identities.
+                // Apply aliases collected so far in this iteration before pattern-matching, so we
+                // see up-to-date operands.
                 let mut instruction = instruction;
                 aliases.replace_inputs(&mut instruction);
 
@@ -133,15 +144,10 @@ impl Simplifier {
         }
         fb.function.put_blocks(new_blocks);
 
-        // Apply aliases globally. Block iteration order is non-deterministic,
-        // so a block processed before its predecessor sees stale operands;
-        // sweep here to fix references the in-walk substitution missed.
-        for (_, block) in fb.function.get_blocks_mut() {
-            for instr in block.get_instructions_mut() {
-                aliases.replace_inputs(instr);
-            }
-            aliases.replace_terminator(block.get_terminator_mut());
-        }
+        // Apply aliases globally. Block iteration order is non-deterministic, so a block processed
+        // before its predecessor sees stale operands; sweep here to fix references the in-walk
+        // substitution missed.
+        aliases.apply_to_function(fb.function, ReplaceScope::Inputs);
 
         changed
     }
@@ -163,13 +169,13 @@ impl Simplifier {
             } => {
                 match kind {
                     BinaryArithOpKind::Add => {
-                        if is_zero(defs, *lhs) {
+                        if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
                             });
                         }
-                        if is_zero(defs, *rhs) {
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -177,7 +183,7 @@ impl Simplifier {
                         }
                     }
                     BinaryArithOpKind::Sub => {
-                        if is_zero(defs, *rhs) {
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -188,25 +194,25 @@ impl Simplifier {
                         }
                     }
                     BinaryArithOpKind::Mul => {
-                        if is_zero(defs, *lhs) {
+                        if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
                             });
                         }
-                        if is_zero(defs, *rhs) {
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
                             });
                         }
-                        if is_one(defs, *lhs) {
+                        if is_one(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
                             });
                         }
-                        if is_one(defs, *rhs) {
+                        if is_one(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -214,7 +220,7 @@ impl Simplifier {
                         }
                     }
                     BinaryArithOpKind::Div => {
-                        if is_one(defs, *rhs) {
+                        if is_one(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -222,13 +228,13 @@ impl Simplifier {
                         }
                     }
                     BinaryArithOpKind::And => {
-                        if is_zero(defs, *lhs) {
+                        if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
                             });
                         }
-                        if is_zero(defs, *rhs) {
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
@@ -240,15 +246,27 @@ impl Simplifier {
                                 target: *lhs,
                             });
                         }
-                    }
-                    BinaryArithOpKind::Or => {
-                        if is_zero(defs, *lhs) {
+                        if is_all_ones(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
                             });
                         }
-                        if is_zero(defs, *rhs) {
+                        if is_all_ones(fb.ssa, *rhs) {
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *lhs,
+                            });
+                        }
+                    }
+                    BinaryArithOpKind::Or => {
+                        if is_zero(fb.ssa, *lhs) {
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *rhs,
+                            });
+                        }
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -262,13 +280,13 @@ impl Simplifier {
                         }
                     }
                     BinaryArithOpKind::Xor => {
-                        if is_zero(defs, *lhs) {
+                        if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
                             });
                         }
-                        if is_zero(defs, *rhs) {
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -279,11 +297,27 @@ impl Simplifier {
                         }
                     }
                     BinaryArithOpKind::Shl | BinaryArithOpKind::Shr => {
-                        if is_zero(defs, *rhs) {
+                        if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
                             });
+                        }
+                        if matches!(kind, BinaryArithOpKind::Shr) {
+                            if let Some(offset) = const_as_usize(fb.ssa, *rhs) {
+                                let lhs_type = types.get_value_type(*lhs);
+                                let lhs_inner = lhs_type.strip_witness();
+                                if let TypeExpr::U(bits) = lhs_inner.expr {
+                                    if offset < bits {
+                                        return Some(Rewrite::Replace(vec![OpCode::BitRange {
+                                            result: *result,
+                                            value: *lhs,
+                                            offset,
+                                            width: bits - offset,
+                                        }]));
+                                    }
+                                }
+                            }
                         }
                     }
                     BinaryArithOpKind::Mod => {}
@@ -295,13 +329,13 @@ impl Simplifier {
                 const_val,
                 var,
             } => {
-                if is_zero(defs, *const_val) {
+                if is_zero(fb.ssa, *const_val) {
                     return Some(Rewrite::Alias {
                         result: *result,
                         target: *const_val,
                     });
                 }
-                if is_one(defs, *const_val) {
+                if is_one(fb.ssa, *const_val) {
                     return Some(Rewrite::Alias {
                         result: *result,
                         target: *var,
@@ -321,7 +355,7 @@ impl Simplifier {
                     });
                 }
                 // cast(cast(x, T), T) → cast(x, T)
-                if let ValueDefinition::Instruction(
+                if let Some(ValueDefinition::Instruction(
                     _,
                     _,
                     OpCode::Cast {
@@ -329,7 +363,7 @@ impl Simplifier {
                         value: _,
                         target: inner_target,
                     },
-                ) = defs.get_definition(*value)
+                )) = defs.get_definition(*value)
                 {
                     if inner_target == target {
                         return Some(Rewrite::Alias {
@@ -342,14 +376,14 @@ impl Simplifier {
             }
             OpCode::Not { result, value } => {
                 // ~~x → x
-                if let ValueDefinition::Instruction(
+                if let Some(ValueDefinition::Instruction(
                     _,
                     _,
                     OpCode::Not {
                         result: _,
                         value: inner,
                     },
-                ) = defs.get_definition(*value)
+                )) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias {
                         result: *result,
@@ -372,6 +406,20 @@ impl Simplifier {
                 }
                 None
             }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                if *offset == 0 && *width == types.get_value_type(*value).get_bit_size() {
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *value,
+                    });
+                }
+                None
+            }
             OpCode::Cmp {
                 kind: CmpKind::Eq,
                 result,
@@ -380,7 +428,7 @@ impl Simplifier {
             } if *lhs == *rhs => materialize_one(types, *result, fb),
             OpCode::ValueOf { result, value } => {
                 // ValueOf(ValueOf(x)) → ValueOf(x)
-                if let ValueDefinition::Instruction(_, _, OpCode::ValueOf { .. }) =
+                if let Some(ValueDefinition::Instruction(_, _, OpCode::ValueOf { .. })) =
                     defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias {
@@ -391,7 +439,7 @@ impl Simplifier {
                 // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
                 // value IS what ValueOf strips back to). Sound by witgen
                 // semantics.
-                if let ValueDefinition::Instruction(
+                if let Some(ValueDefinition::Instruction(
                     _,
                     _,
                     OpCode::WriteWitness {
@@ -399,7 +447,7 @@ impl Simplifier {
                         value: hint,
                         pinned: _,
                     },
-                ) = defs.get_definition(*value)
+                )) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias {
                         result: *result,
@@ -416,14 +464,14 @@ impl Simplifier {
                 // WriteWitness(ValueOf(x)) → x. The new slot's hint is x's
                 // value, so honest prover fills both identically; merging is
                 // equivalent to the always-true constraint new == x.
-                if let ValueDefinition::Instruction(
+                if let Some(ValueDefinition::Instruction(
                     _,
                     _,
                     OpCode::ValueOf {
                         result: _,
                         value: inner,
                     },
-                ) = defs.get_definition(*value)
+                )) = defs.get_definition(*value)
                 {
                     return Some(Rewrite::Alias {
                         result: *result,
@@ -441,23 +489,24 @@ fn materialize_const(
     types: &FunctionTypeInfo,
     result: ValueId,
     fb: &mut HLFunctionBuilder<'_>,
-    pure_value: impl Fn(&TypeExpr) -> Option<ConstValue>,
+    pure_value: impl Fn(&TypeExpr) -> Option<Constant>,
 ) -> Option<Rewrite> {
     let ty = types.get_value_type(result).clone();
     let inner = ty.strip_witness();
     let value = pure_value(&inner.expr)?;
     if ty.is_witness_of() {
-        let tmp = fb.fresh_value();
-        Some(Rewrite::Replace(vec![
-            OpCode::Const { result: tmp, value },
-            OpCode::Cast {
-                result,
-                value: tmp,
-                target: CastTarget::WitnessOf,
-            },
-        ]))
+        let tmp = fb.ssa.add_const(value);
+        Some(Rewrite::Replace(vec![OpCode::Cast {
+            result,
+            value: tmp,
+            target: CastTarget::WitnessOf,
+        }]))
     } else {
-        Some(Rewrite::Replace(vec![OpCode::Const { result, value }]))
+        let canon = fb.ssa.add_const(value);
+        Some(Rewrite::Alias {
+            result,
+            target: canon,
+        })
     }
 }
 
@@ -467,9 +516,9 @@ fn materialize_zero(
     fb: &mut HLFunctionBuilder<'_>,
 ) -> Option<Rewrite> {
     materialize_const(types, result, fb, |t| match t {
-        TypeExpr::U(s) => Some(ConstValue::U(*s, 0)),
-        TypeExpr::I(s) => Some(ConstValue::I(*s, 0)),
-        TypeExpr::Field => Some(ConstValue::Field(ark_bn254::Fr::zero())),
+        TypeExpr::U(s) => Some(Constant::U(*s, 0)),
+        TypeExpr::I(s) => Some(Constant::I(*s, 0)),
+        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
         _ => None,
     })
 }
@@ -480,35 +529,49 @@ fn materialize_one(
     fb: &mut HLFunctionBuilder<'_>,
 ) -> Option<Rewrite> {
     materialize_const(types, result, fb, |t| match t {
-        TypeExpr::U(s) => Some(ConstValue::U(*s, 1)),
-        TypeExpr::I(s) => Some(ConstValue::I(*s, 1)),
-        TypeExpr::Field => Some(ConstValue::Field(ark_bn254::Fr::one())),
+        TypeExpr::U(s) => Some(Constant::U(*s, 1)),
+        TypeExpr::I(s) => Some(Constant::I(*s, 1)),
+        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::one())),
         _ => None,
     })
 }
 
-fn is_zero(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
-    let def = defs.get_definition(v);
-    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
-        match value {
-            ConstValue::U(_, 0) | ConstValue::I(_, 0) => true,
-            ConstValue::Field(f) => f.is_zero(),
-            _ => false,
-        }
-    } else {
-        false
+fn is_zero(ssa: &HLSSA, v: ValueId) -> bool {
+    match ssa.get_const(v).as_deref() {
+        Some(Constant::U(_, 0) | Constant::I(_, 0)) => true,
+        Some(Constant::Field(f)) => f.is_zero(),
+        _ => false,
     }
 }
 
-fn is_one(defs: &FunctionValueDefinitions, v: ValueId) -> bool {
-    let def = defs.get_definition(v);
-    if let ValueDefinition::Instruction(_, _, OpCode::Const { value, .. }) = def {
-        match value {
-            ConstValue::U(_, 1) | ConstValue::I(_, 1) => true,
-            ConstValue::Field(f) => f.is_one(),
-            _ => false,
-        }
+fn is_one(ssa: &HLSSA, v: ValueId) -> bool {
+    match ssa.get_const(v).as_deref() {
+        Some(Constant::U(_, 1) | Constant::I(_, 1)) => true,
+        Some(Constant::Field(f)) => f.is_one(),
+        _ => false,
+    }
+}
+
+fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
+    match ssa.get_const(v).as_deref() {
+        Some(Constant::U(bits, value) | Constant::I(bits, value)) => *value == bit_mask(*bits),
+        _ => false,
+    }
+}
+
+fn bit_mask(bits: usize) -> u128 {
+    if bits == 0 {
+        0
+    } else if bits == 128 {
+        u128::MAX
     } else {
-        false
+        (1u128 << bits) - 1
+    }
+}
+
+fn const_as_usize(ssa: &HLSSA, v: ValueId) -> Option<usize> {
+    match ssa.get_const(v).as_deref() {
+        Some(Constant::U(_, value) | Constant::I(_, value)) => (*value).try_into().ok(),
+        _ => None,
     }
 }

@@ -8,7 +8,7 @@ use crate::compiler::{
     analysis::flow_analysis::{self, FlowAnalysis},
     ssa::{
         BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
-        hlssa::{CallTarget, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+        hlssa::{CallTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
     },
 };
 
@@ -108,8 +108,7 @@ impl WitnessTypeInference {
         };
 
         // Clone main function as specialized version, set as entry point
-        let main_specialized = ssa.get_function(main_id).clone();
-        let main_specialized_id = ssa.insert_function(main_specialized);
+        let main_specialized_id = ssa.duplicate_function(main_id);
         ssa.set_entry_point(main_specialized_id);
 
         let mut specializations: HashMap<SpecKey, SpecValue> = HashMap::new();
@@ -132,7 +131,8 @@ impl WitnessTypeInference {
         // 3. Global worklist loop
         while let Some(spec_key) = worklist.pop_front() {
             queued.remove(&spec_key);
-            let func = ssa.get_function(spec_key.original_func_id);
+            let specialized_func_id = specializations.get(&spec_key).unwrap().specialized_func_id;
+            let func = ssa.get_function(specialized_func_id);
             let cfg = flow_analysis.get_function_cfg(spec_key.original_func_id);
 
             let result = Self::propagate_function(
@@ -184,8 +184,7 @@ impl WitnessTypeInference {
                         .map(Self::construct_pure_witness_for_type)
                         .collect();
 
-                    let specialized_clone = callee_func.clone();
-                    let specialized_id = ssa.insert_function(specialized_clone);
+                    let specialized_id = ssa.duplicate_function(callee_key.original_func_id);
 
                     specializations.insert(
                         callee_key.clone(),
@@ -215,7 +214,7 @@ impl WitnessTypeInference {
 
         // 4. Update Call targets in specialized functions to point to specialized callees
         for (spec_key, spec_value) in &specializations {
-            let func = ssa.get_function(spec_key.original_func_id);
+            let func = ssa.get_function(spec_value.specialized_func_id);
             let cfg = flow_analysis.get_function_cfg(spec_key.original_func_id);
 
             // Re-propagate to get call sites with their correct mapping
@@ -297,6 +296,15 @@ impl WitnessTypeInference {
         let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
         let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
         let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::new();
+
+        ssa.for_each_const(|vid, val| {
+            let shape = match val.as_ref() {
+                Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
+                    WitnessShape::Scalar(WitnessType::Pure)
+                }
+            };
+            value_wt.insert(*vid, shape);
+        });
 
         // Initialize entry block params from arg_types
         let entry_params: Vec<(ValueId, Type)> =
@@ -798,8 +806,8 @@ impl WitnessTypeInference {
                     value_wt.insert(*result_even, val_wt);
                 }
                 OpCode::Cast { result, value, .. }
-                | OpCode::Truncate { result, value, .. }
                 | OpCode::SExt { result, value, .. }
+                | OpCode::BitRange { result, value, .. }
                 | OpCode::Not { result, value } => {
                     let val_wt = value_wt.get(value).unwrap().clone();
                     value_wt.insert(*result, val_wt);
@@ -849,9 +857,6 @@ impl WitnessTypeInference {
                 | OpCode::Todo { .. }
                 | OpCode::ValueOf { .. } => {
                     panic!("Should not be present at this stage {:?}", instruction);
-                }
-                OpCode::Const { result, .. } => {
-                    value_wt.insert(*result, WitnessShape::Scalar(WitnessType::Pure));
                 }
                 OpCode::Guard { .. } => {
                     panic!("ICE: Guard should not be present during witness type inference");

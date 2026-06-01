@@ -66,8 +66,13 @@ fn main() {
     // Parent mode
     let output_path = parse_output_arg(&args);
     let jobs = parse_jobs_arg(&args);
-    run_parent(&output_path, jobs);
+    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
 }
+
+const DEFAULT_IGNORED_TESTS: &[&str] = &[
+    // TODO(#195): Re-enable once the upstream global var regression performance issue is fixed.
+    "noir/test_programs/execution_success/global_var_regression_entry_points",
+];
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
     let mut i = 1;
@@ -1095,7 +1100,7 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
     dirs
 }
 
-fn run_parent(output_path: &Path, jobs: usize) {
+fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
     let mut entries: Vec<TestEntry> = Vec::new();
 
     // 1. Local noir_tests/ directory
@@ -1124,7 +1129,11 @@ fn run_parent(output_path: &Path, jobs: usize) {
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
     let total = entries.len();
-    eprintln!("Running {total} test(s) with {jobs} parallel job(s)");
+    let ignored_count = entries
+        .iter()
+        .filter(|entry| is_ignored_test(entry, ignored_tests))
+        .count();
+    eprintln!("Running {total} test(s) with {jobs} parallel job(s) ({ignored_count} ignored)");
 
     let next_idx = AtomicUsize::new(0);
     let completed = AtomicUsize::new(0);
@@ -1139,6 +1148,14 @@ fn run_parent(output_path: &Path, jobs: usize) {
                         break;
                     }
                     let entry = &entries[idx];
+                    if is_ignored_test(entry, ignored_tests) {
+                        let result = ignored_test_result(&entry.display_name);
+                        let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                        eprintln!("[{n}/{total}] {} (ignored)", entry.display_name);
+                        *slots[idx].lock().unwrap() = Some(result);
+                        continue;
+                    }
+
                     let abs = fs::canonicalize(&entry.path).unwrap();
 
                     let mut child = Command::new(&exe)
@@ -1175,6 +1192,32 @@ fn run_parent(output_path: &Path, jobs: usize) {
     fs::write(output_path, &md).expect("Cannot write output file");
     eprintln!("Wrote {}", output_path.display());
     print!("{md}");
+}
+
+fn is_ignored_test(entry: &TestEntry, ignored_tests: &[&str]) -> bool {
+    let test_name = entry.path.file_name().and_then(|name| name.to_str());
+    ignored_tests.iter().any(|ignored| {
+        let ignored = ignored.trim_matches('/');
+        entry.display_name == ignored
+            || test_name == Some(ignored)
+            || entry.display_name.ends_with(&format!("/{ignored}"))
+    })
+}
+
+fn ignored_test_result(name: &str) -> TestResult {
+    let steps = STEP_KEYS
+        .iter()
+        .map(|&key| (key.to_string(), Status::Skip))
+        .collect();
+
+    TestResult {
+        name: name.to_string(),
+        steps,
+        rows: None,
+        cols: None,
+        witgen_bytes: None,
+        ad_bytes: None,
+    }
 }
 
 fn parse_child_output(name: &str, lines: &[String]) -> TestResult {

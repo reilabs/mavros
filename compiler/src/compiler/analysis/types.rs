@@ -10,9 +10,18 @@ use crate::compiler::{
     analysis::flow_analysis::{CFG, FlowAnalysis},
     ssa::{
         FunctionId, ValueId,
-        hlssa::{CallTarget, CastTarget, ConstValue, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+        hlssa::{CallTarget, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
     },
 };
+
+pub fn const_value_type(value: &Constant) -> Type {
+    match value {
+        Constant::U(size, _) => Type::u(*size),
+        Constant::I(size, _) => Type::i(*size),
+        Constant::Field(_) => Type::field(),
+        Constant::FnPtr(_) => Type::function(),
+    }
+}
 
 fn push_witness_of_to_leaves(t: Type) -> Type {
     match t.expr {
@@ -68,9 +77,17 @@ impl Types {
             .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
             .collect::<HashMap<_, _>>();
 
+        // The constants side-table is module-level; pre-compute types for every constant
+        // `ValueId` so `run_function` can seed `function_info` with them.
+        let constant_types: HashMap<ValueId, Type> = ssa
+            .const_snapshot()
+            .iter()
+            .map(|(vid, cv)| (*vid, const_value_type(cv)))
+            .collect();
+
         for (function_id, function) in ssa.iter_functions() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let function_info = self.run_function(function, &function_types, cfg);
+            let function_info = self.run_function(function, &function_types, &constant_types, cfg);
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
@@ -80,18 +97,18 @@ impl Types {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
             TypeExpr::U(bits) => {
-                if *bits > 64 {
+                if *bits > 128 {
                     return Err(format!(
-                        "Spread expects u(n) with n <= 64, got {}",
+                        "Spread expects u(n) with n <= 128, got {}",
                         value_type
                     ));
                 }
                 Ok(Type::u(bits * 2))
             }
             TypeExpr::I(bits) => {
-                if *bits > 64 {
+                if *bits > 128 {
                     return Err(format!(
-                        "Spread expects i(n) with n <= 64, got {}",
+                        "Spread expects i(n) with n <= 128, got {}",
                         value_type
                     ));
                 }
@@ -144,10 +161,11 @@ impl Types {
         &self,
         function: &HLFunction,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+        constant_types: &HashMap<ValueId, Type>,
         cfg: &CFG,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
-            values: HashMap::new(),
+            values: constant_types.clone(),
         };
 
         for block_id in cfg.get_domination_pre_order() {
@@ -486,20 +504,6 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits: _,
-                from_bits: _,
-            } => {
-                let value_type = function_info
-                    .values
-                    .get(value)
-                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-
-                function_info.values.insert(*result, value_type.clone());
-                Ok(())
-            }
             OpCode::SExt {
                 result,
                 value,
@@ -524,6 +528,29 @@ impl Types {
                     widened
                 };
                 function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                if *width == 0 {
+                    return Err("BitRange width must be at least 1".to_string());
+                }
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let value_bits = value_type.get_bit_size();
+                if *offset + *width > value_bits {
+                    return Err(format!(
+                        "BitRange({}, {}) exceeds source width {} for {}",
+                        offset, width, value_bits, value_type
+                    ));
+                }
+                function_info.values.insert(*result, value_type.clone());
                 Ok(())
             }
             OpCode::Not { result, value } => {
@@ -587,8 +614,7 @@ impl Types {
             }
             OpCode::DLookup {
                 target: _,
-                keys: _,
-                results: _,
+                args: _,
                 flag: _,
             } => Ok(()),
             OpCode::MulConst {
@@ -623,8 +649,7 @@ impl Types {
             }
             OpCode::Lookup {
                 target: _,
-                keys: _,
-                results: _,
+                args: _,
                 flag: _,
             } => Ok(()),
             OpCode::TupleProj { result, tuple, idx } => {
@@ -667,16 +692,6 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
-            OpCode::Const { result, value } => {
-                let ty = match value {
-                    ConstValue::U(size, _) => Type::u(*size),
-                    ConstValue::I(size, _) => Type::i(*size),
-                    ConstValue::Field(_) => Type::field(),
-                    ConstValue::FnPtr(_) => Type::function(),
-                };
-                function_info.values.insert(*result, ty);
-                Ok(())
-            }
             OpCode::Spread { result, value, .. } => {
                 let value_type = function_info
                     .values

@@ -2,8 +2,8 @@ use crate::compiler::ssa::{
     ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, ConstValue, Constants, Endianness,
-        LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, LookupTarget,
+        OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
     },
 };
 
@@ -14,6 +14,10 @@ use crate::compiler::ssa::{
 pub trait HLEmitter {
     fn fresh_value(&mut self) -> ValueId;
     fn emit(&mut self, op: OpCode);
+
+    /// Intern a constant value into the SSA's constants side-table, returning the `ValueId` that
+    /// names it. Identical `Constant`s collapse to the same `ValueId`.
+    fn emit_constant(&mut self, value: Constant) -> ValueId;
 
     // -- Arithmetic --
 
@@ -208,17 +212,6 @@ pub trait HLEmitter {
         r
     }
 
-    fn truncate(&mut self, value: ValueId, to_bits: usize, from_bits: usize) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Truncate {
-            result: r,
-            value,
-            to_bits,
-            from_bits,
-        });
-        r
-    }
-
     fn sext(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::SExt {
@@ -230,33 +223,29 @@ pub trait HLEmitter {
         r
     }
 
+    fn bit_range(&mut self, value: ValueId, offset: usize, width: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::BitRange {
+            result: r,
+            value,
+            offset,
+            width,
+        });
+        r
+    }
+
     // -- Constants --
 
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::Field(value),
-        });
-        r
+        self.emit_constant(Constant::Field(value))
     }
 
     fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::U(bits, value),
-        });
-        r
+        self.emit_constant(Constant::U(bits, value))
     }
 
     fn i_const(&mut self, bits: usize, value: u128) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Const {
-            result: r,
-            value: ConstValue::I(bits, value),
-        });
-        r
+        self.emit_constant(Constant::I(bits, value))
     }
 
     // -- Witness --
@@ -500,8 +489,7 @@ pub trait HLEmitter {
     fn lookup_spread(&mut self, bits: u8, key: ValueId, result: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Spread(bits),
-            keys: vec![key],
-            results: vec![result],
+            args: vec![key, result],
             flag,
         });
     }
@@ -509,8 +497,7 @@ pub trait HLEmitter {
     fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target,
-            keys: vec![value],
-            results: vec![],
+            args: vec![value],
             flag,
         });
     }
@@ -518,8 +505,7 @@ pub trait HLEmitter {
     fn lookup_rngchk_8(&mut self, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Rangecheck(8),
-            keys: vec![value],
-            results: vec![],
+            args: vec![value],
             flag,
         });
     }
@@ -527,8 +513,7 @@ pub trait HLEmitter {
     fn lookup_arr(&mut self, array: ValueId, index: ValueId, result: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target: LookupTarget::Array(array),
-            keys: vec![index],
-            results: vec![result],
+            args: vec![index, result],
             flag,
         });
     }
@@ -622,10 +607,10 @@ pub trait HLEmitter {
 // Type aliases
 // ---------------------------------------------------------------------------
 
-pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type, Constants>;
-pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type, Constants>;
-pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type, Constants>;
-pub type HLSSABuilder<'a> = SSABuilder<'a, OpCode, Type, Constants>;
+pub type HLInstrBuilder<'a> = InstrBuilder<'a, OpCode, Type, Constant>;
+pub type HLFunctionBuilder<'a> = FunctionBuilder<'a, OpCode, Type, Constant>;
+pub type HLBlockEmitter<'a> = BlockEmitter<'a, OpCode, Type, Constant>;
+pub type HLSSABuilder<'a> = SSABuilder<'a, OpCode, Type, Constant>;
 
 // ---------------------------------------------------------------------------
 // HLEmitter impls
@@ -639,6 +624,10 @@ impl HLEmitter for HLInstrBuilder<'_> {
     fn emit(&mut self, op: OpCode) {
         self.instructions.push(op);
     }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
 }
 
 impl HLEmitter for HLBlockEmitter<'_> {
@@ -649,10 +638,14 @@ impl HLEmitter for HLBlockEmitter<'_> {
     fn emit(&mut self, op: OpCode) {
         self.block.push_instruction(op);
     }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
 }
 
 impl HLBlockEmitter<'_> {
-    fn default_value(&mut self, typ: &Type) -> ValueId {
+    pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => self.field_const(ark_bn254::Fr::from(0)),
             TypeExpr::U(size) => self.u_const(*size, 0),

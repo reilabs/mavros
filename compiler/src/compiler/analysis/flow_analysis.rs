@@ -8,6 +8,7 @@ use petgraph::visit::{Bfs, DfsPostOrder, EdgeRef, Walker};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs;
+use std::hash::Hash;
 use std::path::PathBuf;
 
 use crate::compiler::ssa::{BlockId, FunctionId, Instruction, SSA, SSAType, Terminator};
@@ -399,7 +400,7 @@ impl CFG {
 }
 
 impl CFG {
-    pub fn generate_image<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
+    pub fn generate_image<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static>(
         &self,
         output_path: PathBuf,
         ssa: &SSA<Op, Ty, C>,
@@ -567,7 +568,7 @@ impl CallGraph {
 }
 
 impl CallGraph {
-    pub fn generate_image<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
+    pub fn generate_image<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static>(
         &self,
         output_path: PathBuf,
         ssa: &SSA<Op, Ty, C>,
@@ -634,7 +635,7 @@ pub struct FlowAnalysis {
 }
 
 impl FlowAnalysis {
-    pub fn run<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
+    pub fn run<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static>(
         ssa: &SSA<Op, Ty, C>,
     ) -> Self {
         let mut call_graph = CallGraph::new();
@@ -691,7 +692,7 @@ impl FlowAnalysis {
         &self.function_cfgs[&function_id]
     }
 
-    pub fn generate_images<Op: Instruction, Ty: SSAType, C: Clone + Debug + 'static>(
+    pub fn generate_images<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static>(
         &self,
         debug_output_dir: PathBuf,
         ssa: &SSA<Op, Ty, C>,
@@ -736,10 +737,10 @@ impl FlowAnalysis {
     }
 }
 
-impl<Op: Instruction, Ty: SSAType, Cn: Clone + Debug + 'static> Analysis<Op, Ty, Cn>
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> Analysis<Op, Ty, C>
     for FlowAnalysis
 {
-    fn compute(ssa: &SSA<Op, Ty, Cn>, _store: &AnalysisStore) -> Self {
+    fn compute(ssa: &SSA<Op, Ty, C>, _store: &AnalysisStore) -> Self {
         FlowAnalysis::run(ssa)
     }
 }

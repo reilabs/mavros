@@ -61,8 +61,8 @@ impl WitnessWriteToFresh {
                         | OpCode::MkRepeated { .. }
                         | OpCode::Alloc { .. }
                         | OpCode::BinaryArithOp { .. }
-                        | OpCode::Truncate { .. }
                         | OpCode::SExt { .. }
+                        | OpCode::BitRange { .. }
                         | OpCode::Not { .. }
                         | OpCode::Store { .. }
                         | OpCode::Load { .. }
@@ -93,7 +93,6 @@ impl WitnessWriteToFresh {
                         | OpCode::TupleProj { .. }
                         | OpCode::MkTuple { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::Const { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. }
                         | OpCode::Guard { .. } => instruction.clone(),

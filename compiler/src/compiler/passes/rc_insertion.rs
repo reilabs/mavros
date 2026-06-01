@@ -132,10 +132,19 @@ impl RCInsertion {
                             .filter(|v| self.needs_rc(type_info, v))
                             .copied()
                             .collect_vec();
-                        for input in rcd_inputs.iter() {
-                            if currently_live.contains(input) {
+                        for (input, group) in rcd_inputs
+                            .iter()
+                            .sorted_by_key(|v| v.0)
+                            .chunk_by(|v| *v)
+                            .into_iter()
+                        {
+                            let mut count = group.count();
+                            if !currently_live.contains(input) {
+                                count -= 1;
+                            }
+                            if count > 0 {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(1),
+                                    kind: RefCountOp::Bump(count),
                                     value: *input,
                                 });
                             }
@@ -242,17 +251,17 @@ impl RCInsertion {
                         lhs: _,
                         rhs: _,
                     }
-                    | OpCode::Truncate {
-                        result: _,
-                        value: _,
-                        to_bits: _,
-                        from_bits: _,
-                    }
                     | OpCode::SExt {
                         result: _,
                         value: _,
                         from_bits: _,
                         to_bits: _,
+                    }
+                    | OpCode::BitRange {
+                        result: _,
+                        value: _,
+                        offset: _,
+                        width: _,
                     }
                     | OpCode::AssertR1C { a: _, b: _, c: _ }
                     | OpCode::Constrain { a: _, b: _, c: _ }
@@ -264,14 +273,12 @@ impl RCInsertion {
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::Lookup {
                         target: _,
-                        keys: _,
-                        results: _,
+                        args: _,
                         flag: _,
                     }
                     | OpCode::DLookup {
                         target: _,
-                        keys: _,
-                        results: _,
+                        args: _,
                         flag: _,
                     }
                     | OpCode::Not {
@@ -726,9 +733,6 @@ impl RCInsertion {
                     }
                     OpCode::ValueOf { .. } => {
                         panic!("ICE: ValueOf should not appear at this stage");
-                    }
-                    OpCode::Const { .. } => {
-                        new_instructions.push(instruction);
                     }
                     OpCode::Guard { .. } => {
                         panic!("ICE: Guard should be lowered before RC insertion");

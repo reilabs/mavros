@@ -24,7 +24,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, ValueId,
         hlssa::{
-            CallTarget, CastTarget, ConstValue, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            CallTarget, CastTarget, Constant, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
@@ -166,18 +166,12 @@ impl PrepareEntryPoint {
 
             // witness[0] must be constant one, emitted by the program.
             let witness_one_value = fb.ssa.fresh_value();
-            let one_const_value = fb.ssa.fresh_value();
-            let mut write_witness_instructions = vec![
-                OpCode::Const {
-                    result: one_const_value,
-                    value: ConstValue::Field(ark_bn254::Fr::from(1u64)),
-                },
-                OpCode::WriteWitness {
-                    result: Some(witness_one_value),
-                    value: one_const_value,
-                    pinned: true,
-                },
-            ];
+            let one_const_value = fb.ssa.add_const(Constant::Field(ark_bn254::Fr::from(1u64)));
+            let mut write_witness_instructions = vec![OpCode::WriteWitness {
+                result: Some(witness_one_value),
+                value: one_const_value,
+                pinned: true,
+            }];
 
             // Create pinned WriteWitness for each param and build replacements.
             // These must be pinned so they survive DCE even when their results become unused

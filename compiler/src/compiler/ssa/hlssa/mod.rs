@@ -6,27 +6,32 @@ pub mod type_system;
 use itertools::Itertools;
 use std::fmt::Display;
 
-use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, ValueId};
+use crate::compiler::ssa::{
+    Block, Function, FunctionId, Instruction, SSA, SSAConstants, SSAConstantsSnapshot, ValueId,
+};
 pub use type_system::{Type, TypeExpr};
 
 // HLSSA
 // ================================================================================================
 
 /// The high-level SSA is designed for domain-level analysis without concretizing runtime details.
-pub type HLSSA = SSA<OpCode, Type, Constants>;
+pub type HLSSA = SSA<OpCode, Type, Constant>;
 
 impl HLSSA {
     pub fn new() -> Self {
-        Self::with_main("main".to_string(), ())
+        Self::with_main("main".to_string())
     }
 }
 
 // CONSTANT STORAGE
 // ================================================================================================
 
-/// Constant storage for the high-level SSA. Currently a placeholder while constants still live
-/// inline as `OpCode::Const` instructions.
-pub type Constants = ();
+/// Concrete constants side-table type for the high-level SSA.
+pub type HLSSAConstants = SSAConstants<Constant>;
+
+/// Owned, lock-free snapshot of the high-level SSA's constants, as handed out by
+/// [`SSA::const_snapshot`](crate::compiler::ssa::SSA::const_snapshot).
+pub type HLSSAConstantsSnapshot = SSAConstantsSnapshot<Constant>;
 
 // HLSSA OPCODES
 // ================================================================================================
@@ -51,17 +56,17 @@ pub enum OpCode {
         value: ValueId,
         target: CastTarget,
     },
-    Truncate {
-        result: ValueId,
-        value: ValueId,
-        to_bits: usize,
-        from_bits: usize,
-    },
     SExt {
         result: ValueId,
         value: ValueId,
         from_bits: usize,
         to_bits: usize,
+    },
+    BitRange {
+        result: ValueId,
+        value: ValueId,
+        offset: usize,
+        width: usize,
     },
     Not {
         result: ValueId,
@@ -184,14 +189,12 @@ pub enum OpCode {
     },
     Lookup {
         target: LookupTarget<ValueId>,
-        keys: Vec<ValueId>,
-        results: Vec<ValueId>,
+        args: Vec<ValueId>,
         flag: ValueId,
     },
     DLookup {
         target: LookupTarget<ValueId>,
-        keys: Vec<ValueId>,
-        results: Vec<ValueId>,
+        args: Vec<ValueId>,
         flag: ValueId,
     },
     MulConst {
@@ -229,10 +232,6 @@ pub enum OpCode {
     },
     DropGlobal {
         global: usize,
-    },
-    Const {
-        result: ValueId,
-        value: ConstValue,
     },
     Spread {
         result: ValueId,
@@ -482,14 +481,8 @@ impl Instruction for OpCode {
             OpCode::Constrain { a, b, c } => {
                 format!("constrain_r1c(v{} * v{} - v{} == 0)", a.0, b.0, c.0)
             }
-            OpCode::Lookup {
-                target,
-                keys,
-                results,
-                flag,
-            } => {
-                let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
-                let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
+            OpCode::Lookup { target, args, flag } => {
+                let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let target_str = match target {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
@@ -497,8 +490,8 @@ impl Instruction for OpCode {
                     LookupTarget::Spread(n) => format!("spread({})", n),
                 };
                 format!(
-                    "constrain_lookup({}, ({}) => ({}), flag=v{})",
-                    target_str, keys_str, results_str, flag.0
+                    "constrain_lookup({}, ({}), flag=v{})",
+                    target_str, args_str, flag.0
                 )
             }
             OpCode::NextDCoeff { result } => {
@@ -516,24 +509,15 @@ impl Instruction for OpCode {
                 };
                 format!("∂{} / ∂v{} += v{}", matrix_str, result.0, value.0)
             }
-            OpCode::DLookup {
-                target,
-                keys,
-                results,
-                flag,
-            } => {
-                let keys_str = keys.iter().map(|v| format!("v{}", v.0)).join(", ");
-                let results_str = results.iter().map(|v| format!("v{}", v.0)).join(", ");
+            OpCode::DLookup { target, args, flag } => {
+                let args_str = args.iter().map(|v| format!("v{}", v.0)).join(", ");
                 let target_str = match target {
                     LookupTarget::Rangecheck(n) => format!("rngchk({})", n),
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                     LookupTarget::Spread(n) => format!("spread({})", n),
                 };
-                format!(
-                    "∂lookup({}, ({}) => ({}), flag=v{})",
-                    target_str, keys_str, results_str, flag.0
-                )
+                format!("∂lookup({}, ({}), flag=v{})", target_str, args_str, flag.0)
             }
             OpCode::MkSeq {
                 result,
@@ -581,21 +565,6 @@ impl Instruction for OpCode {
                     target
                 )
             }
-            OpCode::Truncate {
-                result,
-                value,
-                to_bits: out_bits,
-                from_bits: in_bits,
-            } => {
-                format!(
-                    "v{}{} = truncate v{} from {} bits to {} bits",
-                    result.0,
-                    annotate_value(*result),
-                    value.0,
-                    in_bits,
-                    out_bits
-                )
-            }
             OpCode::SExt {
                 result,
                 value,
@@ -609,6 +578,21 @@ impl Instruction for OpCode {
                     value.0,
                     in_bits,
                     out_bits
+                )
+            }
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => {
+                format!(
+                    "v{}{} = bit_range(v{}, {}, {})",
+                    result.0,
+                    annotate_value(*result),
+                    value.0,
+                    offset,
+                    width
                 )
             }
             OpCode::Not { result, value } => {
@@ -732,43 +716,6 @@ impl Instruction for OpCode {
             OpCode::DropGlobal { global } => {
                 format!("drop_global({})", global)
             }
-            OpCode::Const { result, value } => match value {
-                ConstValue::U(size, val) => {
-                    format!(
-                        "v{}{} = u_const({}, {})",
-                        result.0,
-                        annotate_value(*result),
-                        size,
-                        val
-                    )
-                }
-                ConstValue::I(size, val) => {
-                    format!(
-                        "v{}{} = i_const({}, {})",
-                        result.0,
-                        annotate_value(*result),
-                        size,
-                        val
-                    )
-                }
-                ConstValue::Field(val) => {
-                    format!(
-                        "v{}{} = field_const({})",
-                        result.0,
-                        annotate_value(*result),
-                        val
-                    )
-                }
-                ConstValue::FnPtr(fn_id) => {
-                    format!(
-                        "v{}{} = fn_ptr_const({}@{})",
-                        result.0,
-                        annotate_value(*result),
-                        func_name(*fn_id),
-                        fn_id.0
-                    )
-                }
-            },
             OpCode::Spread {
                 result,
                 value,
@@ -817,8 +764,7 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ }
-            | Self::Const { .. } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -895,17 +841,17 @@ impl Instruction for OpCode {
                 value: c,
                 target: _,
             }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            }
             | Self::SExt {
                 result: _,
                 value: c,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: _,
+                value: c,
+                offset: _,
+                width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -981,18 +927,7 @@ impl Instruction for OpCode {
                 offset: _,
                 result_type: _,
             } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                keys,
-                results,
-                flag,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-                flag,
-            } => {
+            Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
                     LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
@@ -1003,8 +938,7 @@ impl Instruction for OpCode {
                         ret_vec.push(arr);
                     }
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
+                ret_vec.extend(args);
                 ret_vec.push(flag);
                 ret_vec.into_iter()
             }
@@ -1036,7 +970,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc { result: r, .. }
             | Self::FreshWitness { result: r, .. }
-            | Self::Const { result: r, .. }
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
@@ -1048,8 +981,8 @@ impl Instruction for OpCode {
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
-            | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
+            | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
@@ -1093,7 +1026,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc { result: r, .. }
             | Self::FreshWitness { result: r, .. }
-            | Self::Const { result: r, .. }
             | Self::Cmp { result: r, .. }
             | Self::BinaryArithOp { result: r, .. }
             | Self::ArrayGet { result: r, .. }
@@ -1105,8 +1037,8 @@ impl Instruction for OpCode {
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
-            | Self::Truncate { result: r, .. }
             | Self::SExt { result: r, .. }
+            | Self::BitRange { result: r, .. }
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
@@ -1157,8 +1089,7 @@ impl Instruction for OpCode {
                 result: _,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: _ }
-            | Self::Const { .. } => vec![].into_iter(),
+            | Self::NextDCoeff { result: _ } => vec![].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: _,
@@ -1236,17 +1167,17 @@ impl Instruction for OpCode {
                 value: c,
                 target: _,
             }
-            | Self::Truncate {
-                result: _,
-                value: c,
-                to_bits: _,
-                from_bits: _,
-            }
             | Self::SExt {
                 result: _,
                 value: c,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: _,
+                value: c,
+                offset: _,
+                width: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1327,18 +1258,7 @@ impl Instruction for OpCode {
                 offset: _,
                 result_type: _,
             } => vec![].into_iter(),
-            Self::Lookup {
-                target,
-                keys,
-                results,
-                flag,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-                flag,
-            } => {
+            Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
                     LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
@@ -1349,8 +1269,7 @@ impl Instruction for OpCode {
                         ret_vec.push(arr);
                     }
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
+                ret_vec.extend(args);
                 ret_vec.push(flag);
                 ret_vec.into_iter()
             }
@@ -1385,8 +1304,7 @@ impl Instruction for OpCode {
                 result: r,
                 result_type: _,
             }
-            | Self::NextDCoeff { result: r }
-            | Self::Const { result: r, .. } => vec![r].into_iter(),
+            | Self::NextDCoeff { result: r } => vec![r].into_iter(),
             Self::Cmp {
                 kind: _,
                 result: a,
@@ -1414,17 +1332,17 @@ impl Instruction for OpCode {
                 value: b,
                 target: _,
             } => vec![a, b].into_iter(),
-            Self::Truncate {
-                result: a,
-                value: b,
-                to_bits: _,
-                from_bits: _,
-            } => vec![a, b].into_iter(),
             Self::SExt {
                 result: a,
                 value: b,
                 from_bits: _,
                 to_bits: _,
+            }
+            | Self::BitRange {
+                result: a,
+                value: b,
+                offset: _,
+                width: _,
             } => vec![a, b].into_iter(),
             Self::ArraySet {
                 result: a,
@@ -1484,18 +1402,7 @@ impl Instruction for OpCode {
                 ret_vec.extend(args_vec);
                 ret_vec.into_iter()
             }
-            Self::Lookup {
-                target,
-                keys,
-                results,
-                flag,
-            }
-            | Self::DLookup {
-                target,
-                keys,
-                results,
-                flag,
-            } => {
+            Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
                     LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
@@ -1506,8 +1413,7 @@ impl Instruction for OpCode {
                         ret_vec.push(arr);
                     }
                 }
-                ret_vec.extend(keys);
-                ret_vec.extend(results);
+                ret_vec.extend(args);
                 ret_vec.push(flag);
                 ret_vec.into_iter()
             }
@@ -1740,11 +1646,12 @@ pub enum SliceOpDir {
     Back,
 }
 
-// CONST VALUES
+// CONSTANTS
 // ================================================================================================
 
+/// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ConstValue {
+pub enum Constant {
     U(usize, u128),
     I(usize, u128),
     Field(ark_bn254::Fr),

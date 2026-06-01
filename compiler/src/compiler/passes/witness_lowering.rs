@@ -197,31 +197,21 @@ impl WitnessLowering {
                         }
                         OpCode::Lookup {
                             target,
-                            keys,
-                            results,
+                            args,
                             flag,
                         } => {
-                            let mut new_keys = vec![];
-                            for key in keys.iter() {
-                                let key_type = type_info.get_value_type(*key);
+                            let mut new_args = vec![];
+                            for arg in args.iter() {
+                                let arg_type = type_info.get_value_type(*arg);
                                 assert!(
-                                    key_type.is_witness_of(),
-                                    "Keys of lookup must be witness, got {:?}",
-                                    key_type
+                                    arg_type.strip_witness().is_field(),
+                                    "Lookup args must be fields, got {:?}",
+                                    arg_type
                                 );
-                                new_keys.push(*key);
-                            }
-                            let mut new_results = vec![];
-                            for result in results.iter() {
-                                let result_type = type_info.get_value_type(*result);
-                                assert!(
-                                    result_type.strip_witness().is_field(),
-                                    "Results of lookup must be fields"
-                                );
-                                if !result_type.is_witness_of() {
-                                    new_results.push(emitter.cast_to_witness_of(*result));
+                                if !arg_type.is_witness_of() {
+                                    new_args.push(emitter.cast_to_witness_of(*arg));
                                 } else {
-                                    new_results.push(*result);
+                                    new_args.push(*arg);
                                 }
                             }
                             let new_flag = {
@@ -234,8 +224,7 @@ impl WitnessLowering {
                             };
                             emitter.emit(OpCode::DLookup {
                                 target,
-                                keys: new_keys,
-                                results: new_results,
+                                args: new_args,
                                 flag: new_flag,
                             });
                         }
@@ -430,8 +419,8 @@ impl WitnessLowering {
                         }
                         OpCode::Not { .. }
                         | OpCode::Cmp { .. }
-                        | OpCode::Truncate { .. }
                         | OpCode::SExt { .. }
+                        | OpCode::BitRange { .. }
                         | OpCode::Load { .. }
                         | OpCode::Assert { .. }
                         | OpCode::AssertCmp { .. }
@@ -454,7 +443,6 @@ impl WitnessLowering {
                         | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. }
                         | OpCode::ValueOf { .. }
-                        | OpCode::Const { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);

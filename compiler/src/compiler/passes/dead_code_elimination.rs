@@ -118,14 +118,13 @@ impl DCE {
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
             | OpCode::Cast { .. }
-            | OpCode::Truncate { .. }
             | OpCode::SExt { .. }
+            | OpCode::BitRange { .. }
             | OpCode::Not { .. }
             | OpCode::MulConst { .. }
             | OpCode::ReadGlobal { .. }
             | OpCode::MkTuple { .. }
             | OpCode::ValueOf { .. }
-            | OpCode::Const { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => false,
             OpCode::Guard { inner, .. } => self.is_initially_live(inner.as_ref()),
@@ -403,6 +402,14 @@ impl DCE {
                 }
             }
         }
+
+        // Sweep the module-level constant storage: a constant is live iff some live instruction
+        // (in any function) references its `ValueId`.
+        let all_live: HashSet<ValueId> = live_values
+            .values()
+            .flat_map(|set| set.iter().copied())
+            .collect();
+        ssa.retain_constants(|vid, _| all_live.contains(vid));
 
         for function_id in function_ids {
             let function_cfg = cfg.get_function_cfg(function_id);

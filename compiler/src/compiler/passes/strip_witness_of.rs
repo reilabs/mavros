@@ -113,8 +113,8 @@ impl StripWitnessOf {
             }
             OpCode::Cmp { .. }
             | OpCode::BinaryArithOp { .. }
-            | OpCode::Truncate { .. }
             | OpCode::SExt { .. }
+            | OpCode::BitRange { .. }
             | OpCode::Not { .. }
             | OpCode::Store { .. }
             | OpCode::Load { .. }
@@ -142,7 +142,6 @@ impl StripWitnessOf {
             | OpCode::TupleProj { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
-            | OpCode::Const { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => {}
             OpCode::Guard { .. } => {

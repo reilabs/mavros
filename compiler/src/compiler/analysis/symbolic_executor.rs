@@ -12,8 +12,8 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, Instruction, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget, OpCode, Radix,
-            RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLSSA, LookupTarget,
+            OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
         },
     },
 };
@@ -38,8 +38,8 @@ where
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
-    fn truncate(&self, _from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
+    fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn to_bits(
@@ -100,11 +100,11 @@ pub trait Context<V> {
 
     // TODO it looks odd that this is the only opcode implemented here.
     // This is the _new_ structure, so at some point we should migrate all other opcodes here.
-    fn lookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
+    fn lookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement lookup");
     }
 
-    fn dlookup(&mut self, _target: LookupTarget<V>, _keys: Vec<V>, _results: Vec<V>, _flag: V) {
+    fn dlookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
         panic!("ICE: backend does not implement dlookup");
     }
 
@@ -154,7 +154,20 @@ impl SymbolicExecutor {
     {
         let mut globals: Vec<Option<V>> = vec![None; ssa.num_globals()];
 
-        self.run_fn(ssa, type_info, entry_point, params, &mut globals, context);
+        // Materialize the SSA constants into `V`s once, up front. Constant ids are global and stable
+        // across functions, so we build this map a single time and share it by reference with every
+        // `run_fn` instead of rebuilding it (via the emitting `of_*` path) on every function entry.
+        let consts = materialize_constants(ssa, context);
+
+        self.run_fn(
+            ssa,
+            type_info,
+            entry_point,
+            params,
+            &mut globals,
+            &consts,
+            context,
+        );
     }
 
     #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
@@ -165,6 +178,7 @@ impl SymbolicExecutor {
         fn_id: FunctionId,
         mut inputs: Vec<V>,
         globals: &mut Vec<Option<V>>,
+        consts: &HashMap<ValueId, V>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
@@ -174,7 +188,8 @@ impl SymbolicExecutor {
         let fn_body = ssa.get_function(fn_id);
         let fn_type_info = type_info.get_function(fn_id);
         let entry = fn_body.get_entry();
-        let mut scope: HashMap<ValueId, V> = HashMap::new();
+
+        let mut scope = Scope::new(consts);
 
         let call_result = ctx.on_call(
             fn_id,
@@ -247,18 +262,6 @@ impl SymbolicExecutor {
                             a.cast(cast_target, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Truncate {
-                        result: r,
-                        value: a,
-                        to_bits: to,
-                        from_bits: from,
-                    } => {
-                        let a = &scope[a];
-                        scope.insert(
-                            *r,
-                            a.truncate(*from, *to, &fn_type_info.get_value_type(*r), ctx),
-                        );
-                    }
                     crate::compiler::ssa::hlssa::OpCode::SExt {
                         result: r,
                         value: a,
@@ -269,6 +272,18 @@ impl SymbolicExecutor {
                         scope.insert(
                             *r,
                             a.sext(*from, *to, &fn_type_info.get_value_type(*r), ctx),
+                        );
+                    }
+                    crate::compiler::ssa::hlssa::OpCode::BitRange {
+                        result: r,
+                        value: a,
+                        offset,
+                        width,
+                    } => {
+                        let a = &scope[a];
+                        scope.insert(
+                            *r,
+                            a.bit_range(*offset, *width, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
                     crate::compiler::ssa::hlssa::OpCode::Not {
@@ -347,7 +362,7 @@ impl SymbolicExecutor {
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally
-                            self.run_fn(ssa, type_info, *function_id, params, globals, ctx)
+                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)
                         };
                         for (i, val) in returns.iter().enumerate() {
                             scope.insert(*val, outputs[i].clone());
@@ -528,12 +543,7 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::hlssa::OpCode::DropGlobal { global } => {
                         globals[*global] = None;
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Lookup {
-                        target,
-                        keys,
-                        results,
-                        flag,
-                    } => {
+                    crate::compiler::ssa::hlssa::OpCode::Lookup { target, args, flag } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
@@ -542,20 +552,11 @@ impl SymbolicExecutor {
                             }
                             LookupTarget::Array(arr) => LookupTarget::Array(scope[arr].clone()),
                         };
-                        let keys = keys.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
-                        let results = results
-                            .iter()
-                            .map(|id| scope[id].clone())
-                            .collect::<Vec<_>>();
+                        let args = args.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
                         let flag_value = scope[flag].clone();
-                        ctx.lookup(target, keys, results, flag_value);
+                        ctx.lookup(target, args, flag_value);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::DLookup {
-                        target,
-                        keys,
-                        results,
-                        flag,
-                    } => {
+                    crate::compiler::ssa::hlssa::OpCode::DLookup { target, args, flag } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
@@ -564,13 +565,9 @@ impl SymbolicExecutor {
                             }
                             LookupTarget::Array(arr) => LookupTarget::Array(scope[arr].clone()),
                         };
-                        let keys = keys.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
-                        let results = results
-                            .iter()
-                            .map(|id| scope[id].clone())
-                            .collect::<Vec<_>>();
+                        let args = args.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
                         let flag_value = scope[flag].clone();
-                        ctx.dlookup(target, keys, results, flag_value);
+                        ctx.dlookup(target, args, flag_value);
                     }
                     crate::compiler::ssa::hlssa::OpCode::TupleProj {
                         result: r,
@@ -629,20 +626,6 @@ impl SymbolicExecutor {
                         let val = scope[value].clone();
                         scope.insert(*result, val.value_of(ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Const { result, value } => match value {
-                        crate::compiler::ssa::hlssa::ConstValue::U(size, val) => {
-                            scope.insert(*result, V::of_u(*size, *val, ctx));
-                        }
-                        crate::compiler::ssa::hlssa::ConstValue::I(size, val) => {
-                            scope.insert(*result, V::of_i(*size, *val, ctx));
-                        }
-                        crate::compiler::ssa::hlssa::ConstValue::Field(val) => {
-                            scope.insert(*result, V::of_field(*val, ctx));
-                        }
-                        crate::compiler::ssa::hlssa::ConstValue::FnPtr(_) => {
-                            todo!("FnPtrConst in symbolic executor");
-                        }
-                    },
                     crate::compiler::ssa::hlssa::OpCode::Guard { condition, inner } => {
                         let condition_val = &scope[condition];
                         let inputs: Vec<&V> = inner.get_inputs().map(|id| &scope[id]).collect();
@@ -701,4 +684,62 @@ impl SymbolicExecutor {
 
         panic!("ICE: Unreachable, function did not return");
     }
+}
+
+/// Per-function value environment, layered over the shared constant scope.
+///
+/// Locals (parameters and instruction results) are stored per call, constants are resolved on
+/// lookup miss relying on unique value IDs.
+struct Scope<'c, V> {
+    locals: HashMap<ValueId, V>,
+    consts: &'c HashMap<ValueId, V>,
+}
+
+impl<'c, V> Scope<'c, V> {
+    fn new(consts: &'c HashMap<ValueId, V>) -> Self {
+        Self {
+            locals: HashMap::new(),
+            consts,
+        }
+    }
+
+    fn insert(&mut self, id: ValueId, v: V) {
+        self.locals.insert(id, v);
+    }
+}
+
+impl<V> std::ops::Index<&ValueId> for Scope<'_, V> {
+    type Output = V;
+
+    fn index(&self, id: &ValueId) -> &V {
+        self.locals
+            .get(id)
+            .or_else(|| self.consts.get(id))
+            .expect("ICE: value id not in scope")
+    }
+}
+
+/// Build the constant scope: every interned SSA constant turned into a `V`, exactly once.
+///
+/// Sources from [`HLSSA::const_snapshot`], which releases the constants lock before returning,
+/// rather than [`HLSSA::for_each_const`], which holds the read lock across the walk. The `of_*`
+/// calls below may intern constants via `add_const` (which takes the constants write lock), so
+/// running them while the read lock is held would deadlock.
+fn materialize_constants<V, Ctx>(ssa: &HLSSA, ctx: &mut Ctx) -> HashMap<ValueId, V>
+where
+    V: Value<Ctx>,
+{
+    let mut consts = HashMap::new();
+    for (vid, cv) in ssa.const_snapshot() {
+        let v = match cv.as_ref() {
+            Constant::U(size, val) => V::of_u(*size, *val, ctx),
+            Constant::I(size, val) => V::of_i(*size, *val, ctx),
+            Constant::Field(val) => V::of_field(*val, ctx),
+            Constant::FnPtr(_) => {
+                todo!("FnPtrConst in symbolic executor");
+            }
+        };
+        consts.insert(vid, v);
+    }
+    consts
 }
