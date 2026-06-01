@@ -21,7 +21,9 @@ use crate::compiler::{
     },
 };
 
-pub struct UntaintControlFlow {}
+pub struct UntaintControlFlow {
+    slice_strip_fns: HashMap<(Type, Type), FunctionId>,
+}
 
 /// Look up the witness level for a value, defaulting to Pure for values
 /// not present in the witness type map (e.g., values created after type inference).
@@ -49,7 +51,53 @@ fn maybe_guard(instrs: &mut Vec<OpCode>, taint: Option<ValueId>, instr: OpCode) 
 
 impl UntaintControlFlow {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            slice_strip_fns: HashMap::new(),
+        }
+    }
+
+    fn generate_slice_helper_functions(&mut self, ssa: &mut HLSSA, src: &Type, tgt: &Type) {
+        if src == tgt {
+            return;
+        }
+        match (&src.expr, &tgt.expr) {
+            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
+                let key = ((**s).clone(), (**t).clone());
+                if self.slice_strip_fns.contains_key(&key) {
+                    return;
+                }
+                let name = format!("strip_slice_{}_to_{}", s, t);
+                let fn_id = ssa.add_function(name);
+                self.slice_strip_fns.insert(key, fn_id);
+                self.generate_slice_helper_functions(ssa, s, t);
+                self.synthesize_strip_slice_body(ssa, fn_id, s, t);
+            }
+            (TypeExpr::Array(s, _), TypeExpr::Array(t, _)) => {
+                self.generate_slice_helper_functions(ssa, s, t);
+            }
+            (TypeExpr::Tuple(ss), TypeExpr::Tuple(ts)) => {
+                for (s, t) in ss.iter().zip(ts.iter()) {
+                    self.generate_slice_helper_functions(ssa, s, t);
+                }
+            }
+            (TypeExpr::Ref(s), TypeExpr::Ref(t)) => {
+                self.generate_slice_helper_functions(ssa, s, t);
+            }
+            (TypeExpr::WitnessOf(s_inner), _) => {
+                self.generate_slice_helper_functions(ssa, s_inner, tgt);
+            }
+            _ => {}
+        }
+    }
+
+    fn synthesize_strip_slice_body(
+        &self,
+        _ssa: &mut HLSSA,
+        _fn_id: FunctionId,
+        _src_elem: &Type,
+        _tgt_elem: &Type,
+    ) {
+        todo!();
     }
 
     // -----------------------------------------------------------------------
@@ -312,7 +360,7 @@ impl UntaintControlFlow {
     }
 
     fn process_block(
-        &self,
+        &mut self,
         block_id: BlockId,
         function: &mut HLFunction,
         ssa: &mut HLSSA,
@@ -555,7 +603,7 @@ impl UntaintControlFlow {
 
     /// Process a single instruction: apply cast insertion, then Guard-wrap if tainted.
     fn process_instruction(
-        &self,
+        &mut self,
         instruction: OpCode,
         function: &mut HLFunction,
         ssa: &mut HLSSA,
@@ -589,6 +637,13 @@ impl UntaintControlFlow {
                 unconstrained: true,
             } => {
                 if let Some(ti) = type_info {
+                    for arg in &args {
+                        let arg_type = ti.get_value_type(*arg);
+                        let pure_type = arg_type.strip_all_witness();
+                        if *arg_type != pure_type {
+                            self.generate_slice_helper_functions(ssa, arg_type, &pure_type);
+                        }
+                    }
                     let mut cast_instrs = Vec::new();
                     let new_args: Vec<_> = {
                         let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
@@ -597,7 +652,7 @@ impl UntaintControlFlow {
                                 let arg_type = ti.get_value_type(arg);
                                 let pure_type = arg_type.strip_all_witness();
                                 if *arg_type != pure_type {
-                                    emit_strip_witness(arg, arg_type, &pure_type, &mut builder)
+                                    self.emit_strip_witness(arg, arg_type, &pure_type, &mut builder)
                                 } else {
                                     arg
                                 }
@@ -928,57 +983,69 @@ fn emit_unrolled_array_conversion(
     )
 }
 
-/// Recursively strip WitnessOf from a value (for unconstrained call args).
-/// Uses unrolled element-wise conversion for arrays.
-fn emit_strip_witness(
-    value: ValueId,
-    source_type: &Type,
-    target_type: &Type,
-    builder: &mut HLInstrBuilder<'_>,
-) -> ValueId {
-    match (&source_type.expr, &target_type.expr) {
-        _ if source_type == target_type => value,
-        // WitnessOf(X) → X: emit ValueOf
-        (TypeExpr::WitnessOf(inner), _) => {
-            let unwrapped = builder.value_of(value);
-            emit_strip_witness(unwrapped, inner, target_type, builder)
-        }
-        // Array: unrolled element-wise strip
-        (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-            assert_eq!(src_size, tgt_size);
-            let mut elems = Vec::with_capacity(*src_size);
-            for i in 0..*src_size {
-                let idx = builder.u_const(32, i as u128);
-                let elem = builder.array_get(value, idx);
-                let converted = emit_strip_witness(elem, src_inner, tgt_inner, builder);
-                elems.push(converted);
+impl UntaintControlFlow {
+    /// Recursively strip WitnessOf from a value (for unconstrained call args).
+    /// Uses unrolled element-wise conversion for arrays.
+    /// Dispatches a pre-registered helper function for slices
+    fn emit_strip_witness<E: HLEmitter>(
+        &self,
+        value: ValueId,
+        source_type: &Type,
+        target_type: &Type,
+        builder: &mut E,
+    ) -> ValueId {
+        match (&source_type.expr, &target_type.expr) {
+            _ if source_type == target_type => value,
+            // WitnessOf(X) → X: emit ValueOf
+            (TypeExpr::WitnessOf(inner), _) => {
+                let unwrapped = builder.value_of(value);
+                self.emit_strip_witness(unwrapped, inner, target_type, builder)
             }
-            builder.mk_seq(
-                elems,
-                SequenceTargetType::Array(*src_size),
-                *tgt_inner.clone(),
-            )
-        }
-        // Tuple: decompose, per-field recursive, recompose
-        (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-            assert_eq!(src_fields.len(), tgt_fields.len());
-            let mut converted_elems = vec![];
-            for (i, (sf, tf)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                let proj = builder.tuple_proj(value, i);
-                let converted = emit_strip_witness(proj, sf, tf, builder);
-                converted_elems.push(converted);
+            // Array: unrolled element-wise strip
+            (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
+                assert_eq!(src_size, tgt_size);
+                let mut elems = Vec::with_capacity(*src_size);
+                for i in 0..*src_size {
+                    let idx = builder.u_const(32, i as u128);
+                    let elem = builder.array_get(value, idx);
+                    let converted = self.emit_strip_witness(elem, src_inner, tgt_inner, builder);
+                    elems.push(converted);
+                }
+                builder.mk_seq(
+                    elems,
+                    SequenceTargetType::Array(*src_size),
+                    *tgt_inner.clone(),
+                )
             }
-            builder.mk_tuple(converted_elems, tgt_fields.clone())
+            (TypeExpr::Slice(src_inner), TypeExpr::Slice(tgt_inner)) => {
+                let helper = self
+                    .slice_strip_fns
+                    .get(&((**src_inner).clone(), (**tgt_inner).clone()))
+                    .copied()
+                    .expect("slice strip helper missing; generate_slice_helper_functions must run first");
+                builder.call(helper, vec![value], 1)[0]
+            }
+            // Tuple: decompose, per-field recursive, recompose
+            (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
+                assert_eq!(src_fields.len(), tgt_fields.len());
+                let mut converted_elems = vec![];
+                for (i, (sf, tf)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
+                    let proj = builder.tuple_proj(value, i);
+                    let converted = self.emit_strip_witness(proj, sf, tf, builder);
+                    converted_elems.push(converted);
+                }
+                builder.mk_tuple(converted_elems, tgt_fields.clone())
+            }
+            (TypeExpr::Ref(src_inner), TypeExpr::Ref(tgt_inner)) => {
+                let loaded = builder.load(value);
+                let stripped = self.emit_strip_witness(loaded, src_inner, tgt_inner, builder);
+                builder.alloc((**tgt_inner).clone(), stripped)
+            }
+            _ => panic!(
+                "emit_strip_witness: unsupported conversion {:?} -> {:?}",
+                source_type, target_type
+            ),
         }
-        (TypeExpr::Ref(src_inner), TypeExpr::Ref(tgt_inner)) => {
-            let loaded = builder.load(value);
-            let stripped = emit_strip_witness(loaded, src_inner, tgt_inner, builder);
-            builder.alloc((**tgt_inner).clone(), stripped)
-        }
-        _ => panic!(
-            "emit_strip_witness: unsupported conversion {:?} -> {:?}",
-            source_type, target_type
-        ),
     }
 }
 
