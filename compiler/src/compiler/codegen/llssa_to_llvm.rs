@@ -24,7 +24,8 @@ use inkwell::values::{
 use crate::compiler::analysis::flow_analysis;
 use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::ssa::llssa::{
-    FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, Type,
+    Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
+    Type,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -62,6 +63,7 @@ pub struct LLVMCodeGen<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     value_map: HashMap<ValueId, BasicValueEnum<'ctx>>,
+    constant_values: HashMap<ValueId, BasicValueEnum<'ctx>>,
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
@@ -88,6 +90,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             module,
             builder,
             value_map: HashMap::new(),
+            constant_values: HashMap::new(),
             block_map: HashMap::new(),
             function_map: HashMap::new(),
             vm_ptr: None,
@@ -386,6 +389,30 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.globals.push(global);
         }
 
+        // Materialise module-level LLSSA constants once; each function body will re-seed its
+        // `value_map` from this table. This is a HACK, to be removed once we compile to proper
+        // LLVM constants (#184).
+        self.constant_values.clear();
+        for (vid, c) in llssa.const_snapshot().iter() {
+            let val: BasicValueEnum<'ctx> = match c.as_ref() {
+                Constant::Int { bits, value } => {
+                    let int_type = self
+                        .context
+                        .custom_width_int_type(
+                            NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
+                        )
+                        .expect("A basic integer type can be created");
+                    int_type.const_int(*value, false).into()
+                }
+                Constant::NullPtr => self
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+                    .into(),
+            };
+            self.constant_values.insert(*vid, val);
+        }
+
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
             self.declare_function(*fn_id, function, main_id);
@@ -444,6 +471,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         main_id: FunctionId,
     ) {
         self.value_map.clear();
+        self.value_map
+            .extend(self.constant_values.iter().map(|(vid, val)| (*vid, *val)));
         self.block_map.clear();
 
         let fn_value = self.function_map[&fn_id];
@@ -601,21 +630,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     fn compile_instruction(&mut self, op: &LLOp) {
         match op {
-            LLOp::IntConst {
-                result,
-                bits,
-                value,
-            } => {
-                let int_type = self
-                    .context
-                    .custom_width_int_type(
-                        NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
-                    )
-                    .expect("A basic integer type can be created");
-                let val = int_type.const_int(*value, false);
-                self.value_map.insert(*result, val.into());
-            }
-
             LLOp::IntArith { kind, result, a, b } => {
                 let lhs = self.value_map[a].into_int_value();
                 let rhs = self.value_map[b].into_int_value();
@@ -932,12 +946,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             // ── Memory operations ───────────────────────────────────────
-            LLOp::NullPtr { result } => {
-                let ptr_type = self.context.ptr_type(AddressSpace::default());
-                let null = ptr_type.const_null();
-                self.value_map.insert(*result, null.into());
-            }
-
             LLOp::HeapAlloc {
                 result,
                 struct_type,
