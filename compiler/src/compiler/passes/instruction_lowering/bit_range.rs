@@ -207,39 +207,44 @@ const MODULUS_M1_LO: u128 = 0x2833e84879b9709143e1f593f0000000;
 fn decompose_canonical_field(b: &mut HLBlockEmitter<'_>, value: ValueId) -> (ValueId, ValueId) {
     let two_128 = b.field_const(two_pow(128));
 
-    // Compute pure limb values for the `hi` witness and borrow hint.
-    let pure = b.value_of(value);
-    let lo_hint = lower_pure_field_low_128_bits(b, pure);
-    let high = b.sub(pure, lo_hint);
-    let hi_hint = b.div(high, two_128);
+    let hi = witness_high_limb(b, value, two_128);
+    b.rangecheck(hi, 128);
 
-    let hi = b.write_witness(hi_hint);
-    b.rangecheck(hi, 126);
-
-    let hi_shifted = b.mul(hi, two_128);
-    let value_field = b.cast_to_field(value);
-    let lo = b.sub(value_field, hi_shifted);
+    let lo = recover_low_limb(b, value, hi, two_128);
     b.rangecheck(lo, 128);
 
-    assert_field_canonical(b, lo, hi, lo_hint, two_128);
+    assert_field_canonical(b, lo, hi, two_128);
 
     let lo_u128 = b.cast_to(CastTarget::U(128), lo);
     let hi_u128 = b.cast_to(CastTarget::U(128), hi);
     (lo_u128, hi_u128)
 }
 
+fn witness_high_limb(b: &mut HLBlockEmitter<'_>, value: ValueId, two_128: ValueId) -> ValueId {
+    let value = b.value_of(value);
+    let low = pure_field_low_128_bits(b, value);
+    let high = b.sub(value, low);
+    let high = b.div(high, two_128);
+    b.write_witness(high)
+}
+
+fn recover_low_limb(
+    b: &mut HLBlockEmitter<'_>,
+    value: ValueId,
+    hi: ValueId,
+    two_128: ValueId,
+) -> ValueId {
+    let value = b.cast_to_field(value);
+    let hi_shifted = b.mul(hi, two_128);
+    b.sub(value, hi_shifted)
+}
+
 /// Assert `lo + hi * 2^128 <= p - 1` (i.e. the limbs are the canonical representation), by
 /// performing the 254-bit subtraction `(p - 1) - value` with a hinted borrow and range-checking
 /// that both resulting limbs are non-negative.
-fn assert_field_canonical(
-    b: &mut HLBlockEmitter<'_>,
-    lo: ValueId,
-    hi: ValueId,
-    lo_hint: ValueId,
-    two_128: ValueId,
-) {
-    // Hint the borrow: it is set iff the low-limb subtraction underflows (`lo > (p - 1)_lo`).
-    let lo_pure = b.cast_to(CastTarget::U(128), lo_hint);
+fn assert_field_canonical(b: &mut HLBlockEmitter<'_>, lo: ValueId, hi: ValueId, two_128: ValueId) {
+    let lo_pure = b.value_of(lo);
+    let lo_pure = b.cast_to(CastTarget::U(128), lo_pure);
     let modulus_m1_lo_u = b.u_const(128, MODULUS_M1_LO);
     let borrow_bool = b.lt(modulus_m1_lo_u, lo_pure);
     let borrow_hint = b.cast_to_field(borrow_bool);
@@ -255,10 +260,10 @@ fn assert_field_canonical(
     let hi_gap = b.sub(modulus_hi, hi);
     let hi_gap = b.sub(hi_gap, borrow);
     b.rangecheck(lo_gap, 128);
-    b.rangecheck(hi_gap, 126);
+    b.rangecheck(hi_gap, 128);
 }
 
-fn lower_pure_field_low_128_bits(b: &mut HLBlockEmitter<'_>, value: ValueId) -> ValueId {
+fn pure_field_low_128_bits(b: &mut HLBlockEmitter<'_>, value: ValueId) -> ValueId {
     let low_u128 = b.cast_to(CastTarget::U(128), value);
     b.cast_to_field(low_u128)
 }
