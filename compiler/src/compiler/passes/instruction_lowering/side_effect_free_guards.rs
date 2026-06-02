@@ -1,4 +1,4 @@
-//! Removes guards around operations that are safe to execute unconditionally.
+//! Removes guards around side-effect-free operations that are safe to execute unconditionally.
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
@@ -10,9 +10,9 @@ use crate::compiler::{
 
 use super::{InstructionLoweringRule, LoweringContext};
 
-pub struct LowerUnrefutableGuards {}
+pub struct LowerSideEffectFreeGuards {}
 
-impl InstructionLoweringRule for LowerUnrefutableGuards {
+impl InstructionLoweringRule for LowerSideEffectFreeGuards {
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -23,7 +23,7 @@ impl InstructionLoweringRule for LowerUnrefutableGuards {
             return false;
         };
 
-        if self.is_unrefutable(inner, context.types()) {
+        if self.can_drop_guard(inner, context.types()) {
             b.emit(inner.as_ref().clone());
             true
         } else {
@@ -32,12 +32,12 @@ impl InstructionLoweringRule for LowerUnrefutableGuards {
     }
 }
 
-impl LowerUnrefutableGuards {
+impl LowerSideEffectFreeGuards {
     pub fn new() -> Self {
         Self {}
     }
 
-    fn is_unrefutable(&self, op: &OpCode, type_info: &FunctionTypeInfo) -> bool {
+    fn can_drop_guard(&self, op: &OpCode, type_info: &FunctionTypeInfo) -> bool {
         match op {
             OpCode::Cmp { .. } => true,
             OpCode::BinaryArithOp {

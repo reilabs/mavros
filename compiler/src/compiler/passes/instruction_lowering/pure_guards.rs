@@ -1,7 +1,7 @@
 //! Lowers failable pure Guard instructions into explicit checks.
 //!
-//! After UntaintControlFlow, Guards wrap operations in witness-conditional blocks. Unrefutable
-//! guarded operations are handled by `LowerUnrefutableGuards`; this rule keeps only operations whose
+//! After UntaintControlFlow, Guards wrap operations in witness-conditional blocks. Side-effect-free
+//! guarded operations are handled by `LowerSideEffectFreeGuards`; this rule keeps only operations whose
 //! inactive branch needs special handling to avoid evaluating a failing operation.
 //!
 //! Classification:
@@ -115,8 +115,6 @@ impl LowerPureGuards {
                         );
                         true
                     }
-                    // Field arith is handled by LowerUnrefutableGuards. Witness inputs on integer
-                    // arith stay guarded for the witness arithmetic rule.
                     _ => false,
                 }
             }
