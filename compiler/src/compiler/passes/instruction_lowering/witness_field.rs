@@ -65,7 +65,16 @@ impl LowerWitnessFieldOps {
                 radix,
                 endianness,
                 count,
-            } => self.lower_to_radix(b, context, *result, *value, *radix, *endianness, *count),
+            } => self.lower_to_radix(
+                b,
+                context,
+                None,
+                *result,
+                *value,
+                *radix,
+                *endianness,
+                *count,
+            ),
             OpCode::Rangecheck { value, max_bits }
                 if context.types().get_value_type(*value).is_witness_of() =>
             {
@@ -96,6 +105,22 @@ impl LowerWitnessFieldOps {
                 self.lower_rangecheck(b, context, Some(condition), *value, *max_bits);
                 true
             }
+            OpCode::ToRadix {
+                result,
+                value,
+                radix,
+                endianness,
+                count,
+            } => self.lower_to_radix(
+                b,
+                context,
+                Some(condition),
+                *result,
+                *value,
+                *radix,
+                *endianness,
+                *count,
+            ),
             _ => false,
         }
     }
@@ -271,6 +296,7 @@ impl LowerWitnessFieldOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
+        guard: Option<ValueId>,
         result: ValueId,
         value: ValueId,
         radix: Radix<ValueId>,
@@ -280,7 +306,18 @@ impl LowerWitnessFieldOps {
         let radix = match radix {
             Radix::Dyn(rv) => {
                 let const_256 = b.u_const(32, 256);
-                b.assert_eq(rv, const_256);
+                if let Some(condition) = guard {
+                    b.emit(OpCode::Guard {
+                        condition,
+                        inner: Box::new(OpCode::AssertCmp {
+                            kind: crate::compiler::ssa::hlssa::CmpKind::Eq,
+                            lhs: rv,
+                            rhs: const_256,
+                        }),
+                    });
+                } else {
+                    b.assert_eq(rv, const_256);
+                }
                 Radix::Bytes
             }
             Radix::Bytes if !context.types().get_value_type(value).is_witness_of() => {
@@ -304,6 +341,8 @@ impl LowerWitnessFieldOps {
         let hint = b.to_radix(pure_value, radix, endianness, count);
         let mut witnesses = vec![ValueId(0); count];
         let mut current_sum = b.field_const(Field::ZERO);
+        let guard_field = guard
+            .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)));
         let radix_val = match radix {
             Radix::Bytes => b.field_const(Field::from(256)),
             Radix::Dyn(radix) => b.cast_to(CastTarget::Field, radix),
@@ -321,14 +360,20 @@ impl LowerWitnessFieldOps {
             let byte = b.array_get(hint, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
-            let one = b.field_const(Field::ONE);
-            b.lookup_rngchk(rangecheck_type, byte_wit, one);
+            let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
+            b.lookup_rngchk(rangecheck_type, byte_wit, flag);
             let shift_prev_res = b.mul(current_sum, radix_val);
             current_sum = b.add(shift_prev_res, byte_wit);
             witnesses[i] = byte_wit;
         }
-        let constrain_one = b.field_const(Field::ONE);
-        b.constrain(current_sum, constrain_one, value);
+        if let Some(flag) = guard_field {
+            let diff = b.sub(current_sum, value);
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(diff, flag, zero);
+        } else {
+            let constrain_one = b.field_const(Field::ONE);
+            b.constrain(current_sum, constrain_one, value);
+        }
         let byte_elems: Vec<ValueId> = witnesses
             .iter()
             .map(|&w| b.cast_to(CastTarget::U(8), w))

@@ -76,7 +76,6 @@ impl LowerSideEffectFreeGuards {
             | OpCode::SliceLen { .. }
             | OpCode::Select { .. }
             | OpCode::ToBits { .. }
-            | OpCode::ToRadix { .. }
             | OpCode::ValueOf { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::FreshWitness { .. }
@@ -89,6 +88,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. }
             | OpCode::Todo { .. } => true,
+            OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             OpCode::Store { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }

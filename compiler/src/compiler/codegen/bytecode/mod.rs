@@ -949,7 +949,7 @@ impl CodeGen {
                     result: r,
                     value: v,
                     radix: Radix::Bytes,
-                    endianness: Endianness::Big,
+                    endianness,
                     count: c,
                 } => {
                     assert!(
@@ -957,11 +957,19 @@ impl CodeGen {
                         "TODO: Implement toRadix for U-values"
                     );
                     assert!(*c <= 32, "ToRadix byte count must be <= 32");
-                    emitter.push_op(bytecode::OpCode::ToBytesBe {
-                        val: layouter.get_value(*v),
-                        count: *c as u64,
-                        res: layouter.alloc_value(*r, &type_info.get_value_type(*r)),
-                    })
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    match endianness {
+                        Endianness::Big => emitter.push_op(bytecode::OpCode::ToBytesBe {
+                            val: layouter.get_value(*v),
+                            count: *c as u64,
+                            res,
+                        }),
+                        Endianness::Little => emitter.push_op(bytecode::OpCode::ToBytesLe {
+                            val: layouter.get_value(*v),
+                            count: *c as u64,
+                            res,
+                        }),
+                    }
                 }
                 hlssa::OpCode::ToRadix {
                     result: _,

@@ -5,11 +5,7 @@
 //! execution combined with an instrumenter for the circuit cost, and gives the compiler an idea of
 //! how much a function could be shrunk through specialization on concrete inputs.
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field as _, PrimeField};
 use itertools::Itertools;
@@ -157,6 +153,15 @@ impl Value {
             Value::Field(f) => *f == Field::ONE,
             Value::WitnessOf(inner) => inner.is_const_one(),
             _ => false,
+        }
+    }
+
+    fn as_field_const(&self) -> Option<Field> {
+        match self {
+            Value::U(_, v) | Value::I(_, v) => Some(Field::from(*v)),
+            Value::Field(f) => Some(*f),
+            Value::WitnessOf(inner) => inner.as_field_const(),
+            _ => None,
         }
     }
 
@@ -927,7 +932,14 @@ impl Value {
     }
 
     fn constrain(_a: &Value, _b: &Value, _c: &Value, instrumenter: &mut dyn OpInstrumenter) {
-        instrumenter.record_constrain();
+        match (
+            _a.as_field_const(),
+            _b.as_field_const(),
+            _c.as_field_const(),
+        ) {
+            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
+            _ => instrumenter.record_constrain(),
+        }
     }
 
     fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
@@ -1640,10 +1652,7 @@ struct Instrumenter {
     final_spread_lookups: HashMap<u8, usize>,
     total_table_lookups: usize,
 
-    /// Final table allocation state. Range/spread tables are shared by kind;
-    /// array tables are allocated per array value identity.
-    allocates_rangecheck8_table: bool,
-    allocated_spread_tables: HashSet<u8>,
+    /// Array tables are allocated per array value identity.
     allocated_array_tables: HashMap<usize, usize>,
 }
 
@@ -1660,8 +1669,6 @@ impl Instrumenter {
             final_rangecheck8_lookups: 0,
             final_spread_lookups: HashMap::new(),
             total_table_lookups: 0,
-            allocates_rangecheck8_table: false,
-            allocated_spread_tables: HashSet::new(),
             allocated_array_tables: HashMap::new(),
         }
     }
@@ -1683,7 +1690,6 @@ impl Instrumenter {
             let leftover_bits = bits % 8;
             full_bytes + if leftover_bits > 0 { 2 } else { 0 }
         };
-        self.allocates_rangecheck8_table = true;
         self.final_rangecheck8_lookups += final_lookups;
         self.total_table_lookups += final_lookups;
     }
@@ -1712,7 +1718,6 @@ impl Instrumenter {
 
     fn record_final_spread_lookup(&mut self, bits: u8) {
         *self.final_spread_lookups.entry(bits).or_insert(0) += 1;
-        self.allocated_spread_tables.insert(bits);
         self.total_table_lookups += 1;
     }
 
@@ -1728,14 +1733,15 @@ impl Instrumenter {
     }
 
     fn table_allocation_constraints(&self) -> usize {
-        let range_constraints = if self.allocates_rangecheck8_table {
+        let range_constraints = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
             (1usize << 8) + 1
         } else {
             0
         };
         let spread_constraints = self
-            .allocated_spread_tables
-            .iter()
+            .final_spread_lookups
+            .keys()
+            .filter(|bits| **bits >= 2)
             .map(|bits| 2 * (1usize << *bits as usize) + 1)
             .sum::<usize>();
         let array_constraints = self
@@ -1780,14 +1786,15 @@ impl Instrumenter {
     }
 
     fn allocated_lookup_table_rows(&self) -> usize {
-        let range_rows = if self.allocates_rangecheck8_table {
+        let range_rows = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
             1usize << 8
         } else {
             0
         };
         let spread_rows = self
-            .allocated_spread_tables
-            .iter()
+            .final_spread_lookups
+            .keys()
+            .filter(|bits| **bits >= 2)
             .map(|bits| 1usize << *bits as usize)
             .sum::<usize>();
         let array_rows = self.allocated_array_tables.values().sum::<usize>();
@@ -2175,8 +2182,8 @@ pub struct Summary {
 struct AggregatedConstraintCost {
     recurring_constraints: usize,
     array_table_constraints: usize,
-    allocates_rangecheck8_table: bool,
-    allocated_spread_tables: HashSet<u8>,
+    rangecheck_lookups: HashMap<u8, usize>,
+    final_spread_lookups: HashMap<u8, usize>,
 }
 
 impl AggregatedConstraintCost {
@@ -2186,20 +2193,24 @@ impl AggregatedConstraintCost {
         }
         self.recurring_constraints += cost.recurring_constraints() * calls;
         self.array_table_constraints += cost.array_table_allocation_constraints() * calls;
-        self.allocates_rangecheck8_table |= cost.allocates_rangecheck8_table;
-        self.allocated_spread_tables
-            .extend(cost.allocated_spread_tables.iter().copied());
+        for (bits, count) in cost.rangecheck_lookups.iter() {
+            *self.rangecheck_lookups.entry(*bits).or_insert(0) += count * calls;
+        }
+        for (bits, count) in cost.final_spread_lookups.iter() {
+            *self.final_spread_lookups.entry(*bits).or_insert(0) += count * calls;
+        }
     }
 
     fn shared_table_constraints(&self) -> usize {
-        let range_constraints = if self.allocates_rangecheck8_table {
+        let range_constraints = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
             (1usize << 8) + 1
         } else {
             0
         };
         let spread_constraints = self
-            .allocated_spread_tables
-            .iter()
+            .final_spread_lookups
+            .keys()
+            .filter(|bits| **bits >= 2)
             .map(|bits| 2 * (1usize << *bits as usize) + 1)
             .sum::<usize>();
         range_constraints + spread_constraints

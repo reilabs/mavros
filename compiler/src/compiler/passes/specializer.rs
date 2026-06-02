@@ -62,6 +62,14 @@ enum ConstVal {
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
+fn const_val_as_field(value: &ConstVal) -> Option<Field> {
+    match value {
+        ConstVal::U(_, v) | ConstVal::I(_, v) => Some(Field::from(*v)),
+        ConstVal::Field(f) => Some(*f),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Val(ValueId);
 
@@ -209,12 +217,19 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *b,
             (BinaryArithOpKind::Add, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *self,
 
+            (BinaryArithOpKind::Add, _, _) => Self(ctx.add(self.0, b.0)),
+            (BinaryArithOpKind::Sub, _, _) => Self(ctx.sub(self.0, b.0)),
+            (BinaryArithOpKind::Mul, _, _) => Self(ctx.mul(self.0, b.0)),
+            (BinaryArithOpKind::Div, _, _) => Self(ctx.div(self.0, b.0)),
+
             (BinaryArithOpKind::Mod, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val % b_val;
                 let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
+            (BinaryArithOpKind::Mod, _, _) => Self(ctx.modulo(self.0, b.0)),
+
             (BinaryArithOpKind::And, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val & b_val;
                 let res_v = ctx.u_const(s, res);
@@ -317,8 +332,18 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn assert_r1c(_a: &Self, _b: &Self, _c: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+        let a_const = ctx.const_vals.get(&a.0).and_then(const_val_as_field);
+        let b_const = ctx.const_vals.get(&b.0).and_then(const_val_as_field);
+        let c_const = ctx.const_vals.get(&c.0).and_then(const_val_as_field);
+        match (a_const, b_const, c_const) {
+            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
+            _ => ctx.emit(OpCode::AssertR1C {
+                a: a.0,
+                b: b.0,
+                c: c.0,
+            }),
+        }
     }
 
     fn array_get(&self, index: &Self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
@@ -486,8 +511,14 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn constrain(_a: &Self, _b: &Self, _c: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+        let a_const = ctx.const_vals.get(&a.0).and_then(const_val_as_field);
+        let b_const = ctx.const_vals.get(&b.0).and_then(const_val_as_field);
+        let c_const = ctx.const_vals.get(&c.0).and_then(const_val_as_field);
+        match (a_const, b_const, c_const) {
+            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
+            _ => HLEmitter::constrain(ctx, a.0, b.0, c.0),
+        }
     }
 
     fn to_bits(
@@ -601,12 +632,30 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn write_witness(&self, tp: Option<&Type>, ctx: &mut SpecializationState) -> Self {
+        if ctx.const_vals.contains_key(&self.0) {
+            return *self;
+        }
+        match tp {
+            Some(_) => Self(HLEmitter::write_witness(ctx, self.0)),
+            None => {
+                ctx.emit(OpCode::WriteWitness {
+                    result: None,
+                    value: self.0,
+                    pinned: false,
+                });
+                *self
+            }
+        }
     }
 
-    fn fresh_witness(_result_type: &Type, _ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn fresh_witness(result_type: &Type, ctx: &mut SpecializationState) -> Self {
+        let result = ctx.fresh_value();
+        ctx.emit(OpCode::FreshWitness {
+            result,
+            result_type: result_type.clone(),
+        });
+        Self(result)
     }
 
     fn value_of(&self, ctx: &mut SpecializationState) -> Self {
