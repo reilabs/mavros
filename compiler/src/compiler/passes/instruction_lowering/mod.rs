@@ -1,10 +1,15 @@
 mod bit_range;
+mod degree_spilling;
+mod lookup_spilling;
 mod pure_guards;
+mod side_effect_free_guards;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
 mod witness_compare;
+mod witness_field;
 mod witness_integer_arith;
+mod witness_memory;
 mod witness_spread;
 
 use crate::compiler::{
@@ -21,9 +26,12 @@ use crate::compiler::{
 };
 
 use self::{
-    bit_range::LowerBitRangeOps, pure_guards::LowerPureGuards, witness_array::LowerWitnessArrayOps,
+    bit_range::LowerBitRangeOps, degree_spilling::LowerDegreeSpillingOps,
+    lookup_spilling::LowerLookupSpillingOps, pure_guards::LowerPureGuards,
+    side_effect_free_guards::LowerSideEffectFreeGuards, witness_array::LowerWitnessArrayOps,
     witness_assert::LowerWitnessAssertOps, witness_bitwise::LowerWitnessBitwiseOps,
-    witness_compare::LowerWitnessCompareOps, witness_integer_arith::LowerWitnessIntegerArithOps,
+    witness_compare::LowerWitnessCompareOps, witness_field::LowerWitnessFieldOps,
+    witness_integer_arith::LowerWitnessIntegerArithOps, witness_memory::LowerWitnessMemoryOps,
     witness_spread::LowerWitnessSpreadOps,
 };
 
@@ -73,12 +81,14 @@ impl InstructionLowering {
         Self::with_lowerers(
             "instruction_lowering_witness_integer_ops",
             vec![
+                Box::new(LowerSideEffectFreeGuards::new()),
                 Box::new(LowerWitnessIntegerArithOps::new()),
                 Box::new(LowerWitnessBitwiseOps::new()),
                 Box::new(LowerWitnessSpreadOps::new()),
                 Box::new(LowerBitRangeOps::new()),
                 Box::new(LowerWitnessCompareOps::new()),
                 Box::new(LowerWitnessAssertOps::new()),
+                Box::new(LowerWitnessFieldOps::new()),
             ],
             true,
         )
@@ -87,7 +97,18 @@ impl InstructionLowering {
     pub fn pure_guards() -> Self {
         Self::with_lowerers(
             "instruction_lowering_pure_guards",
-            vec![Box::new(LowerPureGuards::new())],
+            vec![
+                Box::new(LowerSideEffectFreeGuards::new()),
+                Box::new(LowerPureGuards::new()),
+            ],
+            false,
+        )
+    }
+
+    pub fn witness_memory_ops() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_witness_memory_ops",
+            vec![Box::new(LowerWitnessMemoryOps::new())],
             false,
         )
     }
@@ -96,6 +117,22 @@ impl InstructionLowering {
         Self::with_lowerers(
             "instruction_lowering_witness_array_access",
             vec![Box::new(LowerWitnessArrayOps::new())],
+            false,
+        )
+    }
+
+    pub fn lookup_spilling() -> Self {
+        Self::with_lowerers(
+            "lookup_spilling",
+            vec![Box::new(LowerLookupSpillingOps::new())],
+            false,
+        )
+    }
+
+    pub fn degree_spilling() -> Self {
+        Self::with_lowerers(
+            "degree_spilling",
+            vec![Box::new(LowerDegreeSpillingOps::new())],
             false,
         )
     }

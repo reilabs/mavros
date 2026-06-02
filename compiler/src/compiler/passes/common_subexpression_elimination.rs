@@ -11,7 +11,7 @@ use crate::compiler::{
         BlockId, SSAConstantsSnapshot, ValueId,
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            OpCode, Radix,
+            LookupTarget, OpCode, Radix,
         },
     },
 };
@@ -58,7 +58,34 @@ enum ExprNode {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Assertion {
     Rangecheck { value: ExprId, max_bits: usize },
-    ByteLookup { key: ExprId, flag: ExprId },
+    Lookup { target: LookupAssertionTarget, args: Vec<ExprId>, flag: ExprId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum LookupAssertionTarget {
+    Rangecheck(u8),
+    DynRangecheck(ExprId),
+    Array(ExprId),
+    Spread(u8),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Config {
+    deduplicate_lookups: bool,
+}
+
+impl Config {
+    pub fn pre_r1c() -> Self {
+        Self {
+            deduplicate_lookups: true,
+        }
+    }
+
+    pub fn post_r1c() -> Self {
+        Self {
+            deduplicate_lookups: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -272,7 +299,9 @@ impl ExprInterner {
         self.intern(ExprNode::Witness(value))
     }
 }
-pub struct CSE {}
+pub struct CSE {
+    config: Config,
+}
 
 impl Pass for CSE {
     fn name(&self) -> &'static str {
@@ -293,8 +322,16 @@ impl Pass for CSE {
 }
 
 impl CSE {
-    pub fn new() -> Self {
-        Self {}
+    pub fn with_config(config: Config) -> Self {
+        Self { config }
+    }
+
+    pub fn pre_r1c() -> Self {
+        Self::with_config(Config::pre_r1c())
+    }
+
+    pub fn post_r1c() -> Self {
+        Self::with_config(Config::post_r1c())
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
@@ -493,6 +530,23 @@ impl CSE {
                 .entry(assertion)
                 .or_default()
                 .push((block_id, instruction_idx));
+        }
+
+        fn lookup_target_expr(
+            target: &LookupTarget<ValueId>,
+            exprs: &HashMap<ValueId, ExprId>,
+            interner: &mut ExprInterner,
+        ) -> LookupAssertionTarget {
+            match target {
+                LookupTarget::Rangecheck(bits) => LookupAssertionTarget::Rangecheck(*bits),
+                LookupTarget::DynRangecheck(bound) => {
+                    LookupAssertionTarget::DynRangecheck(get_expr(exprs, interner, bound))
+                }
+                LookupTarget::Array(array) => {
+                    LookupAssertionTarget::Array(get_expr(exprs, interner, array))
+                }
+                LookupTarget::Spread(bits) => LookupAssertionTarget::Spread(*bits),
+            }
         }
 
         for block_id in cfg.get_domination_pre_order() {
@@ -928,19 +982,20 @@ impl CSE {
                             },
                         );
                     }
-                    OpCode::Lookup {
-                        target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
-                        args,
-                        flag,
-                    } if args.len() == 1 => {
-                        let key_expr = get_expr(&exprs, &mut interner, &args[0]);
+                    OpCode::Lookup { target, args, flag } if self.config.deduplicate_lookups => {
+                        let target_expr = lookup_target_expr(target, &exprs, &mut interner);
+                        let arg_exprs = args
+                            .iter()
+                            .map(|arg| get_expr(&exprs, &mut interner, arg))
+                            .collect();
                         let flag_expr = get_expr(&exprs, &mut interner, flag);
                         record_assertion(
                             &mut assertions,
                             block_id,
                             instruction_idx,
-                            Assertion::ByteLookup {
-                                key: key_expr,
+                            Assertion::Lookup {
+                                target: target_expr,
+                                args: arg_exprs,
                                 flag: flag_expr,
                             },
                         );
