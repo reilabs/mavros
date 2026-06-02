@@ -25,6 +25,15 @@ pub trait LLEmitter {
         self.emit_constant(Constant::NullPtr)
     }
 
+    fn emit_struct_const(&mut self, layout: LLStruct, values: Vec<Constant>) -> ValueId {
+        // Sanity check for builds with assertions enabled.
+        debug_assert!(
+            layout.accepts(&values),
+            "emit_struct_const: values {values:?} are incompatible with layout {layout:?}",
+        );
+        self.emit_constant(Constant::Struct { layout, values })
+    }
+
     // -- Integer Arithmetic --
 
     fn int_arith(&mut self, kind: IntArithOp, a: ValueId, b: ValueId) -> ValueId {
