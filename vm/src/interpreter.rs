@@ -1,7 +1,7 @@
 use std::{
     alloc::{self, Layout},
     marker::PhantomData,
-    mem,
+    mem::{self, align_of, size_of},
     str::FromStr,
 };
 
@@ -86,7 +86,9 @@ impl Frame {
     /// Pushes a new frame onto the stack with the provided `size` and the given `parent`.
     pub fn push(size: u64, parent: Frame, vm: &mut VM) -> Self {
         unsafe {
-            let layout = Layout::array::<u64>(size as usize + 2).unwrap();
+            let layout =
+                Layout::from_size_align((size as usize + 2) * size_of::<u64>(), align_of::<u128>())
+                    .unwrap();
             let data = alloc::alloc(layout) as *mut u64;
             *data = size;
 
@@ -111,7 +113,8 @@ impl Frame {
             let size = *real_data;
             alloc::dealloc(
                 real_data as *mut u8,
-                Layout::array::<u64>(size as usize + 2).unwrap(),
+                Layout::from_size_align((size as usize + 2) * size_of::<u64>(), align_of::<u128>())
+                    .unwrap(),
             );
             vm.allocation_instrumenter
                 .free(AllocationType::Stack, size as usize + 2);
@@ -150,9 +153,7 @@ impl Frame {
 
     #[inline(always)]
     pub fn read_u128(&self, offset: isize) -> u128 {
-        let lo = self.read_u64(offset) as u128;
-        let hi = self.read_u64(offset + 1) as u128;
-        lo | (hi << 64)
+        unsafe { *(self.data.offset(offset) as *const u128) }
     }
 
     #[inline(always)]

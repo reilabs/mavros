@@ -59,15 +59,6 @@ fn int_mask(bits: u64) -> u128 {
     }
 }
 
-#[inline(always)]
-unsafe fn write_u128_out(ptr: *mut u128, value: u128) {
-    let ptr = ptr.cast::<u64>();
-    unsafe {
-        *ptr = value as u64;
-        *ptr.add(1) = (value >> 64) as u64;
-    }
-}
-
 unsafe fn for_each_array_leaf<F: FnMut(usize, *mut u64)>(
     array: BoxedValue,
     stride: usize,
@@ -487,25 +478,23 @@ mod def {
         frame: Frame,
         vm: &mut VM,
         func: JumpTarget,
-        args: &[(usize, FramePosition)],
+        args: &[(FramePosition, usize, FramePosition)],
         ret: FramePosition,
     ) -> (*const u64, Frame) {
         let func_pc = unsafe { pc.offset(func.0) };
         let func_frame_size = unsafe { *func_pc.offset(-1) };
         let new_frame = Frame::push(func_frame_size, frame, vm);
         let ret_data_ptr = unsafe { frame.data.add(ret.0) };
-        let ret_pc = unsafe { pc.offset(4 + 2 * args.len() as isize) };
+        let ret_pc = unsafe { pc.offset(4 + 3 * args.len() as isize) };
 
         unsafe {
             *new_frame.data = ret_data_ptr as u64;
             *new_frame.data.offset(1) = ret_pc as u64;
         };
 
-        let mut current_child = unsafe { new_frame.data.offset(2) };
-
-        for (i, (arg_size, arg_pos)) in args.iter().enumerate() {
-            unsafe { frame.write_to(current_child, arg_pos.0 as isize, *arg_size) };
-            current_child = unsafe { current_child.add(*arg_size) };
+        for (target, arg_size, arg_pos) in args {
+            let target = unsafe { new_frame.data.add(target.0) };
+            unsafe { frame.write_to(target, arg_pos.0 as isize, *arg_size) };
         }
 
         (func_pc, new_frame)
@@ -626,17 +615,17 @@ mod def {
 
     #[opcode]
     fn add_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a.wrapping_add(b)) };
+        unsafe { *res = a.wrapping_add(b) };
     }
 
     #[opcode]
     fn sub_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a.wrapping_sub(b)) };
+        unsafe { *res = a.wrapping_sub(b) };
     }
 
     #[opcode]
     fn mul_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a.wrapping_mul(b)) };
+        unsafe { *res = a.wrapping_mul(b) };
     }
 
     #[opcode]
@@ -685,12 +674,12 @@ mod def {
 
     #[opcode]
     fn div_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a / b) };
+        unsafe { *res = a / b };
     }
 
     #[opcode]
     fn mod_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a % b) };
+        unsafe { *res = a % b };
     }
 
     #[opcode]
@@ -716,17 +705,17 @@ mod def {
 
     #[opcode]
     fn and_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a & b) };
+        unsafe { *res = a & b };
     }
 
     #[opcode]
     fn or_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a | b) };
+        unsafe { *res = a | b };
     }
 
     #[opcode]
     fn xor_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a ^ b) };
+        unsafe { *res = a ^ b };
     }
 
     #[opcode]
@@ -750,12 +739,12 @@ mod def {
 
     #[opcode]
     fn shl_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a.wrapping_shl(b as u32)) };
+        unsafe { *res = a.wrapping_shl(b as u32) };
     }
 
     #[opcode]
     fn ushr_u128(#[out] res: *mut u128, #[frame] a: u128, #[frame] b: u128) {
-        unsafe { write_u128_out(res, a.wrapping_shr(b as u32)) };
+        unsafe { *res = a.wrapping_shr(b as u32) };
     }
 
     #[opcode]
@@ -767,7 +756,7 @@ mod def {
 
     #[opcode]
     fn not_u128(#[out] res: *mut u128, #[frame] a: u128) {
-        unsafe { write_u128_out(res, !a) };
+        unsafe { *res = !a };
     }
 
     #[opcode]
@@ -829,7 +818,7 @@ mod def {
 
     #[opcode]
     fn truncate_u128(#[out] res: *mut u128, #[frame] a: u128, to_bits: u64) {
-        unsafe { write_u128_out(res, a & int_mask(to_bits)) };
+        unsafe { *res = a & int_mask(to_bits) };
     }
 
     #[opcode]
@@ -884,7 +873,7 @@ mod def {
     #[opcode]
     fn cast_field_to_u128(#[out] res: *mut u128, #[frame] a: Field) {
         let limbs = ark_ff::PrimeField::into_bigint(a).0;
-        unsafe { write_u128_out(res, (limbs[0] as u128) | ((limbs[1] as u128) << 64)) };
+        unsafe { *res = (limbs[0] as u128) | ((limbs[1] as u128) << 64) };
     }
 
     #[opcode]
