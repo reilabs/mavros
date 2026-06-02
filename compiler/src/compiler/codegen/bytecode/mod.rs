@@ -1573,18 +1573,16 @@ impl CodeGen {
                 emitter.push_op(bytecode::OpCode::Nop {});
             }
             Terminator::Return(params) => {
-                let mut offset = 0usize;
+                let mut offset = 0;
                 for param in params {
-                    let param_type = type_info.get_value_type(*param);
-                    offset = layouter.align_offset_for_type(offset, &param_type);
-                    let size = layouter.type_size(&param_type);
+                    let size = layouter.type_size(&type_info.get_value_type(*param));
                     emitter.push_op(bytecode::OpCode::WritePtr {
                         ptr: bytecode::FramePosition::return_data_ptr(),
-                        offset: offset as isize,
+                        offset,
                         src: layouter.get_value(*param),
                         size,
                     });
-                    offset += size;
+                    offset += size as isize;
                 }
                 emitter.push_op(bytecode::OpCode::Ret {});
             }

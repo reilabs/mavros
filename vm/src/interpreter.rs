@@ -1,7 +1,7 @@
 use std::{
     alloc::{self, Layout},
     marker::PhantomData,
-    mem::{self, align_of, size_of},
+    mem::{self, size_of},
     str::FromStr,
 };
 
@@ -14,7 +14,7 @@ use crate::bytecode::parse_struct_layouts;
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
     array::BoxedValue,
-    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
+    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, U128, VM},
 };
 
 /// An opcode handler. Returns the `(pc, frame)` to feed into the next
@@ -86,9 +86,7 @@ impl Frame {
     /// Pushes a new frame onto the stack with the provided `size` and the given `parent`.
     pub fn push(size: u64, parent: Frame, vm: &mut VM) -> Self {
         unsafe {
-            let layout =
-                Layout::from_size_align((size as usize + 2) * size_of::<u64>(), align_of::<u128>())
-                    .unwrap();
+            let layout = Layout::array::<u64>(size as usize + 2).unwrap();
             let data = alloc::alloc(layout) as *mut u64;
             *data = size;
 
@@ -113,8 +111,7 @@ impl Frame {
             let size = *real_data;
             alloc::dealloc(
                 real_data as *mut u8,
-                Layout::from_size_align((size as usize + 2) * size_of::<u64>(), align_of::<u128>())
-                    .unwrap(),
+                Layout::array::<u64>(size as usize + 2).unwrap(),
             );
             vm.allocation_instrumenter
                 .free(AllocationType::Stack, size as usize + 2);
@@ -142,8 +139,8 @@ impl Frame {
     }
 
     #[inline(always)]
-    pub fn read_u128_mut(&self, offset: isize) -> *mut u128 {
-        unsafe { self.data.offset(offset) as *mut u128 }
+    pub fn read_u128_mut(&self, offset: isize) -> *mut U128 {
+        unsafe { self.data.offset(offset) as *mut U128 }
     }
 
     #[inline(always)]
@@ -152,8 +149,8 @@ impl Frame {
     }
 
     #[inline(always)]
-    pub fn read_u128(&self, offset: isize) -> u128 {
-        unsafe { *(self.data.offset(offset) as *const u128) }
+    pub fn read_u128(&self, offset: isize) -> U128 {
+        unsafe { *(self.data.offset(offset) as *const U128) }
     }
 
     #[inline(always)]

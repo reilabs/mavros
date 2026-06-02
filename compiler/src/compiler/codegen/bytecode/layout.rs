@@ -32,7 +32,6 @@ impl FrameLayouter {
     }
 
     pub fn alloc_value(&mut self, value: ValueId, tp: &Type) -> bytecode::FramePosition {
-        self.align_next_for_type(tp);
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += self.type_size(&tp);
@@ -41,9 +40,6 @@ impl FrameLayouter {
 
     pub fn alloc_int(&mut self, value: ValueId, size: usize) -> bytecode::FramePosition {
         assert!(size > 0 && size <= 128);
-        if size > 64 {
-            self.align_next_to_u128();
-        }
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += int_cell_count(size);
@@ -102,29 +98,11 @@ impl FrameLayouter {
         &mut self,
         values: Vec<(ValueId, &Type)>,
     ) -> bytecode::FramePosition {
-        let r = values
-            .first()
-            .map(|(_, tp)| self.align_offset_for_type(self.next_free, tp))
-            .unwrap_or(self.next_free);
+        let r = self.next_free;
         for (value, tp) in values {
             self.alloc_value(value, tp);
         }
         bytecode::FramePosition(r)
-    }
-
-    pub fn align_offset_for_type(&self, offset: usize, tp: &Type) -> usize {
-        match tp.expr {
-            TypeExpr::U(bits) if bits > 64 => align_to_u128_cell(offset),
-            _ => offset,
-        }
-    }
-
-    fn align_next_for_type(&mut self, tp: &Type) {
-        self.next_free = self.align_offset_for_type(self.next_free, tp);
-    }
-
-    fn align_next_to_u128(&mut self) {
-        self.next_free = align_to_u128_cell(self.next_free);
     }
 }
 
@@ -172,10 +150,6 @@ impl GlobalFrameLayouter {
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
         for typ in global_types.iter() {
-            next_free = match typ.expr {
-                TypeExpr::U(bits) if bits > 64 => align_to_u128_cell(next_free),
-                _ => next_free,
-            };
             let size = Self::type_frame_size(typ);
             offsets.push(next_free);
             sizes.push(size);
@@ -219,8 +193,4 @@ impl GlobalFrameLayouter {
 pub fn int_cell_count(bits: usize) -> usize {
     assert!(bits > 0 && bits <= 128);
     bits.div_ceil(64)
-}
-
-fn align_to_u128_cell(offset: usize) -> usize {
-    (offset + 1) & !1
 }

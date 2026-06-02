@@ -554,7 +554,7 @@ fn parse_guest_type(ty: &syn::Type) -> GuestType {
             match ident.to_string().as_str() {
                 "Field" => GuestType::Field,
                 "u64" => GuestType::U64,
-                "u128" => GuestType::U128,
+                "U128" => GuestType::U128,
                 "BoxedValue" => GuestType::BoxedValue,
                 _ => panic!("unsupported guest path type {:?}", ty),
             }
