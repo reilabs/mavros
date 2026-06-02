@@ -22,7 +22,7 @@ use crate::compiler::{
         BlockId, FunctionId, ValueId,
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            OpCode, Radix, RefCountOp, SequenceTargetType, Type, TypeExpr,
+            LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
         },
     },
@@ -36,6 +36,15 @@ fn bit_mask(width: usize) -> Option<u128> {
         Some(u128::MAX)
     } else {
         Some((1u128 << width) - 1)
+    }
+}
+
+fn map_lookup_target(target: LookupTarget<Val>) -> LookupTarget<ValueId> {
+    match target {
+        LookupTarget::Rangecheck(bits) => LookupTarget::Rangecheck(bits),
+        LookupTarget::DynRangecheck(bound) => LookupTarget::DynRangecheck(bound.0),
+        LookupTarget::Array(array) => LookupTarget::Array(array.0),
+        LookupTarget::Spread(bits) => LookupTarget::Spread(bits),
     }
 }
 
@@ -725,6 +734,22 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
     }
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
+
+    fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
+        self.emit(OpCode::Lookup {
+            target: map_lookup_target(target),
+            args: args.into_iter().map(|arg| arg.0).collect(),
+            flag: flag.0,
+        });
+    }
+
+    fn dlookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
+        self.emit(OpCode::DLookup {
+            target: map_lookup_target(target),
+            args: args.into_iter().map(|arg| arg.0).collect(),
+            flag: flag.0,
+        });
+    }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
