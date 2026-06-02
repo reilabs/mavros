@@ -1094,17 +1094,13 @@ impl CodeGen {
                             .map(|a| (*a, type_info.get_value_type(*a)))
                             .collect(),
                     );
-                    let mut target_offset = 2usize;
                     let args = params
                         .iter()
                         .map(|a| {
-                            let arg_type = type_info.get_value_type(*a);
-                            target_offset =
-                                layouter.align_offset_for_type(target_offset, &arg_type);
-                            let target = bytecode::FramePosition(target_offset);
-                            let size = layouter.type_size(&arg_type);
-                            target_offset += size;
-                            (target, size, layouter.get_value(*a))
+                            (
+                                layouter.type_size(&type_info.get_value_type(*a)),
+                                layouter.get_value(*a),
+                            )
                         })
                         .collect::<Vec<_>>();
                     emitter.push_op(bytecode::OpCode::Call {

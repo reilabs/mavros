@@ -8,8 +8,7 @@ use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
 use crate::array::DataType;
-use std::fmt::Display;
-use std::ptr;
+use std::{fmt::Display, mem::align_of, ptr};
 
 /// The number of u64 limbs making up a field element.
 pub const FELT_LIMBS: usize = 4;
@@ -478,23 +477,28 @@ mod def {
         frame: Frame,
         vm: &mut VM,
         func: JumpTarget,
-        args: &[(FramePosition, usize, FramePosition)],
+        args: &[(usize, FramePosition)],
         ret: FramePosition,
     ) -> (*const u64, Frame) {
         let func_pc = unsafe { pc.offset(func.0) };
         let func_frame_size = unsafe { *func_pc.offset(-1) };
         let new_frame = Frame::push(func_frame_size, frame, vm);
         let ret_data_ptr = unsafe { frame.data.add(ret.0) };
-        let ret_pc = unsafe { pc.offset(4 + 3 * args.len() as isize) };
+        let ret_pc = unsafe { pc.offset(4 + 2 * args.len() as isize) };
 
         unsafe {
             *new_frame.data = ret_data_ptr as u64;
             *new_frame.data.offset(1) = ret_pc as u64;
         };
 
-        for (target, arg_size, arg_pos) in args {
-            let target = unsafe { new_frame.data.add(target.0) };
-            unsafe { frame.write_to(target, arg_pos.0 as isize, *arg_size) };
+        let mut current_child = unsafe { new_frame.data.offset(2) };
+
+        for (arg_size, arg_pos) in args {
+            if *arg_size == 2 && current_child.addr() % align_of::<u128>() != 0 {
+                current_child = unsafe { current_child.add(1) };
+            }
+            unsafe { frame.write_to(current_child, arg_pos.0 as isize, *arg_size) };
+            current_child = unsafe { current_child.add(*arg_size) };
         }
 
         (func_pc, new_frame)
