@@ -72,6 +72,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_add_fn: Option<FunctionValue<'ctx>>,
     field_sub_fn: Option<FunctionValue<'ctx>>,
     field_div_fn: Option<FunctionValue<'ctx>>,
+    field_lt_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
@@ -98,6 +99,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_add_fn: None,
             field_sub_fn: None,
             field_div_fn: None,
+            field_lt_fn: None,
             malloc_fn: None,
             free_fn: None,
             field_from_limbs_fn: None,
@@ -327,6 +329,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_type = self.field_llvm_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
+        let bool_type = self.context.bool_type();
         let void_type = self.context.void_type();
         let limbs_type = self.limbs_llvm_type();
 
@@ -372,6 +375,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.module
                 .add_function("__field_div", field_div_type, None),
         );
+
+        // __field_lt(FieldElem, FieldElem) -> bool
+        let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
 
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
@@ -919,60 +926,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldLt { result, a, b } => {
-                // Field less-than compares canonical raw limbs, not Montgomery limbs.
-                let to_fn = self
-                    .field_to_limbs_fn
-                    .expect("__field_to_limbs not declared");
-                let a_raw = self
+                let lhs = self.value_map[a];
+                let rhs = self.value_map[b];
+                let lt_fn = self.field_lt_fn.expect("__field_lt not declared");
+                let call_site = self
                     .builder
-                    .build_call(to_fn, &[self.value_map[a].into()], "a_raw")
-                    .unwrap()
+                    .build_call(lt_fn, &[lhs.into(), rhs.into()], "field_lt")
+                    .unwrap();
+                let val = call_site
                     .try_as_basic_value()
-                    .expect_basic("__field_to_limbs should return a value")
-                    .into_struct_value();
-                let b_raw = self
-                    .builder
-                    .build_call(to_fn, &[self.value_map[b].into()], "b_raw")
-                    .unwrap()
-                    .try_as_basic_value()
-                    .expect_basic("__field_to_limbs should return a value")
-                    .into_struct_value();
-
-                let mut lt_acc = self.context.bool_type().const_int(0, false);
-                let mut eq_prefix = self.context.bool_type().const_int(1, false);
-                for i in (0..4u32).rev() {
-                    let a_limb = self
-                        .builder
-                        .build_extract_value(a_raw, i, "a_l")
-                        .unwrap()
-                        .into_int_value();
-                    let b_limb = self
-                        .builder
-                        .build_extract_value(b_raw, i, "b_l")
-                        .unwrap()
-                        .into_int_value();
-                    let limb_lt = self
-                        .builder
-                        .build_int_compare(IntPredicate::ULT, a_limb, b_limb, "flt")
-                        .unwrap();
-                    let limb_eq = self
-                        .builder
-                        .build_int_compare(IntPredicate::EQ, a_limb, b_limb, "feq")
-                        .unwrap();
-                    let this_limb_decides = self
-                        .builder
-                        .build_and(eq_prefix, limb_lt, "flt_dec")
-                        .unwrap();
-                    lt_acc = self
-                        .builder
-                        .build_or(lt_acc, this_limb_decides, "field_lt")
-                        .unwrap();
-                    eq_prefix = self
-                        .builder
-                        .build_and(eq_prefix, limb_eq, "eq_prefix")
-                        .unwrap();
-                }
-                self.value_map.insert(*result, lt_acc.into());
+                    .expect_basic("field_lt should return a value");
+                self.value_map.insert(*result, val);
             }
 
             LLOp::FieldFromLimbs { result, limbs } => {

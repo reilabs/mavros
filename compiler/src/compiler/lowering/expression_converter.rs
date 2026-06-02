@@ -1305,7 +1305,11 @@ impl<'a> ExpressionConverter<'a> {
                 b.block(self.current_block).rangecheck(value, bit_size);
                 None
             }
-            "field_less_than" => Some(self.convert_field_less_than(call, b)),
+            "field_less_than" => {
+                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
+                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                Some(b.block(self.current_block).lt(lhs, rhs))
+            }
             "is_unconstrained" => {
                 let value = b
                     .ssa
@@ -1373,16 +1377,6 @@ impl<'a> ExpressionConverter<'a> {
         self.convert_replacement_call(name, call, b)
     }
 
-    fn convert_field_less_than(
-        &mut self,
-        call: &noirc_frontend::monomorphization::ast::Call,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
-        let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
-        let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
-        b.block(self.current_block).lt(lhs, rhs)
-    }
-
     fn convert_replacement_call(
         &mut self,
         name: &str,
@@ -1419,10 +1413,6 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         match name {
-            "field_less_than" => {
-                let result = self.convert_field_less_than(call, b);
-                Some(result)
-            }
             "unsafe_cast" => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
                 use noirc_frontend::shared::Signedness;
