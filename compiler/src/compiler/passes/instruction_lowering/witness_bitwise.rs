@@ -31,9 +31,9 @@ impl InstructionLoweringRule for LowerWitnessBitwiseOps {
         instruction: &OpCode,
     ) -> bool {
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_op(b, context, Some(*condition), inner.as_ref())
+            self.process_guarded_shift(b, context, *condition, inner.as_ref())
         } else {
-            self.process_op(b, context, None, instruction)
+            self.process_op(b, context, instruction)
         }
     }
 }
@@ -43,22 +43,10 @@ impl LowerWitnessBitwiseOps {
         Self {}
     }
 
-    fn emit_guarded(&self, b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-        if let Some(condition) = guard {
-            b.emit(OpCode::Guard {
-                condition,
-                inner: Box::new(op),
-            });
-        } else {
-            b.emit(op);
-        }
-    }
-
     fn process_op(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         op: &OpCode,
     ) -> bool {
         let function_type_info = context.types();
@@ -109,7 +97,30 @@ impl LowerWitnessBitwiseOps {
             } if context.types().get_value_type(*lhs).is_witness_of()
                 || context.types().get_value_type(*rhs).is_witness_of() =>
             {
-                self.lower_shift(b, context, guard, *kind, *result, *lhs, *rhs);
+                self.lower_shift(b, context, None, *kind, *result, *lhs, *rhs);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn process_guarded_shift(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        condition: ValueId,
+        op: &OpCode,
+    ) -> bool {
+        match op {
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                result,
+                lhs,
+                rhs,
+            } if context.types().get_value_type(*lhs).is_witness_of()
+                || context.types().get_value_type(*rhs).is_witness_of() =>
+            {
+                self.lower_shift(b, context, Some(condition), *kind, *result, *lhs, *rhs);
                 true
             }
             _ => false,
@@ -277,7 +288,7 @@ impl LowerWitnessBitwiseOps {
                 });
             }
             BinaryArithOpKind::Shr => {
-                self.emit_guarded(
+                emit_guarded(
                     b,
                     guard,
                     OpCode::BinaryArithOp {
@@ -310,17 +321,24 @@ fn guarded_rangecheck(
     guard: Option<ValueId>,
 ) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    let rangecheck = OpCode::Rangecheck {
-        value,
-        max_bits: bits,
-    };
+    emit_guarded(
+        b,
+        guard,
+        OpCode::Rangecheck {
+            value,
+            max_bits: bits,
+        },
+    );
+}
+
+fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
     if let Some(condition) = guard {
         b.emit(OpCode::Guard {
             condition,
-            inner: Box::new(rangecheck),
+            inner: Box::new(op),
         });
     } else {
-        b.emit(rangecheck);
+        b.emit(op);
     }
 }
 

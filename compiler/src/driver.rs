@@ -31,7 +31,6 @@ use crate::{
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
-            explicit_witness::ExplicitWitness,
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
@@ -61,7 +60,7 @@ pub struct Driver {
     initial_ssa: Option<HLSSA>,
     static_struct_access_ssa: Option<HLSSA>,
     monomorphized_ssa: Option<HLSSA>,
-    explicit_witness_ssa: Option<HLSSA>,
+    witness_spilled_ssa: Option<HLSSA>,
     r1cs_ssa: Option<HLSSA>,
     base_witgen_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
@@ -98,7 +97,7 @@ impl Driver {
             initial_ssa: None,
             static_struct_access_ssa: None,
             monomorphized_ssa: None,
-            explicit_witness_ssa: None,
+            witness_spilled_ssa: None,
             r1cs_ssa: None,
             base_witgen_ssa: None,
             abi: None,
@@ -258,25 +257,26 @@ impl Driver {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn explictize_witness(&mut self) -> Result<(), Error> {
+    pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut pass_manager = PassManager::new(
-            "explictize_witness".to_string(),
+            "witness_spilling".to_string(),
             self.draw_cfg,
             vec![
                 Box::new(InstructionLowering::pure_guards()),
+                Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
                 // matches. Each Simplifier internally iterates to fixed point
                 // for purely-algebraic folds.
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(ConditionPropagation::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DeduplicatePhis::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(FixDoubleJumps::new()),
@@ -284,25 +284,26 @@ impl Driver {
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Specializer::new(5.0)),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
                 Box::new(InstructionLowering::witness_integer_ops()),
-                // After the last pre-explicit-witness lowering, run cleanup twice
+                // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
                 // that the second round can then consume.
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(ExplicitWitness::new()),
+                Box::new(InstructionLowering::lookup_spilling()),
+                Box::new(InstructionLowering::degree_spilling()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(FixDoubleJumps::new()),
@@ -312,13 +313,13 @@ impl Driver {
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
         pass_manager.run(&mut ssa);
-        self.explicit_witness_ssa = Some(ssa);
+        self.witness_spilled_ssa = Some(ssa);
         Ok(())
     }
 
     #[tracing::instrument(skip_all)]
     pub fn generate_r1cs(&mut self) -> Result<R1CS, Error> {
-        let mut r1cs_ssa = self.explicit_witness_ssa.clone().unwrap();
+        let mut r1cs_ssa = self.witness_spilled_ssa.clone().unwrap();
 
         let mut r1cs_phase_1 = PassManager::new(
             "r1cs_phase_1".to_string(),
@@ -400,7 +401,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
@@ -435,7 +436,7 @@ impl Driver {
             return;
         }
 
-        let mut ssa = self.explicit_witness_ssa.clone().unwrap();
+        let mut ssa = self.witness_spilled_ssa.clone().unwrap();
 
         let mut pass_manager = PassManager::new(
             "base_witgen".to_string(),
@@ -540,7 +541,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
-                Box::new(CSE::new()),
+                Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),

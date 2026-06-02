@@ -118,7 +118,7 @@ fn run_single(root: PathBuf) {
         driver.run_noir_compiler().ok()?;
         driver.make_struct_access_static().ok()?;
         driver.monomorphize().ok()?;
-        driver.explictize_witness().ok()?;
+        driver.spill_witness().ok()?;
         Some(driver)
     })();
     let mut driver = match driver {

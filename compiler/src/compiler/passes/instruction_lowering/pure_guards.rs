@@ -1,13 +1,11 @@
-//! Lowers pure Guard instructions into plain control flow where possible.
+//! Lowers failable pure Guard instructions into explicit checks.
 //!
-//! After UntaintControlFlow, Guards wrap operations in witness-conditional blocks. Many of these
-//! Guards are unnecessary because the inner operation is a pure computation that doesn't generate
-//! constraints or have side effects. In these cases, we can collapse them to control flow.
+//! After UntaintControlFlow, Guards wrap operations in witness-conditional blocks. Side-effect-free
+//! guarded operations are handled by `LowerSideEffectFreeGuards`; this rule keeps only operations whose
+//! inactive branch needs special handling to avoid evaluating a failing operation.
 //!
 //! Classification:
 //!
-//! - **Always unwrap** (no constraints, no side effects, can't fail): Const, Cmp, Not, And, Or,
-//!   Xor, Cast, BitRange, ExtractTupleField, MkTuple, MkSeq, Load, Select, Field Add/Sub/Mul, etc.
 //! - **Lower with OOB check** (can fail if given an out-of-bounds index): ArrayGet — if OOB, assert
 //!   !cond and produce default; else array_get.
 //! - **Lower with OOB check + passthrough** (RC-tracked allocation): ArraySet — if OOB, assert
@@ -18,9 +16,9 @@
 //!   amount before shifting; Shl also checks overflow so we fail there too.
 //! - **Lower with div-zero check** (pure inputs only, can fail): Div/Mod — if divisor==0 assert
 //!   !cond and produce 0; else compute.
-//! - **Keep as Guard** (side-effectful or generates constraints): Store, Call, WriteWitness,
-//!   Assert, AssertCmp, AssertR1C, Constrain, Rangecheck, and failable ops with witness inputs
-//!   (SExt, integer arith).
+//! - **Leave untouched here** (side-effectful, constraint-generating, or handled by witness rules):
+//!   Store, Call, Assert, AssertCmp, AssertR1C, Constrain, witness Rangecheck, and failable ops with
+//!   witness inputs.
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
@@ -79,7 +77,6 @@ impl LowerPureGuards {
             // -- Side-effectful / constraint-generating: always keep as Guard --
             OpCode::Store { .. }
             | OpCode::Call { .. }
-            | OpCode::WriteWitness { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
@@ -118,17 +115,6 @@ impl LowerPureGuards {
                         );
                         true
                     }
-                    // Field arith can't overflow — always unwrap
-                    TypeExpr::Field => {
-                        emitter.emit(OpCode::BinaryArithOp {
-                            kind,
-                            result,
-                            lhs,
-                            rhs,
-                        });
-                        true
-                    }
-                    // Witness inputs on integer arith: keep as Guard for the witness arithmetic rule.
                     _ => false,
                 }
             }
@@ -182,9 +168,6 @@ impl LowerPureGuards {
                 }
             }
 
-            // -- SExt: keep as Guard for the witness bitwise rule. --
-            OpCode::SExt { .. } => false,
-
             // -- ArraySet: lower with OOB check if index is pure.
             OpCode::ArraySet {
                 result,
@@ -211,45 +194,11 @@ impl LowerPureGuards {
             // ArrayGet/ArraySet with witness index: keep as Guard
             OpCode::ArraySet { .. } | OpCode::ArrayGet { .. } => false,
 
-            // -- Pure computation, no constraints, can't fail → unwrap --
-            OpCode::Cmp { .. }
-            | OpCode::Not { .. }
-            | OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor,
-                ..
-            }
-            | OpCode::Cast { .. }
-            | OpCode::BitRange { .. }
-            | OpCode::MkSeq { .. }
-            | OpCode::MkRepeated { .. }
-            | OpCode::MkTuple { .. }
-            | OpCode::TupleProj { .. }
-            | OpCode::Load { .. }
-            | OpCode::Select { .. }
-            | OpCode::SlicePush { .. }
-            | OpCode::SliceLen { .. }
-            | OpCode::ToBits { .. }
-            | OpCode::ToRadix { .. }
-            | OpCode::ValueOf { .. }
-            | OpCode::MulConst { .. }
-            | OpCode::Alloc { .. }
-            | OpCode::ReadGlobal { .. }
-            | OpCode::InitGlobal { .. }
-            | OpCode::DropGlobal { .. }
-            | OpCode::Spread { .. }
-            | OpCode::Unspread { .. }
-            | OpCode::FreshWitness { .. }
-            | OpCode::NextDCoeff { .. }
-            | OpCode::BumpD { .. }
-            | OpCode::Todo { .. } => {
-                emitter.emit(inner);
-                true
-            }
-
             // Guard-within-Guard should not happen
             OpCode::Guard { .. } => {
                 panic!("LowerPureGuards: nested Guard not expected");
             }
+            _ => false,
         }
     }
 
