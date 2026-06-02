@@ -263,15 +263,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Materialise an LLSSA constant as an LLVM constant value, recursively.
     fn materialize_const(&self, c: &Constant) -> BasicValueEnum<'ctx> {
         match c {
-            Constant::Int { bits, value } => {
-                let int_type = self
-                    .context
-                    .custom_width_int_type(
-                        NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
-                    )
-                    .expect("A basic integer type can be created");
-                int_type.const_int(*value, false).into()
-            }
+            Constant::Int { bits, value } => self.int_mask(*bits, *value).into(),
             Constant::NullPtr => self
                 .context
                 .ptr_type(AddressSpace::default())
@@ -656,6 +648,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::URem => {
                         self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap()
                     }
+                    IntArithOp::SDiv => self.builder.build_int_signed_div(lhs, rhs, name).unwrap(),
+                    IntArithOp::SRem => self.builder.build_int_signed_rem(lhs, rhs, name).unwrap(),
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),

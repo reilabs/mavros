@@ -5,6 +5,7 @@ pub mod type_system;
 
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
+use std::mem::size_of_val;
 
 use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, SSAConstants, ValueId};
 pub use type_system::Type;
@@ -50,7 +51,7 @@ const _: () = assert!(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
     /// A scalar integer constant of `bits` bits with the provided `value`.
-    Int { bits: u32, value: u64 },
+    Int { bits: u32, value: u128 },
 
     /// A null pointer constant.
     NullPtr,
@@ -1020,6 +1021,8 @@ pub enum IntArithOp {
     Mul,
     UDiv,
     URem,
+    SDiv,
+    SRem,
     And,
     Or,
     Xor,
@@ -1035,6 +1038,8 @@ impl Display for IntArithOp {
             IntArithOp::Mul => "mul",
             IntArithOp::UDiv => "udiv",
             IntArithOp::URem => "urem",
+            IntArithOp::SDiv => "sdiv",
+            IntArithOp::SRem => "srem",
             IntArithOp::And => "and",
             IntArithOp::Or => "or",
             IntArithOp::Xor => "xor",

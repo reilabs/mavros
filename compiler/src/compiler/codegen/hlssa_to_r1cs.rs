@@ -8,7 +8,8 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId,
         hlssa::{
-            self, BinaryArithOpKind, CmpKind, HLSSA, Radix, RefCountOp, SliceOpDir, Type, TypeExpr,
+            self, BinaryArithOpKind, CmpKind, HLSSA, MAX_SUPPORTED_SIGNED_BITS,
+            MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SliceOpDir, Type, TypeExpr,
         },
     },
     util::{spread_bits, unspread_bits},
@@ -17,6 +18,10 @@ use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
 
 pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
+
+fn two_pow(exponent: usize) -> ark_bn254::Fr {
+    ark_bn254::Fr::from(2).pow([exponent as u64])
+}
 
 // #[derive(Clone, Debug, Copy, PartialEq, PartialOrd, Eq, Ord)]
 // pub enum WitnessIndex {
@@ -50,10 +55,10 @@ pub enum Value {
 impl Value {
     fn bit_mask(bits: usize) -> u128 {
         assert!(
-            (1..=128).contains(&bits),
+            (1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&bits),
             "invalid integer width for bit mask: {bits}"
         );
-        if bits == 128 {
+        if bits == MAX_SUPPORTED_UNSIGNED_BITS {
             u128::MAX
         } else {
             (1u128 << bits) - 1
@@ -65,21 +70,24 @@ impl Value {
     }
 
     fn decode_signed(v: u128, bits: usize) -> i128 {
-        assert!(bits > 0 && bits <= 128, "invalid signed width: {bits}");
+        assert!(
+            bits > 0 && bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let masked = Self::wrap_unsigned(v, bits);
-        if bits == 128 {
+        let sign_bit = 1u128 << (bits - 1);
+        if masked & sign_bit == 0 {
             masked as i128
         } else {
-            let sign_bit = 1u128 << (bits - 1);
-            if masked & sign_bit == 0 {
-                masked as i128
-            } else {
-                (masked as i128) - ((1u128 << bits) as i128)
-            }
+            (masked as i128) - ((1u128 << bits) as i128)
         }
     }
 
     fn encode_signed(v: i128, bits: usize) -> u128 {
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         Self::wrap_unsigned(v as u128, bits)
     }
 
@@ -484,7 +492,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         match &out_type.strip_witness().expr {
             TypeExpr::U(bits) => {
                 assert!(
-                    *bits > 0 && *bits <= 128,
+                    *bits > 0 && *bits <= MAX_SUPPORTED_UNSIGNED_BITS,
                     "Unsupported unsigned integer size in R1CS arith: u{bits}"
                 );
                 assert!(
@@ -511,7 +519,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
             }
             TypeExpr::I(bits) => {
                 assert!(
-                    *bits > 0 && *bits <= 128,
+                    *bits > 0 && *bits <= MAX_SUPPORTED_SIGNED_BITS,
                     "Unsupported signed integer size in R1CS arith: i{bits}"
                 );
                 assert!(
@@ -545,9 +553,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Shr => {
                         Self::wrap_unsigned(a as u128, *bits).wrapping_shr(b_bits)
                     }
-                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
-                        panic!("Signed div/mod not yet implemented")
-                    }
+                    BinaryArithOpKind::Div => Self::encode_signed(a / b, *bits),
+                    BinaryArithOpKind::Mod => Self::encode_signed(a % b, *bits),
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
@@ -666,7 +673,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
             false
         };
         if sign_bit {
-            let extension = ark_bn254::Fr::from(1u128 << _to) - ark_bn254::Fr::from(1u128 << from);
+            let extension = two_pow(_to) - two_pow(from);
             Value::Const(val + extension)
         } else {
             self.clone()
