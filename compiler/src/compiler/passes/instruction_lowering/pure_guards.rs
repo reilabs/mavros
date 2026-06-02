@@ -715,6 +715,10 @@ impl LowerPureGuards {
         let val_type = type_info.get_value_type(value);
         let val_bits = match &val_type.expr {
             TypeExpr::U(n) | TypeExpr::I(n) => *n,
+            TypeExpr::Field => {
+                self.lower_field_rangecheck_guard(emitter, condition, value, max_bits);
+                return;
+            }
             other => panic!(
                 "LowerPureGuards: pure rangecheck on unsupported type {:?}; \
                  add a comparison strategy for this type",
@@ -737,6 +741,37 @@ impl LowerPureGuards {
         };
         let bound = emitter.u_const(cmp_bits, 1u128 << max_bits);
         let in_range = emitter.lt(v_cmp, bound);
+        let oob = emitter.not(in_range);
+
+        emitter.build_if_else_into(
+            oob,
+            vec![],
+            |e| {
+                let zero = e.u_const(1, 0);
+                e.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    lhs: condition,
+                    rhs: zero,
+                });
+                vec![]
+            },
+            |_| vec![],
+        );
+    }
+
+    fn lower_field_rangecheck_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        value: ValueId,
+        max_bits: usize,
+    ) {
+        if max_bits >= <ark_bn254::Fr as ark_ff::PrimeField>::MODULUS_BIT_SIZE as usize {
+            return;
+        }
+
+        let bound = emitter.field_const(two_pow(max_bits));
+        let in_range = emitter.lt(value, bound);
         let oob = emitter.not(in_range);
 
         emitter.build_if_else_into(

@@ -1408,6 +1408,12 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         match name {
+            "field_less_than" => {
+                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
+                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                let result = b.block(self.current_block).lt(lhs, rhs);
+                Some(result)
+            }
             "unsafe_cast" => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
                 use noirc_frontend::shared::Signedness;

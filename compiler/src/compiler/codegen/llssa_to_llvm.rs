@@ -918,6 +918,63 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.value_map.insert(*result, eq_acc.into());
             }
 
+            LLOp::FieldLt { result, a, b } => {
+                // Field less-than compares canonical raw limbs, not Montgomery limbs.
+                let to_fn = self
+                    .field_to_limbs_fn
+                    .expect("__field_to_limbs not declared");
+                let a_raw = self
+                    .builder
+                    .build_call(to_fn, &[self.value_map[a].into()], "a_raw")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .expect_basic("__field_to_limbs should return a value")
+                    .into_struct_value();
+                let b_raw = self
+                    .builder
+                    .build_call(to_fn, &[self.value_map[b].into()], "b_raw")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .expect_basic("__field_to_limbs should return a value")
+                    .into_struct_value();
+
+                let mut lt_acc = self.context.bool_type().const_int(0, false);
+                let mut eq_prefix = self.context.bool_type().const_int(1, false);
+                for i in (0..4u32).rev() {
+                    let a_limb = self
+                        .builder
+                        .build_extract_value(a_raw, i, "a_l")
+                        .unwrap()
+                        .into_int_value();
+                    let b_limb = self
+                        .builder
+                        .build_extract_value(b_raw, i, "b_l")
+                        .unwrap()
+                        .into_int_value();
+                    let limb_lt = self
+                        .builder
+                        .build_int_compare(IntPredicate::ULT, a_limb, b_limb, "flt")
+                        .unwrap();
+                    let limb_eq = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, a_limb, b_limb, "feq")
+                        .unwrap();
+                    let this_limb_decides = self
+                        .builder
+                        .build_and(eq_prefix, limb_lt, "flt_dec")
+                        .unwrap();
+                    lt_acc = self
+                        .builder
+                        .build_or(lt_acc, this_limb_decides, "field_lt")
+                        .unwrap();
+                    eq_prefix = self
+                        .builder
+                        .build_and(eq_prefix, limb_eq, "eq_prefix")
+                        .unwrap();
+                }
+                self.value_map.insert(*result, lt_acc.into());
+            }
+
             LLOp::FieldFromLimbs { result, limbs } => {
                 // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
                 let limb_vals = self.value_map[limbs];
