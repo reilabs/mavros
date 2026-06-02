@@ -222,7 +222,8 @@ fn decompose_canonical_field(b: &mut HLBlockEmitter<'_>, value: ValueId) -> (Val
 
 fn witness_high_limb(b: &mut HLBlockEmitter<'_>, value: ValueId, two_128: ValueId) -> ValueId {
     let value = b.value_of(value);
-    let low = pure_field_low_128_bits(b, value);
+    let low = b.cast_to(CastTarget::U(128), value);
+    let low = b.cast_to_field(low);
     let high = b.sub(value, low);
     let high = b.div(high, two_128);
     b.write_witness(high)
@@ -261,11 +262,6 @@ fn assert_field_canonical(b: &mut HLBlockEmitter<'_>, lo: ValueId, hi: ValueId, 
     let hi_gap = b.sub(hi_gap, borrow);
     b.rangecheck(lo_gap, 128);
     b.rangecheck(hi_gap, 128);
-}
-
-fn pure_field_low_128_bits(b: &mut HLBlockEmitter<'_>, value: ValueId) -> ValueId {
-    let low_u128 = b.cast_to(CastTarget::U(128), value);
-    b.cast_to_field(low_u128)
 }
 
 /// Select bits `[offset, offset + width)` of a field whose canonical decomposition is the 128-bit
