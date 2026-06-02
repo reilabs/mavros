@@ -196,7 +196,7 @@ impl LowerBitRangeOps {
 /// High 126 bits of the BN254 scalar modulus `p` (equivalently, of `p - 1`).
 const MODULUS_HI: u128 = 0x30644e72e131a029b85045b68181585d;
 /// Low 128 bits of `p - 1`, so that `p - 1 = MODULUS_HI * 2^128 + MODULUS_M1_LO`.
-const MODULUS_M1_LO: u128 = 0x2833e84879b9709143e1f593efffffff;
+const MODULUS_M1_LO: u128 = 0x2833e84879b9709143e1f593f0000000;
 
 /// Split a `WitnessOf<Field>` into canonical `lo` (low 128 bits) and `hi` (high 126 bits) limbs.
 ///
@@ -208,7 +208,7 @@ fn decompose_canonical_field(b: &mut HLBlockEmitter<'_>, value: ValueId) -> (Val
 
     // Hint the limbs from the pure value: `value = lo + hi * 2^128`.
     let pure = b.value_of(value);
-    let lo_hint = lower_pure_field_low_bits(b, pure, 128);
+    let lo_hint = lower_pure_field_low_128_bits(b, pure);
     let high = b.sub(pure, lo_hint);
     let hi_hint = b.div(high, two_128);
 
@@ -261,6 +261,11 @@ fn assert_field_canonical(
     let hi_gap = b.sub(hi_gap, borrow);
     b.rangecheck(lo_gap, 128);
     b.rangecheck(hi_gap, 126);
+}
+
+fn lower_pure_field_low_128_bits(b: &mut HLBlockEmitter<'_>, value: ValueId) -> ValueId {
+    let low_u128 = b.cast_to(CastTarget::U(128), value);
+    b.cast_to_field(low_u128)
 }
 
 /// Select bits `[offset, offset + width)` of a field whose canonical decomposition is the 128-bit
