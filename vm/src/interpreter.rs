@@ -139,8 +139,20 @@ impl Frame {
     }
 
     #[inline(always)]
+    pub fn read_u128_mut(&self, offset: isize) -> *mut u128 {
+        unsafe { self.data.offset(offset) as *mut u128 }
+    }
+
+    #[inline(always)]
     pub fn read_u64(&self, offset: isize) -> u64 {
         unsafe { *self.data.offset(offset) }
+    }
+
+    #[inline(always)]
+    pub fn read_u128(&self, offset: isize) -> u128 {
+        let lo = self.read_u64(offset) as u128;
+        let hi = self.read_u64(offset + 1) as u128;
+        lo | (hi << 64)
     }
 
     #[inline(always)]
