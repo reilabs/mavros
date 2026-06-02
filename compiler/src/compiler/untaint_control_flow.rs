@@ -16,7 +16,7 @@ use crate::compiler::{
         hlssa::{
             BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, OpCode, SequenceTargetType,
             Type, TypeExpr,
-            builder::{HLEmitter, HLInstrBuilder},
+            builder::{HLBlockEmitter, HLEmitter, HLInstrBuilder},
         },
     },
 };
@@ -92,12 +92,83 @@ impl UntaintControlFlow {
 
     fn synthesize_strip_slice_body(
         &self,
-        _ssa: &mut HLSSA,
-        _fn_id: FunctionId,
-        _src_elem: &Type,
-        _tgt_elem: &Type,
+        ssa: &mut HLSSA,
+        fn_id: FunctionId,
+        src_elem: &Type,
+        tgt_elem: &Type,
     ) {
-        todo!();
+        let src_slice = src_elem.clone().slice_of();
+        let tgt_slice = tgt_elem.clone().slice_of();
+
+        let mut function = ssa.take_function(fn_id);
+        function.add_return_type(tgt_slice.clone());
+        let entry_id = function.get_entry_id();
+
+        let mut emitter = HLBlockEmitter::new(&mut function, ssa, entry_id);
+        let slice_param = emitter.add_parameter(src_slice);
+        let len = emitter.slice_len(slice_param);
+        let default_elem = Self::emit_default_value(&mut emitter, tgt_elem);
+        let acc_init = emitter.mk_repeated_dyn(
+            default_elem,
+            SequenceTargetType::Slice,
+            len,
+            tgt_elem.clone(),
+        );
+        let const_0 = emitter.u_const(32, 0);
+        let const_1 = emitter.u_const(32, 1);
+
+        let final_state = emitter.build_loop(
+            vec![(const_0, Type::u(32)), (acc_init, tgt_slice.clone())],
+            |b, loop_params| b.lt(loop_params[0], len),
+            |body_emitter, loop_params| {
+                let i = loop_params[0];
+                let acc = loop_params[1];
+                let elem = body_emitter.array_get(slice_param, i);
+                let stripped = self.emit_strip_witness(elem, src_elem, tgt_elem, body_emitter);
+                let new_acc = body_emitter.array_set(acc, i, stripped);
+                let next_i = body_emitter.add(i, const_1);
+                vec![next_i, new_acc]
+            },
+        );
+
+        emitter.terminate_return(vec![final_state[1]]);
+        drop(emitter);
+
+        ssa.put_function(fn_id, function);
+    }
+
+    fn emit_default_value<E: HLEmitter>(builder: &mut E, ty: &Type) -> ValueId {
+        match &ty.expr {
+            TypeExpr::Field => builder.field_const(ark_bn254::Fr::from(0u64)),
+            TypeExpr::U(bits) => builder.u_const(*bits, 0),
+            TypeExpr::I(bits) => builder.i_const(*bits, 0),
+            TypeExpr::Array(elem, size) => {
+                let elems: Vec<ValueId> = (0..*size)
+                    .map(|_| Self::emit_default_value(builder, elem))
+                    .collect();
+                builder.mk_seq(elems, SequenceTargetType::Array(*size), (**elem).clone())
+            }
+            TypeExpr::Slice(elem) => {
+                builder.mk_seq(vec![], SequenceTargetType::Slice, (**elem).clone())
+            }
+            TypeExpr::Tuple(elems) => {
+                let vals: Vec<ValueId> = elems
+                    .iter()
+                    .map(|t| Self::emit_default_value(builder, t))
+                    .collect();
+                builder.mk_tuple(vals, elems.clone())
+            }
+            TypeExpr::Ref(inner) => {
+                let val = Self::emit_default_value(builder, inner);
+                builder.alloc((**inner).clone(), val)
+            }
+            TypeExpr::WitnessOf(_) => {
+                panic!("emit_default_value should not be called on WitnessOf");
+            }
+            TypeExpr::Function => {
+                panic!("emit_default_value does not support Function type");
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
