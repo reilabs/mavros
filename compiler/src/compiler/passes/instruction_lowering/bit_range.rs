@@ -200,31 +200,26 @@ const MODULUS_M1_LO: u128 = 0x2833e84879b9709143e1f593f0000000;
 
 /// Split a `WitnessOf<Field>` into canonical `lo` (low 128 bits) and `hi` (high 126 bits) limbs.
 ///
-/// The limbs are hinted from the pure value, range-checked, constrained to recompose the original
-/// field element, and asserted to be the canonical (`< p`) representation. They are returned as
-/// `WitnessOf<U(128)>` so that the ordinary integer `BitRange` path can select bits from them.
+/// The high limb is hinted from the pure value, and the low limb is recovered from the input as
+/// `value - hi * 2^128`. Both limbs are range-checked and asserted to be the canonical (`< p`)
+/// representation. They are returned as `WitnessOf<U(128)>` so that the ordinary integer
+/// `BitRange` path can select bits from them.
 fn decompose_canonical_field(b: &mut HLBlockEmitter<'_>, value: ValueId) -> (ValueId, ValueId) {
     let two_128 = b.field_const(two_pow(128));
 
-    // Hint the limbs from the pure value: `value = lo + hi * 2^128`.
+    // Compute pure limb values for the `hi` witness and borrow hint.
     let pure = b.value_of(value);
     let lo_hint = lower_pure_field_low_128_bits(b, pure);
     let high = b.sub(pure, lo_hint);
     let hi_hint = b.div(high, two_128);
 
-    let lo = b.write_witness(lo_hint);
     let hi = b.write_witness(hi_hint);
-    b.rangecheck(lo, 128);
     b.rangecheck(hi, 126);
 
-    // Constrain that the limbs recompose the original field element.
     let hi_shifted = b.mul(hi, two_128);
-    let recomposed = b.add(lo, hi_shifted);
     let value_field = b.cast_to_field(value);
-    let diff = b.sub(value_field, recomposed);
-    let one = b.field_const(Field::ONE);
-    let zero = b.field_const(Field::ZERO);
-    b.constrain(one, diff, zero);
+    let lo = b.sub(value_field, hi_shifted);
+    b.rangecheck(lo, 128);
 
     assert_field_canonical(b, lo, hi, lo_hint, two_128);
 
