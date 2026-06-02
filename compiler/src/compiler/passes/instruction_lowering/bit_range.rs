@@ -9,7 +9,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, Endianness, OpCode, Radix, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, Endianness, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
+            Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -354,8 +355,8 @@ fn lower_pure_bit_range_value(
     match value_type.strip_witness().expr {
         TypeExpr::U(bits) | TypeExpr::I(bits) => {
             assert!(
-                bits <= 128,
-                "pure integer BitRange lowering only supports up to 128-bit integers"
+                bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+                "pure integer BitRange lowering only supports up to {MAX_SUPPORTED_UNSIGNED_BITS}-bit integers"
             );
             let unsigned = b.cast_to(CastTarget::U(bits), value);
             let mask = b.u_const(bits, bit_mask(bits, offset, width));
@@ -430,10 +431,13 @@ fn two_pow(exponent: usize) -> Field {
 }
 
 fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {
-    assert!(bits <= 128, "u128 mask cannot represent u{bits}");
+    assert!(
+        bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+        "u{MAX_SUPPORTED_UNSIGNED_BITS} mask cannot represent u{bits}"
+    );
     assert!(width > 0, "BitRange width must be at least 1");
     assert!(offset + width <= bits, "BitRange exceeds source width");
-    if width == 128 {
+    if width == MAX_SUPPORTED_UNSIGNED_BITS {
         u128::MAX
     } else {
         ((1u128 << width) - 1) << offset

@@ -15,7 +15,8 @@ use crate::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
                 self, BinaryArithOpKind, CmpKind, DMatrix, Endianness, HLBlock, HLFunction, HLSSA,
-                HLSSAConstantsSnapshot, LookupTarget, Radix, RefCountOp, Type, TypeExpr,
+                HLSSAConstantsSnapshot, LookupTarget, MAX_SUPPORTED_SIGNED_BITS, Radix, RefCountOp,
+                Type, TypeExpr,
             },
         },
     },
@@ -91,8 +92,8 @@ fn materialize_constants(
             }
             hlssa::Constant::I(size, val) => {
                 assert!(
-                    *size <= 64,
-                    "signed integers wider than i64 are unsupported"
+                    *size <= MAX_SUPPORTED_SIGNED_BITS,
+                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                 );
                 let res = layouter.alloc_int(vid, *size);
                 emitter.push_op(bytecode::OpCode::MovConst {
@@ -1433,9 +1434,11 @@ impl CodeGen {
                     let value_type = type_info.get_value_type(*value);
                     let value_bits = match value_type.strip_witness().expr {
                         TypeExpr::U(bits) => bits,
-                        TypeExpr::I(bits) if bits <= 64 => bits,
+                        TypeExpr::I(bits) if bits <= MAX_SUPPORTED_SIGNED_BITS => bits,
                         TypeExpr::I(bits) => {
-                            panic!("signed integers wider than i64 are unsupported: i{bits}")
+                            panic!(
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported: i{bits}"
+                            )
                         }
                         t => panic!("Unsupported spread value type: {:?}", t),
                     };
@@ -1446,7 +1449,10 @@ impl CodeGen {
                     let res = match result_type.strip_witness().expr {
                         TypeExpr::U(bits) => layouter.alloc_int(*result, bits),
                         TypeExpr::I(bits) => {
-                            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
                             layouter.alloc_int(*result, bits)
                         }
                         TypeExpr::Field => layouter.alloc_field(*result),
@@ -1468,7 +1474,10 @@ impl CodeGen {
                     let res_and = match odd_type.strip_witness().expr {
                         TypeExpr::U(bits) => layouter.alloc_int(*result_odd, bits),
                         TypeExpr::I(bits) => {
-                            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
                             layouter.alloc_int(*result_odd, bits)
                         }
                         TypeExpr::Field => layouter.alloc_field(*result_odd),
@@ -1477,7 +1486,10 @@ impl CodeGen {
                     let res_xor = match even_type.strip_witness().expr {
                         TypeExpr::U(bits) => layouter.alloc_int(*result_even, bits),
                         TypeExpr::I(bits) => {
-                            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
                             layouter.alloc_int(*result_even, bits)
                         }
                         TypeExpr::Field => layouter.alloc_field(*result_even),
@@ -1637,8 +1649,8 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
         }
         TypeExpr::I(bits) => {
             assert!(
-                *bits <= 64,
-                "signed integers wider than i64 are unsupported"
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             (1, bytecode::ELEM_WORD)
         }

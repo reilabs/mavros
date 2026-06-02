@@ -13,7 +13,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS,
+            OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -142,7 +143,7 @@ impl LowerWitnessBitwiseOps {
         let (bits, result_cast) =
             integer_bits_and_cast(function_type_info, result, "bitwise result");
         assert!(
-            bits <= 128,
+            bits <= MAX_SUPPORTED_UNSIGNED_BITS,
             "bitwise spread width too large for natural-width Spread lowering: {bits}"
         );
 
@@ -246,8 +247,8 @@ impl LowerWitnessBitwiseOps {
         to_bits: usize,
     ) {
         assert!(
-            to_bits <= 64,
-            "signed integers wider than i64 are unsupported"
+            to_bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
         );
         let sign = if context.range(value).is_non_negative_in_signed(from_bits) {
             b.field_const(Field::ZERO)
@@ -372,7 +373,10 @@ fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
     match ty.strip_witness().expr {
         TypeExpr::U(bits) => CastTarget::U(bits),
         TypeExpr::I(bits) => {
-            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+            assert!(
+                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
             CastTarget::I(bits)
         }
         other => panic!("expected integer type, got {:?}", other),
@@ -399,7 +403,10 @@ fn integer_bits_and_cast(
     {
         TypeExpr::U(bits) => (bits, CastTarget::U(bits)),
         TypeExpr::I(bits) => {
-            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+            assert!(
+                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
             (bits, CastTarget::I(bits))
         }
         other => panic!("{context}: expected integer type, got {:?}", other),

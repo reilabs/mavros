@@ -8,7 +8,8 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId,
         hlssa::{
-            self, BinaryArithOpKind, CmpKind, HLSSA, Radix, RefCountOp, SliceOpDir, Type, TypeExpr,
+            self, BinaryArithOpKind, CmpKind, HLSSA, MAX_SUPPORTED_SIGNED_BITS,
+            MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SliceOpDir, Type, TypeExpr,
         },
     },
     util::{spread_bits, unspread_bits},
@@ -54,10 +55,10 @@ pub enum Value {
 impl Value {
     fn bit_mask(bits: usize) -> u128 {
         assert!(
-            (1..=128).contains(&bits),
+            (1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&bits),
             "invalid integer width for bit mask: {bits}"
         );
-        if bits == 128 {
+        if bits == MAX_SUPPORTED_UNSIGNED_BITS {
             u128::MAX
         } else {
             (1u128 << bits) - 1
@@ -70,8 +71,8 @@ impl Value {
 
     fn decode_signed(v: u128, bits: usize) -> i128 {
         assert!(
-            bits > 0 && bits <= 64,
-            "signed integers wider than i64 are unsupported"
+            bits > 0 && bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
         );
         let masked = Self::wrap_unsigned(v, bits);
         let sign_bit = 1u128 << (bits - 1);
@@ -83,7 +84,10 @@ impl Value {
     }
 
     fn encode_signed(v: i128, bits: usize) -> u128 {
-        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         Self::wrap_unsigned(v as u128, bits)
     }
 
@@ -488,7 +492,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         match &out_type.strip_witness().expr {
             TypeExpr::U(bits) => {
                 assert!(
-                    *bits > 0 && *bits <= 128,
+                    *bits > 0 && *bits <= MAX_SUPPORTED_UNSIGNED_BITS,
                     "Unsupported unsigned integer size in R1CS arith: u{bits}"
                 );
                 assert!(
@@ -515,7 +519,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
             }
             TypeExpr::I(bits) => {
                 assert!(
-                    *bits > 0 && *bits <= 128,
+                    *bits > 0 && *bits <= MAX_SUPPORTED_SIGNED_BITS,
                     "Unsupported signed integer size in R1CS arith: i{bits}"
                 );
                 assert!(

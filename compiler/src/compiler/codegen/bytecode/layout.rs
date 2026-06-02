@@ -7,7 +7,9 @@ use crate::{
         codegen::constants,
         ssa::{
             ValueId,
-            hlssa::{HLSSA, Type, TypeExpr},
+            hlssa::{
+                HLSSA, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr,
+            },
         },
     },
     vm::{self, bytecode},
@@ -39,7 +41,7 @@ impl FrameLayouter {
     }
 
     pub fn alloc_int(&mut self, value: ValueId, size: usize) -> bytecode::FramePosition {
-        assert!(size > 0 && size <= 128);
+        assert!(size > 0 && size <= MAX_SUPPORTED_UNSIGNED_BITS);
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += int_cell_count(size);
@@ -71,11 +73,14 @@ impl FrameLayouter {
         match tp.expr {
             TypeExpr::Field => bytecode::FELT_LIMBS,
             TypeExpr::U(bits) => {
-                assert!(bits <= 128);
+                assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
                 int_cell_count(bits)
             }
             TypeExpr::I(bits) => {
-                assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+                assert!(
+                    bits <= MAX_SUPPORTED_SIGNED_BITS,
+                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                );
                 1
             }
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
@@ -166,13 +171,13 @@ impl GlobalFrameLayouter {
         match &typ.expr {
             TypeExpr::Field => bytecode::FELT_LIMBS,
             TypeExpr::U(bits) => {
-                assert!(*bits <= 128);
+                assert!(*bits <= MAX_SUPPORTED_UNSIGNED_BITS);
                 int_cell_count(*bits)
             }
             TypeExpr::I(bits) => {
                 assert!(
-                    *bits <= 64,
-                    "signed integers wider than i64 are unsupported"
+                    *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                 );
                 1
             }
@@ -191,6 +196,6 @@ impl GlobalFrameLayouter {
 }
 
 pub fn int_cell_count(bits: usize) -> usize {
-    assert!(bits > 0 && bits <= 128);
+    assert!(bits > 0 && bits <= MAX_SUPPORTED_UNSIGNED_BITS);
     bits.div_ceil(64)
 }

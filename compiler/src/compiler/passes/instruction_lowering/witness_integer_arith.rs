@@ -8,7 +8,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode, Type,
+            TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -219,7 +220,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
         let sign_l = match known_sign(&lhs_range, bits) {
@@ -294,7 +298,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
         let product_range = lhs_range.mul(&rhs_range);
@@ -398,7 +405,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_range = context.range(lhs);

@@ -1,5 +1,7 @@
 //! A collection of miscellaneous utils for the compiler that don't necessarily have a good place.
 
+use crate::compiler::ssa::hlssa::MAX_SUPPORTED_UNSIGNED_BITS;
+
 pub fn spread_bits(v: u128, bits: usize) -> u128 {
     assert!(
         bits <= 64,
@@ -18,8 +20,8 @@ pub fn spread_bits(v: u128, bits: usize) -> u128 {
 
 pub fn unspread_bits(v: u128, bits: usize) -> (u128, u128) {
     assert!(
-        bits <= 128 && bits % 2 == 0,
-        "unspread_bits expects an even width up to 128, got {bits}"
+        bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
+        "unspread_bits expects an even width up to {MAX_SUPPORTED_UNSIGNED_BITS}, got {bits}"
     );
 
     fn compact_bits(mut x: u128) -> u128 {

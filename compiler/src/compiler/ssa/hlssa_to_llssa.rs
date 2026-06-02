@@ -20,7 +20,8 @@ use super::{
     BlockId, FunctionId, Terminator, ValueId,
     hlssa::{
         BinaryArithOpKind, CmpKind, Constant, DMatrix, HLFunction, HLSSA, HLSSAConstantsSnapshot,
-        Type as HLType, TypeExpr as HLTypeExpr,
+        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type as HLType,
+        TypeExpr as HLTypeExpr,
     },
     llssa::{
         Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
@@ -41,8 +42,8 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::U(bits) => LLType::Int(*bits as u32),
         HLTypeExpr::I(bits) => {
             assert!(
-                *bits <= 64,
-                "signed integers wider than i64 are unsupported"
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             LLType::Int(*bits as u32)
         }
@@ -63,8 +64,8 @@ fn elem_struct(ty: &HLType) -> LLStruct {
         HLTypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
         HLTypeExpr::I(bits) => {
             assert!(
-                *bits <= 64,
-                "signed integers wider than i64 are unsupported"
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
         }
@@ -88,8 +89,8 @@ fn tuple_field_type(ty: &HLType) -> LLFieldType {
         HLTypeExpr::U(bits) => LLFieldType::Int(*bits as u32),
         HLTypeExpr::I(bits) => {
             assert!(
-                *bits <= 64,
-                "signed integers wider than i64 are unsupported"
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             LLFieldType::Int(*bits as u32)
         }
@@ -571,8 +572,8 @@ fn lower_constants_llssa(
             }
             Constant::I(bits, val) => {
                 assert!(
-                    *bits <= 64,
-                    "signed integers wider than i64 are unsupported"
+                    *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                 );
                 let ll_val = llssa.add_const(LLConstant::Int {
                     bits: *bits as u32,
@@ -775,8 +776,8 @@ fn lower_instruction(
                 }
                 HLTypeExpr::I(bits) => {
                     assert!(
-                        *bits <= 64,
-                        "signed integers wider than i64 are unsupported"
+                        *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                     );
                     let op = match kind {
                         BinaryArithOpKind::Add => IntArithOp::Add,
@@ -835,12 +836,12 @@ fn lower_instruction(
                     e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs)
                 }
                 (CmpKind::Eq, HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                    if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                    if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
                 {
                     e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                 }
                 (CmpKind::Lt, HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                    if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                    if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
                 {
                     e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
                 }
@@ -1030,8 +1031,8 @@ fn lower_instruction(
                             HLTypeExpr::U(bits) => *bits,
                             HLTypeExpr::I(bits) => {
                                 assert!(
-                                    *bits <= 64,
-                                    "signed integers wider than i64 are unsupported"
+                                    *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                                 );
                                 *bits
                             }
@@ -1058,8 +1059,10 @@ fn lower_instruction(
                     }
                 }
                 CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
-                    if matches!(target, CastTarget::I(bits) if *bits > 64) {
-                        panic!("signed integers wider than i64 are unsupported");
+                    if matches!(target, CastTarget::I(bits) if *bits > MAX_SUPPORTED_SIGNED_BITS) {
+                        panic!(
+                            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                        );
                     }
                     let ll_result = match &source_type.expr {
                         HLTypeExpr::Field => {
@@ -1091,8 +1094,8 @@ fn lower_instruction(
                         }
                         HLTypeExpr::I(source_bits) => {
                             assert!(
-                                *source_bits <= 64,
-                                "signed integers wider than i64 are unsupported"
+                                *source_bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                             );
                             if *target_bits > *source_bits {
                                 e.zext(ll_value, *target_bits as u32)
@@ -1194,7 +1197,7 @@ fn lower_instruction(
                         e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                     }
                     (HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                        if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                        if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
                     {
                         e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                     }
@@ -1205,7 +1208,7 @@ fn lower_instruction(
                         e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs)
                     }
                     (HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                        if lhs_bits == rhs_bits && *lhs_bits <= 64 =>
+                        if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
                     {
                         e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
                     }
@@ -1427,7 +1430,10 @@ fn integer_width(ty: &HLType) -> u32 {
     match scalar_ty.expr {
         HLTypeExpr::U(bits) => bits as u32,
         HLTypeExpr::I(bits) => {
-            assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+            assert!(
+                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
             bits as u32
         }
         _ => panic!("Expected integer type, got {}", ty),
@@ -1481,8 +1487,8 @@ fn lower_unspread(
     let even_bits = integer_width(even_type);
     let active_bits = bits as u32;
     assert!(
-        input_bits <= 128 && input_bits % 2 == 0,
-        "Unspread expects an even integer width up to 128 bits, got {}",
+        input_bits <= MAX_SUPPORTED_UNSIGNED_BITS as u32 && input_bits % 2 == 0,
+        "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {}",
         value_type
     );
     assert!(
@@ -2020,13 +2026,15 @@ fn ensure_field_sized(
             (e.zext(ll_val, 64), e.emit_int_const(64, 0))
         }
         HLTypeExpr::U(64) | HLTypeExpr::I(64) => (ll_val, e.emit_int_const(64, 0)),
-        HLTypeExpr::U(bits) if *bits <= 128 => {
+        HLTypeExpr::U(bits) if *bits <= MAX_SUPPORTED_UNSIGNED_BITS => {
             let lo = e.truncate(ll_val, 64);
             let shift = e.emit_int_const(*bits as u32, 64);
             let hi = e.int_arith(IntArithOp::UShr, ll_val, shift);
             (lo, e.truncate(hi, 64))
         }
-        HLTypeExpr::I(_) => panic!("signed integers wider than i64 are unsupported"),
+        HLTypeExpr::I(_) => {
+            panic!("signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported")
+        }
         _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
     };
     let zero = e.emit_int_const(64, 0);
@@ -3195,8 +3203,8 @@ fn load_pure_lookup_elem_as_field(
         }
         HLTypeExpr::I(bits) => {
             assert!(
-                *bits <= 64,
-                "signed integers wider than i64 are unsupported"
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
             int_to_field(e, value, *bits)
@@ -3227,8 +3235,8 @@ fn ad_bump_lookup_elem_db(
         }
         HLTypeExpr::I(bits) => {
             assert!(
-                *bits <= 64,
-                "signed integers wider than i64 are unsupported"
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
             let value_field = int_to_field(e, value, *bits);

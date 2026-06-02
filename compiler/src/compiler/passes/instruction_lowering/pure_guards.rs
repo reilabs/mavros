@@ -27,7 +27,8 @@ use crate::compiler::{
     ssa::{
         Instruction, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS,
+            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -219,8 +220,8 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
-        if signed && bits > 64 {
-            panic!("signed integers wider than i64 are unsupported");
+        if signed && bits > MAX_SUPPORTED_SIGNED_BITS {
+            panic!("signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported");
         }
 
         match (signed, kind) {
@@ -724,7 +725,7 @@ impl LowerPureGuards {
             return;
         }
         assert!(
-            val_bits <= 128 && max_bits < 128,
+            val_bits <= MAX_SUPPORTED_UNSIGNED_BITS && max_bits < MAX_SUPPORTED_UNSIGNED_BITS,
             "LowerPureGuards: pure rangecheck on {val_type} with max_bits = \
              {max_bits} needs wider-than-u128 comparison; not yet supported"
         );

@@ -3,7 +3,7 @@
 use noirc_frontend::monomorphization::ast::Type as NoirType;
 use noirc_frontend::shared::Signedness;
 
-use crate::compiler::ssa::hlssa::Type;
+use crate::compiler::ssa::hlssa::{MAX_SUPPORTED_SIGNED_BITS, Type};
 
 /// Converts AST types to SSA types.
 pub struct TypeConverter;
@@ -22,7 +22,10 @@ impl TypeConverter {
                 Signedness::Unsigned => Type::u(bit_size.bit_size() as usize),
                 Signedness::Signed => {
                     let bits = bit_size.bit_size() as usize;
-                    assert!(bits <= 64, "signed integers wider than i64 are unsupported");
+                    assert!(
+                        bits <= MAX_SUPPORTED_SIGNED_BITS,
+                        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                    );
                     Type::i(bits)
                 }
             },

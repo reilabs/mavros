@@ -22,7 +22,8 @@ use crate::compiler::{
         BlockId, FunctionId, ValueId,
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            OpCode, Radix, RefCountOp, SequenceTargetType, Type, TypeExpr,
+            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
+            TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
         },
     },
@@ -644,8 +645,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         match cst_val {
             Some(ConstVal::U(b, v)) => {
                 assert!(
-                    *b <= 128 && b % 2 == 0,
-                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    *b <= MAX_SUPPORTED_UNSIGNED_BITS && b % 2 == 0,
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got u{}",
                     b
                 );
                 let half_bits = b / 2;
@@ -657,8 +658,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             }
             Some(ConstVal::I(b, v)) => {
                 assert!(
-                    *b <= 128 && b % 2 == 0,
-                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    *b <= MAX_SUPPORTED_UNSIGNED_BITS && b % 2 == 0,
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got i{}",
                     b
                 );
                 let half_bits = b / 2;
