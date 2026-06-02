@@ -13,8 +13,8 @@ pub use crate::InputValueOrdered;
 use crate::bytecode::parse_struct_layouts;
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
-    array::BoxedValue,
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, U128, VM},
+    layout::BoxedValue,
 };
 
 /// An opcode handler. Returns the `(pc, frame)` to feed into the next
@@ -259,9 +259,8 @@ fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) 
     }
 }
 
-/// Phase 1 of witness generation: executes the VM to produce the
-/// pre-commitment witness and captures all intermediate state needed for
-/// phase 2.
+/// Phase 1 of witness generation: executes the VM to produce the pre-commitment witness and
+/// captures all intermediate state needed for phase 2.
 #[instrument(skip_all, name = "Interpreter::run_phase1")]
 pub fn run_phase1(
     program: &[u64],

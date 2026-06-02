@@ -70,26 +70,7 @@ impl FrameLayouter {
 
     /// Returns the size of `tp` in u`64` cells.
     pub fn type_size(&self, tp: &Type) -> usize {
-        match tp.expr {
-            TypeExpr::Field => bytecode::FELT_LIMBS,
-            TypeExpr::U(bits) => {
-                assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
-                int_cell_count(bits)
-            }
-            TypeExpr::I(bits) => {
-                assert!(
-                    bits <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                1
-            }
-            TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Tuple(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
-            _ => todo!(),
-        }
+        type_size(tp)
     }
 
     pub fn alloc_scratch(&mut self, count: usize) -> bytecode::FramePosition {
@@ -114,7 +95,7 @@ impl FrameLayouter {
 /// Interns unique struct shapes during codegen and returns a stable index into the resulting
 /// descriptor table.
 pub struct StructLayoutInterner {
-    pub table: Vec<vm::array::StructDescriptor>,
+    pub table: Vec<vm::layout::StructDescriptor>,
     pub index: HashMap<Vec<(u32, bool)>, usize>,
 }
 
@@ -132,12 +113,12 @@ impl StructLayoutInterner {
         }
         let idx = self.table.len();
         self.table
-            .push(vm::array::StructDescriptor::new(fields.clone()));
+            .push(vm::layout::StructDescriptor::new(fields.clone()));
         self.index.insert(fields, idx);
         idx
     }
 
-    pub fn into_table(self) -> Vec<vm::array::StructDescriptor> {
+    pub fn into_table(self) -> Vec<vm::layout::StructDescriptor> {
         self.table
     }
 }
@@ -198,4 +179,28 @@ impl GlobalFrameLayouter {
 pub fn int_cell_count(bits: usize) -> usize {
     assert!(bits > 0 && bits <= MAX_SUPPORTED_UNSIGNED_BITS);
     bits.div_ceil(64)
+}
+
+/// The number of u64 cells occupied by a value of type `tp` in a frame slot / array element.
+pub fn type_size(tp: &Type) -> usize {
+    match tp.expr {
+        TypeExpr::Field => bytecode::FELT_LIMBS,
+        TypeExpr::U(bits) => {
+            assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
+            int_cell_count(bits)
+        }
+        TypeExpr::I(bits) => {
+            assert!(
+                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            1
+        }
+        TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
+        TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
+        TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
+        TypeExpr::Tuple(_) => constants::POINTER_SIZE_CELLS,
+        TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
+        _ => todo!(),
+    }
 }

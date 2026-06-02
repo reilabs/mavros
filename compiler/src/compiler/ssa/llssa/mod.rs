@@ -27,7 +27,16 @@ pub type LLSSA = SSA<LLOp, Type, Constant>;
 ///
 /// The word used to track the refcount for that object should be set to this value, and every
 /// refcount operation should check for this value before attempting to modify the refcount.
-pub const RC_IMMORTAL_OBJECT: u64 = u64::MAX;
+pub use mavros_vm::layout::RC_IMMORTAL_OBJECT;
+
+/// The sentinel stored in an array's `table_id` cell to mean "no lookup table has been registered
+/// for this array yet".
+///
+/// The first lookup over an array sees this value, claims a fresh table index, and overwrites the
+/// cell with it. It is kept deliberately distinct from [`RC_IMMORTAL_OBJECT`] in case of memory
+/// clashes between the fields. As real table indices are small, non-negative integers, this is
+/// fine.
+pub use mavros_vm::layout::TABLE_ID_UNASSIGNED;
 
 /// The size of the refcount in bytes.
 pub const RC_SIZE_BYTES: usize = 8;
@@ -58,13 +67,28 @@ pub enum Constant {
 
     /// An aggregate (used for tuples and other aggregates).
     Struct { layout: LLStruct, values: Vec<Constant> },
+
+    /// A pointer to the heap object denoted by another interned constant.
+    ///
+    /// Lets an aggregate (`Struct`/`Array`) reference a pooled heap constant by id, so shared heap
+    /// children are materialized once and deduped.
+    ///
+    /// NOTE: Any future LLSSA-level DCE must follow `Ptr` targets transitively, since a pointee may
+    /// be referenced only from here and not from any instruction.
+    Ptr(ValueId),
+
+    /// A constant array containing `values.len()` elements, each laid out inline.
+    ///
+    /// Scalar elements are inline (`Int` for `u`/`i`, the four-limb `field_elem` `Struct` for
+    /// `Field`); heap elements (nested arrays) are `Ptr(child_id)`.
+    Array { elem: LLStruct, values: Vec<Constant> },
 }
 
 impl Constant {
     /// True if this constant can legally fill a slot of `field` type.
     ///
-    /// `InlineArray`/`FlexArray` fields are memory-only and have no constant form,
-    /// so they never match; any other mismatched pairing is rejected too.
+    /// `InlineArray`/`FlexArray` fields are memory-only and have no constant form, so they never
+    /// match; any other mismatched pairing is rejected too.
     fn matches_field(&self, field: &LLFieldType) -> bool {
         match (self, field) {
             (Constant::Int { bits, .. }, LLFieldType::Int(w)) => bits == w,
@@ -72,6 +96,7 @@ impl Constant {
             (Constant::Struct { layout, values }, LLFieldType::Inline(inner)) => {
                 layout == inner && layout.accepts(values)
             }
+            (Constant::Ptr(_), LLFieldType::Ptr) => true,
             _ => false,
         }
     }
@@ -759,12 +784,32 @@ impl LLStruct {
         Self::new(vec![LLFieldType::Int(RC_SIZE_BITS as u32)])
     }
 
-    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
+    /// A refcounted, fixed-size array.
+    ///
+    /// The fields are:
+    ///
+    /// - The **rc header** as an inline struct.
+    /// - A pointer to the cell used to track the lookup table mapping for the array. This is kept
+    ///   out of line to allow for a uniform structure between constant and runtime arrays.
+    /// - The data of the array.
     pub fn rc_array(elem: LLStruct, count: usize) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(64),
+            LLFieldType::Ptr,
             LLFieldType::InlineArray(elem, count),
+        ])
+    }
+
+    /// A refcounted, fixed-size array with a trailing lookup table pointer cell.
+    ///
+    /// This shares the initial layout with [`Self::rc_array`], but has a trailing `i64` as the cell
+    /// with the table index.
+    pub fn rc_array_storage(elem: LLStruct, count: usize) -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Ptr,
+            LLFieldType::InlineArray(elem, count),
+            LLFieldType::Int(64),
         ])
     }
 
@@ -1217,6 +1262,15 @@ mod tests {
         // InlineArray / FlexArray fields have no constant form.
         let arr = LLStruct::new(vec![LLFieldType::InlineArray(one_int, 1)]);
         assert!(!arr.accepts(&[Constant::Int { bits: 64, value: 0 }]));
+    }
+
+    /// A `Ptr` constant fills a `Ptr` field and nothing else.
+    #[test]
+    fn ptr_constant_matches_only_ptr_field() {
+        let p = Constant::Ptr(ValueId(0));
+        assert!(LLStruct::new(vec![LLFieldType::Ptr]).accepts(&[p.clone()]));
+        assert!(!LLStruct::new(vec![LLFieldType::Int(64)]).accepts(&[p.clone()]));
+        assert!(!LLStruct::new(vec![LLFieldType::Inline(LLStruct::field_elem())]).accepts(&[p]));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub fn const_value_type(value: &Constant) -> Type {
         Constant::I(size, _) => Type::i(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
+        Constant::Array { elem_type, elems } => elem_type.clone().array_of(elems.len()),
     }
 }
 
@@ -733,5 +734,39 @@ impl Analysis for TypeInfo {
     fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
         let cfg = store.get::<FlowAnalysis>();
         Types::new().run(ssa, cfg)
+    }
+}
+
+#[cfg(test)]
+mod const_type_tests {
+    use super::*;
+
+    #[test]
+    fn array_constant_type_is_fixed_array() {
+        let c = Constant::Array {
+            elem_type: Type::field(),
+            elems: vec![
+                Constant::Field(ark_bn254::Fr::from(1u64)),
+                Constant::Field(ark_bn254::Fr::from(2u64)),
+                Constant::Field(ark_bn254::Fr::from(3u64)),
+            ],
+        };
+        assert_eq!(const_value_type(&c), Type::field().array_of(3));
+    }
+
+    #[test]
+    fn nested_array_constant_type_is_array_of_arrays() {
+        let inner = Constant::Array {
+            elem_type: Type::field(),
+            elems: vec![
+                Constant::Field(ark_bn254::Fr::from(0u64)),
+                Constant::Field(ark_bn254::Fr::from(0u64)),
+            ],
+        };
+        let c = Constant::Array {
+            elem_type: Type::field().array_of(2),
+            elems: vec![inner.clone(), inner],
+        };
+        assert_eq!(const_value_type(&c), Type::field().array_of(2).array_of(2));
     }
 }

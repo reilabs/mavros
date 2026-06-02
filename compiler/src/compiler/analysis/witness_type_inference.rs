@@ -297,10 +297,14 @@ impl WitnessTypeInference {
         let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
         let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::new();
 
+        // No constant can be witness-tainted.
         ssa.for_each_const(|vid, val| {
             let shape = match val.as_ref() {
                 Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
                     WitnessShape::Scalar(WitnessType::Pure)
+                }
+                Constant::Array { elem_type, elems } => {
+                    Self::construct_pure_witness_for_type(&elem_type.clone().array_of(elems.len()))
                 }
             };
             value_wt.insert(*vid, shape);

@@ -248,6 +248,11 @@ pub trait HLEmitter {
         self.emit_constant(Constant::I(bits, value))
     }
 
+    /// A fixed-size constant array of `elem_type` whose elements are themselves constants.
+    fn array_const(&mut self, elem_type: Type, elems: Vec<Constant>) -> ValueId {
+        self.emit_constant(Constant::Array { elem_type, elems })
+    }
+
     // -- Witness --
 
     fn value_of(&mut self, value: ValueId) -> ValueId {

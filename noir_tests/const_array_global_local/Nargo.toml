@@ -1,0 +1,6 @@
+[package]
+name = "const_array_global_local"
+type = "bin"
+authors = [""]
+
+[dependencies]

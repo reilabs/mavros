@@ -4,10 +4,10 @@ use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _, Field as _};
 use mavros_opcode_gen::interpreter;
 
-use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
+use crate::layout::{BoxedLayout, BoxedValue, StructDescriptor, TABLE_ID_UNASSIGNED};
 
-use crate::array::DataType;
+use crate::layout::DataType;
 use std::fmt::Display;
 use std::ptr;
 
@@ -697,6 +697,20 @@ mod def {
         frame.memcpy(target.0 as isize, source.0 as isize, size);
     }
 
+    /// Seal a freshly-constructed heap object as immortal.
+    ///
+    /// Used to pin program constants that have been built into the globals region: once immortal,
+    /// `inc_rc`/`dec_rc` leave the object (and its children) alone, giving each unique constant a
+    /// single stable identity for the lifetime of the run. The object was allocated through the
+    /// normal `alloc` path (which recorded a heap `Alloc`), so we record a matching `Free` here to
+    /// keep `final_memory_usage` balanced, but the storage is **intentionally** never reclaimed.
+    #[opcode]
+    fn mk_immortal(#[frame] obj: BoxedValue, vm: &mut VM) {
+        let size = obj.layout().underlying_array_size(&vm.struct_layouts);
+        obj.make_immortal();
+        vm.allocation_instrumenter.free(AllocationType::Heap, size);
+    }
+
     #[opcode]
     fn write_ptr(
         frame: Frame,
@@ -1208,7 +1222,6 @@ mod def {
         let target = new_array.array_idx(index as usize, stride);
         if new_array.layout().data_type() == DataType::BoxedArray {
             if new_array.0 == array.0 {
-                // if we're reusing the array, the old element needs to be garbage collected
                 let old_elem = unsafe { *(target as *mut BoxedValue) };
                 old_elem.dec_rc(vm);
             } else {
@@ -1643,7 +1656,7 @@ mod def {
         let table_id_ptr = array.table_id();
         let table_idx = unsafe { *table_id_ptr };
 
-        let table_idx = if table_idx == u64::MAX {
+        let table_idx = if table_idx == TABLE_ID_UNASSIGNED {
             // First lookup on this array: create a new table
             let (cnst_off, wit_off, mult_wit) = unsafe {
                 (
@@ -1825,7 +1838,7 @@ mod def {
         let table_id_ptr = array.table_id();
         let table_idx = unsafe { *table_id_ptr };
 
-        let table_idx = if table_idx == u64::MAX {
+        let table_idx = if table_idx == TABLE_ID_UNASSIGNED {
             // First AD call on this array: create table and process table constraints
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };

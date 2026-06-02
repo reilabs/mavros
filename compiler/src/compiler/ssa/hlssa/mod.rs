@@ -1638,13 +1638,26 @@ pub enum SliceOpDir {
 // CONSTANTS
 // ================================================================================================
 
-/// The value type stored in the high-level SSA's constants side-table.
+/// The value type stored in the high-level SSA's constants table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
+    /// An unsigned integer.
     U(usize, u128),
+
+    /// A signed integer.
     I(usize, u128),
+
+    /// A field element.
     Field(ark_bn254::Fr),
+
+    /// A pointer to a function with the specified identifier.
     FnPtr(FunctionId),
+
+    /// A constant array.
+    ///
+    /// Elements may be any kind of constant except `FnPtr`. The length of the array is statically
+    /// known and is given by `elems.len()`.
+    Array { elem_type: Type, elems: Vec<Constant> },
 }
 
 // REFERENCE COUNTING OPS

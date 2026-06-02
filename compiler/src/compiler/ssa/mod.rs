@@ -886,4 +886,40 @@ mod tests {
         assert_eq!(seen.get(&a), Some(&Constant::U(8, 1)));
         assert_eq!(seen.get(&b), Some(&Constant::U(8, 2)));
     }
+
+    /// Structurally-equal array constants (including nested ones) intern to the same ValueId,
+    /// exercising the derived `Eq`/`Hash` on the new `Constant::Array` variant.
+    #[test]
+    fn array_constants_are_interned() {
+        use crate::compiler::ssa::hlssa::Type;
+
+        let ssa = HLSSA::with_main("main".to_string());
+        let mk = || Constant::Array {
+            elem_type: Type::field().array_of(2),
+            elems: vec![
+                Constant::Array {
+                    elem_type: Type::field(),
+                    elems: vec![Constant::U(8, 1), Constant::U(8, 2)],
+                },
+                Constant::Array {
+                    elem_type: Type::field(),
+                    elems: vec![Constant::U(8, 3), Constant::U(8, 4)],
+                },
+            ],
+        };
+
+        let a = ssa.add_const(mk());
+        let b = ssa.add_const(mk());
+        assert_eq!(a, b, "equal array constants should dedup to one ValueId");
+
+        // A differing element produces a distinct constant.
+        let c = ssa.add_const(Constant::Array {
+            elem_type: Type::field().array_of(2),
+            elems: vec![Constant::Array {
+                elem_type: Type::field(),
+                elems: vec![Constant::U(8, 9), Constant::U(8, 2)],
+            }],
+        });
+        assert_ne!(a, c);
+    }
 }

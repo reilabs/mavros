@@ -19,7 +19,7 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        BlockId, FunctionId, ValueId,
+        BlockId, FunctionId, Instruction, ValueId,
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
             MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
@@ -54,6 +54,19 @@ enum ConstVal {
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
+/// A heap constant whose materializing instruction has been deferred.
+///
+/// It is recorded here when the value is created, and only emitted into the body
+/// (by [`SpecializationState::force`]) if some live instruction actually consumes it. Constants
+/// that only ever fold away (e.g. an array read at a constant index, which folds through
+/// [`ConstVal::Array`]) are never emitted, keeping the candidate body free of dead `MkSeq`s so the
+/// cost gate can measure it with `HLFunction::code_size`.
+///
+/// Other variants will be added (#184).
+enum PendingHeapConstant {
+    Array { elems: Vec<ValueId>, seq_type: SequenceTargetType, elem_type: Type },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Val(ValueId);
 
@@ -69,6 +82,67 @@ struct SpecializationState<'a> {
 
     /// Constant values created during specialization, usually by constant folding.
     const_vals: HashMap<ValueId, ConstVal>,
+
+    /// Heap constants whose materializing instruction has been deferred.
+    ///
+    /// Entries are removed as they are forced; any left over at the end of specialization were
+    /// never consumed by a live instruction and are simply dropped.
+    pending_heap_consts: HashMap<ValueId, PendingHeapConstant>,
+}
+
+impl SpecializationState<'_> {
+    /// Register a constant array as a deferred heap constant.
+    fn defer_array_const(
+        &mut self,
+        elems: Vec<ValueId>,
+        seq_type: SequenceTargetType,
+        elem_type: Type,
+    ) -> ValueId {
+        let id = self.fresh_value();
+        self.const_vals.insert(id, ConstVal::Array(elems.clone()));
+        self.pending_heap_consts.insert(
+            id,
+            PendingHeapConstant::Array {
+                elems,
+                seq_type,
+                elem_type,
+            },
+        );
+        id
+    }
+
+    /// Emit the deferred materializing instruction for `id`, if it is still pending.
+    ///
+    /// Idempotent: a heap constant consumed by several instructions is materialized once, at its
+    /// first use.
+    ///
+    /// Ordering is load-bearing: remove the entry *before* emitting (so the re-entrant `emit` for
+    /// the `MkSeq` below doesn't see `id` as still pending), and force the elements *first* so
+    /// their defs precede this one in the single entry block.
+    fn force(&mut self, id: ValueId) {
+        if let Some(pending) = self.pending_heap_consts.remove(&id) {
+            match pending {
+                PendingHeapConstant::Array {
+                    elems,
+                    seq_type,
+                    elem_type,
+                } => {
+                    for e in &elems {
+                        self.force(*e);
+                    }
+                    let entry = self.body.get_entry_id();
+                    self.body
+                        .get_block_mut(entry)
+                        .push_instruction(OpCode::MkSeq {
+                            result: id,
+                            elems,
+                            seq_type,
+                            elem_type,
+                        });
+                }
+            }
+        }
+    }
 }
 
 impl HLEmitter for SpecializationState<'_> {
@@ -77,6 +151,12 @@ impl HLEmitter for SpecializationState<'_> {
     }
 
     fn emit(&mut self, op: OpCode) {
+        // Force any deferred heap constant this instruction consumes, so its `MkSeq` is emitted
+        // immediately before this op. `get_inputs` descends transparently into `Guard.inner`, so
+        // guarded consumers are covered too.
+        for input in op.get_inputs().copied().collect::<Vec<_>>() {
+            self.force(input);
+        }
         let entry = self.body.get_entry_id();
         self.body.get_block_mut(entry).push_instruction(op);
     }
@@ -486,9 +566,35 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         &self,
         endianness: Endianness,
         size: usize,
-        _out_type: &Type,
+        out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
+        // Constant-fold a known field input into a constant bit array, mirroring the cost
+        // estimator (which treats `to_bits` on a constant as free). This is what lets the
+        // `pow_32(_, 5)`-style specializations collapse to a handful of constraints. Indexing the
+        // result folds through the `ConstVal::Array` entry; the array is registered as a deferred
+        // heap constant, so unless something consumes it as a whole sequence its `MkSeq` is never
+        // emitted in the first place.
+        //
+        // This will evolve to work on general constants not just arrays (#184).
+        if let Some(ConstVal::Field(f)) = ctx.const_vals.get(&self.0).cloned() {
+            let bits = f.into_bigint().to_bits_le();
+            let elem_type = out_type.get_array_element();
+            let mut elem_ids = Vec::with_capacity(size);
+            for i in 0..size {
+                let bit_index = match endianness {
+                    Endianness::Little => i,
+                    Endianness::Big => size - i - 1,
+                };
+                let bit = u128::from(bits.get(bit_index).copied().unwrap_or(false));
+                let bit_id = ctx.u_const(1, bit);
+                ctx.const_vals.insert(bit_id, ConstVal::U(1, bit));
+                elem_ids.push(bit_id);
+            }
+            let arr = ctx.defer_array_const(elem_ids, SequenceTargetType::Array(size), elem_type);
+            return Self(arr);
+        }
+
         let val = ctx.to_bits(self.0, endianness, size);
         ctx.const_vals
             .insert(val, ConstVal::BitsOf(Box::new(self.0), size, endianness));
@@ -537,8 +643,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         elem_type: &Type,
     ) -> Self {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.mk_seq(a.clone(), seq_type, elem_type.clone());
-        ctx.const_vals.insert(val, ConstVal::Array(a));
+        let val = ctx.defer_array_const(a, seq_type, elem_type.clone());
         Self(val)
     }
 
@@ -719,6 +824,11 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
     }
 
     fn on_return(&mut self, returns: &mut [Val], _return_types: &[Type]) {
+        // Returns build the terminator directly rather than going through `emit`, so force any
+        // returned heap constant here — it's the one consumer the `emit` choke point doesn't cover.
+        for v in returns.iter() {
+            self.force(v.0);
+        }
         self.body.terminate_block_with_return(
             self.body.get_entry_id(),
             returns.iter().map(|v| v.0).collect(),
@@ -916,24 +1026,27 @@ impl Specializer {
             }
         }
 
-        let body = {
-            let mut state = SpecializationState {
-                ssa: &*ssa,
-                body,
-                const_vals,
-            };
-
-            SymbolicExecutor::new().run(
-                &*ssa,
-                type_info,
-                signature.get_fun_id(),
-                call_params,
-                &mut state,
-            );
-
-            state.body
+        let mut state = SpecializationState {
+            ssa: &*ssa,
+            body,
+            const_vals,
+            pending_heap_consts: HashMap::new(),
         };
 
+        SymbolicExecutor::new().run(
+            &*ssa,
+            type_info,
+            signature.get_fun_id(),
+            call_params,
+            &mut state,
+        );
+
+        let body = state.body;
+
+        // With deferred materialization the body holds no dead constant `MkSeq`s: every heap
+        // constant that survives was forced into a live instruction, and ones that folded away were
+        // never emitted. So `code_size` is the true post-specialization size and matches what the
+        // following DCE leaves behind.
         let code_bloat = body.code_size();
         let savings_to_code_ratio = summary.specialization_total_savings as f64 / code_bloat as f64;
 

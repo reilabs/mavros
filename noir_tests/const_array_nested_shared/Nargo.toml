@@ -1,0 +1,6 @@
+[package]
+name = "const_array_nested_shared"
+type = "bin"
+authors = [""]
+
+[dependencies]

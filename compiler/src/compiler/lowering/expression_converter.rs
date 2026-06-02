@@ -985,31 +985,32 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 let element_val = self.convert_expression(element, b).unwrap();
                 let len = *length as usize;
+                let elem_type = self.type_converter.convert_type(elem_ast_type);
+
+                // A fixed-size repeat of a constant element folds into a `Constant::Array`.
+                if !*is_vector {
+                    if let Some(c) = b.ssa().get_const(element_val) {
+                        let elems = vec![(*c).clone(); len];
+                        return Some(b.emit_const(Constant::Array { elem_type, elems }));
+                    }
+                }
+
                 let seq_type = if *is_vector {
                     SequenceTargetType::Slice
                 } else {
                     SequenceTargetType::Array(len)
                 };
-                let elem_type = self.type_converter.convert_type(elem_ast_type);
                 let result =
                     b.block(self.current_block)
                         .mk_repeated(element_val, seq_type, len, elem_type);
                 Some(result)
             }
             Literal::Str(s) => {
-                // str<N>: array of u8 (UTF-8 bytes)
+                // str<N>: array of u8 (UTF-8 bytes). Always fully constant.
                 let elem_type = Type::u(8);
-                let len = s.len();
-                let elems: Vec<ValueId> = s
-                    .bytes()
-                    .map(|byte| b.emit_const(Constant::U(8, byte as u128)))
-                    .collect();
-                let arr = b.block(self.current_block).mk_seq(
-                    elems,
-                    SequenceTargetType::Array(len),
-                    elem_type,
-                );
-                Some(arr)
+                let elems: Vec<Constant> =
+                    s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
+                Some(b.emit_const(Constant::Array { elem_type, elems }))
             }
             Literal::FmtStr(fragments, _count, captures) => {
                 // fmtstr<N, T>: Tuple(Array(U(32), N), ...T_fields)
@@ -1084,10 +1085,37 @@ impl<'a> ExpressionConverter<'a> {
         };
         let elem_type = self.type_converter.convert_type(elem_ast_type);
 
+        if let Some(id) = Self::try_as_const_array(&elements, &elem_type, &seq_type, b) {
+            return Some(id);
+        }
+
         let result = b
             .block(self.current_block)
             .mk_seq(elements, seq_type, elem_type);
         Some(result)
+    }
+
+    /// Fold a fixed-size array whose elements are all constants into a single `Constant::Array`.
+    ///
+    /// Returns `None` for any context where this is not possible, in which case the caller should
+    /// fall back to a runtime `MkSeq`/`MkRepeated`. Nesting is handled automatically.
+    fn try_as_const_array(
+        elem_ids: &[ValueId],
+        elem_type: &Type,
+        seq_type: &SequenceTargetType,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        if !matches!(seq_type, SequenceTargetType::Array(_)) {
+            return None;
+        }
+        let mut elems = Vec::with_capacity(elem_ids.len());
+        for vid in elem_ids {
+            elems.push((*b.ssa().get_const(*vid)?).clone());
+        }
+        Some(b.emit_const(Constant::Array {
+            elem_type: elem_type.clone(),
+            elems,
+        }))
     }
 
     fn convert_tuple(

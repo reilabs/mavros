@@ -23,17 +23,14 @@ use crate::{
     vm::{self, bytecode},
 };
 
-/// Materialize every constant `ValueId` referenced by `function` into the function's frame at
-/// entry.
+/// Collect the `ValueId`s of every constant referenced by `function` (in instructions and
+/// terminators).
 ///
-/// This can likely be improved in the future by handling constants specially in the VM, but for now
-/// this is the simplest solution that maintains semantic correctness.
-fn materialize_constants(
+/// Returned in arbitrary order; callers that need determinism must sort.
+fn collect_referenced_consts(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
-    layouter: &mut FrameLayouter,
-    emitter: &mut EmitterState,
-) {
+) -> Vec<ValueId> {
     let mut referenced: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
     for (_, block) in function.get_blocks() {
         for instr in block.get_instructions() {
@@ -60,60 +57,273 @@ fn materialize_constants(
             }
         }
     }
+    referenced.into_iter().collect()
+}
 
+/// Materialize every value constant `ValueId` referenced by `function` into the function's frame at
+/// entry.
+fn materialize_const_values_into_frame(
+    function: &HLFunction,
+    constants: &HLSSAConstantsSnapshot,
+    const_globals: &ConstGlobals,
+    global_base: usize,
+    layouter: &mut FrameLayouter,
+    emitter: &mut EmitterState,
+) {
     // Sort for determinism: HashSet iteration order is non-deterministic but the emitted bytecode
     // must be stable across runs.
-    let mut referenced: Vec<ValueId> = referenced.into_iter().collect();
+    let mut referenced = collect_referenced_consts(function, constants);
     referenced.sort_by_key(|v| v.0);
 
     for vid in referenced {
-        match constants.get(&vid).expect("vid is in constants").as_ref() {
-            hlssa::Constant::U(size, val) => {
-                let res = layouter.alloc_int(vid, *size);
-                match size {
-                    bits if *bits <= 64 => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res,
-                            val: *val as u64,
-                        });
-                    }
-                    128 => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res,
-                            val: *val as u64,
-                        });
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res: res.offset(1),
-                            val: (*val >> 64) as u64,
-                        });
-                    }
-                    bits => panic!("unsupported unsigned integer width: {bits}"),
-                }
-            }
-            hlssa::Constant::I(size, val) => {
-                assert!(
-                    *size <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                let res = layouter.alloc_int(vid, *size);
-                emitter.push_op(bytecode::OpCode::MovConst {
+        let constant = constants.get(&vid).expect("vid is in constants");
+        match constant.as_ref() {
+            // Heap constants live in dedicated immortal global slots, initialized once at program
+            // start (see `emit_const_init`); every function just loads the shared pointer from its
+            // slot, ensuring a unique identity.
+            hlssa::Constant::Array { .. } => {
+                let global_offset = global_base + const_globals.by_value[constant.as_ref()];
+                let res =
+                    layouter.alloc_scratch(crate::compiler::codegen::constants::POINTER_SIZE_CELLS);
+                emitter.push_op(bytecode::OpCode::ReadGlobal {
                     res,
-                    val: *val as u64,
+                    global_offset,
+                    size: crate::compiler::codegen::constants::POINTER_SIZE_CELLS,
                 });
+                layouter.variables.insert(vid, res.0);
             }
-            hlssa::Constant::Field(val) => {
-                let start = layouter.alloc_field(vid);
-                for i in 0..bytecode::FELT_LIMBS {
-                    emitter.push_op(bytecode::OpCode::MovConst {
-                        res: start.offset(i as isize),
-                        val: val.0.0[i],
-                    });
-                }
-            }
-            hlssa::Constant::FnPtr(_) => {
-                panic!("FnPtr constants not supported in codegen");
+            // Scalar constants stay as inline immediates (no identity to share).
+            _ => {
+                let pos = materialize_const_value(constant.as_ref(), layouter, emitter);
+                // Bind the constant's `ValueId` to its frame slot. (For scalars this matches the
+                // old `alloc_int`/`alloc_field`, which inserted the same mapping.)
+                layouter.variables.insert(vid, pos.0);
             }
         }
+    }
+}
+
+/// Recursively materialize a single constant into a freshly allocated frame slot and return its
+/// position.
+fn materialize_const_value(
+    c: &hlssa::Constant,
+    layouter: &mut FrameLayouter,
+    emitter: &mut EmitterState,
+) -> bytecode::FramePosition {
+    match c {
+        hlssa::Constant::U(size, val) => {
+            let res = layouter.alloc_scratch(layout::int_cell_count(*size));
+            match size {
+                bits if *bits <= 64 => {
+                    emitter.push_op(bytecode::OpCode::MovConst {
+                        res,
+                        val: *val as u64,
+                    });
+                }
+                128 => {
+                    emitter.push_op(bytecode::OpCode::MovConst {
+                        res,
+                        val: *val as u64,
+                    });
+                    emitter.push_op(bytecode::OpCode::MovConst {
+                        res: res.offset(1),
+                        val: (*val >> 64) as u64,
+                    });
+                }
+                bits => panic!("unsupported unsigned integer width: {bits}"),
+            }
+            res
+        }
+        hlssa::Constant::I(size, val) => {
+            assert!(
+                *size <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            let res = layouter.alloc_scratch(layout::int_cell_count(*size));
+            emitter.push_op(bytecode::OpCode::MovConst {
+                res,
+                val: *val as u64,
+            });
+            res
+        }
+        hlssa::Constant::Field(val) => {
+            let start = layouter.alloc_temp_field();
+            for i in 0..bytecode::FELT_LIMBS {
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res: start.offset(i as isize),
+                    val: val.0.0[i],
+                });
+            }
+            start
+        }
+        hlssa::Constant::FnPtr(_) => {
+            panic!("FnPtr constants not supported in codegen");
+        }
+        hlssa::Constant::Array { elem_type, elems } => {
+            let items = elems
+                .iter()
+                .map(|e| materialize_const_value(e, layouter, emitter))
+                .collect::<Vec<_>>();
+            let is_ptr = elem_type.is_heap_allocated();
+            let stride = layouter.type_size(elem_type);
+            let res =
+                layouter.alloc_scratch(crate::compiler::codegen::constants::POINTER_SIZE_CELLS);
+            emitter.push_op(bytecode::OpCode::ArrayAlloc {
+                res,
+                stride,
+                meta: vm::layout::BoxedLayout::array(elems.len() * stride, is_ptr),
+                items,
+            });
+            res
+        }
+    }
+}
+
+/// The raw u64 words a scalar constant occupies in a `PrimArray` element slot of `stride` cells.
+fn scalar_const_words(c: &hlssa::Constant, stride: usize) -> Vec<u64> {
+    let mut words = match c {
+        hlssa::Constant::Field(val) => val.0.0.to_vec(),
+        hlssa::Constant::U(_, val) => {
+            let mut w = vec![*val as u64];
+            if stride > 1 {
+                w.push((*val >> 64) as u64);
+            }
+            w
+        }
+        hlssa::Constant::I(_, val) => vec![*val as u64],
+        other => panic!("non-scalar constant {other:?} as PrimArray element"),
+    };
+    words.resize(stride, 0);
+    words
+}
+
+/// Program-wide registry assigning each unique heap constant a dedicated slot in the globals
+/// region, deduplicating structurally-equal constants (including recursive sub-arrays).
+///
+/// Heap constants are those that undergo reference counting; scalars are still emitted inline.
+/// Entries are ordered inner-before-outer, so a parent's children always have lower indices and
+/// are initialized into their own global slots first. The init bytecode (see `emit_const_init`)
+/// builds each entry once and seals it immortal; every use loads the shared pointer with
+/// `ReadGlobal`. The global offset of entry `k` is `global_base + k`, where `global_base` is the
+/// size of the user-globals region (each constant occupies one pointer cell).
+///
+/// This is used purely during bytecode generation and does not persist in the bytecode program.
+#[derive(Default)]
+struct ConstGlobals {
+    by_value: HashMap<hlssa::Constant, usize>,
+    ordered: Vec<hlssa::Constant>,
+}
+
+impl ConstGlobals {
+    /// Register a heap constant and return its index, recursively registering heap children first.
+    fn register(&mut self, c: &hlssa::Constant) -> usize {
+        if let Some(&id) = self.by_value.get(c) {
+            return id;
+        }
+        let hlssa::Constant::Array { elems, .. } = c else {
+            panic!("ICE: only heap (array) constants are spilled to globals; got {c:?}");
+        };
+        // Register heap children first so they occupy lower indices (and earlier init slots).
+        for e in elems {
+            if matches!(e, hlssa::Constant::Array { .. }) {
+                self.register(e);
+            }
+        }
+        let id = self.ordered.len();
+        self.ordered.push(c.clone());
+        self.by_value.insert(c.clone(), id);
+        id
+    }
+
+    /// Scan every function for referenced heap (array) constants and assign each a global slot.
+    /// Functions are visited in a stable order and each function's referenced constants are sorted,
+    /// so the resulting indexing — and hence the emitted bytecode — is deterministic.
+    fn collect(ssa: &HLSSA, constants: &HLSSAConstantsSnapshot) -> Self {
+        let mut this = Self::default();
+        let mut fn_ids: Vec<FunctionId> = ssa.iter_functions().map(|(id, _)| *id).collect();
+        fn_ids.sort_by_key(|f| f.0);
+        for fid in fn_ids {
+            let function = ssa.get_function(fid);
+            let mut referenced = collect_referenced_consts(function, constants);
+            referenced.sort_by_key(|v| v.0);
+            for vid in referenced {
+                let constant = constants.get(&vid).expect("vid is in constants");
+                if matches!(constant.as_ref(), hlssa::Constant::Array { .. }) {
+                    this.register(constant.as_ref());
+                }
+            }
+        }
+        this
+    }
+}
+
+/// Emit the bytecode that initializes every heap constant into its dedicated immortal global slot.
+///
+/// Runs at the very start of the program entry function (before any other code, including the
+/// user globals initializer, which may itself reference a constant). Entries are processed
+/// inner-before-outer so a parent's children are already initialized in their own global slots and
+/// can be loaded back with `ReadGlobal`. Each constant is built with the ordinary array opcodes,
+/// sealed with `MkImmortal`, then stored into its slot with `InitGlobal`.
+fn emit_const_init(
+    const_globals: &ConstGlobals,
+    global_base: usize,
+    layouter: &mut FrameLayouter,
+    emitter: &mut EmitterState,
+) {
+    const POINTER: usize = crate::compiler::codegen::constants::POINTER_SIZE_CELLS;
+    for (k, c) in const_globals.ordered.iter().enumerate() {
+        let hlssa::Constant::Array { elem_type, elems } = c else {
+            unreachable!("ConstGlobals only holds array constants");
+        };
+        let is_ptr = elem_type.is_heap_allocated();
+        let stride = layout::type_size(elem_type);
+
+        let items: Vec<bytecode::FramePosition> = if is_ptr {
+            // Heap elements: load each child's already-initialized immortal pointer from its slot.
+            elems
+                .iter()
+                .map(|e| {
+                    let child_offset = global_base + const_globals.by_value[e];
+                    let slot = layouter.alloc_scratch(POINTER);
+                    emitter.push_op(bytecode::OpCode::ReadGlobal {
+                        res: slot,
+                        global_offset: child_offset,
+                        size: POINTER,
+                    });
+                    slot
+                })
+                .collect()
+        } else {
+            // Scalar elements: materialize raw words inline with MovConst.
+            elems
+                .iter()
+                .map(|e| {
+                    let words = scalar_const_words(e, stride);
+                    let slot = layouter.alloc_scratch(stride);
+                    for (i, &word) in words.iter().enumerate() {
+                        emitter.push_op(bytecode::OpCode::MovConst {
+                            res: slot.offset(i as isize),
+                            val: word,
+                        });
+                    }
+                    slot
+                })
+                .collect()
+        };
+
+        let res = layouter.alloc_scratch(POINTER);
+        emitter.push_op(bytecode::OpCode::ArrayAlloc {
+            res,
+            stride,
+            meta: vm::layout::BoxedLayout::array(elems.len() * stride, is_ptr),
+            items,
+        });
+        emitter.push_op(bytecode::OpCode::MkImmortal { obj: res });
+        emitter.push_op(bytecode::OpCode::InitGlobal {
+            src: res,
+            global_offset: global_base + k,
+            size: POINTER,
+        });
     }
 }
 
@@ -133,6 +343,11 @@ impl CodeGen {
         let mut struct_interner = StructLayoutInterner::new();
         let constants = ssa.const_snapshot();
 
+        // Assign every unique heap constant a dedicated global slot, appended after the user
+        // globals. The entry function initializes them; all functions load them via `ReadGlobal`.
+        let const_globals = ConstGlobals::collect(ssa, &constants);
+        let global_base = global_layouter.total_size;
+
         let function = ssa.get_main();
         let function = self.run_function(
             function,
@@ -140,6 +355,8 @@ impl CodeGen {
             type_info.get_function(ssa.get_main_id()),
             &global_layouter,
             &mut struct_interner,
+            &const_globals,
+            true, // entry function: emit the constant-init prologue
             &constants,
         );
 
@@ -160,6 +377,8 @@ impl CodeGen {
                 type_info.get_function(*function_id),
                 &global_layouter,
                 &mut struct_interner,
+                &const_globals,
+                false,
                 &constants,
             );
             function_ids.insert(*function_id, cur_fn_begin);
@@ -189,7 +408,7 @@ impl CodeGen {
 
         bytecode::Program {
             functions,
-            global_frame_size: global_layouter.total_size,
+            global_frame_size: global_base + const_globals.ordered.len(),
             struct_layouts: struct_interner.into_table(),
         }
     }
@@ -201,6 +420,8 @@ impl CodeGen {
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
         struct_interner: &mut StructLayoutInterner,
+        const_globals: &ConstGlobals,
+        is_entry: bool,
         constants: &HLSSAConstantsSnapshot,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
@@ -213,8 +434,26 @@ impl CodeGen {
             layouter.alloc_value(*param, tp);
         }
 
-        // TODO: Deal with constants better in the bytecode (#201)
-        materialize_constants(function, constants, &mut layouter, &mut emitter);
+        // The program entry function initializes every heap constant into its dedicated immortal
+        // global slot before any other code runs (including this function's own constant uses
+        // below and the user globals initializer it later calls).
+        if is_entry {
+            emit_const_init(
+                const_globals,
+                global_layouter.total_size,
+                &mut layouter,
+                &mut emitter,
+            );
+        }
+
+        materialize_const_values_into_frame(
+            function,
+            constants,
+            const_globals,
+            global_layouter.total_size,
+            &mut layouter,
+            &mut emitter,
+        );
 
         self.run_block_body(
             function,
@@ -1035,7 +1274,7 @@ impl CodeGen {
                     emitter.push_op(bytecode::OpCode::ArrayAlloc {
                         res,
                         stride: layouter.type_size(eltype),
-                        meta: vm::array::BoxedLayout::array(args.len() * stride, is_ptr),
+                        meta: vm::layout::BoxedLayout::array(args.len() * stride, is_ptr),
                         items: args,
                     });
                 }
@@ -1053,7 +1292,7 @@ impl CodeGen {
                     emitter.push_op(bytecode::OpCode::ArrayAllocRepeated {
                         res,
                         stride,
-                        meta: vm::array::BoxedLayout::array(*count * stride, is_ptr),
+                        meta: vm::layout::BoxedLayout::array(*count * stride, is_ptr),
                         count: *count,
                         item,
                     });
@@ -1080,7 +1319,7 @@ impl CodeGen {
                     let idx = struct_interner.intern(field_layout);
                     emitter.push_op(bytecode::OpCode::TupleAlloc {
                         res,
-                        meta: vm::array::BoxedLayout::new_struct(idx),
+                        meta: vm::layout::BoxedLayout::new_struct(idx),
                         fields,
                     });
                 }
@@ -1540,7 +1779,7 @@ impl CodeGen {
                     let res = layouter.alloc_ptr(*result);
                     let elem_size = layouter.type_size(elem_type);
                     let elem_rc = elem_type.is_heap_allocated();
-                    let meta = vm::array::BoxedLayout::ref_cell(elem_size, elem_rc);
+                    let meta = vm::layout::BoxedLayout::ref_cell(elem_size, elem_rc);
                     emitter.push_op(bytecode::OpCode::RefAlloc { res, meta });
                 }
                 hlssa::OpCode::Store { ptr, value } => {

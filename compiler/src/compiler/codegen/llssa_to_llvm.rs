@@ -18,14 +18,15 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, GlobalValue, IntValue, PointerValue,
+    StructValue,
 };
 
 use crate::compiler::analysis::flow_analysis;
 use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::ssa::llssa::{
     Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
-    Type,
+    RC_IMMORTAL_OBJECT, TABLE_ID_UNASSIGNED, Type,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -79,6 +80,10 @@ pub struct LLVMCodeGen<'ctx> {
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
     // Globals
     globals: Vec<inkwell::values::GlobalValue<'ctx>>,
+
+    /// Memoizes the global emitted for each interned heap-allocated constant to ensure
+    /// materialization only happens once.
+    global_constants: HashMap<ValueId, GlobalValue<'ctx>>,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -105,6 +110,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
             globals: Vec::new(),
+            global_constants: HashMap::new(),
         };
 
         codegen.declare_runtime_functions();
@@ -262,8 +268,41 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.widen_or_trunc_int(x, result_bits, name)
     }
 
-    /// Materialise an LLSSA constant as an LLVM constant value, recursively.
-    fn materialize_const(&self, c: &Constant) -> BasicValueEnum<'ctx> {
+    /// Recursively materialise the interned constant `vid` as an LLVM value.
+    ///
+    /// Scalars and non-rc structs become inline LLVM constant values; heap-allocated constants are
+    /// emitted once as a read-only global and represented by the *address* of that global, exactly
+    /// like a `heap_alloc` result.
+    fn materialize_const(
+        &mut self,
+        vid: ValueId,
+        consts: &HashMap<ValueId, std::sync::Arc<Constant>>,
+    ) -> BasicValueEnum<'ctx> {
+        let c = consts
+            .get(&vid)
+            .expect("constant vid present in snapshot")
+            .clone();
+        match c.as_ref() {
+            Constant::Array { .. } => self
+                .materialize_array_global(vid, c.as_ref(), consts)
+                .as_pointer_value()
+                .into(),
+            Constant::Ptr(child) => self.materialize_const(*child, consts),
+            Constant::Int { .. } | Constant::NullPtr | Constant::Struct { .. } => {
+                self.materialize_inline_const(c.as_ref(), consts)
+            }
+        }
+    }
+
+    /// Materialise a value (non-rc) constant as an inline LLVM constant value.
+    ///
+    /// A `Ptr` child delegates to [`Self::materialize_const`], which builds/fetches the child's
+    /// global and yields its address.
+    fn materialize_inline_const(
+        &mut self,
+        c: &Constant,
+        consts: &HashMap<ValueId, std::sync::Arc<Constant>>,
+    ) -> BasicValueEnum<'ctx> {
         match c {
             Constant::Int { bits, value } => self.int_mask(*bits, *value).into(),
             Constant::NullPtr => self
@@ -272,14 +311,104 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .const_null()
                 .into(),
             Constant::Struct { layout, values } => {
-                let fields: Vec<BasicValueEnum<'ctx>> =
-                    values.iter().map(|v| self.materialize_const(v)).collect();
+                let fields: Vec<BasicValueEnum<'ctx>> = values
+                    .iter()
+                    .map(|v| self.materialize_inline_const(v, consts))
+                    .collect();
                 self.convert_struct_type(layout)
                     .into_struct_type()
                     .const_named_struct(&fields)
                     .into()
             }
+            Constant::Ptr(child) => self.materialize_const(*child, consts),
+            Constant::Array { .. } => {
+                unreachable!("ICE: Array constants are interned by ValueId, never stored inline")
+            }
         }
+    }
+
+    /// Emit the interned array constant `vid` as a read-only LLVM global, plus a writable companion
+    /// global holding its `table_id` index.
+    ///
+    /// Recurses so nested heap constants are only ever emitted once.
+    ///
+    /// The object layout matches `LLStruct::rc_array`: `{ {i64 rc}, ptr table_id_ptr, [N x Elem] }`,
+    /// with `rc = RC_IMMORTAL_OBJECT` (so refcount ops are no-ops and it is never freed) and
+    /// `table_id_ptr` pointing at the writable companion (initialized to `TABLE_ID_UNASSIGNED`).
+    fn materialize_array_global(
+        &mut self,
+        vid: ValueId,
+        c: &Constant,
+        consts: &HashMap<ValueId, std::sync::Arc<Constant>>,
+    ) -> GlobalValue<'ctx> {
+        if let Some(g) = self.global_constants.get(&vid) {
+            return *g;
+        }
+
+        let Constant::Array { elem, values } = c else {
+            panic!("materialize_array_global: vid {vid:?} is not a Constant::Array");
+        };
+        let elem = elem.clone();
+        let values = values.clone();
+        let count = values.len();
+
+        // Build the inline element initializers. Each element is laid out as the `elem` struct:
+        // a scalar `Int` is wrapped in its single-field element struct, a `Field` is already that
+        // struct, and a heap (nested-array) element is a `Ptr` to the child's global.
+        let elem_ty = self.convert_struct_type(&elem).into_struct_type();
+        let elem_consts: Vec<StructValue<'ctx>> = values
+            .iter()
+            .map(|v| match v {
+                Constant::Int { .. } | Constant::Ptr(_) => {
+                    elem_ty.const_named_struct(&[self.materialize_inline_const(v, consts)])
+                }
+                Constant::Struct { .. } => {
+                    self.materialize_inline_const(v, consts).into_struct_value()
+                }
+                other => panic!("unexpected array element constant: {other:?}"),
+            })
+            .collect();
+        let data_const = elem_ty.const_array(&elem_consts);
+
+        let i64_ty = self.context.i64_type();
+
+        // The one mutable word, kept out of line so the array object can be a truly read-only
+        // constant. Claimed and overwritten by the first lookup over this array.
+        let tid_global = self.module.add_global(
+            i64_ty,
+            Some(AddressSpace::default()),
+            &format!("__mavros_const_arr_tid_{}", vid.0),
+        );
+        tid_global.set_initializer(&i64_ty.const_int(TABLE_ID_UNASSIGNED, false));
+        tid_global.set_constant(false);
+        tid_global.set_linkage(Linkage::Internal);
+
+        // The read-only array object itself.
+        let arr_struct = LLStruct::rc_array(elem, count);
+        let arr_ty = self.convert_struct_type(&arr_struct).into_struct_type();
+        let rc_header_ty = self
+            .convert_struct_type(&LLStruct::rc_header())
+            .into_struct_type();
+        let rc_const =
+            rc_header_ty.const_named_struct(&[i64_ty.const_int(RC_IMMORTAL_OBJECT, false).into()]);
+        let arr_const = arr_ty.const_named_struct(&[
+            rc_const.into(),
+            tid_global.as_pointer_value().into(),
+            data_const.into(),
+        ]);
+
+        let arr_global = self.module.add_global(
+            arr_ty,
+            Some(AddressSpace::default()),
+            &format!("__mavros_const_arr_{}", vid.0),
+        );
+        arr_global.set_initializer(&arr_const);
+        arr_global.set_constant(true);
+        arr_global.set_unnamed_addr(true);
+        arr_global.set_linkage(Linkage::Internal);
+
+        self.global_constants.insert(vid, arr_global);
+        arr_global
     }
 
     fn convert_struct_type(&self, s: &LLStruct) -> BasicTypeEnum<'ctx> {
@@ -415,13 +544,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.globals.push(global);
         }
 
-        // Materialise module-level LLSSA constants once, allowing each function to re-seed from
-        // this map.
-        self.constant_values = llssa
-            .const_snapshot()
-            .into_iter()
-            .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
-            .collect();
+        // Materialise LLSSA constants once, allowing each function to re-seed from this map.
+        let consts = llssa.const_snapshot();
+        let mut constant_values = HashMap::with_capacity(consts.len());
+        let vids: Vec<ValueId> = consts.keys().copied().collect();
+        for vid in vids {
+            let value = self.materialize_const(vid, &consts);
+            constant_values.insert(vid, value);
+        }
+        self.constant_values = constant_values;
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -1307,5 +1438,143 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
 
         lib_path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inkwell::context::Context;
+
+    fn int_elem(bits: u32) -> LLStruct {
+        LLStruct::new(vec![LLFieldType::Int(bits)])
+    }
+
+    fn int_const(bits: u32, value: u128) -> Constant {
+        Constant::Int { bits, value }
+    }
+
+    /// A `[u32; 3]` constant emits exactly one read-only array global plus its writable `table_id`
+    /// companion, with `rc = RC_IMMORTAL_OBJECT` and the companion seeded to `TABLE_ID_UNASSIGNED`.
+    /// Scalar elements stay inline — no separately-interned scalar globals.
+    #[test]
+    fn scalar_array_const_emits_one_readonly_global() {
+        let ssa = LLSSA::with_main("t".to_string());
+        let vid = ssa.add_const(Constant::Array {
+            elem: int_elem(32),
+            values: vec![int_const(32, 10), int_const(32, 20), int_const(32, 30)],
+        });
+        let consts = ssa.const_snapshot();
+
+        let ctx = Context::create();
+        let mut cg = LLVMCodeGen::new(&ctx, "t");
+        cg.materialize_const(vid, &consts);
+
+        // Exactly one array global was emitted (no extra for inline scalars).
+        assert_eq!(cg.global_constants.len(), 1);
+
+        // The emitted globals form valid LLVM IR (well-typed initializers).
+        assert!(
+            cg.module.verify().is_ok(),
+            "module failed to verify: {}",
+            cg.module.verify().unwrap_err()
+        );
+
+        let ir = cg.get_ir();
+        assert!(ir.contains(&format!("@__mavros_const_arr_{} ", vid.0)));
+        assert!(ir.contains(&format!("@__mavros_const_arr_tid_{} ", vid.0)));
+        // The array object itself is a truly read-only constant…
+        assert!(ir.contains("unnamed_addr constant"));
+        // …with the immortal refcount (u64::MAX prints as i64 -1)…
+        assert!(ir.contains("i64 -1"));
+        // …and the table-id companion is writable, seeded to TABLE_ID_UNASSIGNED (i64::MIN).
+        assert!(ir.contains(&format!(
+            "@__mavros_const_arr_tid_{} = internal global i64 -9223372036854775808",
+            vid.0
+        )));
+        // Element data is inline.
+        assert!(ir.contains("i32 10"));
+        assert!(ir.contains("i32 20"));
+        assert!(ir.contains("i32 30"));
+    }
+
+    /// Nested arrays emit a global per interned (sub-)array; a sub-array shared between two parents
+    /// (`arr1 = [arr2, arr3]`, `arr4 = [arr2, arr5]`) is materialized exactly once, with both
+    /// parents referencing the same child global.
+    #[test]
+    fn nested_array_const_dedups_shared_subarray() {
+        let ssa = LLSSA::with_main("t".to_string());
+        let inner = int_elem(32);
+        let id2 = ssa.add_const(Constant::Array {
+            elem: inner.clone(),
+            values: vec![int_const(32, 1), int_const(32, 2)],
+        });
+        let id3 = ssa.add_const(Constant::Array {
+            elem: inner.clone(),
+            values: vec![int_const(32, 3), int_const(32, 4)],
+        });
+        let id5 = ssa.add_const(Constant::Array {
+            elem: inner.clone(),
+            values: vec![int_const(32, 5), int_const(32, 6)],
+        });
+        let ptr_elem = LLStruct::new(vec![LLFieldType::Ptr]);
+        let id1 = ssa.add_const(Constant::Array {
+            elem: ptr_elem.clone(),
+            values: vec![Constant::Ptr(id2), Constant::Ptr(id3)],
+        });
+        let id4 = ssa.add_const(Constant::Array {
+            elem: ptr_elem,
+            values: vec![Constant::Ptr(id2), Constant::Ptr(id5)],
+        });
+        let consts = ssa.const_snapshot();
+
+        let ctx = Context::create();
+        let mut cg = LLVMCodeGen::new(&ctx, "t");
+        cg.materialize_const(id1, &consts);
+        cg.materialize_const(id4, &consts);
+
+        // Five distinct globals: the two parents and three inner arrays (arr2 emitted once).
+        assert_eq!(cg.global_constants.len(), 5);
+        for id in [id1, id2, id3, id4, id5] {
+            assert!(cg.global_constants.contains_key(&id));
+        }
+
+        // Cross-referencing globals (parent initializers hold child-global addresses) verify.
+        assert!(
+            cg.module.verify().is_ok(),
+            "module failed to verify: {}",
+            cg.module.verify().unwrap_err()
+        );
+
+        // Both parents reference the same shared child global for arr2.
+        let ir = cg.get_ir();
+        let arr2 = format!("@__mavros_const_arr_{} ", id2.0);
+        // declaration (1) + one reference from each of the two parents (2) = at least 3 mentions.
+        assert!(
+            ir.matches(arr2.trim_end()).count() >= 3,
+            "expected arr2 global referenced by both parents:\n{ir}"
+        );
+    }
+
+    /// Two structurally-equal top-level arrays intern to one `ValueId`, hence one global.
+    #[test]
+    fn equal_array_consts_share_one_global() {
+        let ssa = LLSSA::with_main("t".to_string());
+        let a = ssa.add_const(Constant::Array {
+            elem: int_elem(64),
+            values: vec![int_const(64, 7), int_const(64, 8)],
+        });
+        let b = ssa.add_const(Constant::Array {
+            elem: int_elem(64),
+            values: vec![int_const(64, 7), int_const(64, 8)],
+        });
+        assert_eq!(a, b, "equal arrays should intern to one ValueId");
+
+        let consts = ssa.const_snapshot();
+        let ctx = Context::create();
+        let mut cg = LLVMCodeGen::new(&ctx, "t");
+        cg.materialize_const(a, &consts);
+        cg.materialize_const(b, &consts);
+        assert_eq!(cg.global_constants.len(), 1);
     }
 }

@@ -9,6 +9,27 @@ use crate::{
     bytecode::{AllocationType, VM},
 };
 
+// CONSTANTS
+// ================================================================================================
+
+/// Refcount sentinel marking a heap object as _immortal_.
+///
+/// Every refcount operation performed on an RC holding this value is a no-op, and such objects are
+/// never freed.
+pub const RC_IMMORTAL_OBJECT: u64 = u64::MAX;
+
+/// The sentinel stored in an array's `table_id` cell to mean "no lookup table has been registered
+/// for this array yet".
+///
+/// The first lookup over an array sees this value, claims a fresh table index, and overwrites the
+/// cell with it. It is kept deliberately distinct from [`RC_IMMORTAL_OBJECT`] in case of memory
+/// clashes between the fields. Its value is fine as real table indices are small, non-negative
+/// integers.
+pub const TABLE_ID_UNASSIGNED: u64 = i64::MIN as u64;
+
+// LAYOUT
+// ================================================================================================
+
 #[derive(Debug, Clone, Copy)]
 pub struct BoxedLayout(pub u64);
 
@@ -24,9 +45,8 @@ pub enum DataType {
     RefCell = 7,
 }
 
-/// Per-shape struct layout, interned by the compiler and shared across all
-/// instances of a struct type. Indexed by the 56-bit payload of a
-/// `BoxedLayout` whose `DataType` is `Struct`.
+/// Per-shape struct layout, interned by the compiler and shared across all instances of a struct
+/// type. Indexed by the 56-bit payload of a `BoxedLayout` whose `DataType` is `Struct`.
 #[derive(Debug, Clone)]
 pub struct StructDescriptor {
     /// Per-field `(size_in_u64_words, is_refcounted)`.
@@ -242,7 +262,7 @@ impl BoxedValue {
         unsafe {
             *ptr = layout.0;
             *ptr.offset(1) = 1;
-            *ptr.offset(2) = u64::MAX; // table_id sentinel: no table assigned
+            *ptr.offset(2) = TABLE_ID_UNASSIGNED; // table_id sentinel: no table assigned
         }
         // println!("allocing {:?} of size {} ({:?})", ptr, arr_size, layout.data_type());
         Self(ptr)
@@ -250,6 +270,23 @@ impl BoxedValue {
 
     fn rc(&self) -> *mut u64 {
         unsafe { self.0.offset(1) }
+    }
+
+    /// Seal this object as *immortal* (see [`RC_IMMORTAL_OBJECT`]).
+    ///
+    /// Every refcount operation performed on an object holding this value as its refcount is a
+    /// no-op, and such objects are never freed. Used by the `MkImmortal` opcode after a heap
+    /// constant is constructed.
+    ///
+    /// The caller is responsible for balancing the allocation instrumenter (the `MkImmortal` opcode
+    /// records a matching `free`), since the object was allocated through the normal `alloc` path.
+    pub fn make_immortal(&self) {
+        unsafe { *self.rc() = RC_IMMORTAL_OBJECT };
+    }
+
+    /// Whether this object is immortal (its refcount is the [`RC_IMMORTAL_OBJECT`] sentinel).
+    pub fn is_immortal(&self) -> bool {
+        unsafe { *self.rc() == RC_IMMORTAL_OBJECT }
     }
 
     pub fn layout(&self) -> BoxedLayout {
@@ -396,6 +433,11 @@ impl BoxedValue {
     pub fn inc_rc(&self, by: u64) {
         let rc = self.rc();
         unsafe {
+            // Immortal objects (constant table) are never ref-counted; skip to avoid overflowing
+            // the sentinel.
+            if *rc == RC_IMMORTAL_OBJECT {
+                return;
+            }
             *rc += by;
         }
     }
@@ -416,6 +458,11 @@ impl BoxedValue {
         while let Some(item) = queue.pop_front() {
             let rc = item.rc();
             let rc_val = unsafe { *rc };
+            if rc_val == RC_IMMORTAL_OBJECT {
+                // Immortal object (constant table): never decremented, never freed, and its
+                // children are themselves immortal — so don't enqueue them.
+                continue;
+            }
             if rc_val == 1 {
                 let layout = item.layout();
                 match layout.data_type() {
@@ -532,10 +579,46 @@ impl BoxedValue {
 
             unsafe {
                 ptr::copy_nonoverlapping(self.data(), new_array.data(), layout.array_size());
-                // Decrement RC of the old array since we've cloned it.
-                *rc -= 1;
+                // Decrement RC of the old array since we've cloned it — unless it's immortal
+                // (a shared constant), in which case the sentinel must be left untouched. The
+                // fresh copy is an ordinary mortal array that the caller may mutate.
+                if rc_val != RC_IMMORTAL_OBJECT {
+                    *rc -= 1;
+                }
             }
             new_array
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Header layout: [0]=layout, [1]=refcount, [2]=table_id, [3..]=payload.
+    fn boxed_with_rc(buf: &mut [u64], rc: u64) -> BoxedValue {
+        buf[1] = rc;
+        BoxedValue(buf.as_mut_ptr())
+    }
+
+    #[test]
+    fn immortal_inc_rc_is_noop() {
+        let mut buf = vec![0u64; 8];
+        let bv = boxed_with_rc(&mut buf, RC_IMMORTAL_OBJECT);
+        assert!(bv.is_immortal());
+        bv.inc_rc(5);
+        assert_eq!(
+            buf[1], RC_IMMORTAL_OBJECT,
+            "inc_rc must leave an immortal refcount untouched (no overflow)"
+        );
+    }
+
+    #[test]
+    fn mortal_inc_rc_increments() {
+        let mut buf = vec![0u64; 8];
+        let bv = boxed_with_rc(&mut buf, 3);
+        assert!(!bv.is_immortal());
+        bv.inc_rc(2);
+        assert_eq!(buf[1], 5);
     }
 }

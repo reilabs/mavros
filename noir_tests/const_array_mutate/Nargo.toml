@@ -1,0 +1,6 @@
+[package]
+name = "const_array_mutate"
+type = "bin"
+authors = [""]
+
+[dependencies]

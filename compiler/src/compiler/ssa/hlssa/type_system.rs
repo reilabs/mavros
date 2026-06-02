@@ -5,7 +5,7 @@ use crate::compiler::ssa::SSAType;
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Field,
     U(usize),
@@ -18,7 +18,7 @@ pub enum TypeExpr {
     Function,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     pub expr: TypeExpr,
 }
@@ -460,6 +460,22 @@ impl SSAType for Type {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    // --- Hash ---
+
+    #[test]
+    fn type_hash_equal_types_collide() {
+        let mut set = HashSet::new();
+        set.insert(Type::field().array_of(3));
+        // A structurally-equal type is already present.
+        assert!(set.contains(&Type::field().array_of(3)));
+        // A different length is distinct.
+        assert!(!set.contains(&Type::field().array_of(4)));
+        // Nested arrays hash too.
+        set.insert(Type::field().array_of(2).array_of(2));
+        assert!(set.contains(&Type::field().array_of(2).array_of(2)));
+    }
 
     // --- is_subtype_of ---
 

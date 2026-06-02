@@ -25,7 +25,7 @@ use super::{
     },
     llssa::{
         Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
-        LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
+        LLSSA, LLStruct, RC_IMMORTAL_OBJECT, TABLE_ID_UNASSIGNED, Type as LLType,
         builder::{LLBlockEmitter, LLEmitter},
     },
 };
@@ -77,9 +77,63 @@ fn elem_struct(ty: &HLType) -> LLStruct {
     }
 }
 
-/// Get the RC'd array struct for an Array<T, N> type.
+/// Get the RC'd array struct for an Array<T, N> type (canonical layout; used by every access GEP).
 fn rc_array_struct(elem_type: &HLType, count: usize) -> LLStruct {
     LLStruct::rc_array(elem_struct(elem_type), count)
+}
+
+/// Allocation layout for a runtime array: [`rc_array_struct`] plus the trailing `table_id` cell.
+fn rc_array_storage_struct(elem_type: &HLType, count: usize) -> LLStruct {
+    LLStruct::rc_array_storage(elem_struct(elem_type), count)
+}
+
+/// Wire up the `table_id` of a freshly allocated runtime array.
+///
+/// Store [`TABLE_ID_UNASSIGNED`] into the trailing cell (field 3 of the storage layout) and point
+/// the array's `table_id_ptr` (field 1) at it. `arr` must be allocated using
+/// [`rc_array_storage_struct`].
+fn init_array_table_id(e: &mut LLBlockEmitter<'_>, arr: ValueId, storage_struct: LLStruct) {
+    let cell = e.struct_field_ptr(arr, storage_struct.clone(), 3);
+    let unassigned = e.emit_int_const(64, TABLE_ID_UNASSIGNED);
+    e.ll_store(cell, unassigned);
+    let table_id_ptr = e.struct_field_ptr(arr, storage_struct, 1);
+    e.ll_store(table_id_ptr, cell);
+}
+
+/// Dereference an array's `table_id_ptr` (field 1) to get the writable `i64` cell holding its
+/// lookup-table index (or [`TABLE_ID_UNASSIGNED`]).
+///
+/// The cell lives in the array's own allocation for runtime arrays and in a separate writable
+/// global for constant arrays; either way it is reached uniformly through this pointer.
+fn array_table_id_cell(
+    e: &mut LLBlockEmitter<'_>,
+    arr: ValueId,
+    canonical_struct: LLStruct,
+) -> ValueId {
+    let table_id_ptr = e.struct_field_ptr(arr, canonical_struct, 1);
+    e.ll_load(table_id_ptr, LLType::Ptr)
+}
+
+/// Reset an already-allocated array's `table_id` cell back to [`TABLE_ID_UNASSIGNED`] (e.g. after
+/// an in-place mutation invalidates any registered lookup table).
+fn reset_array_table_id(e: &mut LLBlockEmitter<'_>, arr: ValueId, canonical_struct: LLStruct) {
+    let cell = array_table_id_cell(e, arr, canonical_struct);
+    let unassigned = e.emit_int_const(64, TABLE_ID_UNASSIGNED);
+    e.ll_store(cell, unassigned);
+}
+
+/// Load an array's `table_id` cell pointer and the index/sentinel it holds.
+///
+/// The returned pointer is the writable cell (store the claimed index through it); the value is
+/// [`TABLE_ID_UNASSIGNED`] until a table has been registered.
+fn load_array_table_id(
+    e: &mut LLBlockEmitter<'_>,
+    arr: ValueId,
+    canonical_struct: LLStruct,
+) -> (ValueId, ValueId) {
+    let cell = array_table_id_cell(e, arr, canonical_struct);
+    let value = e.ll_load(cell, LLType::i64());
+    (cell, value)
 }
 
 /// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
@@ -511,11 +565,9 @@ fn lower_inner(
 // Per-function lowering
 // =============================================================================
 
-/// Lower every HLSSA constant `ValueId` referenced by `function` into LLSSA.
+/// Lower every HLSSA constant `ValueId` referenced by `function` into the LLSSA's constant table.
 ///
-/// All HLSSA constants are interned into LLSSA's module-level constants table. Scalar `U`/`I`
-/// constants become `LLConstant::Int`; field constants become an aggregate `LLConstant::Struct`
-/// holding the four-limb `field_elem()` layout with one `Int` value per limb.
+/// For aggregate constants, lowering is handled bottom-up to ensure de-duplication.
 fn lower_constants_llssa(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
@@ -594,6 +646,70 @@ fn lower_constants_llssa(
             Constant::FnPtr(_) => {
                 panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
             }
+            arr @ Constant::Array { .. } => {
+                let ll_val = intern_array_const(arr, llssa);
+                val_map.insert(vid, ll_val);
+            }
+        }
+    }
+}
+
+/// Recursively intern an HLSSA array constant into the LLSSA constants table, returning its
+/// `ValueId`.
+fn intern_array_const(c: &Constant, llssa: &LLSSA) -> ValueId {
+    let Constant::Array { elem_type, elems } = c else {
+        panic!("intern_array_const expects an array constant, got {c:?}");
+    };
+    let heap = elem_type.is_heap_allocated();
+    let values = elems
+        .iter()
+        .map(|e| {
+            if heap {
+                LLConstant::Ptr(intern_array_const(e, llssa))
+            } else {
+                scalar_ll_const(e)
+            }
+        })
+        .collect();
+    llssa.add_const(LLConstant::Array {
+        elem: elem_struct(elem_type),
+        values,
+    })
+}
+
+/// Convert a scalar HLSSA constant to its inline LLSSA constant form, without interning it.
+fn scalar_ll_const(c: &Constant) -> LLConstant {
+    match c {
+        Constant::U(bits, val) => LLConstant::Int {
+            bits: *bits as u32,
+            value: *val,
+        },
+        Constant::I(bits, val) => {
+            assert!(
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            LLConstant::Int {
+                bits: *bits as u32,
+                value: *val,
+            }
+        }
+        Constant::Field(fr) => {
+            let values =
+                fr.0.0 // Montgomery form
+                    .iter()
+                    .map(|&l| LLConstant::Int {
+                        bits: 64,
+                        value: l as u128,
+                    })
+                    .collect();
+            LLConstant::Struct {
+                layout: LLStruct::field_elem(),
+                values,
+            }
+        }
+        Constant::Array { .. } | Constant::FnPtr(_) => {
+            panic!("ICE: scalar_ll_const expects a scalar constant, got {c:?}")
         }
     }
 }
@@ -1519,19 +1635,18 @@ fn lower_mk_array(
     count: usize,
 ) {
     let rc_struct = rc_array_struct(elem_type, count);
+    let rc_storage = rc_array_storage_struct(elem_type, count);
     let es = elem_struct(elem_type);
 
-    // Allocate
-    let arr = e.heap_alloc(rc_struct.clone(), None);
+    // Allocate a new array
+    let arr = e.heap_alloc(rc_storage.clone(), None);
 
     // Init RC to 1
     let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
+    init_array_table_id(e, arr, rc_storage);
 
     // Store elements
     let data = e.struct_field_ptr(arr, rc_struct, 2);
@@ -1559,17 +1674,16 @@ fn lower_mk_repeated(
     count: usize,
 ) {
     let rc_struct = rc_array_struct(elem_type, count);
+    let rc_storage = rc_array_storage_struct(elem_type, count);
     let es = elem_struct(elem_type);
 
-    let arr = e.heap_alloc(rc_struct.clone(), None);
+    let arr = e.heap_alloc(rc_storage.clone(), None);
 
     let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
+    init_array_table_id(e, arr, rc_storage);
 
     let data = e.struct_field_ptr(arr, rc_struct, 2);
     let ll_element = val_map[&element];
@@ -1629,18 +1743,17 @@ fn lower_to_bytes(
     // Allocate RC'd array of u8
     let u8_type = HLType::u(8);
     let rc_struct = rc_array_struct(&u8_type, count);
+    let rc_storage = rc_array_storage_struct(&u8_type, count);
     let es = elem_struct(&u8_type);
 
-    let arr = e.heap_alloc(rc_struct.clone(), None);
+    let arr = e.heap_alloc(rc_storage.clone(), None);
 
     // Init RC to 1
     let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
+    init_array_table_id(e, arr, rc_storage);
 
     // Store bytes into the array
     let data = e.struct_field_ptr(arr, rc_struct, 2);
@@ -1838,6 +1951,7 @@ fn lower_array_set(
     let arr_type = fn_type_info.get_value_type(array);
     let (et, count) = array_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
+    let rc_storage = rc_array_storage_struct(et, count);
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);
 
@@ -1886,9 +2000,8 @@ fn lower_array_set(
             }
 
             me.ll_store(slot, ll_val);
-            let table_id = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
-            let unassigned = me.emit_int_const(64, u64::MAX);
-            me.ll_store(table_id, unassigned);
+            // The contents changed, so any registered lookup table is stale; reset to unassigned.
+            reset_array_table_id(me, ll_arr, rc_struct.clone());
             vec![ll_arr]
         },
         // -- Copy then mutate --
@@ -1897,15 +2010,13 @@ fn lower_array_set(
             modify_rc(ce, rc_ptr, -1);
 
             // Allocate new array
-            let new_arr = ce.heap_alloc(rc_struct.clone(), None);
+            let new_arr = ce.heap_alloc(rc_storage.clone(), None);
 
             // Init new RC to 1
             let new_hdr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 0);
             let new_rc_ptr = ce.struct_field_ptr(new_hdr, LLStruct::rc_header(), 0);
             ce.ll_store(new_rc_ptr, one);
-            let new_table_id = ce.struct_field_ptr(new_arr, rc_struct.clone(), 1);
-            let unassigned = ce.emit_int_const(64, u64::MAX);
-            ce.ll_store(new_table_id, unassigned);
+            init_array_table_id(ce, new_arr, rc_storage.clone());
 
             // Copy all data
             let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 2);
@@ -3013,7 +3124,7 @@ fn get_or_init_forward_lookup_table(
             table_id_or_sentinel,
             ..
         } => {
-            let sentinel = e.emit_int_const(64, u64::MAX);
+            let sentinel = e.emit_int_const(64, TABLE_ID_UNASSIGNED);
             e.int_eq(table_id_or_sentinel, sentinel)
         }
     };
@@ -3272,8 +3383,8 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         assert(&mut e, ok);
     }
 
-    let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 1);
-    let table_id_or_sentinel = e.ll_load(table_id_ptr, LLType::i64());
+    let (table_id_ptr, table_id_or_sentinel) =
+        load_array_table_id(&mut e, array, rc_struct.clone());
     let (mults_base, table_idx_i32) = get_or_init_forward_lookup_table(
         &mut e,
         ForwardLookupTableState::Array {
@@ -3757,11 +3868,11 @@ fn emit_array_ad_init_body(
         lookup,
         witness_layout,
         |e, inv_cnst_off| {
-            let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 1);
+            let cell = array_table_id_cell(e, array, rc_struct.clone());
             let one_i32 = e.emit_int_const(32, 1);
             let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
             let snap_u64 = e.zext(snap, 64);
-            e.ll_store(table_id_ptr, snap_u64);
+            e.ll_store(cell, snap_u64);
         },
         |e, i_i64, x_coeff| {
             let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
@@ -3790,9 +3901,8 @@ fn generate_darray_ad_call(
     let result_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
 
-    let table_id_ptr = e.struct_field_ptr(array, rc_struct, 1);
-    let snap = e.ll_load(table_id_ptr, LLType::i64());
-    let sentinel = e.emit_int_const(64, u64::MAX);
+    let (_table_id_cell, snap) = load_array_table_id(&mut e, array, rc_struct);
+    let sentinel = e.emit_int_const(64, TABLE_ID_UNASSIGNED);
     let is_unalloc = e.int_eq(snap, sentinel);
     let merge = e.build_if_else(
         is_unalloc,
@@ -4082,5 +4192,185 @@ mod tests {
             "felt constant should not lower to an MkStruct instruction:\n{dump}"
         );
         assert_eq!(val_map.len(), 1, "the felt constant should be mapped");
+    }
+
+    fn hl_field(x: u64) -> Constant {
+        Constant::Field(ark_bn254::Fr::from(x))
+    }
+
+    fn hl_array(elem_type: HLType, elems: Vec<Constant>) -> Constant {
+        Constant::Array { elem_type, elems }
+    }
+
+    /// A scalar array constant is interned as one first-class `LLConstant::Array` with inline
+    /// element values — not materialized as a heap array, and with no separately-interned scalars.
+    #[test]
+    fn scalar_array_const_interns_inline() {
+        use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+
+        let mut hlssa = HLSSA::with_main("arr_test".to_string());
+        let main_id = hlssa.get_main_id();
+        let mut hb = HLSSABuilder::new(&mut hlssa);
+        hb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
+            let c = e.array_const(HLType::field(), vec![hl_field(1), hl_field(2), hl_field(3)]);
+            e.terminate_return(vec![c]);
+        });
+
+        let constants = hlssa.const_snapshot();
+        let function = hlssa.get_main();
+
+        let mut llssa = LLSSA::with_main("arr_test".to_string());
+        let mut val_map = HashMap::new();
+        lower_constants_llssa(function, &constants, &mut llssa, &mut val_map);
+
+        let dump = llssa.to_string(&DefaultSSAAnnotator);
+        // First-class Array constant, NOT a runtime heap array.
+        assert!(
+            dump.contains("Array {"),
+            "expected a first-class Array constant in dump:\n{dump}"
+        );
+        assert!(
+            !dump.contains("heap_alloc") && !dump.contains("store"),
+            "array constant should not materialize a heap array:\n{dump}"
+        );
+        assert!(!val_map.is_empty(), "the array constant should be mapped");
+
+        // Exactly one constant in the table (the Array) — scalars are inline, not interned.
+        let snap = llssa.const_snapshot();
+        assert_eq!(
+            snap.len(),
+            1,
+            "scalar elements must not be interned separately:\n{dump}"
+        );
+        let LLConstant::Array { elem, values } = &**snap.values().next().unwrap() else {
+            panic!("expected an Array constant");
+        };
+        assert_eq!(
+            *elem,
+            LLStruct::field_elem(),
+            "element layout is field_elem"
+        );
+        assert_eq!(values.len(), 3, "three inline element values");
+        for v in values {
+            assert!(
+                matches!(v, LLConstant::Struct { .. }),
+                "each field element is an inline Struct, not a Ptr"
+            );
+        }
+    }
+
+    /// An integer array constant interns with a `{Int(bits)}` element layout and inline `Int` values.
+    #[test]
+    fn int_array_const_interns_inline() {
+        let c = hl_array(
+            HLType::u(32),
+            vec![Constant::U(32, 10), Constant::U(32, 20)],
+        );
+        let llssa = LLSSA::with_main("int_arr".to_string());
+        let id = intern_array_const(&c, &llssa);
+        let LLConstant::Array { elem, values } = &*llssa.get_const(id).unwrap() else {
+            panic!("expected Array");
+        };
+        assert_eq!(*elem, LLStruct::new(vec![LLFieldType::Int(32)]));
+        assert_eq!(values.len(), 2);
+        for v in values {
+            assert!(matches!(v, LLConstant::Int { bits: 32, .. }));
+        }
+        // Only the array itself is pooled; the inline ints are not separate constants.
+        assert_eq!(llssa.const_snapshot().len(), 1);
+    }
+
+    /// A nested array constant interns recursively: the outer `Array` has `{Ptr}` element layout and
+    /// its `values` are `Ptr`s referencing separately-interned inner `Array` constants.
+    #[test]
+    fn nested_array_const_interns_recursively() {
+        let inner = |a: u64, b: u64| hl_array(HLType::field(), vec![hl_field(a), hl_field(b)]);
+        let outer = hl_array(HLType::field().array_of(2), vec![inner(1, 2), inner(3, 4)]);
+
+        let llssa = LLSSA::with_main("nested".to_string());
+        let outer_id = intern_array_const(&outer, &llssa);
+
+        let LLConstant::Array { elem, values } = &*llssa.get_const(outer_id).unwrap() else {
+            panic!("outer should intern to an Array constant");
+        };
+        // The outer array's elements are pointers (to the inner heap arrays).
+        assert_eq!(*elem, LLStruct::new(vec![LLFieldType::Ptr]));
+        assert_eq!(values.len(), 2, "two inner arrays");
+        for v in values {
+            let LLConstant::Ptr(iid) = v else {
+                panic!("each outer element is a Ptr to a nested array");
+            };
+            assert!(
+                matches!(&*llssa.get_const(*iid).unwrap(), LLConstant::Array { .. }),
+                "the Ptr targets a nested Array constant"
+            );
+        }
+        // Three distinct Array constants total: two inner + one outer.
+        let n_arrays = llssa
+            .const_snapshot()
+            .values()
+            .filter(|c| matches!(&***c, LLConstant::Array { .. }))
+            .count();
+        assert_eq!(n_arrays, 3, "two inner + one outer Array constants");
+    }
+
+    /// A heap sub-constant shared by two parents is pooled exactly once: `arr1 = [arr2, arr3]` and
+    /// `arr4 = [arr2, arr5]` must both reference the *same* interned `arr2` via `Ptr`.
+    #[test]
+    fn shared_nested_subarray_pooled_once() {
+        let inner = HLType::field();
+        let outer = HLType::field().array_of(3);
+        let arr2 = hl_array(
+            inner.clone(),
+            vec![hl_field(11), hl_field(22), hl_field(33)],
+        );
+        let arr3 = hl_array(inner.clone(), vec![hl_field(1), hl_field(2), hl_field(3)]);
+        let arr5 = hl_array(inner, vec![hl_field(7), hl_field(8), hl_field(9)]);
+        let arr1 = hl_array(outer.clone(), vec![arr2.clone(), arr3]);
+        let arr4 = hl_array(outer, vec![arr2.clone(), arr5]);
+
+        let llssa = LLSSA::with_main("shared".to_string());
+        let id1 = intern_array_const(&arr1, &llssa);
+        let id4 = intern_array_const(&arr4, &llssa);
+        // Interning arr2 on its own dedups to the already-pooled entry.
+        let id2 = intern_array_const(&arr2, &llssa);
+
+        // The first element of each parent is `Ptr(arr2_id)`.
+        let first_ptr = |id| {
+            let LLConstant::Array { values, .. } = &*llssa.get_const(id).unwrap() else {
+                panic!("expected Array");
+            };
+            let LLConstant::Ptr(target) = values[0] else {
+                panic!("expected Ptr element");
+            };
+            target
+        };
+        assert_eq!(first_ptr(id1), first_ptr(id4), "shared arr2 is one id");
+        assert_eq!(
+            first_ptr(id1),
+            id2,
+            "and equals the standalone-interned arr2"
+        );
+
+        // Exactly one pooled constant equals arr2.
+        let arr2_ll = (*llssa.get_const(id2).unwrap()).clone();
+        let count = llssa
+            .const_snapshot()
+            .values()
+            .filter(|c| ***c == arr2_ll)
+            .count();
+        assert_eq!(count, 1, "arr2 is pooled exactly once");
+    }
+
+    /// Two structurally-equal top-level array constants intern to the same `ValueId`.
+    #[test]
+    fn equal_array_consts_dedup() {
+        let mk = || hl_array(HLType::field(), vec![hl_field(5), hl_field(6)]);
+        let llssa = LLSSA::with_main("dedup".to_string());
+        let a = intern_array_const(&mk(), &llssa);
+        let b = intern_array_const(&mk(), &llssa);
+        assert_eq!(a, b, "equal array constants dedup to one ValueId");
     }
 }
