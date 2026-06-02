@@ -1,4 +1,6 @@
 mod bit_range;
+mod degree_spilling;
+mod lookup_spilling;
 mod pure_guards;
 mod side_effect_free_guards;
 mod witness_array;
@@ -24,7 +26,8 @@ use crate::compiler::{
 };
 
 use self::{
-    bit_range::LowerBitRangeOps, pure_guards::LowerPureGuards,
+    bit_range::LowerBitRangeOps, degree_spilling::LowerDegreeSpillingOps,
+    lookup_spilling::LowerLookupSpillingOps, pure_guards::LowerPureGuards,
     side_effect_free_guards::LowerSideEffectFreeGuards, witness_array::LowerWitnessArrayOps,
     witness_assert::LowerWitnessAssertOps, witness_bitwise::LowerWitnessBitwiseOps,
     witness_compare::LowerWitnessCompareOps, witness_field::LowerWitnessFieldOps,
@@ -114,6 +117,22 @@ impl InstructionLowering {
         Self::with_lowerers(
             "instruction_lowering_witness_array_access",
             vec![Box::new(LowerWitnessArrayOps::new())],
+            false,
+        )
+    }
+
+    pub fn lookup_spilling() -> Self {
+        Self::with_lowerers(
+            "lookup_spilling",
+            vec![Box::new(LowerLookupSpillingOps::new())],
+            false,
+        )
+    }
+
+    pub fn degree_spilling() -> Self {
+        Self::with_lowerers(
+            "degree_spilling",
+            vec![Box::new(LowerDegreeSpillingOps::new())],
             false,
         )
     }

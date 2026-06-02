@@ -1,78 +1,30 @@
-use std::collections::HashMap;
-
 use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    analysis::types::FunctionTypeInfo,
     ssa::{
-        BlockId, ValueId,
+        ValueId,
         hlssa::{
-            CastTarget, Endianness, HLBlock, HLSSA, LookupTarget, OpCode, Radix,
-            builder::{HLEmitter, HLInstrBuilder, HLSSABuilder},
+            CastTarget, Endianness, LookupTarget, OpCode, Radix,
+            builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
+use super::{InstructionLoweringRule, LoweringContext};
+
 const SPREAD_SPILL_THRESHOLD_BITS: u8 = 16;
 
-pub struct LookupSpilling {}
+pub struct LowerLookupSpillingOps {}
 
-impl Pass for LookupSpilling {
-    fn name(&self) -> &'static str {
-        "lookup_spilling"
-    }
-
-    fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id()]
-    }
-
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<TypeInfo>());
-    }
-
-    fn preserves(&self) -> Vec<AnalysisId> {
-        vec![FlowAnalysis::id()]
-    }
-}
-
-impl LookupSpilling {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
-        let fids: Vec<_> = ssa.get_function_ids().collect();
-        let mut sb = HLSSABuilder::new(ssa);
-        for function_id in fids {
-            let function_type_info = type_info.get_function(function_id);
-            sb.modify_function(function_id, |fb| {
-                let mut new_blocks = HashMap::<BlockId, HLBlock>::new();
-                for (bid, mut block) in fb.function.take_blocks().into_iter() {
-                    let mut new_instructions = Vec::new();
-                    for instruction in block.take_instructions().into_iter() {
-                        let b =
-                            &mut HLInstrBuilder::new(fb.function, fb.ssa, &mut new_instructions);
-                        self.process_instruction(b, function_type_info, instruction);
-                    }
-                    block.put_instructions(new_instructions);
-                    new_blocks.insert(bid, block);
-                }
-                fb.function.put_blocks(new_blocks);
-            });
-        }
-    }
-
-    fn process_instruction(
+impl InstructionLoweringRule for LowerLookupSpillingOps {
+    fn lower_instruction(
         &self,
-        b: &mut HLInstrBuilder<'_>,
-        function_type_info: &FunctionTypeInfo,
-        instruction: OpCode,
-    ) {
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        instruction: &OpCode,
+    ) -> bool {
         match instruction {
             OpCode::Lookup {
                 target: LookupTarget::Rangecheck(bits),
@@ -80,28 +32,36 @@ impl LookupSpilling {
                 flag,
             } => {
                 assert_eq!(args.len(), 1, "Rangecheck lookup must have exactly one key");
-                self.spill_rangecheck_bits(b, args[0], bits as usize, flag);
+                self.spill_rangecheck_bits(b, args[0], *bits as usize, *flag);
+                true
             }
             OpCode::Lookup {
                 target: LookupTarget::Spread(bits),
                 args,
                 flag,
-            } if bits >= SPREAD_SPILL_THRESHOLD_BITS => {
+            } if *bits >= SPREAD_SPILL_THRESHOLD_BITS => {
                 assert_eq!(
                     args.len(),
                     2,
                     "Spread lookup must have exactly one key and one result"
                 );
-                self.spill_wide_spread_lookup(b, function_type_info, args[0], args[1], flag, bits);
+                self.spill_wide_spread_lookup(b, context.types(), args[0], args[1], *flag, *bits);
+                true
             }
-            instruction => b.push(instruction),
+            _ => false,
         }
     }
+}
 
-    /// Rangecheck `value ∈ [0, 2^bits)` for any `bits ≥ 1`.
+impl LowerLookupSpillingOps {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Rangecheck `value in [0, 2^bits)` for any `bits >= 1`.
     fn spill_rangecheck_bits(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         value: ValueId,
         bits: usize,
         flag: ValueId,
@@ -134,7 +94,7 @@ impl LookupSpilling {
 
         let pure_value = b.value_of(value);
         let bytes_val = b.fresh_value();
-        b.push(OpCode::ToRadix {
+        b.emit(OpCode::ToRadix {
             result: bytes_val,
             value: pure_value,
             radix: Radix::Bytes,
@@ -175,7 +135,7 @@ impl LookupSpilling {
 
     fn spill_wide_spread_lookup(
         &self,
-        b: &mut HLInstrBuilder<'_>,
+        b: &mut HLBlockEmitter<'_>,
         function_type_info: &FunctionTypeInfo,
         key: ValueId,
         expected_spread: ValueId,
@@ -255,7 +215,7 @@ impl LookupSpilling {
 }
 
 fn extract_low_chunk(
-    b: &mut HLInstrBuilder<'_>,
+    b: &mut HLBlockEmitter<'_>,
     value: ValueId,
     value_bits: usize,
     offset: usize,
