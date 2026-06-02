@@ -1,7 +1,9 @@
 mod bit_range;
 mod pure_guards;
 mod witness_array;
+mod witness_assert;
 mod witness_bitwise;
+mod witness_compare;
 mod witness_integer_arith;
 mod witness_spread;
 
@@ -20,7 +22,8 @@ use crate::compiler::{
 
 use self::{
     bit_range::LowerBitRangeOps, pure_guards::LowerPureGuards, witness_array::LowerWitnessArrayOps,
-    witness_bitwise::LowerWitnessBitwiseOps, witness_integer_arith::LowerWitnessIntegerArithOps,
+    witness_assert::LowerWitnessAssertOps, witness_bitwise::LowerWitnessBitwiseOps,
+    witness_compare::LowerWitnessCompareOps, witness_integer_arith::LowerWitnessIntegerArithOps,
     witness_spread::LowerWitnessSpreadOps,
 };
 
@@ -74,6 +77,8 @@ impl InstructionLowering {
                 Box::new(LowerWitnessBitwiseOps::new()),
                 Box::new(LowerWitnessSpreadOps::new()),
                 Box::new(LowerBitRangeOps::new()),
+                Box::new(LowerWitnessCompareOps::new()),
+                Box::new(LowerWitnessAssertOps::new()),
             ],
             true,
         )

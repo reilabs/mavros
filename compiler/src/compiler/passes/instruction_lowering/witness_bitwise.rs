@@ -1,4 +1,5 @@
-//! Lowers witness-tainted bitwise and bit-selection operations before the main explicit-witness pass.
+//! Lowers integer bitwise, bit-selection, and sign-extension operations before the main
+//! explicit-witness pass.
 //!
 //! This pass emits `Spread`/`Unspread` operations, except for `u64` bitwise ops where it keeps a
 //! two-limb `u32` decomposition. It also canonicalizes witness integer casts/shifts into the shared
@@ -96,10 +97,7 @@ impl LowerWitnessBitwiseOps {
                 value,
                 from_bits,
                 to_bits,
-            } if context.types().get_value_type(*value).is_witness_of()
-                && integer_bits_and_signedness(context.types().get_value_type(*value))
-                    .is_some() =>
-            {
+            } if integer_bits_and_signedness(context.types().get_value_type(*value)).is_some() => {
                 self.lower_integer_sext(b, context, *result, *value, *from_bits, *to_bits);
                 true
             }
