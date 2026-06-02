@@ -72,6 +72,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_add_fn: Option<FunctionValue<'ctx>>,
     field_sub_fn: Option<FunctionValue<'ctx>>,
     field_div_fn: Option<FunctionValue<'ctx>>,
+    field_lt_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
@@ -98,6 +99,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_add_fn: None,
             field_sub_fn: None,
             field_div_fn: None,
+            field_lt_fn: None,
             malloc_fn: None,
             free_fn: None,
             field_from_limbs_fn: None,
@@ -327,6 +329,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_type = self.field_llvm_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
+        let bool_type = self.context.bool_type();
         let void_type = self.context.void_type();
         let limbs_type = self.limbs_llvm_type();
 
@@ -372,6 +375,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.module
                 .add_function("__field_div", field_div_type, None),
         );
+
+        // __field_lt(FieldElem, FieldElem) -> bool
+        let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
 
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
@@ -916,6 +923,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
                 }
                 self.value_map.insert(*result, eq_acc.into());
+            }
+
+            LLOp::FieldLt { result, a, b } => {
+                let lhs = self.value_map[a];
+                let rhs = self.value_map[b];
+                let lt_fn = self.field_lt_fn.expect("__field_lt not declared");
+                let call_site = self
+                    .builder
+                    .build_call(lt_fn, &[lhs.into(), rhs.into()], "field_lt")
+                    .unwrap();
+                let val = call_site
+                    .try_as_basic_value()
+                    .expect_basic("field_lt should return a value");
+                self.value_map.insert(*result, val);
             }
 
             LLOp::FieldFromLimbs { result, limbs } => {
