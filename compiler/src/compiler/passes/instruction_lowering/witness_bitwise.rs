@@ -30,11 +30,7 @@ impl InstructionLoweringRule for LowerWitnessBitwiseOps {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
-            self.process_guarded_op(b, context, *condition, inner.as_ref())
-        } else {
-            self.process_op(b, context, None, instruction)
-        }
+        self.process_op(b, context, instruction)
     }
 }
 
@@ -43,22 +39,10 @@ impl LowerWitnessBitwiseOps {
         Self {}
     }
 
-    fn emit_guarded(&self, b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-        if let Some(condition) = guard {
-            b.emit(OpCode::Guard {
-                condition,
-                inner: Box::new(op),
-            });
-        } else {
-            b.emit(op);
-        }
-    }
-
     fn process_op(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         op: &OpCode,
     ) -> bool {
         let function_type_info = context.types();
@@ -109,30 +93,7 @@ impl LowerWitnessBitwiseOps {
             } if context.types().get_value_type(*lhs).is_witness_of()
                 || context.types().get_value_type(*rhs).is_witness_of() =>
             {
-                self.lower_shift(b, context, guard, *kind, *result, *lhs, *rhs);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn process_guarded_op(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        condition: ValueId,
-        op: &OpCode,
-    ) -> bool {
-        match op {
-            OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
-                result,
-                lhs,
-                rhs,
-            } if context.types().get_value_type(*lhs).is_witness_of()
-                || context.types().get_value_type(*rhs).is_witness_of() =>
-            {
-                self.lower_shift(b, context, Some(condition), *kind, *result, *lhs, *rhs);
+                self.lower_shift(b, context, *kind, *result, *lhs, *rhs);
                 true
             }
             _ => false,
@@ -263,7 +224,6 @@ impl LowerWitnessBitwiseOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        guard: Option<ValueId>,
         kind: BinaryArithOpKind,
         result: ValueId,
         lhs: ValueId,
@@ -292,7 +252,7 @@ impl LowerWitnessBitwiseOps {
                 let lhs_field = b.cast_to_field(lhs);
                 let factor_field = b.cast_to_field(factor);
                 let shifted = b.mul(lhs_field, factor_field);
-                guarded_rangecheck(b, shifted, bits, guard);
+                rangecheck(b, shifted, bits);
                 b.emit(OpCode::Cast {
                     result,
                     value: shifted,
@@ -300,16 +260,12 @@ impl LowerWitnessBitwiseOps {
                 });
             }
             BinaryArithOpKind::Shr => {
-                self.emit_guarded(
-                    b,
-                    guard,
-                    OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Div,
-                        result,
-                        lhs,
-                        rhs: factor,
-                    },
-                );
+                b.emit(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Div,
+                    result,
+                    lhs,
+                    rhs: factor,
+                });
             }
             _ => unreachable!(),
         }
@@ -326,25 +282,12 @@ fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
 
-fn guarded_rangecheck(
-    b: &mut HLBlockEmitter<'_>,
-    value: ValueId,
-    bits: usize,
-    guard: Option<ValueId>,
-) {
+fn rangecheck(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    let rangecheck = OpCode::Rangecheck {
+    b.emit(OpCode::Rangecheck {
         value,
         max_bits: bits,
-    };
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(rangecheck),
-        });
-    } else {
-        b.emit(rangecheck);
-    }
+    });
 }
 
 fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
