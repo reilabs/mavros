@@ -172,7 +172,6 @@ impl LowerBitRangeOps {
         b.constrain(flag, diff, zero);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_witness_field_bit_range(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -181,9 +180,10 @@ impl LowerBitRangeOps {
         offset: usize,
         width: usize,
     ) {
-        let flag = b.field_const(Field::ONE);
-        let bytes = decompose_canonical_field_bytes(b, value, flag);
-        let selected = lower_field_bit_range_from_bytes(b, &bytes, offset, width, flag);
+        // Decompose the canonical field element into two integer limbs, then reuse the regular
+        // `BitRange` lowering path on the limbs to extract the requested bits.
+        let (lo, hi) = decompose_canonical_field(b, value);
+        let selected = select_field_bits_from_limbs(b, lo, hi, offset, width);
 
         b.emit(OpCode::Cast {
             result,
@@ -193,156 +193,104 @@ impl LowerBitRangeOps {
     }
 }
 
-fn decompose_canonical_field_bytes(
-    b: &mut HLBlockEmitter<'_>,
-    value: ValueId,
-    flag: ValueId,
-) -> Vec<ValueId> {
-    let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
-    let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
-    let two_to_8 = b.field_const(Field::from(256u128));
-    let two_to_64 = b.field_const(two_pow(64));
-    let two_to_128 = b.field_const(two_pow(128));
+/// High 126 bits of the BN254 scalar modulus `p` (equivalently, of `p - 1`).
+const MODULUS_HI: u128 = 0x30644e72e131a029b85045b68181585d;
+/// Low 128 bits of `p - 1`, so that `p - 1 = MODULUS_HI * 2^128 + MODULUS_M1_LO`.
+const MODULUS_M1_LO: u128 = 0x2833e84879b9709143e1f593efffffff;
+
+/// Split a `WitnessOf<Field>` into canonical `lo` (low 128 bits) and `hi` (high 126 bits) limbs.
+///
+/// The limbs are hinted from the pure value, range-checked, constrained to recompose the original
+/// field element, and asserted to be the canonical (`< p`) representation. They are returned as
+/// `WitnessOf<U(128)>` so that the ordinary integer `BitRange` path can select bits from them.
+fn decompose_canonical_field(b: &mut HLBlockEmitter<'_>, value: ValueId) -> (ValueId, ValueId) {
+    let two_128 = b.field_const(two_pow(128));
+
+    // Hint the limbs from the pure value: `value = lo + hi * 2^128`.
+    let pure = b.value_of(value);
+    let lo_hint = lower_pure_field_low_bits(b, pure, 128);
+    let high = b.sub(pure, lo_hint);
+    let hi_hint = b.div(high, two_128);
+
+    let lo = b.write_witness(lo_hint);
+    let hi = b.write_witness(hi_hint);
+    b.rangecheck(lo, 128);
+    b.rangecheck(hi, 126);
+
+    // Constrain that the limbs recompose the original field element.
+    let hi_shifted = b.mul(hi, two_128);
+    let recomposed = b.add(lo, hi_shifted);
+    let value_field = b.cast_to_field(value);
+    let diff = b.sub(value_field, recomposed);
+    let one = b.field_const(Field::ONE);
     let zero = b.field_const(Field::ZERO);
+    b.constrain(one, diff, zero);
 
-    let pure_value = b.value_of(value);
-    let bytes_arr = b.to_radix(pure_value, Radix::Bytes, Endianness::Big, 32);
+    assert_field_canonical(b, lo, hi, lo_hint, two_128);
 
-    let mut bytes = Vec::with_capacity(32);
-    let mut limbs = [zero; 4];
-    let mut full_sum = zero;
-    for i in 0..31 {
-        let idx = b.u_const(32, i as u128);
-        let byte = b.array_get(bytes_arr, idx);
-        let byte_field = b.cast_to_field(byte);
-        let byte_wit = b.write_witness(byte_field);
-        b.lookup_rngchk_8(byte_wit, flag);
-        bytes.push(byte_wit);
-
-        let limb_idx = i / 8;
-        let shifted_limb = b.mul(limbs[limb_idx], two_to_8);
-        limbs[limb_idx] = b.add(shifted_limb, byte_wit);
-
-        let shifted_full = b.mul(full_sum, two_to_8);
-        full_sum = b.add(shifted_full, byte_wit);
-    }
-
-    let full_sum_shifted = b.mul(full_sum, two_to_8);
-    let lsb = b.sub(value, full_sum_shifted);
-    b.lookup_rngchk_8(lsb, flag);
-    bytes.push(lsb);
-
-    let shifted_limb = b.mul(limbs[3], two_to_8);
-    limbs[3] = b.add(shifted_limb, lsb);
-
-    let hi_upper = b.mul(limbs[0], two_to_64);
-    let hi = b.add(hi_upper, limbs[1]);
-    let lo_upper = b.mul(limbs[2], two_to_64);
-    let lo = b.add(lo_upper, limbs[3]);
-
-    let limb2_pure = b.value_of(limbs[2]);
-    let limb3_pure = b.value_of(limbs[3]);
-    let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
-    let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
-    let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
-    let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
-    let hi_lt = b.lt(mod_limb2, limb2_u64);
-    let hi_eq = b.eq(mod_limb2, limb2_u64);
-    let lo_lt = b.lt(mod_limb3, limb3_u64);
-    let hi_eq_f = b.cast_to_field(hi_eq);
-    let lo_lt_f = b.cast_to_field(lo_lt);
-    let hi_eq_and_lo_lt = b.mul(hi_eq_f, lo_lt_f);
-    let hi_lt_f = b.cast_to_field(hi_lt);
-    let borrow_hint = b.add(hi_lt_f, hi_eq_and_lo_lt);
-    let borrow_wit = b.write_witness(borrow_hint);
-    b.constrain(borrow_wit, borrow_wit, borrow_wit);
-
-    let borrow_shift = b.mul(borrow_wit, two_to_128);
-    let tmp1 = b.sub(modulus_lo_m1, lo);
-    let result_lo = b.add(tmp1, borrow_shift);
-
-    let tmp3 = b.sub(modulus_hi, hi);
-    let result_hi = b.sub(tmp3, borrow_wit);
-    b.rangecheck(result_hi, 128);
-    b.rangecheck(result_lo, 128);
-
-    bytes
+    let lo_u128 = b.cast_to(CastTarget::U(128), lo);
+    let hi_u128 = b.cast_to(CastTarget::U(128), hi);
+    (lo_u128, hi_u128)
 }
 
-fn lower_field_bit_range_from_bytes(
+/// Assert `lo + hi * 2^128 <= p - 1` (i.e. the limbs are the canonical representation), by
+/// performing the 254-bit subtraction `(p - 1) - value` with a hinted borrow and range-checking
+/// that both resulting limbs are non-negative.
+fn assert_field_canonical(
     b: &mut HLBlockEmitter<'_>,
-    bytes: &[ValueId],
+    lo: ValueId,
+    hi: ValueId,
+    lo_hint: ValueId,
+    two_128: ValueId,
+) {
+    // Hint the borrow: it is set iff the low-limb subtraction underflows (`lo > (p - 1)_lo`).
+    let lo_pure = b.cast_to(CastTarget::U(128), lo_hint);
+    let modulus_m1_lo_u = b.u_const(128, MODULUS_M1_LO);
+    let borrow_bool = b.lt(modulus_m1_lo_u, lo_pure);
+    let borrow_hint = b.cast_to_field(borrow_bool);
+    let borrow = b.write_witness(borrow_hint);
+    b.constrain(borrow, borrow, borrow);
+
+    let modulus_m1_lo = b.field_const(Field::from(MODULUS_M1_LO));
+    let modulus_hi = b.field_const(Field::from(MODULUS_HI));
+    let borrow_shifted = b.mul(borrow, two_128);
+
+    let lo_gap = b.sub(modulus_m1_lo, lo);
+    let lo_gap = b.add(lo_gap, borrow_shifted);
+    let hi_gap = b.sub(modulus_hi, hi);
+    let hi_gap = b.sub(hi_gap, borrow);
+    b.rangecheck(lo_gap, 128);
+    b.rangecheck(hi_gap, 126);
+}
+
+/// Select bits `[offset, offset + width)` of a field whose canonical decomposition is the 128-bit
+/// `lo` limb and 126-bit `hi` limb, by running the integer `BitRange` path on the limb(s) the
+/// range covers and recombining the partial results.
+fn select_field_bits_from_limbs(
+    b: &mut HLBlockEmitter<'_>,
+    lo: ValueId,
+    hi: ValueId,
     offset: usize,
     width: usize,
-    flag: ValueId,
 ) -> ValueId {
-    let low_end = lower_field_low_bits_from_bytes(b, bytes, offset + width, flag);
-    let low_start = lower_field_low_bits_from_bytes(b, bytes, offset, flag);
-    let selected_shifted = b.sub(low_end, low_start);
-    let divisor = b.field_const(two_pow(offset));
-    b.div(selected_shifted, divisor)
-}
-
-fn lower_field_low_bits_from_bytes(
-    b: &mut HLBlockEmitter<'_>,
-    bytes: &[ValueId],
-    bits: usize,
-    flag: ValueId,
-) -> ValueId {
-    assert!(bits <= 254, "field BitRange exceeds canonical field width");
-    if bits == 0 {
-        return b.field_const(Field::ZERO);
+    const SPLIT: usize = 128;
+    if offset + width <= SPLIT {
+        let bits = b.bit_range(lo, offset, width);
+        b.cast_to_field(bits)
+    } else if offset >= SPLIT {
+        let bits = b.bit_range(hi, offset - SPLIT, width);
+        b.cast_to_field(bits)
+    } else {
+        let lo_width = SPLIT - offset;
+        let hi_width = offset + width - SPLIT;
+        let lo_bits = b.bit_range(lo, offset, lo_width);
+        let hi_bits = b.bit_range(hi, 0, hi_width);
+        let lo_field = b.cast_to_field(lo_bits);
+        let hi_field = b.cast_to_field(hi_bits);
+        let shift = b.field_const(two_pow(lo_width));
+        let hi_shifted = b.mul(hi_field, shift);
+        b.add(lo_field, hi_shifted)
     }
-
-    let two_to_8 = b.field_const(Field::from(256u128));
-    let full_bytes = bits / 8;
-    let partial_bits = bits % 8;
-    let start = 32 - full_bytes - usize::from(partial_bits > 0);
-    let mut value = b.field_const(Field::ZERO);
-    for (i, byte) in bytes.iter().enumerate().skip(start) {
-        let elem = if i == start && partial_bits > 0 {
-            split_partial_field_byte(b, *byte, partial_bits, flag)
-        } else {
-            *byte
-        };
-        let shifted = b.mul(value, two_to_8);
-        value = b.add(shifted, elem);
-    }
-    value
-}
-
-fn split_partial_field_byte(
-    b: &mut HLBlockEmitter<'_>,
-    byte_wit: ValueId,
-    lo_size: usize,
-    flag: ValueId,
-) -> ValueId {
-    assert!(
-        (1..8).contains(&lo_size),
-        "partial byte split must be non-empty"
-    );
-    let hi_size = 8 - lo_size;
-    let two_to_lo = b.field_const(Field::from(1u128 << lo_size));
-
-    let byte_pure = b.value_of(byte_wit);
-    let byte_u8 = b.cast_to(CastTarget::U(8), byte_pure);
-    let divisor = b.u_const(8, 1u128 << lo_size);
-    let hi_hint_u8 = b.div(byte_u8, divisor);
-    let hi_hint = b.cast_to_field(hi_hint_u8);
-    let hi_wit = b.write_witness(hi_hint);
-
-    let hi_bound = b.field_const(Field::from((1u128 << hi_size) - 1));
-    let hi_gap = b.sub(hi_bound, hi_wit);
-    b.lookup_rngchk_8(hi_gap, flag);
-
-    let hi_shifted = b.mul(hi_wit, two_to_lo);
-    let lo = b.sub(byte_wit, hi_shifted);
-
-    let lo_bound = b.field_const(Field::from((1u128 << lo_size) - 1));
-    let lo_gap = b.sub(lo_bound, lo);
-    b.lookup_rngchk_8(lo_gap, flag);
-
-    lo
 }
 
 fn lower_pure_bit_range_value(
