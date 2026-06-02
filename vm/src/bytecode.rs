@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 
 use crate::{ConstraintsLayout, Field, WitnessLayout};
-use ark_ff::{AdditiveGroup as _, BigInteger as _};
+use ark_ff::{AdditiveGroup as _, BigInteger as _, Field as _};
 use mavros_opcode_gen::interpreter;
 
 use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
@@ -47,6 +47,145 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
         ELEM_WORD => Field::from(unsafe { *(ptr as *const u64) }),
         ELEM_FIELD => unsafe { *(ptr as *const Field) },
         _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn int_mask(bits: u64) -> u128 {
+    if bits >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct U128 {
+    pub lo: u64,
+    pub hi: u64,
+}
+
+const _: () = assert!(
+    std::mem::size_of::<U128>() == 2 * std::mem::size_of::<u64>()
+        && std::mem::align_of::<U128>() == std::mem::align_of::<u64>(),
+    "U128 must have the same cell layout as two u64 words"
+);
+
+impl U128 {
+    #[inline(always)]
+    pub fn from_u128(value: u128) -> Self {
+        Self {
+            lo: value as u64,
+            hi: (value >> 64) as u64,
+        }
+    }
+
+    #[inline(always)]
+    pub fn to_u128(self) -> u128 {
+        (self.lo as u128) | ((self.hi as u128) << 64)
+    }
+
+    #[inline(always)]
+    pub fn wrapping_add(self, rhs: Self) -> Self {
+        Self::from_u128(self.to_u128().wrapping_add(rhs.to_u128()))
+    }
+
+    #[inline(always)]
+    pub fn wrapping_sub(self, rhs: Self) -> Self {
+        Self::from_u128(self.to_u128().wrapping_sub(rhs.to_u128()))
+    }
+
+    #[inline(always)]
+    pub fn wrapping_mul(self, rhs: Self) -> Self {
+        Self::from_u128(self.to_u128().wrapping_mul(rhs.to_u128()))
+    }
+
+    #[inline(always)]
+    pub fn wrapping_shl(self, rhs: u32) -> Self {
+        Self::from_u128(self.to_u128().wrapping_shl(rhs))
+    }
+
+    #[inline(always)]
+    pub fn wrapping_shr(self, rhs: u32) -> Self {
+        Self::from_u128(self.to_u128().wrapping_shr(rhs))
+    }
+
+    #[inline(always)]
+    pub fn truncate(self, bits: u64) -> Self {
+        Self::from_u128(self.to_u128() & int_mask(bits))
+    }
+}
+
+impl Ord for U128 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.hi.cmp(&other.hi).then(self.lo.cmp(&other.lo))
+    }
+}
+
+impl PartialOrd for U128 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::ops::Div for U128 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        Self::from_u128(self.to_u128() / rhs.to_u128())
+    }
+}
+
+impl std::ops::Rem for U128 {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self::Output {
+        Self::from_u128(self.to_u128() % rhs.to_u128())
+    }
+}
+
+impl std::ops::BitAnd for U128 {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self {
+            lo: self.lo & rhs.lo,
+            hi: self.hi & rhs.hi,
+        }
+    }
+}
+
+impl std::ops::BitOr for U128 {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            lo: self.lo | rhs.lo,
+            hi: self.hi | rhs.hi,
+        }
+    }
+}
+
+impl std::ops::BitXor for U128 {
+    type Output = Self;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        Self {
+            lo: self.lo ^ rhs.lo,
+            hi: self.hi ^ rhs.hi,
+        }
+    }
+}
+
+impl std::ops::Not for U128 {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self {
+            lo: !self.lo,
+            hi: !self.hi,
+        }
     }
 }
 
@@ -485,7 +624,7 @@ mod def {
 
         let mut current_child = unsafe { new_frame.data.offset(2) };
 
-        for (i, (arg_size, arg_pos)) in args.iter().enumerate() {
+        for (arg_size, arg_pos) in args {
             unsafe { frame.write_to(current_child, arg_pos.0 as isize, *arg_size) };
             current_child = unsafe { current_child.add(*arg_size) };
         }
@@ -607,6 +746,21 @@ mod def {
     }
 
     #[opcode]
+    fn add_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a.wrapping_add(b) };
+    }
+
+    #[opcode]
+    fn sub_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a.wrapping_sub(b) };
+    }
+
+    #[opcode]
+    fn mul_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a.wrapping_mul(b) };
+    }
+
+    #[opcode]
     fn div_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a / b;
@@ -618,6 +772,46 @@ mod def {
         unsafe {
             *res = a % b;
         }
+    }
+
+    #[opcode]
+    fn div_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+        unsafe {
+            let shift = 64 - bits;
+            let a = ((a << shift) as i64) >> shift;
+            let b = ((b << shift) as i64) >> shift;
+            *res = (a / b) as u64
+                & if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+        }
+    }
+
+    #[opcode]
+    fn mod_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+        unsafe {
+            let shift = 64 - bits;
+            let a = ((a << shift) as i64) >> shift;
+            let b = ((b << shift) as i64) >> shift;
+            *res = (a % b) as u64
+                & if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+        }
+    }
+
+    #[opcode]
+    fn div_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a / b };
+    }
+
+    #[opcode]
+    fn mod_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a % b };
     }
 
     #[opcode]
@@ -642,6 +836,21 @@ mod def {
     }
 
     #[opcode]
+    fn and_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a & b };
+    }
+
+    #[opcode]
+    fn or_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a | b };
+    }
+
+    #[opcode]
+    fn xor_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a ^ b };
+    }
+
+    #[opcode]
     fn shl_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let shifted = a << b;
@@ -661,10 +870,25 @@ mod def {
     }
 
     #[opcode]
+    fn shl_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a.wrapping_shl(b.lo as u32) };
+    }
+
+    #[opcode]
+    fn ushr_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+        unsafe { *res = a.wrapping_shr(b.lo as u32) };
+    }
+
+    #[opcode]
     fn not_u64(#[out] res: *mut u64, #[frame] a: u64) {
         unsafe {
             *res = !a;
         }
+    }
+
+    #[opcode]
+    fn not_u128(#[out] res: *mut U128, #[frame] a: U128) {
+        unsafe { *res = !a };
     }
 
     #[opcode]
@@ -682,13 +906,33 @@ mod def {
     }
 
     #[opcode]
+    fn eq_u128(#[out] res: *mut u64, #[frame] a: U128, #[frame] b: U128) {
+        unsafe {
+            *res = (a == b) as u64;
+        }
+    }
+
+    #[opcode]
+    fn field_eq(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
+        unsafe {
+            *res = (a == b) as u64;
+        }
+    }
+
+    #[opcode]
+    fn lt_u128(#[out] res: *mut u64, #[frame] a: U128, #[frame] b: U128) {
+        unsafe {
+            *res = (a < b) as u64;
+        }
+    }
+
+    #[opcode]
     fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            // Sign-extend from `bits` to 64 bits, then compare as signed
             let shift = 64 - bits;
-            let sa = ((a << shift) as i64) >> shift;
-            let sb = ((b << shift) as i64) >> shift;
-            *res = (sa < sb) as u64;
+            let a = ((a << shift) as i64) >> shift;
+            let b = ((b << shift) as i64) >> shift;
+            *res = (a < b) as u64;
         }
     }
 
@@ -702,6 +946,11 @@ mod def {
             };
             *res = a & mask;
         }
+    }
+
+    #[opcode]
+    fn truncate_u128(#[out] res: *mut U128, #[frame] a: U128, to_bits: u64) {
+        unsafe { *res = a.truncate(to_bits) };
     }
 
     #[opcode]
@@ -754,9 +1003,27 @@ mod def {
     }
 
     #[opcode]
+    fn cast_field_to_u128(#[out] res: *mut U128, #[frame] a: Field) {
+        let limbs = ark_ff::PrimeField::into_bigint(a).0;
+        unsafe {
+            *res = U128 {
+                lo: limbs[0],
+                hi: limbs[1],
+            }
+        };
+    }
+
+    #[opcode]
     fn cast_u64_to_field(#[out] res: *mut Field, #[frame] a: u64) {
         unsafe {
             *res = From::from(a);
+        }
+    }
+
+    #[opcode]
+    fn cast_u128_to_field(#[out] res: *mut Field, #[frame] a: U128) {
+        unsafe {
+            *res = Field::from(a.lo) + Field::from(a.hi) * Field::from(2).pow([64]);
         }
     }
 
@@ -1080,6 +1347,11 @@ mod def {
 
     #[opcode]
     fn assert_eq_u64(#[frame] a: u64, #[frame] b: u64) {
+        assert_eq!(a, b);
+    }
+
+    #[opcode]
+    fn assert_eq_u128(#[frame] a: U128, #[frame] b: U128) {
         assert_eq!(a, b);
     }
 

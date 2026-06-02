@@ -18,11 +18,24 @@ pub trait LLEmitter {
     // -- Constant --
 
     fn emit_int_const(&mut self, bits: u32, value: u64) -> ValueId {
+        self.emit_int_const_u128(bits, value as u128)
+    }
+
+    fn emit_int_const_u128(&mut self, bits: u32, value: u128) -> ValueId {
         self.emit_constant(Constant::Int { bits, value })
     }
 
     fn emit_nullptr_const(&mut self) -> ValueId {
         self.emit_constant(Constant::NullPtr)
+    }
+
+    fn emit_struct_const(&mut self, layout: LLStruct, values: Vec<Constant>) -> ValueId {
+        // Sanity check for builds with assertions enabled.
+        debug_assert!(
+            layout.accepts(&values),
+            "emit_struct_const: values {values:?} are incompatible with layout {layout:?}",
+        );
+        self.emit_constant(Constant::Struct { layout, values })
     }
 
     // -- Integer Arithmetic --

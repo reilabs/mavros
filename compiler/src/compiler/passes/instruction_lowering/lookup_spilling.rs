@@ -6,7 +6,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, Endianness, LookupTarget, OpCode, Radix,
+            CastTarget, Endianness, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -143,8 +143,8 @@ impl LowerLookupSpillingOps {
         bits: u8,
     ) {
         assert!(
-            bits <= 128,
-            "wide Spread lookup spilling currently supports widths up to 128 bits, got {bits}"
+            bits as usize <= MAX_SUPPORTED_UNSIGNED_BITS,
+            "wide Spread lookup spilling currently supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
         );
 
         let key_type = function_type_info.get_value_type(key);
@@ -238,7 +238,7 @@ fn two_pow(exponent: usize) -> Field {
 
 fn two_pow_u128(exponent: usize) -> u128 {
     assert!(
-        exponent < 128,
+        exponent < MAX_SUPPORTED_UNSIGNED_BITS,
         "u128 constant shift out of range for exponent {exponent}"
     );
     1u128 << exponent

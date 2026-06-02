@@ -15,7 +15,8 @@ use crate::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
                 self, BinaryArithOpKind, CmpKind, DMatrix, Endianness, HLBlock, HLFunction, HLSSA,
-                HLSSAConstantsSnapshot, LookupTarget, Radix, RefCountOp, Type, TypeExpr,
+                HLSSAConstantsSnapshot, LookupTarget, MAX_SUPPORTED_SIGNED_BITS, Radix, RefCountOp,
+                Type, TypeExpr,
             },
         },
     },
@@ -67,9 +68,36 @@ fn materialize_constants(
 
     for vid in referenced {
         match constants.get(&vid).expect("vid is in constants").as_ref() {
-            hlssa::Constant::U(size, val) | hlssa::Constant::I(size, val) => {
+            hlssa::Constant::U(size, val) => {
+                let res = layouter.alloc_int(vid, *size);
+                match size {
+                    bits if *bits <= 64 => {
+                        emitter.push_op(bytecode::OpCode::MovConst {
+                            res,
+                            val: *val as u64,
+                        });
+                    }
+                    128 => {
+                        emitter.push_op(bytecode::OpCode::MovConst {
+                            res,
+                            val: *val as u64,
+                        });
+                        emitter.push_op(bytecode::OpCode::MovConst {
+                            res: res.offset(1),
+                            val: (*val >> 64) as u64,
+                        });
+                    }
+                    bits => panic!("unsupported unsigned integer width: {bits}"),
+                }
+            }
+            hlssa::Constant::I(size, val) => {
+                assert!(
+                    *size <= MAX_SUPPORTED_SIGNED_BITS,
+                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                );
+                let res = layouter.alloc_int(vid, *size);
                 emitter.push_op(bytecode::OpCode::MovConst {
-                    res: layouter.alloc_u64(vid, *size),
+                    res,
                     val: *val as u64,
                 });
             }
@@ -339,13 +367,21 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::AddInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                             bits: *bits as u64,
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::AddU128 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
                         });
                     }
                     TypeExpr::WitnessOf(_) => {
@@ -372,13 +408,21 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::SubInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                             bits: *bits as u64,
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::SubU128 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for subtraction: {:?}", t),
@@ -397,15 +441,31 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(_bits) => {
-                        let result = layouter.alloc_u64(*val, *_bits);
+                    TypeExpr::U(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::DivU64 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::I(_) => panic!("Signed div not yet implemented"),
+                    TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::DivS64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                            bits: *bits as u64,
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::DivU128 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
                     t => panic!("Unsupported type for division: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
@@ -417,15 +477,31 @@ impl CodeGen {
                     TypeExpr::Field => {
                         panic!("Modulo is not defined on field elements")
                     }
-                    TypeExpr::U(_bits) => {
-                        let result = layouter.alloc_u64(*val, *_bits);
+                    TypeExpr::U(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::ModU64 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::I(_) => panic!("Signed mod not yet implemented"),
+                    TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::ModS64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                            bits: *bits as u64,
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::ModU128 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
                     t => panic!("Unsupported type for modulo: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
@@ -442,13 +518,21 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::MulInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                             bits: *bits as u64,
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::MulU128 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for multiplication: {:?}", t),
@@ -462,9 +546,17 @@ impl CodeGen {
                     TypeExpr::Field => {
                         panic!("Unsupported: field and");
                     }
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::AndU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::AndU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -478,9 +570,17 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::OrU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::OrU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -494,9 +594,17 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::XorU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::XorU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -510,13 +618,21 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::ShlU64 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
                             bits: *bits as u64,
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::ShlU128 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
                         });
                     }
                     t => panic!("Unsupported type for shift left: {:?}", t),
@@ -527,9 +643,17 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
+                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::UshrU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
+                    }
+                    TypeExpr::U(128) => {
+                        let result = layouter.alloc_int(*val, 128);
+                        emitter.push_op(bytecode::OpCode::UshrU128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -547,24 +671,44 @@ impl CodeGen {
                         TypeExpr::U(bits) | TypeExpr::I(bits) => *bits,
                         t => panic!("Unsupported result type for comparison: {:?}", t),
                     };
-                    let result = layouter.alloc_u64(*val, result_bits);
-                    let lhs_type = &type_info.get_value_type(*op1).expr;
-                    match lhs_type {
-                        TypeExpr::I(bits) => {
+                    let result = layouter.alloc_int(*val, result_bits);
+                    let lhs_type = type_info.get_value_type(*op1);
+                    let rhs_type = type_info.get_value_type(*op2);
+                    match (&lhs_type.expr, &rhs_type.expr) {
+                        (TypeExpr::I(lhs_bits), TypeExpr::I(rhs_bits))
+                            if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                        {
                             emitter.push_op(bytecode::OpCode::LtS64 {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
-                                bits: *bits as u64,
+                                bits: *lhs_bits as u64,
                             });
                         }
-                        _ => {
+                        (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
+                            if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                        {
                             emitter.push_op(bytecode::OpCode::LtU64 {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
                             });
                         }
+                        (TypeExpr::U(128), TypeExpr::U(128)) => {
+                            emitter.push_op(bytecode::OpCode::LtU128 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
+                        }
+                        (TypeExpr::Field, TypeExpr::Field) => {
+                            emitter.push_op(bytecode::OpCode::LtU64 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            })
+                        }
+                        _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                     }
                 }
                 hlssa::OpCode::Cmp {
@@ -572,17 +716,50 @@ impl CodeGen {
                     result: val,
                     lhs: op1,
                     rhs: op2,
-                } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                        let result = layouter.alloc_u64(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::EqU64 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                } => {
+                    let result_bits = match &type_info.get_value_type(*val).expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) => *bits,
+                        t => panic!("Unsupported result type for comparison: {:?}", t),
+                    };
+                    let result = layouter.alloc_int(*val, result_bits);
+                    let lhs_type = type_info.get_value_type(*op1);
+                    let rhs_type = type_info.get_value_type(*op2);
+                    match (&lhs_type.expr, &rhs_type.expr) {
+                        (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
+                            if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                        {
+                            emitter.push_op(bytecode::OpCode::EqU64 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
+                        }
+                        (TypeExpr::I(lhs_bits), TypeExpr::I(rhs_bits))
+                            if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                        {
+                            emitter.push_op(bytecode::OpCode::EqU64 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
+                        }
+                        (TypeExpr::U(128), TypeExpr::U(128)) => {
+                            emitter.push_op(bytecode::OpCode::EqU128 {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
+                        }
+                        (TypeExpr::Field, TypeExpr::Field) => {
+                            emitter.push_op(bytecode::OpCode::FieldEq {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                            });
+                        }
+                        _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                     }
-                    t => panic!("Unsupported type for comparison: {:?}", t),
-                },
+                }
                 hlssa::OpCode::Cast {
                     result: r,
                     value: v,
@@ -595,10 +772,21 @@ impl CodeGen {
                         // If the source is not Field-sized, cast to Field first.
                         let field_pos = if l_type.expr != TypeExpr::Field {
                             let tmp = layouter.alloc_temp_field();
-                            emitter.push_op(bytecode::OpCode::CastU64ToField {
-                                res: tmp,
-                                a: layouter.get_value(*v),
-                            });
+                            match &l_type.expr {
+                                TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                                    emitter.push_op(bytecode::OpCode::CastU64ToField {
+                                        res: tmp,
+                                        a: layouter.get_value(*v),
+                                    });
+                                }
+                                TypeExpr::U(128) => {
+                                    emitter.push_op(bytecode::OpCode::CastU128ToField {
+                                        res: tmp,
+                                        a: layouter.get_value(*v),
+                                    });
+                                }
+                                t => panic!("Unsupported witness cast source: {:?}", t),
+                            }
                             tmp
                         } else {
                             layouter.get_value(*v)
@@ -621,37 +809,119 @@ impl CodeGen {
                     }
                     let result = layouter.alloc_value(*r, &r_type);
                     match (&l_type.expr, &r_type.expr) {
-                        (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::U(_) | TypeExpr::I(_)) => {
+                        (
+                            TypeExpr::U(source_bits) | TypeExpr::I(source_bits),
+                            TypeExpr::U(target_bits) | TypeExpr::I(target_bits),
+                        ) if *source_bits <= 64 && *target_bits <= 64 => {
+                            let source_cells = source_bits.div_ceil(64);
+                            let target_cells = target_bits.div_ceil(64);
+                            let copied_cells = source_cells.min(target_cells);
                             emitter.push_op(bytecode::OpCode::MovFrame {
                                 target: result,
                                 source: layouter.get_value(*v),
-                                size: layouter.type_size(&l_type),
-                            })
+                                size: copied_cells,
+                            });
+                            if target_cells > source_cells {
+                                for cell in source_cells..target_cells {
+                                    emitter.push_op(bytecode::OpCode::MovConst {
+                                        res: result.offset(cell as isize),
+                                        val: 0,
+                                    });
+                                }
+                            }
+                            if target_bits < source_bits {
+                                emitter.push_op(bytecode::OpCode::TruncateU64 {
+                                    res: result,
+                                    a: result,
+                                    to_bits: *target_bits as u64,
+                                });
+                            }
                         }
-                        (TypeExpr::Field, TypeExpr::U(_) | TypeExpr::I(_)) => {
+                        (TypeExpr::U(128), TypeExpr::U(target_bits) | TypeExpr::I(target_bits))
+                            if *target_bits <= 64 =>
+                        {
+                            emitter.push_op(bytecode::OpCode::MovFrame {
+                                target: result,
+                                source: layouter.get_value(*v),
+                                size: 1,
+                            });
+                            if *target_bits < 64 {
+                                emitter.push_op(bytecode::OpCode::TruncateU64 {
+                                    res: result,
+                                    a: result,
+                                    to_bits: *target_bits as u64,
+                                });
+                            }
+                        }
+                        (TypeExpr::U(source_bits) | TypeExpr::I(source_bits), TypeExpr::U(128))
+                            if *source_bits <= 64 =>
+                        {
+                            emitter.push_op(bytecode::OpCode::MovFrame {
+                                target: result,
+                                source: layouter.get_value(*v),
+                                size: 1,
+                            });
+                            emitter.push_op(bytecode::OpCode::MovConst {
+                                res: result.offset(1),
+                                val: 0,
+                            });
+                        }
+                        (TypeExpr::Field, TypeExpr::U(bits) | TypeExpr::I(bits)) if *bits <= 64 => {
                             emitter.push_op(bytecode::OpCode::CastFieldToU64 {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
+                            if *bits < 64 {
+                                emitter.push_op(bytecode::OpCode::TruncateU64 {
+                                    res: result,
+                                    a: result,
+                                    to_bits: *bits as u64,
+                                });
+                            }
                         }
-                        (TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::Field) => {
+                        (TypeExpr::Field, TypeExpr::U(128)) => {
+                            emitter.push_op(bytecode::OpCode::CastFieldToU128 {
+                                res: result,
+                                a: layouter.get_value(*v),
+                            });
+                        }
+                        (TypeExpr::U(bits) | TypeExpr::I(bits), TypeExpr::Field) if *bits <= 64 => {
                             emitter.push_op(bytecode::OpCode::CastU64ToField {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
                         }
-                        _ => panic!("Unsupported cast: {:?} -> {:?}", l_type, r_type),
+                        (TypeExpr::U(128), TypeExpr::Field) => {
+                            emitter.push_op(bytecode::OpCode::CastU128ToField {
+                                res: result,
+                                a: layouter.get_value(*v),
+                            });
+                        }
+                        _ => panic!("unsupported args {} {}", l_type, r_type),
                     }
                 }
                 hlssa::OpCode::Not {
                     result: r,
                     value: v,
                 } => {
-                    let result = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    emitter.push_op(bytecode::OpCode::NotU64 {
-                        res: result,
-                        a: layouter.get_value(*v),
-                    });
+                    let result_type = type_info.get_value_type(*r);
+                    match &result_type.expr {
+                        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                            let result = layouter.alloc_value(*r, result_type);
+                            emitter.push_op(bytecode::OpCode::NotU64 {
+                                res: result,
+                                a: layouter.get_value(*v),
+                            });
+                        }
+                        TypeExpr::U(128) => {
+                            let result = layouter.alloc_value(*r, result_type);
+                            emitter.push_op(bytecode::OpCode::NotU128 {
+                                res: result,
+                                a: layouter.get_value(*v),
+                            });
+                        }
+                        t => panic!("Unsupported type for not: {:?}", t),
+                    }
                 }
                 hlssa::OpCode::Constrain { a, b, c } => {
                     let a_type = type_info.get_value_type(*a);
@@ -868,42 +1138,71 @@ impl CodeGen {
                 hlssa::OpCode::AssertCmp { kind, lhs, rhs } => match kind {
                     hlssa::CmpKind::Eq => {
                         let lhs_type = type_info.get_value_type(*lhs);
-                        match &lhs_type.expr {
-                            TypeExpr::Field => {
+                        let rhs_type = type_info.get_value_type(*rhs);
+                        match (&lhs_type.expr, &rhs_type.expr) {
+                            (TypeExpr::Field, TypeExpr::Field) => {
                                 emitter.push_op(bytecode::OpCode::AssertEqField {
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
                             }
-                            TypeExpr::U(_) | TypeExpr::I(_) => {
+                            (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
+                                if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                            {
                                 emitter.push_op(bytecode::OpCode::AssertEqU64 {
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
                             }
-                            t => panic!("Unsupported type for AssertCmp Eq in vm: {:?}", t),
+                            (TypeExpr::I(lhs_bits), TypeExpr::I(rhs_bits))
+                                if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                            {
+                                emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
+                            }
+                            (TypeExpr::U(128), TypeExpr::U(128)) => {
+                                emitter.push_op(bytecode::OpCode::AssertEqU128 {
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
+                            }
+                            _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                         }
                     }
                     hlssa::CmpKind::Lt => {
                         let lhs_type = type_info.get_value_type(*lhs);
+                        let rhs_type = type_info.get_value_type(*rhs);
                         let cmp_result = layouter.alloc_scratch(1);
-                        match &lhs_type.expr {
-                            TypeExpr::I(bits) => {
+                        match (&lhs_type.expr, &rhs_type.expr) {
+                            (TypeExpr::I(lhs_bits), TypeExpr::I(rhs_bits))
+                                if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                            {
                                 emitter.push_op(bytecode::OpCode::LtS64 {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
-                                    bits: *bits as u64,
+                                    bits: *lhs_bits as u64,
                                 });
                             }
-                            TypeExpr::U(_) => {
+                            (TypeExpr::U(lhs_bits), TypeExpr::U(rhs_bits))
+                                if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                            {
                                 emitter.push_op(bytecode::OpCode::LtU64 {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
                             }
-                            t => panic!("Unsupported type for AssertCmp Lt in vm: {:?}", t),
+                            (TypeExpr::U(128), TypeExpr::U(128)) => {
+                                emitter.push_op(bytecode::OpCode::LtU128 {
+                                    res: cmp_result,
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
+                            }
+                            _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                         }
                         let one = layouter.alloc_scratch(1);
                         emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
@@ -1018,15 +1317,25 @@ impl CodeGen {
                 } => {
                     // MulConst reads coeff as Field (4 u64s). Cast if needed.
                     let c_type = type_info.get_value_type(*c);
-                    let coeff_pos = if c_type.expr != TypeExpr::Field {
-                        let tmp = layouter.alloc_temp_field();
-                        emitter.push_op(bytecode::OpCode::CastU64ToField {
-                            res: tmp,
-                            a: layouter.get_value(*c),
-                        });
-                        tmp
-                    } else {
-                        layouter.get_value(*c)
+                    let coeff_pos = match &c_type.expr {
+                        TypeExpr::Field => layouter.get_value(*c),
+                        TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                            let tmp = layouter.alloc_temp_field();
+                            emitter.push_op(bytecode::OpCode::CastU64ToField {
+                                res: tmp,
+                                a: layouter.get_value(*c),
+                            });
+                            tmp
+                        }
+                        TypeExpr::U(128) => {
+                            let tmp = layouter.alloc_temp_field();
+                            emitter.push_op(bytecode::OpCode::CastU128ToField {
+                                res: tmp,
+                                a: layouter.get_value(*c),
+                            });
+                            tmp
+                        }
+                        t => panic!("Unsupported MulConst coefficient type: {:?}", t),
                     };
                     emitter.push_op(bytecode::OpCode::MulConst {
                         res: layouter.alloc_ptr(*r),
@@ -1131,16 +1440,29 @@ impl CodeGen {
                 }
                 hlssa::OpCode::Spread { result, value, .. } => {
                     let value_type = type_info.get_value_type(*value);
-                    let value_bits = match &value_type.expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => bits,
-                        _ => panic!("Unsupported spread input type in codegen: {value_type}"),
+                    let value_bits = match value_type.strip_witness().expr {
+                        TypeExpr::U(bits) => bits,
+                        TypeExpr::I(bits) if bits <= MAX_SUPPORTED_SIGNED_BITS => bits,
+                        TypeExpr::I(bits) => {
+                            panic!(
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported: i{bits}"
+                            )
+                        }
+                        t => panic!("Unsupported spread value type: {:?}", t),
                     };
-                    if *value_bits > 32 {
+                    if value_bits > 32 {
                         todo!("Spread bytecode lowering for integer widths > 32 bits");
                     }
                     let result_type = type_info.get_value_type(*result);
                     let res = match result_type.strip_witness().expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => layouter.alloc_u64(*result, bits),
+                        TypeExpr::U(bits) => layouter.alloc_int(*result, bits),
+                        TypeExpr::I(bits) => {
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
+                            layouter.alloc_int(*result, bits)
+                        }
                         TypeExpr::Field => layouter.alloc_field(*result),
                         _ => panic!("Unsupported spread result type: {result_type}"),
                     };
@@ -1158,15 +1480,25 @@ impl CodeGen {
                     let odd_type = type_info.get_value_type(*result_odd);
                     let even_type = type_info.get_value_type(*result_even);
                     let res_and = match odd_type.strip_witness().expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            layouter.alloc_u64(*result_odd, bits)
+                        TypeExpr::U(bits) => layouter.alloc_int(*result_odd, bits),
+                        TypeExpr::I(bits) => {
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
+                            layouter.alloc_int(*result_odd, bits)
                         }
                         TypeExpr::Field => layouter.alloc_field(*result_odd),
                         _ => panic!("Unsupported unspread odd result type: {odd_type}"),
                     };
                     let res_xor = match even_type.strip_witness().expr {
-                        TypeExpr::U(bits) | TypeExpr::I(bits) => {
-                            layouter.alloc_u64(*result_even, bits)
+                        TypeExpr::U(bits) => layouter.alloc_int(*result_even, bits),
+                        TypeExpr::I(bits) => {
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
+                            layouter.alloc_int(*result_even, bits)
                         }
                         TypeExpr::Field => layouter.alloc_field(*result_even),
                         _ => panic!("Unsupported unspread even result type: {even_type}"),
@@ -1316,10 +1648,17 @@ impl EmitterState {
 fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
     match &elem_type.expr {
         TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
-        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+        TypeExpr::U(bits) => {
             assert!(
                 *bits <= 64,
                 "Array lookup unsupported for {elem_type} (>64 bits)"
+            );
+            (1, bytecode::ELEM_WORD)
+        }
+        TypeExpr::I(bits) => {
+            assert!(
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
             );
             (1, bytecode::ELEM_WORD)
         }

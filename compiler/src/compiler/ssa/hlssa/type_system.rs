@@ -2,6 +2,9 @@ use std::fmt::{Debug, Display, Formatter};
 
 use crate::compiler::ssa::SSAType;
 
+pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
+pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
     Field,

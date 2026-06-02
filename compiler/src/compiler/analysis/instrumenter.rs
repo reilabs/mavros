@@ -20,8 +20,9 @@ use crate::compiler::{
     ssa::{
         FunctionId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget, Radix,
-            RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget,
+            MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type,
+            TypeExpr,
         },
     },
     util::{spread_bits, unspread_bits},
@@ -167,10 +168,10 @@ impl Value {
 
     fn bit_mask(bits: usize) -> u128 {
         assert!(
-            (1..=128).contains(&bits),
+            (1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&bits),
             "invalid integer width for bit mask: {bits}"
         );
-        if bits == 128 {
+        if bits == MAX_SUPPORTED_UNSIGNED_BITS {
             u128::MAX
         } else {
             (1u128 << bits) - 1
@@ -827,8 +828,8 @@ impl Value {
         match self {
             Value::U(bits, v) => {
                 assert!(
-                    *bits <= 128 && bits % 2 == 0,
-                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got u{}",
                     bits
                 );
                 let (odd_val, even_val) = unspread_bits(*v, *bits);
@@ -837,8 +838,8 @@ impl Value {
             }
             Value::I(bits, v) => {
                 assert!(
-                    *bits <= 128 && bits % 2 == 0,
-                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got i{}",
                     bits
                 );
                 let (odd_val, even_val) = unspread_bits(*v, *bits);
@@ -858,8 +859,8 @@ impl Value {
             }
             Value::Unknown(ScalarKind::U(bits)) => {
                 assert!(
-                    *bits <= 128 && bits % 2 == 0,
-                    "Unspread expects an even integer width up to 128 bits, got u{}",
+                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got u{}",
                     bits
                 );
                 let half_bits = bits / 2;
@@ -870,8 +871,8 @@ impl Value {
             }
             Value::Unknown(ScalarKind::I(bits)) => {
                 assert!(
-                    *bits <= 128 && bits % 2 == 0,
-                    "Unspread expects an even integer width up to 128 bits, got i{}",
+                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got i{}",
                     bits
                 );
                 let half_bits = bits / 2;

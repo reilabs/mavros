@@ -1,7 +1,7 @@
 use std::{
     alloc::{self, Layout},
     marker::PhantomData,
-    mem,
+    mem::{self, size_of},
     str::FromStr,
 };
 
@@ -14,7 +14,7 @@ use crate::bytecode::parse_struct_layouts;
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
     array::BoxedValue,
-    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, VM},
+    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, U128, VM},
 };
 
 /// An opcode handler. Returns the `(pc, frame)` to feed into the next
@@ -139,8 +139,18 @@ impl Frame {
     }
 
     #[inline(always)]
+    pub fn read_u128_mut(&self, offset: isize) -> *mut U128 {
+        unsafe { self.data.offset(offset) as *mut U128 }
+    }
+
+    #[inline(always)]
     pub fn read_u64(&self, offset: isize) -> u64 {
         unsafe { *self.data.offset(offset) }
+    }
+
+    #[inline(always)]
+    pub fn read_u128(&self, offset: isize) -> U128 {
+        unsafe { *(self.data.offset(offset) as *const U128) }
     }
 
     #[inline(always)]
