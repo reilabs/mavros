@@ -25,7 +25,7 @@ use super::{
     },
     llssa::{
         Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
-        LLSSA, LLStruct, Type as LLType,
+        LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
         builder::{LLBlockEmitter, LLEmitter},
     },
 };
@@ -513,17 +513,13 @@ fn lower_inner(
 
 /// Lower every HLSSA constant `ValueId` referenced by `function` into LLSSA.
 ///
-/// Scalar HLSSA constants (`U`/`I`/`nullptr`) are interned into LLSSA's module-level constants
-/// table. Field constants don't fit in the LLSSA constants table (which only stores scalars), so
-/// they're materialized as an `LLOp::MkStruct` in this function's entry block, with the four limbs
-/// themselves drawn from the LLSSA constants table. This restriction is will be lifted in the
-/// future (#184).
+/// All HLSSA constants are interned into LLSSA's module-level constants table. Scalar `U`/`I`
+/// constants become `LLConstant::Int`; field constants become an aggregate `LLConstant::Struct`
+/// holding the four-limb `field_elem()` layout with one `Int` value per limb.
 fn lower_constants_llssa(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
-    ll_func: &mut LLFunction,
     llssa: &mut LLSSA,
-    ll_entry_id: BlockId,
     val_map: &mut HashMap<ValueId, ValueId>,
 ) {
     let mut referenced = HashSet::new();
@@ -560,7 +556,6 @@ fn lower_constants_llssa(
     let mut referenced: Vec<ValueId> = referenced.into_iter().collect();
     referenced.sort_by_key(|v| v.0);
 
-    let mut field_constants: Vec<(ValueId, [u64; 4])> = Vec::new();
     for vid in referenced {
         match constants.get(&vid).expect("vid is in constants").as_ref() {
             Constant::U(bits, val) => {
@@ -582,27 +577,24 @@ fn lower_constants_llssa(
                 val_map.insert(vid, ll_val);
             }
             Constant::Field(fr) => {
-                field_constants.push((vid, fr.0.0));
+                let limbs = fr.0.0; // We want to keep this in montgomery form
+                let values = limbs
+                    .iter()
+                    .map(|&l| LLConstant::Int {
+                        bits: 64,
+                        value: l as u128,
+                    })
+                    .collect();
+                let ll_val = llssa.add_const(LLConstant::Struct {
+                    layout: LLStruct::field_elem(),
+                    values,
+                });
+                val_map.insert(vid, ll_val);
             }
             Constant::FnPtr(_) => {
                 panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
             }
         }
-    }
-
-    if field_constants.is_empty() {
-        return;
-    }
-
-    let mut emitter = LLBlockEmitter::new(ll_func, llssa, ll_entry_id);
-    for (vid, limbs) in field_constants {
-        let field_struct = LLStruct::field_elem();
-        let l0 = emitter.emit_int_const(64, limbs[0]);
-        let l1 = emitter.emit_int_const(64, limbs[1]);
-        let l2 = emitter.emit_int_const(64, limbs[2]);
-        let l3 = emitter.emit_int_const(64, limbs[3]);
-        let ll_val = emitter.mk_struct(field_struct, vec![l0, l1, l2, l3]);
-        val_map.insert(vid, ll_val);
     }
 }
 
@@ -655,14 +647,7 @@ fn lower_function(
         }
     }
 
-    lower_constants_llssa(
-        function,
-        constants,
-        &mut ll_func,
-        llssa,
-        ll_entry_id,
-        &mut val_map,
-    );
+    lower_constants_llssa(function, constants, llssa, &mut val_map);
 
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
@@ -1906,9 +1891,8 @@ fn lower_array_set(
         },
         // -- Copy then mutate --
         |ce| {
-            // Decrement old array's RC
-            let new_rc = ce.int_sub(rc, one);
-            ce.ll_store(rc_ptr, new_rc);
+            // Decrement old array's RC (immortal objects are left untouched)
+            modify_rc(ce, rc_ptr, -1);
 
             // Allocate new array
             let new_arr = ce.heap_alloc(rc_struct.clone(), None);
@@ -1943,9 +1927,7 @@ fn lower_array_set(
                                 be.struct_field_ptr(elem_val, inner_rc_struct.clone().unwrap(), 0);
                             let inner_rc_ptr =
                                 be.struct_field_ptr(inner_hdr, LLStruct::rc_header(), 0);
-                            let inner_rc = be.ll_load(inner_rc_ptr, LLType::i64());
-                            let new_inner_rc = be.int_add(inner_rc, one);
-                            be.ll_store(inner_rc_ptr, new_inner_rc);
+                            modify_rc(be, inner_rc_ptr, 1);
                             vec![]
                         },
                         |_| vec![],
@@ -1963,6 +1945,32 @@ fn lower_array_set(
     );
 
     val_map.insert(result, merge_results[0]);
+}
+
+/// Modify the provided `rc_ptr` by `delta` and store it back.
+///
+/// The returned value is the effective refcount afterward, allowing the liveness check to proceed
+/// based on that value.
+fn modify_rc(e: &mut LLBlockEmitter<'_>, rc_ptr: ValueId, delta: i64) -> ValueId {
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let immortal = e.emit_int_const(64, RC_IMMORTAL_OBJECT);
+    let is_immortal = e.int_eq(rc, immortal);
+    let results = e.build_if_else(
+        is_immortal,
+        vec![LLType::i64()],
+        |_| vec![rc], // immortal: leave the refcount untouched
+        |e| {
+            let mag = e.emit_int_const(64, delta.unsigned_abs());
+            let new_rc = if delta >= 0 {
+                e.int_add(rc, mag)
+            } else {
+                e.int_sub(rc, mag)
+            };
+            e.ll_store(rc_ptr, new_rc);
+            vec![new_rc]
+        },
+    );
+    results[0]
 }
 
 /// Lower MemOp::Bump(n) -- increment refcount by n.
@@ -1986,10 +1994,7 @@ fn lower_rc_bump(
 
     let hdr = e.struct_field_ptr(ll_arr, rc_struct, 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let n_val = e.emit_int_const(64, n as u64);
-    let new_rc = e.int_add(rc, n_val);
-    e.ll_store(rc_ptr, new_rc);
+    modify_rc(e, rc_ptr, n as i64);
 }
 
 /// Lower MemOp::Drop -- call the generated drop function.
@@ -2191,10 +2196,7 @@ fn lower_ad_rc_bump(
     let base = LLStruct::ad_node_base();
     let hdr = e.struct_field_ptr(ll_node, base, 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let n_val = e.emit_int_const(64, n as u64);
-    let new_rc = e.int_add(rc, n_val);
-    e.ll_store(rc_ptr, new_rc);
+    modify_rc(e, rc_ptr, n as i64);
 }
 
 /// RC drop for AD nodes: call __ad_drop.
@@ -2365,10 +2367,7 @@ fn generate_ad_drop_function(
     // Decrement RC
     let rc_hdr = e.struct_field_ptr(node, LLStruct::ad_node_base(), 0);
     let rc_ptr = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    let new_rc = modify_rc(&mut e, rc_ptr, -1);
 
     // If RC hit zero, dispatch on tag and tear down
     let zero = e.emit_int_const(64, 0);
@@ -2531,10 +2530,7 @@ fn generate_drop_function_for_array(
     // Decrement RC
     let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    let new_rc = modify_rc(&mut e, rc_ptr, -1);
 
     // If RC hit zero, drop inner elements and free
     let zero = e.emit_int_const(64, 0);
@@ -2598,10 +2594,7 @@ fn generate_drop_function_for_tuple(
     // Decrement RC
     let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    let new_rc = modify_rc(&mut e, rc_ptr, -1);
 
     // If RC hit zero, drop inner heap-allocated elements and free
     let zero = e.emit_int_const(64, 0);
@@ -2666,10 +2659,7 @@ fn generate_drop_function_for_ref(
 
     let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let rc = e.ll_load(rc_ptr, LLType::i64());
-    let one = e.emit_int_const(64, 1);
-    let new_rc = e.int_sub(rc, one);
-    e.ll_store(rc_ptr, new_rc);
+    let new_rc = modify_rc(&mut e, rc_ptr, -1);
 
     let zero = e.emit_int_const(64, 0);
     let dead = e.int_eq(new_rc, zero);
@@ -3996,4 +3986,99 @@ fn generate_drngchk_8_ad_call(
     drop(e);
 
     func
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::DefaultSSAAnnotator;
+    use crate::compiler::ssa::llssa::builder::LLSSABuilder;
+
+    /// A guarded refcount mutation must compare against `RC_IMMORTAL_OBJECT`
+    /// before touching the refcount word.
+    #[test]
+    fn guarded_rc_add_emits_immortal_check() {
+        let mut ssa = LLSSA::with_main("guard_test".to_string());
+        let main_id = ssa.get_main_id();
+
+        let rc_header = LLStruct::rc_header();
+        let rc_array = LLStruct::new(vec![
+            LLFieldType::Inline(rc_header.clone()),
+            LLFieldType::Int(64),
+        ]);
+
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
+            let arr = e.heap_alloc(rc_array.clone(), None);
+            let hdr = e.struct_field_ptr(arr, rc_array.clone(), 0);
+            let rc_ptr = e.struct_field_ptr(hdr, rc_header, 0);
+            // Decrement through the guarded helper.
+            let _ = modify_rc(&mut e, rc_ptr, -1);
+            e.terminate_return(vec![]);
+        });
+
+        let dump = ssa.to_string(&DefaultSSAAnnotator);
+        // The immortal sentinel must be materialized and compared.
+        assert!(
+            dump.contains("Int { bits: 64, value: 18446744073709551615 }"),
+            "expected RC_IMMORTAL_OBJECT sentinel in dump:\n{dump}"
+        );
+        assert!(
+            dump.contains("icmp.eq"),
+            "expected immortal equality check in dump:\n{dump}"
+        );
+        // The guarded decrement still emits a subtraction on the mortal path.
+        assert!(
+            dump.contains("sub"),
+            "expected guarded decrement in dump:\n{dump}"
+        );
+    }
+
+    /// A felt constant must be interned as an aggregate `Struct` constant (the four-limb
+    /// `field_elem` layout), not materialized as an `MkStruct` instruction.
+    #[test]
+    fn felt_constant_lowers_to_struct_constant() {
+        use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+
+        let mut hlssa = HLSSA::with_main("felt_test".to_string());
+        let main_id = hlssa.get_main_id();
+        let mut hb = HLSSABuilder::new(&mut hlssa);
+        hb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
+            let c = e.field_const(ark_bn254::Fr::from(7u64));
+            e.terminate_return(vec![c]);
+        });
+
+        let constants = hlssa.const_snapshot();
+        let function = hlssa.get_main();
+
+        let mut llssa = LLSSA::with_main("felt_test".to_string());
+        let mut val_map = HashMap::new();
+        lower_constants_llssa(function, &constants, &mut llssa, &mut val_map);
+
+        let dump = llssa.to_string(&DefaultSSAAnnotator);
+        // The felt is a module-level aggregate constant...
+        assert!(
+            dump.contains("Struct {"),
+            "expected an aggregate Struct constant in dump:\n{dump}"
+        );
+        // ...with four i64 limb values inside it.
+        assert!(
+            dump.contains("Int { bits: 64"),
+            "expected i64 limb values in the struct constant:\n{dump}"
+        );
+        // ...and is NOT emitted as a runtime MkStruct instruction.
+        assert!(
+            !dump.contains("mk_struct"),
+            "felt constant should not lower to an MkStruct instruction:\n{dump}"
+        );
+        assert_eq!(val_map.len(), 1, "the felt constant should be mapped");
+    }
 }

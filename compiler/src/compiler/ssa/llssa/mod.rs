@@ -5,6 +5,7 @@ pub mod type_system;
 
 use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
+use std::mem::size_of_val;
 
 use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, SSAConstants, ValueId};
 pub use type_system::Type;
@@ -19,18 +20,61 @@ pub use super::hlssa::DMatrix;
 /// integer/field arithmetic split, and explicit memory management.
 pub type LLSSA = SSA<LLOp, Type, Constant>;
 
+// CONSTANTS
+// ================================================================================================
+
+/// The constant used to signal that an object is immortal for the purposes of reference counting.
+///
+/// The word used to track the refcount for that object should be set to this value, and every
+/// refcount operation should check for this value before attempting to modify the refcount.
+pub const RC_IMMORTAL_OBJECT: u64 = u64::MAX;
+
+/// The size of the refcount in bytes.
+pub const RC_SIZE_BYTES: usize = 8;
+
+/// The size of the refcount in bits.
+pub const RC_SIZE_BITS: usize = RC_SIZE_BYTES * 8;
+
+const _: () = assert!(
+    size_of_val(&RC_IMMORTAL_OBJECT) == RC_SIZE_BYTES,
+    "Size of the immortal refcount constant does not match the size of the refcount value"
+);
+
 // CONSTANT STORAGE
 // ================================================================================================
 
 /// The value type stored in the low-level SSA's constants table.
 ///
-/// LLSSA constants are scalar leaves: integers of a given bit width and the null pointer. Aggregate
-/// constants (e.g. the four-limb field element struct) remain as `LLOp::MkStruct` instructions for
-/// now, but this will be changed in subsequent work (#184).
+/// Most LLSSA constants are scalar leaves: integers of a given bit width and the null pointer.
+/// Aggregate constants (e.g. the four-limb field element struct) are representable via `Struct`,
+/// which pairs a struct layout with one constant value per field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
+    /// A scalar integer constant of `bits` bits with the provided `value`.
     Int { bits: u32, value: u128 },
+
+    /// A null pointer constant.
     NullPtr,
+
+    /// An aggregate (used for tuples and other aggregates).
+    Struct { layout: LLStruct, values: Vec<Constant> },
+}
+
+impl Constant {
+    /// True if this constant can legally fill a slot of `field` type.
+    ///
+    /// `InlineArray`/`FlexArray` fields are memory-only and have no constant form,
+    /// so they never match; any other mismatched pairing is rejected too.
+    fn matches_field(&self, field: &LLFieldType) -> bool {
+        match (self, field) {
+            (Constant::Int { bits, .. }, LLFieldType::Int(w)) => bits == w,
+            (Constant::NullPtr, LLFieldType::Ptr) => true,
+            (Constant::Struct { layout, values }, LLFieldType::Inline(inner)) => {
+                layout == inner && layout.accepts(values)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The constants table type for LLSSA.
@@ -667,7 +711,7 @@ pub type LLBlock = Block<LLOp, Type>;
 // ================================================================================================
 
 /// Struct layout, owned inline. Structural equality.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LLStruct {
     pub fields: Vec<LLFieldType>,
 }
@@ -699,7 +743,7 @@ impl LLStruct {
 
     /// RC header: { Int(64) } — just a refcount.
     pub fn rc_header() -> Self {
-        Self::new(vec![LLFieldType::Int(64)])
+        Self::new(vec![LLFieldType::Int(RC_SIZE_BITS as u32)])
     }
 
     /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
@@ -897,6 +941,17 @@ impl LLStruct {
             LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => false,
         })
     }
+
+    /// True if `values` is exactly one constant per field, in declaration order,
+    /// with each constant compatible with its field type (see `Constant::matches_field`).
+    pub fn accepts(&self, values: &[Constant]) -> bool {
+        self.fields.len() == values.len()
+            && self
+                .fields
+                .iter()
+                .zip(values)
+                .all(|(f, v)| v.matches_field(f))
+    }
 }
 
 impl Display for LLStruct {
@@ -913,14 +968,18 @@ impl Display for LLStruct {
 // ================================================================================================
 
 /// What a struct field / memory slot holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LLFieldType {
     Int(u32),
+
     Ptr,
+
     /// Nested struct embedded in place.
     Inline(LLStruct),
+
     /// Fixed-count contiguous array of identical structs.
     InlineArray(LLStruct, usize),
+
     /// Variable-length trailing array (C99 flexible array member).
     FlexArray(LLStruct),
 }
@@ -1092,6 +1151,78 @@ mod tests {
         let inner = LLStruct::new(vec![LLFieldType::Int(64), LLFieldType::Ptr]);
         let outer = LLStruct::new(vec![LLFieldType::Inline(inner), LLFieldType::Int(32)]);
         assert!(outer.is_value_safe());
+    }
+
+    #[test]
+    fn accepts_matching_field_elem() {
+        let values: Vec<Constant> = (0..4)
+            .map(|v| Constant::Int { bits: 64, value: v })
+            .collect();
+        assert!(LLStruct::field_elem().accepts(&values));
+    }
+
+    #[test]
+    fn accepts_rejects_mismatches() {
+        let field_elem = LLStruct::field_elem();
+
+        // Wrong arity: only three values for a four-field struct.
+        let three: Vec<Constant> = (0..3)
+            .map(|v| Constant::Int { bits: 64, value: v })
+            .collect();
+        assert!(!field_elem.accepts(&three));
+
+        // Wrong int width: i32 where i64 is expected.
+        let bad_width = vec![
+            Constant::Int { bits: 32, value: 0 },
+            Constant::Int { bits: 64, value: 0 },
+            Constant::Int { bits: 64, value: 0 },
+            Constant::Int { bits: 64, value: 0 },
+        ];
+        assert!(!field_elem.accepts(&bad_width));
+
+        // Wrong kind: NullPtr where an Int is expected.
+        let one_int = LLStruct::new(vec![LLFieldType::Int(64)]);
+        assert!(!one_int.accepts(&[Constant::NullPtr]));
+
+        // Ptr field accepts NullPtr.
+        let one_ptr = LLStruct::new(vec![LLFieldType::Ptr]);
+        assert!(one_ptr.accepts(&[Constant::NullPtr]));
+
+        // Inline field: nested struct constant must match the inner layout.
+        let outer = LLStruct::new(vec![LLFieldType::Inline(one_int.clone())]);
+        let good_nested = vec![Constant::Struct {
+            layout: one_int.clone(),
+            values: vec![Constant::Int { bits: 64, value: 7 }],
+        }];
+        assert!(outer.accepts(&good_nested));
+        let bad_nested = vec![Constant::Struct {
+            layout: LLStruct::new(vec![LLFieldType::Int(32)]),
+            values: vec![Constant::Int { bits: 32, value: 7 }],
+        }];
+        assert!(!outer.accepts(&bad_nested));
+
+        // InlineArray / FlexArray fields have no constant form.
+        let arr = LLStruct::new(vec![LLFieldType::InlineArray(one_int, 1)]);
+        assert!(!arr.accepts(&[Constant::Int { bits: 64, value: 0 }]));
+    }
+
+    #[test]
+    #[should_panic(expected = "incompatible with layout")]
+    fn emit_struct_const_rejects_incompatible() {
+        let mut ssa = LLSSA::with_main("bad_struct".to_string());
+        let main_id = ssa.get_main_id();
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
+            // Only three values for a four-limb field-element layout.
+            let values = vec![
+                Constant::Int { bits: 64, value: 0 },
+                Constant::Int { bits: 64, value: 0 },
+                Constant::Int { bits: 64, value: 0 },
+            ];
+            e.emit_struct_const(LLStruct::field_elem(), values);
+        });
     }
 
     #[test]

@@ -260,7 +260,26 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.widen_or_trunc_int(x, result_bits, name)
     }
 
-    /// Convert an LLStruct to an LLVM struct type.
+    /// Materialise an LLSSA constant as an LLVM constant value, recursively.
+    fn materialize_const(&self, c: &Constant) -> BasicValueEnum<'ctx> {
+        match c {
+            Constant::Int { bits, value } => self.int_mask(*bits, *value).into(),
+            Constant::NullPtr => self
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+            Constant::Struct { layout, values } => {
+                let fields: Vec<BasicValueEnum<'ctx>> =
+                    values.iter().map(|v| self.materialize_const(v)).collect();
+                self.convert_struct_type(layout)
+                    .into_struct_type()
+                    .const_named_struct(&fields)
+                    .into()
+            }
+        }
+    }
+
     fn convert_struct_type(&self, s: &LLStruct) -> BasicTypeEnum<'ctx> {
         let fields: Vec<BasicTypeEnum<'ctx>> = s
             .fields
@@ -389,21 +408,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.globals.push(global);
         }
 
-        // Materialise module-level LLSSA constants once; each function body will re-seed its
-        // `value_map` from this table. This is a HACK, to be removed once we compile to proper
-        // LLVM constants (#184).
-        self.constant_values.clear();
-        for (vid, c) in llssa.const_snapshot().iter() {
-            let val: BasicValueEnum<'ctx> = match c.as_ref() {
-                Constant::Int { bits, value } => self.int_mask(*bits, *value).into(),
-                Constant::NullPtr => self
-                    .context
-                    .ptr_type(AddressSpace::default())
-                    .const_null()
-                    .into(),
-            };
-            self.constant_values.insert(*vid, val);
-        }
+        // Materialise module-level LLSSA constants once, allowing each function to re-seed from
+        // this map.
+        self.constant_values = llssa
+            .const_snapshot()
+            .into_iter()
+            .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
+            .collect();
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
