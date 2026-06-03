@@ -11,6 +11,7 @@ use std::{
 use crate::compiler::{
     analysis::{
         flow_analysis::{self, FlowAnalysis},
+        slice_lengths::{FunctionSliceLengths, SliceLengthAnalysis},
         types::{FunctionTypeInfo, TypeInfo},
     },
     ssa::{Instruction, hlssa::Endianness},
@@ -47,7 +48,7 @@ fn lower_type(ty: &HLType) -> LLType {
             );
             LLType::Int(*bits as u32)
         }
-        HLTypeExpr::Array(..) => LLType::Ptr,
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
         HLTypeExpr::Tuple(_) => LLType::Ptr,
@@ -69,7 +70,7 @@ fn elem_struct(ty: &HLType) -> LLStruct {
             );
             LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
         }
-        HLTypeExpr::Array(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
@@ -94,7 +95,7 @@ fn tuple_field_type(ty: &HLType) -> LLFieldType {
             );
             LLFieldType::Int(*bits as u32)
         }
-        HLTypeExpr::Array(..) => LLFieldType::Ptr,
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLFieldType::Ptr,
         HLTypeExpr::Tuple(_) => LLFieldType::Ptr,
         HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
         HLTypeExpr::Ref(_) => LLFieldType::Ptr,
@@ -125,6 +126,40 @@ fn array_info(ty: &HLType) -> (&HLType, usize) {
     match &ty.expr {
         HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
         _ => panic!("Expected array type, got: {}", ty),
+    }
+}
+
+/// Extract the element type and LL layout count for an array-or-slice value.
+///
+/// Slices do not currently carry a runtime length in LLSSA. For operations
+/// that only need the shared header/table/data offsets, use a zero-length
+/// trailing array layout; producers that know the concrete length still
+/// allocate the exact number of elements.
+fn array_or_slice_info(ty: &HLType) -> (&HLType, usize) {
+    match &ty.expr {
+        HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
+        HLTypeExpr::Slice(inner) => (inner.as_ref(), 0),
+        _ => panic!("Expected array or slice type, got: {}", ty),
+    }
+}
+
+/// Extract the element type and concrete element count for an array-or-slice
+/// value. Arrays carry their count in the type; slices need a count inferred
+/// from their producer because the current LLSSA slice layout has no length
+/// field.
+fn concrete_array_or_slice_info<'a>(
+    ty: &'a HLType,
+    value: ValueId,
+    slice_lengths: &FunctionSliceLengths,
+    context: &str,
+) -> (&'a HLType, usize) {
+    match &ty.expr {
+        HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
+        HLTypeExpr::Slice(inner) => {
+            let count = slice_lengths.require(value, context);
+            (inner.as_ref(), count)
+        }
+        _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
 
@@ -172,7 +207,7 @@ fn get_or_create_drop_fn(
 
     // Recursively create drop fns for inner heap-allocated elements first
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) => {
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
             }
@@ -195,7 +230,9 @@ fn get_or_create_drop_fn(
     // Resolve or create the drop function ID
     let fn_id = match &ty.expr {
         HLTypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
-        HLTypeExpr::Array(_inner, _) => llssa.add_function(format!("drop_{}", ty)),
+        HLTypeExpr::Array(_inner, _) | HLTypeExpr::Slice(_inner) => {
+            llssa.add_function(format!("drop_{}", ty))
+        }
         HLTypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
         HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
         _ => panic!("{} is not supported yet", ty),
@@ -466,10 +503,15 @@ fn lower_inner(
     // Second pass: lower each function body. Snapshot the constants once; every function lowering
     // reads from the same lock-free view.
     let constants = hlssa.const_snapshot();
+    let slice_lengths = SliceLengthAnalysis::run(hlssa, type_info);
     for (fn_id, function) in hlssa.iter_functions() {
         let ll_fn_id = fn_map[fn_id];
         let fn_type_info = type_info.get_function(*fn_id);
         let cfg = flow_analysis.get_function_cfg(*fn_id);
+        let fn_slice_lengths = slice_lengths
+            .function_values(*fn_id)
+            .cloned()
+            .unwrap_or_default();
 
         let ll_func = lower_function(
             function,
@@ -482,6 +524,7 @@ fn lower_inner(
             &mut lookup_fns,
             &hlssa_global_types,
             &constants,
+            &fn_slice_lengths,
         );
 
         llssa.put_function(ll_fn_id, ll_func);
@@ -610,6 +653,7 @@ fn lower_function(
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
     constants: &HLSSAConstantsSnapshot,
+    slice_lengths: &FunctionSliceLengths,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
@@ -665,6 +709,7 @@ fn lower_function(
                 &mut val_map,
                 fn_type_info,
                 fn_map,
+                slice_lengths,
                 drop_fns,
                 ad_fns,
                 lookup_fns,
@@ -713,6 +758,7 @@ fn lower_instruction(
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
     fn_map: &HashMap<FunctionId, FunctionId>,
+    slice_lengths: &FunctionSliceLengths,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
@@ -895,6 +941,15 @@ fn lower_instruction(
             lower_mk_array(e, val_map, *result, elems, elem_type, *count);
         }
 
+        OpCode::MkSeq {
+            result,
+            elems,
+            seq_type: SequenceTargetType::Slice,
+            elem_type,
+        } => {
+            lower_mk_array(e, val_map, *result, elems, elem_type, elems.len());
+        }
+
         OpCode::MkRepeated {
             result,
             element,
@@ -923,6 +978,7 @@ fn lower_instruction(
                 e,
                 val_map,
                 fn_type_info,
+                slice_lengths,
                 *result,
                 *array,
                 *index,
@@ -1098,10 +1154,9 @@ fn lower_instruction(
                     };
                     val_map.insert(*result, ll_result);
                 }
-                _ => panic!(
-                    "Unsupported cast target in HLSSA->LLSSA lowering: {:?}",
-                    target
-                ),
+                CastTarget::Nop | CastTarget::ArrayToSlice => {
+                    val_map.insert(*result, ll_value);
+                }
             }
         }
 
@@ -1799,7 +1854,7 @@ fn lower_array_get(
     index: ValueId,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let (et, count) = array_info(arr_type);
+    let (et, count) = array_or_slice_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
     let ll_elem_type = lower_type(et);
@@ -1828,6 +1883,7 @@ fn lower_array_set(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
+    slice_lengths: &FunctionSliceLengths,
     result: ValueId,
     array: ValueId,
     index: ValueId,
@@ -1836,7 +1892,8 @@ fn lower_array_set(
     ad_fns: &mut AdFunctions,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let (et, count) = array_info(arr_type);
+    let (et, count) =
+        concrete_array_or_slice_info(arr_type, array, slice_lengths, "ArraySet/SliceSet");
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);
@@ -1849,6 +1906,7 @@ fn lower_array_set(
     let inner_rc_struct = if elem_is_rc {
         Some(match &et.expr {
             HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
+            HLTypeExpr::Slice(inner) => rc_array_struct(inner, 0),
             HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
             HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
             _ => panic!("Unsupported RC element type: {}", et),
@@ -1986,7 +2044,10 @@ fn lower_rc_bump(
     let val_type = fn_type_info.get_value_type(value);
 
     let rc_struct = match &val_type.expr {
-        HLTypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => {
+            let (inner, count) = array_or_slice_info(val_type);
+            rc_array_struct(inner, count)
+        }
         HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
         _ => panic!("lower_rc_bump: unexpected type {}", val_type),
@@ -2477,7 +2538,9 @@ fn generate_ad_drop_function(
 fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     for entry in drop_fns {
         let func = match &entry.ty.expr {
-            HLTypeExpr::Array(..) => generate_drop_function_for_array(llssa, &entry.ty, drop_fns),
+            HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => {
+                generate_drop_function_for_array(llssa, &entry.ty, drop_fns)
+            }
             HLTypeExpr::Tuple(elements) => {
                 generate_drop_function_for_tuple(llssa, elements, &entry.ty, drop_fns)
             }
@@ -2496,6 +2559,7 @@ fn needs_drop(expr: &HLTypeExpr) -> bool {
     matches!(
         expr,
         HLTypeExpr::Array(..)
+            | HLTypeExpr::Slice(..)
             | HLTypeExpr::Tuple(..)
             | HLTypeExpr::WitnessOf(..)
             | HLTypeExpr::Ref(..)
@@ -2517,7 +2581,11 @@ fn generate_drop_function_for_array(
     ty: &HLType,
     drop_fns: &[DropFnEntry],
 ) -> LLFunction {
-    let (et, count) = array_info(ty);
+    let (et, count) = array_or_slice_info(ty);
+    assert!(
+        !matches!(ty.expr, HLTypeExpr::Slice(_)) || !needs_drop(&et.expr),
+        "Dropping slices with RC'd elements is not supported in HLSSA->LLSSA lowering"
+    );
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);

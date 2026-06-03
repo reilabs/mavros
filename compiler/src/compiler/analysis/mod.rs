@@ -1,6 +1,7 @@
 pub mod flow_analysis;
 pub mod instrumenter;
 pub mod liveness;
+pub mod slice_lengths;
 pub mod symbolic_executor;
 pub mod types;
 pub mod value_definitions;
