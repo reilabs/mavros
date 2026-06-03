@@ -251,51 +251,60 @@ impl PrepareEntryPoint {
                     let block = fb.function.get_block_mut(bid);
                     let old_instructions = block.take_instructions();
 
-                    let mut replacements = ValueReplacements::new();
                     let mut new_instructions = Vec::new();
 
                     for mut instr in old_instructions {
-                        replacements.replace_instruction(&mut instr);
-
-                        let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
+                        let prepare_calls: Vec<(ValueId, ValueId, Type)> = if let OpCode::Call {
                             unconstrained: true,
                             results,
                             function: CallTarget::Static(callee_id),
                             ..
-                        } = &instr
+                        } = &mut instr
                         {
-                            callee_return_types
-                                .get(callee_id)
-                                .map(|rt| {
-                                    results
-                                        .iter()
-                                        .zip(rt.iter())
-                                        .map(|(r, t)| (*r, t.clone()))
-                                        .collect()
+                            let return_types = callee_return_types.get(callee_id).unwrap_or_else(|| {
+                                panic!("missing return type information for unconstrained call to {callee_id:?}")
+                            });
+                            assert_eq!(
+                                results.len(),
+                                return_types.len(),
+                                "unconstrained call result count does not match callee return type count"
+                            );
+
+                            let prepared_results = results.clone();
+                            let raw_results: Vec<ValueId> = prepared_results
+                                .iter()
+                                .map(|_| fb.ssa.fresh_value())
+                                .collect();
+
+                            *results = raw_results.clone();
+
+                            prepared_results
+                                .into_iter()
+                                .zip(raw_results)
+                                .zip(return_types.iter().cloned())
+                                .map(|((prepared_result, raw_result), return_type)| {
+                                    (prepared_result, raw_result, return_type)
                                 })
-                                .unwrap_or_default()
+                                .collect()
                         } else {
                             vec![]
                         };
 
                         new_instructions.push(instr);
 
-                        for (result_vid, return_type) in call_results {
-                            let reconstructed = fb.ssa.fresh_value();
+                        for (prepared_result, raw_result, return_type) in prepare_calls {
                             let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
                             new_instructions.push(OpCode::Call {
-                                results: vec![reconstructed],
+                                results: vec![prepared_result],
                                 function: CallTarget::Static(prepare_fn),
-                                args: vec![result_vid],
+                                args: vec![raw_result],
                                 unconstrained: false,
                             });
-                            replacements.insert(result_vid, reconstructed);
                         }
                     }
 
                     let block = fb.function.get_block_mut(bid);
                     block.put_instructions(new_instructions);
-                    replacements.replace_terminator(block.get_terminator_mut());
                 }
             });
         }

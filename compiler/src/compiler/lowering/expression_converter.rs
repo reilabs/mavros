@@ -841,16 +841,17 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let mut value = self.convert_expression(tuple_expr, b).unwrap();
-        // If the expression is a reference (e.g. &mut self), load through it first
         if let Some(typ) = tuple_expr.return_type() {
             if matches!(
                 typ.as_ref(),
                 noirc_frontend::monomorphization::ast::Type::Reference(_, _)
             ) {
-                value = b.block(self.current_block).load(value);
+                panic!(
+                    "Unsupported tuple/struct field extraction on Noir reference: field .{idx} of `{tuple_expr}` has type `{typ}`. Mavros needs reference-place projection here; auto-deref would produce invalid SSA."
+                );
             }
         }
+        let value = self.convert_expression(tuple_expr, b).unwrap();
         let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)
     }
