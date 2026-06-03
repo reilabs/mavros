@@ -20,7 +20,6 @@ use crate::compiler::{
 struct SpecKey {
     original_func_id: FunctionId,
     arg_types: Vec<WitnessShape>,
-    arg_aliases: Vec<Vec<ParamPtrPath>>,
     cfg_witness: WitnessType,
 }
 
@@ -28,7 +27,6 @@ struct SpecKey {
 struct SpecValue {
     specialized_func_id: FunctionId,
     return_types: Vec<WitnessShape>,
-    return_aliases: Vec<HashSet<ParamPtrPath>>,
     arg_types_out: Vec<WitnessShape>,
 }
 
@@ -38,7 +36,6 @@ struct SpecValue {
 
 struct PropagationResult {
     return_types: Vec<WitnessShape>,
-    return_aliases: Vec<HashSet<ParamPtrPath>>,
     arg_types_out: Vec<WitnessShape>,
     value_wt: HashMap<ValueId, WitnessShape>,
     block_cfg: HashMap<BlockId, WitnessType>,
@@ -50,47 +47,7 @@ struct PropagationResult {
 struct CallSiteInfo {
     callee_func_id: FunctionId,
     arg_types: Vec<WitnessShape>,
-    arg_aliases: Vec<Vec<ParamPtrPath>>,
     cfg_witness: WitnessType,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct PtrPath {
-    root: ValueId,
-    fields: Vec<usize>,
-}
-
-impl PtrPath {
-    fn root(root: ValueId) -> Self {
-        Self {
-            root,
-            fields: Vec::new(),
-        }
-    }
-
-    fn field(&self, field_idx: usize) -> Self {
-        let mut fields = self.fields.clone();
-        fields.push(field_idx);
-        Self {
-            root: self.root,
-            fields,
-        }
-    }
-
-    fn extend(&self, fields: &[usize]) -> Self {
-        let mut extended = self.fields.clone();
-        extended.extend(fields.iter().copied());
-        Self {
-            root: self.root,
-            fields: extended,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct ParamPtrPath {
-    param_idx: usize,
-    fields: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,14 +91,12 @@ impl WitnessTypeInference {
             .get_parameters()
             .map(|(_, tp)| Self::construct_pure_witness_for_type(tp))
             .collect();
-        let main_arg_aliases = Self::identity_param_aliases(&main_arg_types);
 
         let main_return_types: Vec<WitnessShape> = main_func
             .get_returns()
             .iter()
             .map(|_| WitnessShape::Scalar(WitnessType::Pure)) // optimistic
             .collect();
-        let main_return_len = main_func.get_returns().len();
 
         let main_cfg_witness = WitnessType::Pure;
 
@@ -149,7 +104,6 @@ impl WitnessTypeInference {
         let main_key = SpecKey {
             original_func_id: main_id,
             arg_types: main_arg_types.clone(),
-            arg_aliases: main_arg_aliases.clone(),
             cfg_witness: main_cfg_witness,
         };
 
@@ -168,7 +122,6 @@ impl WitnessTypeInference {
             SpecValue {
                 specialized_func_id: main_specialized_id,
                 return_types: main_return_types,
-                return_aliases: vec![HashSet::new(); main_return_len],
                 arg_types_out: main_arg_types.clone(),
             },
         );
@@ -186,7 +139,6 @@ impl WitnessTypeInference {
                 func,
                 cfg,
                 &spec_key.arg_types,
-                &spec_key.arg_aliases,
                 spec_key.cfg_witness,
                 &specializations,
                 ssa,
@@ -194,11 +146,9 @@ impl WitnessTypeInference {
 
             let spec_value = specializations.get_mut(&spec_key).unwrap();
             let changed = result.return_types != spec_value.return_types
-                || result.return_aliases != spec_value.return_aliases
                 || result.arg_types_out != spec_value.arg_types_out;
 
             spec_value.return_types = result.return_types;
-            spec_value.return_aliases = result.return_aliases;
             spec_value.arg_types_out = result.arg_types_out;
 
             // Store the propagation result for later FunctionWitnessType construction
@@ -216,7 +166,6 @@ impl WitnessTypeInference {
                 let callee_key = SpecKey {
                     original_func_id: call_site.callee_func_id,
                     arg_types: call_site.arg_types.clone(),
-                    arg_aliases: call_site.arg_aliases.clone(),
                     cfg_witness: call_site.cfg_witness,
                 };
 
@@ -234,7 +183,6 @@ impl WitnessTypeInference {
                         .iter()
                         .map(Self::construct_pure_witness_for_type)
                         .collect();
-                    let callee_return_len = callee_func.get_returns().len();
 
                     let specialized_id = ssa.duplicate_function(callee_key.original_func_id);
 
@@ -243,7 +191,6 @@ impl WitnessTypeInference {
                         SpecValue {
                             specialized_func_id: specialized_id,
                             return_types: callee_return_types,
-                            return_aliases: vec![HashSet::new(); callee_return_len],
                             arg_types_out: callee_key.arg_types.clone(),
                         },
                     );
@@ -275,7 +222,6 @@ impl WitnessTypeInference {
                 func,
                 cfg,
                 &spec_key.arg_types,
-                &spec_key.arg_aliases,
                 spec_key.cfg_witness,
                 &specializations,
                 ssa,
@@ -304,7 +250,6 @@ impl WitnessTypeInference {
                         let callee_key = SpecKey {
                             original_func_id: call_site.callee_func_id,
                             arg_types: call_site.arg_types.clone(),
-                            arg_aliases: call_site.arg_aliases.clone(),
                             cfg_witness: call_site.cfg_witness,
                         };
                         let callee_spec = specializations.get(&callee_key).unwrap();
@@ -340,7 +285,6 @@ impl WitnessTypeInference {
         func: &HLFunction,
         cfg: &flow_analysis::CFG,
         arg_types: &[WitnessShape],
-        arg_aliases: &[Vec<ParamPtrPath>],
         cfg_witness: WitnessType,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
@@ -351,8 +295,6 @@ impl WitnessTypeInference {
         // Inner state
         let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
         let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
-        let mut ptr_aliases: HashMap<ValueId, HashSet<PtrPath>> = HashMap::new();
-        let mut memory_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
 
         ssa.for_each_const(|vid, val| {
             let shape = match val.as_ref() {
@@ -366,16 +308,9 @@ impl WitnessTypeInference {
         // Initialize entry block params from arg_types
         let entry_params: Vec<(ValueId, Type)> =
             func.get_entry().get_parameters().cloned().collect();
-        let entry_param_indices = entry_params
-            .iter()
-            .enumerate()
-            .map(|(idx, (value_id, _))| (*value_id, idx))
-            .collect::<HashMap<_, _>>();
         for ((value_id, _), wt) in entry_params.iter().zip(arg_types.iter()) {
             value_wt.insert(*value_id, wt.clone());
-            Self::init_ref_location(&mut ptr_aliases, &mut memory_wt, *value_id, wt);
         }
-        Self::init_entry_ref_aliases(&mut ptr_aliases, &entry_params, arg_aliases);
 
         // Initialize other block params as Pure (optimistic)
         for (block_id, block) in func.get_blocks() {
@@ -387,8 +322,7 @@ impl WitnessTypeInference {
             for (value_id, tp) in block.get_parameters() {
                 if !value_wt.contains_key(value_id) {
                     let wt = Self::construct_pure_witness_for_type(tp);
-                    value_wt.insert(*value_id, wt.clone());
-                    Self::init_ref_location(&mut ptr_aliases, &mut memory_wt, *value_id, &wt);
+                    value_wt.insert(*value_id, wt);
                 }
             }
         }
@@ -398,8 +332,6 @@ impl WitnessTypeInference {
         for _iteration in 0..max_iterations {
             let old_value_wt = value_wt.clone();
             let old_block_cfg = block_cfg.clone();
-            let old_ptr_aliases = ptr_aliases.clone();
-            let old_memory_wt = memory_wt.clone();
 
             Self::propagate_once(
                 func,
@@ -408,24 +340,17 @@ impl WitnessTypeInference {
                 entry_id,
                 &mut value_wt,
                 &mut block_cfg,
-                &mut ptr_aliases,
-                &mut memory_wt,
                 specializations,
                 ssa,
             );
 
-            if value_wt == old_value_wt
-                && block_cfg == old_block_cfg
-                && ptr_aliases == old_ptr_aliases
-                && memory_wt == old_memory_wt
-            {
+            if value_wt == old_value_wt && block_cfg == old_block_cfg {
                 break;
             }
         }
 
         // Collect return types
         let mut return_types = Vec::new();
-        let mut return_aliases: Option<Vec<HashSet<ParamPtrPath>>> = None;
         let mut call_sites = Vec::new();
 
         // Re-run one more time to collect call_sites and return_types
@@ -450,11 +375,9 @@ impl WitnessTypeInference {
                         .iter()
                         .map(|v| value_wt.get(v).unwrap().clone())
                         .collect();
-                    let callee_arg_aliases = Self::call_arg_aliases(args, &ptr_aliases);
                     call_sites.push(CallSiteInfo {
                         callee_func_id: *callee_id,
                         arg_types: callee_arg_types,
-                        arg_aliases: callee_arg_aliases,
                         cfg_witness: block_cw,
                     });
                 }
@@ -465,23 +388,14 @@ impl WitnessTypeInference {
                     .iter()
                     .map(|v| value_wt.get(v).unwrap().clone())
                     .collect();
-                let ret_aliases = values
-                    .iter()
-                    .map(|v| Self::return_param_aliases(*v, &ptr_aliases, &entry_param_indices))
-                    .collect::<Vec<_>>();
                 if return_types.is_empty() {
                     return_types = ret_wts;
-                    return_aliases = Some(ret_aliases);
                 } else {
                     return_types = return_types
                         .iter()
                         .zip(ret_wts.iter())
                         .map(|(a, b)| a.join(b))
                         .collect();
-                    let aliases = return_aliases.as_mut().unwrap();
-                    for (existing, new_aliases) in aliases.iter_mut().zip(ret_aliases.into_iter()) {
-                        existing.extend(new_aliases);
-                    }
                 }
             }
         }
@@ -494,8 +408,6 @@ impl WitnessTypeInference {
                 .map(Self::construct_pure_witness_for_type)
                 .collect();
         }
-        let return_aliases =
-            return_aliases.unwrap_or_else(|| vec![HashSet::new(); return_types.len()]);
 
         // Compute arg_types_out: for Ref args, reflect any updates to the ref's inner shape.
         let arg_types_out: Vec<WitnessShape> = entry_params
@@ -512,7 +424,6 @@ impl WitnessTypeInference {
 
         PropagationResult {
             return_types,
-            return_aliases,
             arg_types_out,
             value_wt,
             block_cfg,
@@ -528,8 +439,6 @@ impl WitnessTypeInference {
         _entry_id: BlockId,
         value_wt: &mut HashMap<ValueId, WitnessShape>,
         block_cfg: &mut HashMap<BlockId, WitnessType>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
     ) {
@@ -537,15 +446,7 @@ impl WitnessTypeInference {
             let block = func.get_block(*block_id);
             let block_cw = *block_cfg.get(block_id).unwrap();
 
-            Self::propagate_block_instructions(
-                block,
-                block_cw,
-                value_wt,
-                ptr_aliases,
-                memory_wt,
-                specializations,
-                ssa,
-            );
+            Self::propagate_block_instructions(block, block_cw, value_wt, specializations, ssa);
 
             // Handle terminator
             if let Some(terminator) = block.get_terminator() {
@@ -561,15 +462,8 @@ impl WitnessTypeInference {
                             let existing = value_wt.get(target_value).unwrap().clone();
                             let joined = existing.join(&param_wt);
                             value_wt.insert(*target_value, joined.clone());
-                            Self::merge_value_wt(value_wt, *param, joined);
                             if matches!(&param_wt, WitnessShape::Ref(_, _)) {
-                                Self::join_ref_aliases(
-                                    value_wt,
-                                    ptr_aliases,
-                                    memory_wt,
-                                    *target_value,
-                                    *param,
-                                );
+                                Self::merge_value_wt(value_wt, *param, joined);
                             }
                         }
                     }
@@ -599,8 +493,6 @@ impl WitnessTypeInference {
                 }
             }
         }
-
-        Self::sync_all_ref_values(value_wt, ptr_aliases, memory_wt);
     }
 
     /// Process all instructions in a single block, updating `value_wt` according
@@ -609,8 +501,6 @@ impl WitnessTypeInference {
         block: &HLBlock,
         block_cw: WitnessType,
         value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
     ) {
@@ -654,16 +544,15 @@ impl WitnessTypeInference {
                     let inner = Self::construct_pure_witness_for_type(tp);
                     let wt = WitnessShape::Ref(WitnessType::Pure, Box::new(inner));
                     value_wt.insert(*r, wt.clone());
-                    Self::init_ref_location(ptr_aliases, memory_wt, *r, &wt);
                 }
                 OpCode::Store { ptr, value: v } => {
                     let val_wt = value_wt.get(v).unwrap();
                     // cfg_witness contributes to the toplevel of what's stored.
                     let store_wt = val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
-                    Self::join_ref_inner(value_wt, ptr_aliases, memory_wt, *ptr, &store_wt);
+                    Self::merge_ref_inner(value_wt, *ptr, store_wt);
                 }
                 OpCode::Load { result: r, ptr } => {
-                    let result_wt = Self::read_ref_inner(value_wt, ptr_aliases, memory_wt, *ptr);
+                    let result_wt = Self::read_ref_inner(value_wt, *ptr);
                     value_wt.insert(*r, result_wt);
                 }
                 OpCode::RefTupleSplice {
@@ -671,14 +560,7 @@ impl WitnessTypeInference {
                     tuple_ref,
                     field_idx,
                 } => {
-                    Self::propagate_ref_tuple_splice(
-                        value_wt,
-                        ptr_aliases,
-                        memory_wt,
-                        *tuple_ref,
-                        *r,
-                        *field_idx,
-                    );
+                    Self::propagate_ref_tuple_splice(value_wt, *tuple_ref, *r, *field_idx);
                 }
                 OpCode::ReadGlobal {
                     result: r,
@@ -687,7 +569,6 @@ impl WitnessTypeInference {
                 } => {
                     let result_wt = Self::construct_pure_witness_for_type(tp);
                     value_wt.insert(*r, result_wt);
-                    Self::init_ref_location(ptr_aliases, memory_wt, *r, value_wt.get(r).unwrap());
                 }
                 OpCode::Assert { .. }
                 | OpCode::AssertCmp { .. }
@@ -767,61 +648,30 @@ impl WitnessTypeInference {
                         for (result, ret_type) in results.iter().zip(callee_return_types.iter()) {
                             let pure_wt = Self::construct_pure_witness_for_type(ret_type);
                             value_wt.insert(*result, pure_wt);
-                            Self::init_ref_location(
-                                ptr_aliases,
-                                memory_wt,
-                                *result,
-                                value_wt.get(result).unwrap(),
-                            );
                         }
                     } else {
                         let callee_arg_types: Vec<WitnessShape> = args
                             .iter()
                             .map(|v| value_wt.get(v).unwrap().clone())
                             .collect();
-                        let callee_arg_aliases = Self::call_arg_aliases(args, ptr_aliases);
                         let callee_key = SpecKey {
                             original_func_id: *callee_id,
                             arg_types: callee_arg_types,
-                            arg_aliases: callee_arg_aliases,
                             cfg_witness: block_cw,
                         };
 
                         if let Some(callee_spec) = specializations.get(&callee_key) {
                             // Use callee's return types
-                            for (result_idx, (result, ret_wt)) in results
-                                .iter()
-                                .zip(callee_spec.return_types.iter())
-                                .enumerate()
+                            for (result, ret_wt) in
+                                results.iter().zip(callee_spec.return_types.iter())
                             {
                                 value_wt.insert(*result, ret_wt.clone());
-                                Self::init_ref_location(ptr_aliases, memory_wt, *result, ret_wt);
-                                if matches!(ret_wt, WitnessShape::Ref(_, _)) {
-                                    Self::apply_return_aliases(
-                                        value_wt,
-                                        ptr_aliases,
-                                        memory_wt,
-                                        *result,
-                                        &callee_spec.return_aliases[result_idx],
-                                        args,
-                                    );
-                                }
                             }
-                            // Join callee ref-arg effects back into caller argument shapes.
+                            // Merge callee argument effects back into caller argument shapes.
                             for (arg, arg_out) in args.iter().zip(callee_spec.arg_types_out.iter())
                             {
                                 Self::merge_value_wt(value_wt, *arg, arg_out.clone());
-                                if let WitnessShape::Ref(_, inner_out) = arg_out {
-                                    Self::join_ref_inner(
-                                        value_wt,
-                                        ptr_aliases,
-                                        memory_wt,
-                                        *arg,
-                                        inner_out,
-                                    );
-                                }
                             }
-                            Self::sync_all_ref_values(value_wt, ptr_aliases, memory_wt);
                         } else {
                             // Specialization not yet registered — use optimistic Pure returns
                             // based on the callee function's return type structure
@@ -836,12 +686,6 @@ impl WitnessTypeInference {
                                     .map(|existing| existing.join(&pure_wt))
                                     .unwrap_or(pure_wt);
                                 value_wt.insert(*result, result_wt);
-                                Self::init_ref_location(
-                                    ptr_aliases,
-                                    memory_wt,
-                                    *result,
-                                    value_wt.get(result).unwrap(),
-                                );
                             }
                         }
                     }
@@ -1007,337 +851,66 @@ impl WitnessTypeInference {
         Self::merge_value_wt(value_wt, tuple, updated);
     }
 
-    fn identity_param_aliases(arg_types: &[WitnessShape]) -> Vec<Vec<ParamPtrPath>> {
-        arg_types
-            .iter()
-            .enumerate()
-            .map(|(param_idx, wt)| {
-                if matches!(wt, WitnessShape::Ref(_, _)) {
-                    vec![ParamPtrPath {
-                        param_idx,
-                        fields: Vec::new(),
-                    }]
-                } else {
-                    Vec::new()
-                }
-            })
-            .collect()
-    }
-
-    fn init_entry_ref_aliases(
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        entry_params: &[(ValueId, Type)],
-        arg_aliases: &[Vec<ParamPtrPath>],
-    ) {
-        for (param_idx, aliases) in arg_aliases.iter().enumerate() {
-            if aliases.is_empty() {
-                continue;
+    fn read_ref_inner(value_wt: &HashMap<ValueId, WitnessShape>, ptr: ValueId) -> WitnessShape {
+        match value_wt.get(&ptr).unwrap() {
+            WitnessShape::Ref(ptr_info, inner) => {
+                inner.with_toplevel_info(inner.toplevel_info().join(*ptr_info))
             }
-            let value = entry_params[param_idx].0;
-            let mapped = aliases
-                .iter()
-                .map(|alias| PtrPath {
-                    root: entry_params[alias.param_idx].0,
-                    fields: alias.fields.clone(),
-                })
-                .collect::<HashSet<_>>();
-            ptr_aliases.insert(value, mapped);
+            other => panic!("Load from non-ref witness type: {:?}", other),
         }
     }
 
-    fn call_arg_aliases(
-        args: &[ValueId],
-        ptr_aliases: &HashMap<ValueId, HashSet<PtrPath>>,
-    ) -> Vec<Vec<ParamPtrPath>> {
-        let arg_aliases = args
-            .iter()
-            .map(|arg| ptr_aliases.get(arg).cloned().unwrap_or_default())
-            .collect::<Vec<_>>();
-
-        arg_aliases
-            .iter()
-            .map(|aliases| {
-                let mut formal_aliases = HashSet::new();
-                for alias in aliases {
-                    for (param_idx, param_aliases) in arg_aliases.iter().enumerate() {
-                        for param_alias in param_aliases {
-                            if alias.root == param_alias.root
-                                && alias.fields.starts_with(&param_alias.fields)
-                            {
-                                formal_aliases.insert(ParamPtrPath {
-                                    param_idx,
-                                    fields: alias.fields[param_alias.fields.len()..].to_vec(),
-                                });
-                            }
-                        }
-                    }
-                }
-                let mut formal_aliases = formal_aliases.into_iter().collect::<Vec<_>>();
-                formal_aliases.sort();
-                formal_aliases
-            })
-            .collect()
-    }
-
-    fn init_ref_location(
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        value: ValueId,
-        wt: &WitnessShape,
-    ) {
-        let WitnessShape::Ref(_, inner) = wt else {
-            return;
-        };
-        ptr_aliases
-            .entry(value)
-            .or_insert_with(|| HashSet::from([PtrPath::root(value)]));
-        memory_wt
-            .entry(value)
-            .and_modify(|existing| *existing = existing.join(inner))
-            .or_insert_with(|| *inner.clone());
-    }
-
-    fn ensure_ref_aliases(
-        value_wt: &HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        value: ValueId,
-    ) -> HashSet<PtrPath> {
-        let wt = value_wt
-            .get(&value)
-            .unwrap_or_else(|| panic!("Missing witness type for ref value {:?}", value));
-        Self::init_ref_location(ptr_aliases, memory_wt, value, wt);
-        ptr_aliases
-            .get(&value)
-            .cloned()
-            .unwrap_or_else(|| panic!("Missing pointer aliases for ref value {:?}", value))
-    }
-
-    fn join_ref_aliases(
+    fn merge_ref_inner(
         value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        target: ValueId,
-        source: ValueId,
-    ) {
-        let source_aliases = Self::ensure_ref_aliases(value_wt, ptr_aliases, memory_wt, source);
-        Self::ensure_ref_aliases(value_wt, ptr_aliases, memory_wt, target);
-        ptr_aliases
-            .entry(target)
-            .or_default()
-            .extend(source_aliases);
-        Self::sync_ref_value(value_wt, ptr_aliases, memory_wt, target);
-    }
-
-    fn join_ref_inner(
-        value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
         ptr: ValueId,
-        new_inner: &WitnessShape,
+        new_inner: WitnessShape,
     ) {
-        let aliases = Self::ensure_ref_aliases(value_wt, ptr_aliases, memory_wt, ptr);
-        for alias in aliases {
-            Self::join_path(memory_wt, &alias, new_inner);
-        }
-        Self::sync_all_ref_values(value_wt, ptr_aliases, memory_wt);
-    }
-
-    fn read_ref_inner(
-        value_wt: &HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr: ValueId,
-    ) -> WitnessShape {
-        let aliases = Self::ensure_ref_aliases(value_wt, ptr_aliases, memory_wt, ptr);
-        let ptr_info = match value_wt.get(&ptr).unwrap() {
-            WitnessShape::Ref(ptr_info, _) => *ptr_info,
-            _ => panic!("Load from non-ref type"),
+        let ptr_wt = value_wt.get(&ptr).unwrap().clone();
+        let updated = match ptr_wt {
+            WitnessShape::Ref(ptr_info, inner) => {
+                WitnessShape::Ref(ptr_info, Box::new(inner.join(&new_inner)))
+            }
+            other => panic!("Store to non-ref witness type: {:?}", other),
         };
-        let inner = Self::read_aliases(memory_wt, &aliases);
-        inner.with_toplevel_info(inner.toplevel_info().join(ptr_info))
+        Self::merge_value_wt(value_wt, ptr, updated);
     }
 
     fn propagate_ref_tuple_splice(
         value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
         tuple_ref: ValueId,
         result: ValueId,
         field_idx: usize,
     ) {
-        let tuple_aliases = Self::ensure_ref_aliases(value_wt, ptr_aliases, memory_wt, tuple_ref);
-        let field_aliases = tuple_aliases
-            .iter()
-            .map(|alias| alias.field(field_idx))
-            .collect::<HashSet<_>>();
-        let ptr_info = match value_wt.get(&tuple_ref).unwrap() {
-            WitnessShape::Ref(ptr_info, _) => *ptr_info,
-            _ => panic!("RefTupleSplice from non-ref witness type"),
+        let tuple_ref_wt = value_wt.get(&tuple_ref).unwrap().clone();
+        let (ptr_info, tuple_top, mut children) = match tuple_ref_wt {
+            WitnessShape::Ref(ptr_info, inner) => match *inner {
+                WitnessShape::Tuple(tuple_top, children) => (ptr_info, tuple_top, children),
+                other => panic!("RefTupleSplice on non-tuple witness type: {:?}", other),
+            },
+            other => panic!("RefTupleSplice from non-ref witness type: {:?}", other),
         };
-        let child = Self::read_aliases(memory_wt, &field_aliases);
-        let result_wt = value_wt
-            .get(&result)
-            .map(|existing| match existing {
-                WitnessShape::Ref(existing_info, existing_child) => WitnessShape::Ref(
-                    existing_info.join(ptr_info),
-                    Box::new(existing_child.join(&child)),
-                ),
-                other => panic!(
-                    "RefTupleSplice result has non-ref witness type: {:?}",
-                    other
-                ),
-            })
-            .unwrap_or_else(|| WitnessShape::Ref(ptr_info, Box::new(child)));
-        value_wt.insert(result, result_wt);
 
-        ptr_aliases.entry(result).or_default().extend(field_aliases);
-        Self::sync_ref_value(value_wt, ptr_aliases, memory_wt, result);
-    }
+        let child = children[field_idx]
+            .clone()
+            .with_toplevel_info(tuple_top.join(children[field_idx].toplevel_info()));
+        Self::merge_value_wt(
+            value_wt,
+            result,
+            WitnessShape::Ref(ptr_info, Box::new(child)),
+        );
 
-    fn return_param_aliases(
-        value: ValueId,
-        ptr_aliases: &HashMap<ValueId, HashSet<PtrPath>>,
-        entry_param_indices: &HashMap<ValueId, usize>,
-    ) -> HashSet<ParamPtrPath> {
-        ptr_aliases
-            .get(&value)
-            .into_iter()
-            .flat_map(|aliases| aliases.iter())
-            .filter_map(|alias| {
-                entry_param_indices
-                    .get(&alias.root)
-                    .map(|param_idx| ParamPtrPath {
-                        param_idx: *param_idx,
-                        fields: alias.fields.clone(),
-                    })
-            })
-            .collect()
-    }
-
-    fn apply_return_aliases(
-        value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &mut HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        result: ValueId,
-        return_aliases: &HashSet<ParamPtrPath>,
-        args: &[ValueId],
-    ) {
-        if return_aliases.is_empty() {
-            return;
-        }
-
-        let mut mapped_aliases = HashSet::new();
-        for returned_alias in return_aliases {
-            let arg = args[returned_alias.param_idx];
-            let arg_aliases = Self::ensure_ref_aliases(value_wt, ptr_aliases, memory_wt, arg);
-            mapped_aliases.extend(
-                arg_aliases
-                    .iter()
-                    .map(|alias| alias.extend(&returned_alias.fields)),
-            );
-        }
-
-        ptr_aliases
-            .entry(result)
-            .or_default()
-            .extend(mapped_aliases);
-        Self::sync_ref_value(value_wt, ptr_aliases, memory_wt, result);
-    }
-
-    fn read_aliases(
-        memory_wt: &HashMap<ValueId, WitnessShape>,
-        aliases: &HashSet<PtrPath>,
-    ) -> WitnessShape {
-        let mut reads = aliases
-            .iter()
-            .map(|alias| Self::read_path(memory_wt, alias));
-        let first = reads
-            .next()
-            .unwrap_or_else(|| panic!("Cannot read through empty pointer alias set"));
-        reads.fold(first, |acc, next| acc.join(&next))
-    }
-
-    fn read_path(memory_wt: &HashMap<ValueId, WitnessShape>, path: &PtrPath) -> WitnessShape {
-        let root = memory_wt
-            .get(&path.root)
-            .unwrap_or_else(|| panic!("Missing memory witness shape for root {:?}", path.root));
-        Self::read_shape_path(root, &path.fields)
-    }
-
-    fn read_shape_path(shape: &WitnessShape, fields: &[usize]) -> WitnessShape {
-        let Some((&field_idx, rest)) = fields.split_first() else {
-            return shape.clone();
-        };
-        match shape {
-            WitnessShape::Tuple(top, children) => {
-                let child = Self::read_shape_path(&children[field_idx], rest);
-                child.with_toplevel_info(child.toplevel_info().join(*top))
-            }
+        let result_inner = match value_wt.get(&result).unwrap().clone() {
+            WitnessShape::Ref(_, inner) => *inner,
             other => panic!(
-                "Cannot read tuple field path {:?} through non-tuple witness type {:?}",
-                fields, other
+                "RefTupleSplice result has non-ref witness type: {:?}",
+                other
             ),
-        }
-    }
-
-    fn join_path(
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        path: &PtrPath,
-        new_wt: &WitnessShape,
-    ) {
-        let root = memory_wt
-            .get_mut(&path.root)
-            .unwrap_or_else(|| panic!("Missing memory witness shape for root {:?}", path.root));
-        Self::join_shape_path(root, &path.fields, new_wt);
-    }
-
-    fn join_shape_path(shape: &mut WitnessShape, fields: &[usize], new_wt: &WitnessShape) {
-        let Some((&field_idx, rest)) = fields.split_first() else {
-            *shape = shape.join(new_wt);
-            return;
         };
-        match shape {
-            WitnessShape::Tuple(_, children) => {
-                Self::join_shape_path(&mut children[field_idx], rest, new_wt);
-            }
-            other => panic!(
-                "Cannot write tuple field path {:?} through non-tuple witness type {:?}",
-                fields, other
-            ),
-        }
-    }
-
-    fn sync_all_ref_values(
-        value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-    ) {
-        let values = ptr_aliases.keys().cloned().collect::<Vec<_>>();
-        for value in values {
-            Self::sync_ref_value(value_wt, ptr_aliases, memory_wt, value);
-        }
-    }
-
-    fn sync_ref_value(
-        value_wt: &mut HashMap<ValueId, WitnessShape>,
-        ptr_aliases: &HashMap<ValueId, HashSet<PtrPath>>,
-        memory_wt: &mut HashMap<ValueId, WitnessShape>,
-        value: ValueId,
-    ) {
-        let Some(aliases) = ptr_aliases.get(&value) else {
-            return;
-        };
-        let Some(WitnessShape::Ref(ptr_info, inner)) = value_wt.get(&value).cloned() else {
-            return;
-        };
-        for alias in aliases {
-            Self::join_path(memory_wt, alias, &inner);
-        }
-        let alias_inner = Self::read_aliases(memory_wt, aliases);
-        value_wt.insert(
-            value,
-            WitnessShape::Ref(ptr_info, Box::new(inner.join(&alias_inner))),
+        children[field_idx] = children[field_idx].join(&result_inner);
+        Self::merge_value_wt(
+            value_wt,
+            tuple_ref,
+            WitnessShape::Ref(ptr_info, Box::new(WitnessShape::Tuple(tuple_top, children))),
         );
     }
 
