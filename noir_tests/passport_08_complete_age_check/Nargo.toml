@@ -4,6 +4,6 @@ type = "bin"
 authors = [""]
 
 [dependencies]
-compare_age = { path = "../../noir-passport-monolithic/utils/compare/age" }
-data_check_expiry = { path = "../../noir-passport-monolithic/utils/data-check/expiry" }
-passport_validity_check = { path = "../../noir-passport-monolithic/utils/passport_validity_check" }
+compare_age = { path = "vendor/utils/compare/age" }
+data_check_expiry = { path = "vendor/utils/data-check/expiry" }
+passport_validity_check = { path = "vendor/utils/passport_validity_check" }
