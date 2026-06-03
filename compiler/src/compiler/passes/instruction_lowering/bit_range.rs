@@ -113,66 +113,23 @@ impl LowerBitRangeOps {
         let source_bits = value_type.get_bit_size();
         let pure_value = b.value_of(value);
 
-        if offset == 0 {
-            let value_field = b.cast_to_field(value);
-            let high_bits = source_bits - width;
-            let low = if high_bits == 0 {
-                value_field
-            } else {
-                let high_hint = lower_pure_bit_range_value(
-                    b,
-                    pure_value,
-                    &value_type.strip_witness(),
-                    width,
-                    high_bits,
-                );
-                let high_hint = b.cast_to_field(high_hint);
-                let high = b.write_witness(high_hint);
-                b.rangecheck(high, high_bits);
-
-                let shift = b.field_const(two_pow(width));
-                let high_shifted = b.mul(high, shift);
-                b.sub(value_field, high_shifted)
-            };
-
-            b.rangecheck(low, width);
-            b.emit(OpCode::Cast {
-                result,
-                value: low,
-                target: cast_target_for_scalar_type(context.types().get_value_type(result)),
-            });
-            return;
-        }
-
-        let hint =
-            lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), offset, width);
-        let hint_field = b.cast_to_field(hint);
-
-        let result_witness = b.write_witness(hint_field);
-        b.emit(OpCode::Cast {
-            result,
-            value: result_witness,
-            target: cast_target_for_scalar_type(context.types().get_value_type(result)),
-        });
-
-        let result_field = b.cast_to_field(result);
-        b.rangecheck(result_field, width);
-
         let low_bits = offset;
         let low = if low_bits == 0 {
-            None
+            let zero = b.field_const(Field::ZERO);
+            b.cast_to(CastTarget::WitnessOf, zero)
         } else {
             let low_hint =
                 lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), 0, low_bits);
             let low_hint = b.cast_to_field(low_hint);
             let low = b.write_witness(low_hint);
             b.rangecheck(low, low_bits);
-            Some(low)
+            low
         };
 
         let high_bits = source_bits - offset - width;
-        let high = if high_bits == 0 {
-            None
+        let high_shifted = if high_bits == 0 {
+            let zero = b.field_const(Field::ZERO);
+            b.cast_to(CastTarget::WitnessOf, zero)
         } else {
             let high_hint = lower_pure_bit_range_value(
                 b,
@@ -184,24 +141,26 @@ impl LowerBitRangeOps {
             let high_hint = b.cast_to_field(high_hint);
             let high = b.write_witness(high_hint);
             b.rangecheck(high, high_bits);
-            Some(high)
+            let high_shift = b.field_const(two_pow(offset + width));
+            b.mul(high, high_shift)
         };
 
-        let mut reconstructed = low.unwrap_or_else(|| b.field_const(Field::ZERO));
-        let result_shift = b.field_const(two_pow(offset));
-        let result_shifted = b.mul(result_field, result_shift);
-        reconstructed = b.add(reconstructed, result_shifted);
-        if let Some(high) = high {
-            let high_shift = b.field_const(two_pow(offset + width));
-            let high_shifted = b.mul(high, high_shift);
-            reconstructed = b.add(reconstructed, high_shifted);
-        }
-
         let value_field = b.cast_to_field(value);
-        let diff = b.sub(value_field, reconstructed);
-        let zero = b.field_const(Field::ZERO);
-        let flag = b.field_const(Field::ONE);
-        b.constrain(flag, diff, zero);
+        let selected_shifted = b.sub(value_field, low);
+        let selected_shifted = b.sub(selected_shifted, high_shifted);
+        let selected = if offset == 0 {
+            selected_shifted
+        } else {
+            let shift = b.field_const(two_pow(offset));
+            b.div(selected_shifted, shift)
+        };
+
+        b.rangecheck(selected, width);
+        b.emit(OpCode::Cast {
+            result,
+            value: selected,
+            target: cast_target_for_scalar_type(context.types().get_value_type(result)),
+        });
     }
 
     fn lower_witness_field_bit_range(
