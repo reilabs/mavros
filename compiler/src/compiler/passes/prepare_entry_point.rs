@@ -236,6 +236,9 @@ impl PrepareEntryPoint {
             }
         }
 
+        let prepare_fn_ids: std::collections::HashSet<FunctionId> =
+            prepare_fns.iter().map(|p| p.fn_id).collect();
+
         // Process each function/block: single pass over instructions, handling
         // all unconstrained calls inline so indices never go stale.
         let mut sb = HLSSABuilder::new(ssa);
@@ -247,16 +250,14 @@ impl PrepareEntryPoint {
                 .map(|(id, _)| *id)
                 .collect();
             sb.modify_function(fid, |fb| {
-                for bid in block_ids {
-                    let block = fb.function.get_block_mut(bid);
+                let mut replacements = ValueReplacements::new();
+                for bid in &block_ids {
+                    let block = fb.function.get_block_mut(*bid);
                     let old_instructions = block.take_instructions();
 
-                    let mut replacements = ValueReplacements::new();
                     let mut new_instructions = Vec::new();
 
-                    for mut instr in old_instructions {
-                        replacements.replace_instruction(&mut instr);
-
+                    for instr in old_instructions {
                         let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
                             unconstrained: true,
                             results,
@@ -293,7 +294,27 @@ impl PrepareEntryPoint {
                         }
                     }
 
-                    let block = fb.function.get_block_mut(bid);
+                    let block = fb.function.get_block_mut(*bid);
+                    block.put_instructions(new_instructions);
+                }
+
+                for bid in &block_ids {
+                    let block = fb.function.get_block_mut(*bid);
+                    let old_instructions = block.take_instructions();
+                    let mut new_instructions = Vec::with_capacity(old_instructions.len());
+                    for mut instr in old_instructions {
+                        let is_prepare_call = matches!(
+                            &instr,
+                            OpCode::Call {
+                                function: CallTarget::Static(callee),
+                                ..
+                            } if prepare_fn_ids.contains(callee)
+                        );
+                        if !is_prepare_call {
+                            replacements.replace_inputs(&mut instr);
+                        }
+                        new_instructions.push(instr);
+                    }
                     block.put_instructions(new_instructions);
                     replacements.replace_terminator(block.get_terminator_mut());
                 }
