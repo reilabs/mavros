@@ -761,12 +761,6 @@ impl WitnessTypeInference {
                             let result_wt =
                                 elem_wt.with_toplevel_info((*top).join(elem_wt.toplevel_info()));
                             Self::merge_value_wt(value_wt, *result, result_wt);
-                            Self::join_tuple_child(
-                                value_wt,
-                                *tuple,
-                                *idx,
-                                value_wt.get(result).unwrap().clone(),
-                            );
                         }
                         _ => {
                             panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
@@ -783,12 +777,6 @@ impl WitnessTypeInference {
                         *result,
                         WitnessShape::Tuple(WitnessType::Pure, children),
                     );
-                    if let WitnessShape::Tuple(_, children) = value_wt.get(result).unwrap().clone()
-                    {
-                        for (elem, child) in elems.iter().zip(children.into_iter()) {
-                            Self::merge_value_wt(value_wt, *elem, child);
-                        }
-                    }
                 }
                 OpCode::WriteWitness { result, .. } => {
                     // WriteWitness records a value on the witness tape.
@@ -829,26 +817,6 @@ impl WitnessTypeInference {
             .map(|existing| existing.join(&new_wt))
             .unwrap_or(new_wt);
         value_wt.insert(value, joined);
-    }
-
-    fn join_tuple_child(
-        value_wt: &mut HashMap<ValueId, WitnessShape>,
-        tuple: ValueId,
-        idx: usize,
-        child_wt: WitnessShape,
-    ) {
-        let tuple_wt = value_wt
-            .get(&tuple)
-            .unwrap_or_else(|| panic!("Missing tuple witness type for {:?}", tuple))
-            .clone();
-        let updated = match tuple_wt {
-            WitnessShape::Tuple(top, mut children) => {
-                children[idx] = children[idx].join(&child_wt);
-                WitnessShape::Tuple(top, children)
-            }
-            other => panic!("Tuple child update on non-tuple witness type: {:?}", other),
-        };
-        Self::merge_value_wt(value_wt, tuple, updated);
     }
 
     fn read_ref_inner(value_wt: &HashMap<ValueId, WitnessShape>, ptr: ValueId) -> WitnessShape {
