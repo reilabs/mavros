@@ -731,7 +731,10 @@ impl UntaintControlFlow {
                             .collect()
                     };
                     for instr in cast_instrs {
-                        maybe_guard(new_instructions, block_taint, instr);
+                        match instr {
+                            OpCode::Call { .. } => new_instructions.push(instr),
+                            _ => maybe_guard(new_instructions, block_taint, instr),
+                        }
                     }
                     new_instructions.push(OpCode::Call {
                         results,

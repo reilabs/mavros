@@ -94,6 +94,9 @@ impl StripWitnessOf {
             OpCode::MkRepeated { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
+            OpCode::MkRepeatedDyn { elem_type, .. } => {
+                *elem_type = elem_type.strip_all_witness();
+            }
             OpCode::Alloc { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }

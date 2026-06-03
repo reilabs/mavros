@@ -85,6 +85,13 @@ pub enum OpCode {
         count: usize,
         elem_type: Type,
     },
+    MkRepeatedDyn {
+        result: ValueId,
+        element: ValueId,
+        seq_type: SequenceTargetType,
+        count: ValueId,
+        elem_type: Type,
+    },
     Alloc {
         result: ValueId,
         elem_type: Type,
@@ -552,6 +559,23 @@ impl Instruction for OpCode {
                     elem_type
                 )
             }
+            OpCode::MkRepeatedDyn {
+                result,
+                element,
+                seq_type,
+                count,
+                elem_type,
+            } => {
+                format!(
+                    "v{}{} = [v{}; {}] : {} of {}",
+                    result.0,
+                    annotate_value(*result),
+                    element.0,
+                    count.0,
+                    seq_type,
+                    elem_type
+                )
+            }
             OpCode::Cast {
                 result,
                 value,
@@ -879,6 +903,13 @@ impl Instruction for OpCode {
                 count: _,
                 elem_type: _,
             } => vec![element].into_iter(),
+            Self::MkRepeatedDyn {
+                result: _,
+                element,
+                seq_type: _,
+                count,
+                elem_type: _,
+            } => vec![element, count].into_iter(),
             Self::Select {
                 result: _,
                 cond: b,
@@ -979,6 +1010,7 @@ impl Instruction for OpCode {
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
             | Self::MkRepeated { result: r, .. }
+            | Self::MkRepeatedDyn { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::SExt { result: r, .. }
@@ -1035,6 +1067,7 @@ impl Instruction for OpCode {
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
             | Self::MkRepeated { result: r, .. }
+            | Self::MkRepeatedDyn { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::SExt { result: r, .. }
@@ -1205,6 +1238,13 @@ impl Instruction for OpCode {
                 count: _,
                 elem_type: _,
             } => vec![element].into_iter(),
+            Self::MkRepeatedDyn {
+                result: _,
+                element,
+                seq_type: _,
+                count,
+                elem_type: _,
+            } => vec![element, count].into_iter(),
             Self::MkTuple {
                 result: _,
                 elems: inputs,
@@ -1434,6 +1474,13 @@ impl Instruction for OpCode {
                 count: _,
                 elem_type: _,
             } => vec![r, element].into_iter(),
+            Self::MkRepeatedDyn {
+                result: r,
+                element,
+                seq_type: _,
+                count,
+                elem_type: _,
+            } => vec![r, element, count].into_iter(),
             Self::Select {
                 result: a,
                 cond: b,

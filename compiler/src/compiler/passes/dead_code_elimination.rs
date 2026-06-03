@@ -78,6 +78,22 @@ impl Pass for DCE {
     }
 }
 
+fn peel_guard(op: &OpCode) -> &OpCode {
+    let mut cur = op;
+    while let OpCode::Guard { inner, .. } = cur {
+        cur = inner.as_ref();
+    }
+    cur
+}
+
+fn peel_guard_mut(op: &mut OpCode) -> &mut OpCode {
+    let mut cur = op;
+    while let OpCode::Guard { inner, .. } = cur {
+        cur = inner.as_mut();
+    }
+    cur
+}
+
 impl DCE {
     pub fn new(config: Config) -> Self {
         Self { config }
@@ -117,6 +133,7 @@ impl DCE {
             | OpCode::SliceLen { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::MkRepeatedDyn { .. }
             | OpCode::Cast { .. }
             | OpCode::SExt { .. }
             | OpCode::BitRange { .. }
@@ -148,7 +165,7 @@ impl DCE {
                     if let OpCode::Call {
                         function: CallTarget::Static(callee),
                         ..
-                    } = instruction
+                    } = peel_guard(instruction)
                     {
                         static_calls_by_callee.entry(*callee).or_default().push((
                             *function_id,
@@ -281,10 +298,11 @@ impl DCE {
                                                 continue;
                                             }
                                             let caller = ssa.get_function(*caller_fn);
-                                            if let OpCode::Call { args, .. } = caller
-                                                .get_block(*caller_block)
-                                                .get_instruction(*caller_i)
-                                            {
+                                            if let OpCode::Call { args, .. } = peel_guard(
+                                                caller
+                                                    .get_block(*caller_block)
+                                                    .get_instruction(*caller_i),
+                                            ) {
                                                 assert!(
                                                     *i < args.len(),
                                                     "ICE: live callee entry param index out of bounds at callsite"
@@ -325,7 +343,7 @@ impl DCE {
                                 results,
                                 function: CallTarget::Static(callee),
                                 ..
-                            } = instruction
+                            } = peel_guard(instruction)
                             {
                                 if let Some(result_idx) =
                                     results.iter().position(|result| *result == value_id)
@@ -359,7 +377,7 @@ impl DCE {
                         function: CallTarget::Static(callee),
                         args,
                         ..
-                    } = instruction
+                    } = peel_guard(instruction)
                     {
                         // When a Call becomes live, propagate already-live callee entry
                         // params back to the corresponding callsite args. Other callee
@@ -435,7 +453,7 @@ impl DCE {
                         function: CallTarget::Static(callee),
                         args,
                         unconstrained: _,
-                    } = &mut instruction
+                    } = peel_guard_mut(&mut instruction)
                     {
                         let mut new_args = vec![];
                         for (arg_i, arg) in args.iter().enumerate() {

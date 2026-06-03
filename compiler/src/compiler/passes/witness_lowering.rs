@@ -155,6 +155,28 @@ impl WitnessLowering {
                                 elem_type: new_elem_type,
                             });
                         }
+                        OpCode::MkRepeatedDyn {
+                            result: r,
+                            element,
+                            seq_type: s,
+                            count,
+                            elem_type: tp,
+                        } => {
+                            let new_elem_type = self.witness_lowering_in_type(&tp);
+                            let new_element = self.convert_if_needed(
+                                element,
+                                &new_elem_type,
+                                type_info,
+                                &mut emitter,
+                            );
+                            emitter.emit(OpCode::MkRepeatedDyn {
+                                result: r,
+                                element: new_element,
+                                seq_type: s,
+                                count,
+                                elem_type: new_elem_type,
+                            });
+                        }
                         OpCode::Alloc {
                             result: r,
                             elem_type: tp,

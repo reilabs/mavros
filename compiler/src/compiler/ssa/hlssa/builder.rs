@@ -355,12 +355,20 @@ pub trait HLEmitter {
 
     fn mk_repeated_dyn(
         &mut self,
-        _element: ValueId,
-        _seq_type: SequenceTargetType,
-        _count: ValueId,
-        _elem_type: Type,
+        element: ValueId,
+        seq_type: SequenceTargetType,
+        count: ValueId,
+        elem_type: Type,
     ) -> ValueId {
-        todo!();
+        let r = self.fresh_value();
+        self.emit(OpCode::MkRepeatedDyn {
+            result: r,
+            element,
+            count,
+            seq_type,
+            elem_type,
+        });
+        r
     }
 
     fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {

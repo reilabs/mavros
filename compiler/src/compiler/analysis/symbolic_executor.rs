@@ -120,6 +120,16 @@ pub trait Context<V> {
         panic!("ICE: backend does not implement slice_len");
     }
 
+    fn mk_repeated_dyn(
+        &mut self,
+        _element: &V,
+        _length: &V,
+        _seq_type: SequenceTargetType,
+        _elem_type: &Type,
+    ) -> V {
+        panic!("ICE: backend does not implement mk_repeated_dyn");
+    }
+
     /// Handle a Guard instruction. Receives the inner opcode, the condition value,
     /// all resolved inner inputs, and result types. Returns values for each result.
     /// The implementer should nuke information on outputs and handle effectful ops
@@ -312,6 +322,20 @@ impl SymbolicExecutor {
                         let elem = scope[element].clone();
                         let a = vec![elem; *count];
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
+                    }
+                    crate::compiler::ssa::hlssa::OpCode::MkRepeatedDyn {
+                        result: r,
+                        element,
+                        seq_type,
+                        count,
+                        elem_type,
+                    } => {
+                        let element_val = scope[element].clone();
+                        let count_val = scope[count].clone();
+                        scope.insert(
+                            *r,
+                            ctx.mk_repeated_dyn(&element_val, &count_val, *seq_type, elem_type),
+                        );
                     }
                     crate::compiler::ssa::hlssa::OpCode::Alloc {
                         result: r,

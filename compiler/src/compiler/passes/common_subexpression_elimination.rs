@@ -962,6 +962,7 @@ impl CSE {
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
                     | OpCode::MkRepeated { .. }
+                    | OpCode::MkRepeatedDyn { .. }
                     | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }

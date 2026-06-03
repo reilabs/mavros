@@ -403,6 +403,27 @@ impl RCInsertion {
                         }
                         currently_live.insert(*element);
                     }
+                    OpCode::MkRepeatedDyn {
+                        result,
+                        element,
+                        seq_type: _,
+                        count: _,
+                        elem_type,
+                    } => {
+                        if self.type_needs_rc(elem_type) && !currently_live.contains(element) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: RefCountOp::Drop,
+                                value: *element,
+                            });
+                        }
+                        new_instructions.push(instruction.clone());
+                        if !currently_live.contains(result) {
+                            panic!(
+                                "ICE: Result of MkRepeatedDyn is immediately dropped. This is a bug."
+                            )
+                        }
+                        currently_live.insert(*element);
+                    }
                     OpCode::Alloc {
                         result,
                         elem_type: _,

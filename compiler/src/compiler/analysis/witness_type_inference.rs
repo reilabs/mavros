@@ -791,6 +791,15 @@ impl WitnessTypeInference {
                         WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
                     );
                 }
+                OpCode::MkRepeatedDyn {
+                    result: _,
+                    element: _,
+                    seq_type: _,
+                    count: _,
+                    elem_type: _,
+                } => {
+                    todo!();
+                }
                 OpCode::Spread { result, value, .. } => {
                     let val_wt = value_wt.get(value).unwrap().clone();
                     value_wt.insert(*result, val_wt);

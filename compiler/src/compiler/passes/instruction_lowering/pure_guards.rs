@@ -222,6 +222,7 @@ impl LowerPureGuards {
             | OpCode::BitRange { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::MkRepeatedDyn { .. }
             | OpCode::MkTuple { .. }
             | OpCode::TupleProj { .. }
             | OpCode::Load { .. }
