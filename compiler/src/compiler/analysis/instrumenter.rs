@@ -1802,6 +1802,25 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
     }
 
+    fn mk_repeated_dyn(
+        &mut self,
+        element: &SpecSplitValue,
+        length: &SpecSplitValue,
+        _seq_type: SequenceTargetType,
+        _elem_type: &Type,
+    ) -> SpecSplitValue {
+        fn repeat(elem: &Value, len: &Value) -> Value {
+            match len {
+                Value::U(_, n) => Value::Array(vec![elem.clone(); *n as usize]),
+                _ => Value::Array(vec![]),
+            }
+        }
+        SpecSplitValue {
+            unspecialized: repeat(&element.unspecialized, &length.unspecialized),
+            specialized: repeat(&element.specialized, &length.specialized),
+        }
+    }
+
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
             Value::Array(values) => Value::U(32, values.len() as u128),
@@ -1833,6 +1852,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 TypeExpr::Array(elem, size) => {
                     Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
                 }
+                TypeExpr::Slice(_) => Value::Array(vec![]),
                 TypeExpr::Tuple(elems) => Value::Tuple(elems.iter().map(unknown_value).collect()),
                 TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
                 TypeExpr::Ref(inner) => Value::Pointer(Rc::new(RefCell::new(unknown_value(inner)))),
