@@ -147,6 +147,11 @@ pub enum LLOp {
         a: ValueId,
         b: ValueId,
     },
+    FieldLt {
+        result: ValueId,
+        a: ValueId,
+        b: ValueId,
+    },
     FieldToLimbs {
         result: ValueId,
         src: ValueId,
@@ -252,7 +257,8 @@ impl Instruction for LLOp {
             LLOp::IntArith { a, b, .. }
             | LLOp::IntCmp { a, b, .. }
             | LLOp::FieldArith { a, b, .. }
-            | LLOp::FieldEq { a, b, .. } => vec![a, b].into_iter(),
+            | LLOp::FieldEq { a, b, .. }
+            | LLOp::FieldLt { a, b, .. } => vec![a, b].into_iter(),
 
             LLOp::Store { ptr, value } => vec![ptr, value].into_iter(),
             LLOp::Load { ptr, .. } => vec![ptr].into_iter(),
@@ -295,6 +301,7 @@ impl Instruction for LLOp {
             | LLOp::FieldArith { result, .. }
             | LLOp::FieldNeg { result, .. }
             | LLOp::FieldEq { result, .. }
+            | LLOp::FieldLt { result, .. }
             | LLOp::FieldToLimbs { result, .. }
             | LLOp::FieldFromLimbs { result, .. }
             | LLOp::MkStruct { result, .. }
@@ -332,6 +339,7 @@ impl Instruction for LLOp {
             | LLOp::FieldArith { result, .. }
             | LLOp::FieldNeg { result, .. }
             | LLOp::FieldEq { result, .. }
+            | LLOp::FieldLt { result, .. }
             | LLOp::FieldToLimbs { result, .. }
             | LLOp::FieldFromLimbs { result, .. }
             | LLOp::MkStruct { result, .. }
@@ -375,7 +383,8 @@ impl Instruction for LLOp {
             LLOp::IntArith { a, b, .. }
             | LLOp::IntCmp { a, b, .. }
             | LLOp::FieldArith { a, b, .. }
-            | LLOp::FieldEq { a, b, .. } => vec![a, b].into_iter(),
+            | LLOp::FieldEq { a, b, .. }
+            | LLOp::FieldLt { a, b, .. } => vec![a, b].into_iter(),
 
             LLOp::Store { ptr, value } => vec![ptr, value].into_iter(),
             LLOp::Load { ptr, .. } => vec![ptr].into_iter(),
@@ -430,7 +439,8 @@ impl Instruction for LLOp {
             LLOp::IntArith { result, a, b, .. }
             | LLOp::IntCmp { result, a, b, .. }
             | LLOp::FieldArith { result, a, b, .. }
-            | LLOp::FieldEq { result, a, b, .. } => vec![result, a, b].into_iter(),
+            | LLOp::FieldEq { result, a, b, .. }
+            | LLOp::FieldLt { result, a, b, .. } => vec![result, a, b].into_iter(),
 
             LLOp::Select {
                 result,
@@ -562,6 +572,9 @@ impl Instruction for LLOp {
             }
             LLOp::FieldEq { result, a, b } => {
                 format!("{} = field.eq {}, {}", v(*result), vr(*a), vr(*b))
+            }
+            LLOp::FieldLt { result, a, b } => {
+                format!("{} = field.lt {}, {}", v(*result), vr(*a), vr(*b))
             }
             LLOp::FieldToLimbs { result, src } => {
                 format!("{} = field.to_limbs {}", v(*result), vr(*src))

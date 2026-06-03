@@ -920,6 +920,13 @@ mod def {
     }
 
     #[opcode]
+    fn lt_field(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
+        unsafe {
+            *res = (ark_ff::PrimeField::into_bigint(a) < ark_ff::PrimeField::into_bigint(b)) as u64;
+        }
+    }
+
+    #[opcode]
     fn lt_u128(#[out] res: *mut u64, #[frame] a: U128, #[frame] b: U128) {
         unsafe {
             *res = (a < b) as u64;

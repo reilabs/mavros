@@ -702,7 +702,7 @@ impl CodeGen {
                             });
                         }
                         (TypeExpr::Field, TypeExpr::Field) => {
-                            emitter.push_op(bytecode::OpCode::LtU64 {
+                            emitter.push_op(bytecode::OpCode::LtField {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
@@ -1197,6 +1197,13 @@ impl CodeGen {
                             }
                             (TypeExpr::U(128), TypeExpr::U(128)) => {
                                 emitter.push_op(bytecode::OpCode::LtU128 {
+                                    res: cmp_result,
+                                    a: layouter.get_value(*lhs),
+                                    b: layouter.get_value(*rhs),
+                                });
+                            }
+                            (TypeExpr::Field, TypeExpr::Field) => {
+                                emitter.push_op(bytecode::OpCode::LtField {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
