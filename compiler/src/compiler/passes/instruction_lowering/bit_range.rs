@@ -110,6 +110,22 @@ impl LowerBitRangeOps {
         width: usize,
     ) {
         let value_type = context.types().get_value_type(value);
+        let selected = self.lower_witness_bit_range_to_field(b, value, value_type, offset, width);
+        b.emit(OpCode::Cast {
+            result,
+            value: selected,
+            target: cast_target_for_scalar_type(context.types().get_value_type(result)),
+        });
+    }
+
+    fn lower_witness_bit_range_to_field(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        value: ValueId,
+        value_type: &Type,
+        offset: usize,
+        width: usize,
+    ) -> ValueId {
         let source_bits = value_type.get_bit_size();
         let pure_value = b.value_of(value);
 
@@ -156,11 +172,7 @@ impl LowerBitRangeOps {
         };
 
         b.rangecheck(selected, width);
-        b.emit(OpCode::Cast {
-            result,
-            value: selected,
-            target: cast_target_for_scalar_type(context.types().get_value_type(result)),
-        });
+        selected
     }
 
     fn lower_witness_field_bit_range(
@@ -187,22 +199,29 @@ impl LowerBitRangeOps {
 
         let lo_u128 = b.cast_to(CastTarget::U(128), lo);
         let hi_u128 = b.cast_to(CastTarget::U(128), hi);
+        let limb_type = Type::witness_of(Type::u(128));
 
         let selected = if offset + width <= SPLIT {
-            let bits = b.bit_range(lo_u128, offset, width);
+            let bits = self.lower_witness_bit_range_to_field(b, lo_u128, &limb_type, offset, width);
             b.rangecheck(hi, 128);
-            b.cast_to_field(bits)
+            bits
         } else if offset >= SPLIT {
-            let bits = b.bit_range(hi_u128, offset - SPLIT, width);
+            let bits = self.lower_witness_bit_range_to_field(
+                b,
+                hi_u128,
+                &limb_type,
+                offset - SPLIT,
+                width,
+            );
             b.rangecheck(lo, 128);
-            b.cast_to_field(bits)
+            bits
         } else {
             let lo_width = SPLIT - offset;
             let hi_width = offset + width - SPLIT;
-            let lo_bits = b.bit_range(lo_u128, offset, lo_width);
-            let hi_bits = b.bit_range(hi_u128, 0, hi_width);
-            let lo_field = b.cast_to_field(lo_bits);
-            let hi_field = b.cast_to_field(hi_bits);
+            let lo_field =
+                self.lower_witness_bit_range_to_field(b, lo_u128, &limb_type, offset, lo_width);
+            let hi_field =
+                self.lower_witness_bit_range_to_field(b, hi_u128, &limb_type, 0, hi_width);
             let shift = b.field_const(two_pow(lo_width));
             let hi_shifted = b.mul(hi_field, shift);
             b.add(lo_field, hi_shifted)
