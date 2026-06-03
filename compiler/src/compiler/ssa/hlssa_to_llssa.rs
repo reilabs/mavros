@@ -831,6 +831,7 @@ fn lower_instruction(
                     e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
                 }
                 (CmpKind::Eq, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
+                (CmpKind::Lt, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
                 _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
             };
             val_map.insert(*result, ll_result);
@@ -1197,6 +1198,7 @@ fn lower_instruction(
                     {
                         e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
                     }
+                    (HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
                     _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                 },
             };

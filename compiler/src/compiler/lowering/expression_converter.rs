@@ -1305,6 +1305,11 @@ impl<'a> ExpressionConverter<'a> {
                 b.block(self.current_block).rangecheck(value, bit_size);
                 None
             }
+            "field_less_than" => {
+                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
+                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                Some(b.block(self.current_block).lt(lhs, rhs))
+            }
             "is_unconstrained" => {
                 let value = b
                     .ssa

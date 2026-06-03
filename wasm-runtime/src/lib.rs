@@ -209,3 +209,24 @@ pub unsafe extern "C" fn __field_div(
     let result = if b == Fr::ZERO { Fr::ZERO } else { a / b };
     unsafe { write_field(result_ptr, result) };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Field less-than
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __field_lt(
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    b0: i64,
+    b1: i64,
+    b2: i64,
+    b3: i64,
+) -> bool {
+    use ark_ff::PrimeField;
+    let a = limbs_to_fr(a0, a1, a2, a3);
+    let b = limbs_to_fr(b0, b1, b2, b3);
+    a.into_bigint() < b.into_bigint()
+}
