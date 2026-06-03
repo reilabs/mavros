@@ -115,6 +115,7 @@ pub enum Value {
     Field(Field),
     Array(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
+    PointerToTupleField(Box<Value>, usize),
     Unknown(ScalarKind),
     UnknownSlice,
     WitnessOf(Box<Value>),
@@ -512,6 +513,11 @@ impl Value {
             Value::Pointer(val) => {
                 val.borrow_mut().blind();
             }
+            Value::PointerToTupleField(_, _) => {
+                let mut val = self.ptr_read_value();
+                val.blind();
+                self.ptr_write_value(&val);
+            }
             Value::Tuple(vals) => {
                 for val in vals {
                     val.blind();
@@ -536,6 +542,11 @@ impl Value {
             }
             Value::Pointer(val) => {
                 val.borrow_mut().forget_concrete();
+            }
+            Value::PointerToTupleField(_, _) => {
+                let mut val = self.ptr_read_value();
+                val.forget_concrete();
+                self.ptr_write_value(&val);
             }
             Value::Tuple(vals) => {
                 for val in vals {
@@ -566,6 +577,9 @@ impl Value {
             }
             Value::Pointer(val) => {
                 ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig()))
+            }
+            Value::PointerToTupleField(_, _) => {
+                ValueSignature::PointerTo(Box::new(self.ptr_read_value().make_unspecialized_sig()))
             }
             Value::Tuple(vals) => {
                 ValueSignature::Tuple(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
@@ -989,20 +1003,48 @@ impl Value {
         }
     }
 
-    fn ptr_read(&self, _tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn ptr_read_value(&self) -> Value {
         match self {
             Value::Pointer(val) => val.borrow().clone(),
+            Value::PointerToTupleField(parent, index) => {
+                let parent_value = parent.ptr_read_value();
+                parent_value.tuple_get(*index)
+            }
             _ => panic!("Cannot read from {:?}", self),
         }
     }
 
-    fn ptr_write(&self, val: &Value, _instrumenter: &mut dyn OpInstrumenter) {
+    fn ptr_write_value(&self, val: &Value) {
         match self {
             Value::Pointer(ptr) => {
                 *(ptr.borrow_mut()) = val.clone();
             }
+            Value::PointerToTupleField(parent, index) => {
+                let mut parent_value = parent.ptr_read_value();
+                parent_value.tuple_set(*index, val.clone());
+                parent.ptr_write_value(&parent_value);
+            }
             _ => panic!("Cannot write to {:?}", self),
         }
+    }
+
+    fn tuple_set(&mut self, index: usize, val: Value) {
+        match self {
+            Value::WitnessOf(inner) => inner.tuple_set(index, val),
+            Value::Tuple(vals) => vals[index] = val,
+            _ => panic!(
+                "Cannot set tuple element of {:?} with index {:?}",
+                self, index
+            ),
+        }
+    }
+
+    fn ptr_read(&self, _tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
+        self.ptr_read_value()
+    }
+
+    fn ptr_write(&self, val: &Value, _instrumenter: &mut dyn OpInstrumenter) {
+        self.ptr_write_value(val);
     }
 
     fn assert_r1c(a: &Value, b: &Value, c: &Value, get_unspecialized: &mut dyn OpInstrumenter) {
@@ -1473,17 +1515,19 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn alloc(_elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
+    fn alloc(elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
-            specialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
+            unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(
+                elem_type,
+            )))),
+            specialized: Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(elem_type)))),
         }
     }
 
-    fn ref_tuple_splice(&self, _index: usize, out_type: &Type, _ctx: &mut CostAnalysis) -> Self {
+    fn ref_tuple_splice(&self, index: usize, _out_type: &Type, _ctx: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: Value::unknown_from_type(out_type),
-            specialized: Value::unknown_from_type(out_type),
+            unspecialized: Value::PointerToTupleField(Box::new(self.unspecialized.clone()), index),
+            specialized: Value::PointerToTupleField(Box::new(self.specialized.clone()), index),
         }
     }
 
@@ -1833,30 +1877,17 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         inputs: Vec<&SpecSplitValue>,
         result_types: Vec<&Type>,
     ) -> Vec<SpecSplitValue> {
-        fn unknown_value(ty: &Type) -> Value {
-            match &ty.expr {
-                TypeExpr::Field => Value::Unknown(ScalarKind::Field),
-                TypeExpr::U(s) | TypeExpr::I(s) => Value::Unknown(ScalarKind::U(*s)),
-                TypeExpr::Array(elem, size) => {
-                    Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
-                }
-                TypeExpr::Tuple(elems) => Value::Tuple(elems.iter().map(unknown_value).collect()),
-                TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
-                TypeExpr::Ref(inner) => Value::Pointer(Rc::new(RefCell::new(unknown_value(inner)))),
-                _ => panic!("Unsupported type for unknown value: {:?}", ty),
-            }
-        }
-
         // Nuke ptr contents for effectful ptr ops
         if let crate::compiler::ssa::hlssa::OpCode::Store { .. } = inner {
             // First input is the ptr
             if let Some(ptr_val) = inputs.first() {
-                if let Value::Pointer(p) = &ptr_val.unspecialized {
-                    *p.borrow_mut() = Value::Unknown(ScalarKind::Field);
-                }
-                if let Value::Pointer(p) = &ptr_val.specialized {
-                    *p.borrow_mut() = Value::Unknown(ScalarKind::Field);
-                }
+                let mut unspecialized = ptr_val.unspecialized.ptr_read_value();
+                unspecialized.forget_concrete();
+                ptr_val.unspecialized.ptr_write_value(&unspecialized);
+
+                let mut specialized = ptr_val.specialized.ptr_read_value();
+                specialized.forget_concrete();
+                ptr_val.specialized.ptr_write_value(&specialized);
             }
         }
 
@@ -1864,7 +1895,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         result_types
             .iter()
             .map(|ty| {
-                let v = unknown_value(ty);
+                let v = Value::unknown_from_type(ty);
                 SpecSplitValue {
                     unspecialized: v.clone(),
                     specialized: v,
