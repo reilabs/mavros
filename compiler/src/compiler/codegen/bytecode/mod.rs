@@ -788,6 +788,26 @@ impl CodeGen {
                         item,
                     });
                 }
+                hlssa::OpCode::MkRepeatedDyn {
+                    result: r,
+                    element,
+                    count,
+                    seq_type: _,
+                    elem_type: eltype,
+                } => {
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let item = layouter.get_value(*element);
+                    let length_pos = layouter.get_value(*count);
+                    let is_ptr = eltype.is_heap_allocated();
+                    let stride = layouter.type_size(eltype);
+                    emitter.push_op(bytecode::OpCode::ArrayAllocRepeatedDyn {
+                        res,
+                        length: length_pos,
+                        element: item,
+                        stride,
+                        ptr_elems: if is_ptr { 1 } else { 0 },
+                    });
+                }
                 hlssa::OpCode::MkTuple {
                     result,
                     elems,

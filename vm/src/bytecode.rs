@@ -818,6 +818,36 @@ mod def {
     }
 
     #[opcode]
+    fn array_alloc_repeated_dyn(
+        #[out] res: *mut BoxedValue,
+        #[frame] length: u64,
+        element: FramePosition,
+        stride: usize,
+        ptr_elems: u64,
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let count = length as usize;
+        let size = count * stride;
+        let is_ptr = ptr_elems != 0;
+        let layout = BoxedLayout::array(size, is_ptr);
+        let array = BoxedValue::alloc(layout, vm);
+        for i in 0..count {
+            let tgt = array.array_idx(i, stride);
+            unsafe {
+                frame.write_to(tgt, element.0 as isize, stride);
+            }
+        }
+        if is_ptr && count > 0 {
+            let elem = unsafe { *(array.array_idx(0, stride) as *mut BoxedValue) };
+            elem.inc_rc(count as u64);
+        }
+        unsafe {
+            *res = array;
+        }
+    }
+
+    #[opcode]
     #[inline(never)]
     fn tuple_alloc(
         #[out] res: *mut BoxedValue,
