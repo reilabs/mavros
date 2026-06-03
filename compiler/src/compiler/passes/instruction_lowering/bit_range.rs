@@ -111,13 +111,39 @@ impl LowerBitRangeOps {
     ) {
         let value_type = context.types().get_value_type(value);
         let source_bits = value_type.get_bit_size();
+        let pure_value = b.value_of(value);
 
         if offset == 0 {
-            self.lower_witness_low_bit_range(b, context, result, value, width, source_bits);
+            let value_field = b.cast_to_field(value);
+            let high_bits = source_bits - width;
+            let low = if high_bits == 0 {
+                value_field
+            } else {
+                let high_hint = lower_pure_bit_range_value(
+                    b,
+                    pure_value,
+                    &value_type.strip_witness(),
+                    width,
+                    high_bits,
+                );
+                let high_hint = b.cast_to_field(high_hint);
+                let high = b.write_witness(high_hint);
+                b.rangecheck(high, high_bits);
+
+                let shift = b.field_const(two_pow(width));
+                let high_shifted = b.mul(high, shift);
+                b.sub(value_field, high_shifted)
+            };
+
+            b.rangecheck(low, width);
+            b.emit(OpCode::Cast {
+                result,
+                value: low,
+                target: cast_target_for_scalar_type(context.types().get_value_type(result)),
+            });
             return;
         }
 
-        let pure_value = b.value_of(value);
         let hint =
             lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), offset, width);
         let hint_field = b.cast_to_field(hint);
@@ -178,46 +204,6 @@ impl LowerBitRangeOps {
         b.constrain(flag, diff, zero);
     }
 
-    fn lower_witness_low_bit_range(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        result: ValueId,
-        value: ValueId,
-        width: usize,
-        source_bits: usize,
-    ) {
-        let value_type = context.types().get_value_type(value);
-        let value_field = b.cast_to_field(value);
-        let high_bits = source_bits - width;
-        let low = if high_bits == 0 {
-            value_field
-        } else {
-            let pure_value = b.value_of(value);
-            let high_hint = lower_pure_bit_range_value(
-                b,
-                pure_value,
-                &value_type.strip_witness(),
-                width,
-                high_bits,
-            );
-            let high_hint = b.cast_to_field(high_hint);
-            let high = b.write_witness(high_hint);
-            b.rangecheck(high, high_bits);
-
-            let shift = b.field_const(two_pow(width));
-            let high_shifted = b.mul(high, shift);
-            b.sub(value_field, high_shifted)
-        };
-
-        b.rangecheck(low, width);
-        b.emit(OpCode::Cast {
-            result,
-            value: low,
-            target: cast_target_for_scalar_type(context.types().get_value_type(result)),
-        });
-    }
-
     fn lower_witness_field_bit_range(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -226,22 +212,64 @@ impl LowerBitRangeOps {
         offset: usize,
         width: usize,
     ) {
-        let limbs = decompose_field_limbs(b, value);
-        let selection =
-            select_field_bits_from_limbs(b, limbs.lo_u128, limbs.hi_u128, offset, width);
+        const SPLIT: usize = 128;
 
-        if !selection.lo_rangechecked {
-            b.rangecheck(limbs.lo, 128);
-        }
-        if !selection.hi_rangechecked {
-            b.rangecheck(limbs.hi, 128);
-        }
+        let two_128 = b.field_const(two_pow(128));
+        let value_pure = b.value_of(value);
+        let lo_hint = b.cast_to(CastTarget::U(128), value_pure);
+        let lo_hint = b.cast_to_field(lo_hint);
+        let hi_hint = b.sub(value_pure, lo_hint);
+        let hi_hint = b.div(hi_hint, two_128);
+        let hi = b.write_witness(hi_hint);
 
-        assert_field_canonical(b, limbs.lo, limbs.hi, limbs.two_128);
+        let value_field = b.cast_to_field(value);
+        let hi_shifted = b.mul(hi, two_128);
+        let lo = b.sub(value_field, hi_shifted);
+
+        let lo_u128 = b.cast_to(CastTarget::U(128), lo);
+        let hi_u128 = b.cast_to(CastTarget::U(128), hi);
+
+        let selected = if offset + width <= SPLIT {
+            let bits = b.bit_range(lo_u128, offset, width);
+            b.rangecheck(hi, 128);
+            b.cast_to_field(bits)
+        } else if offset >= SPLIT {
+            let bits = b.bit_range(hi_u128, offset - SPLIT, width);
+            b.rangecheck(lo, 128);
+            b.cast_to_field(bits)
+        } else {
+            let lo_width = SPLIT - offset;
+            let hi_width = offset + width - SPLIT;
+            let lo_bits = b.bit_range(lo_u128, offset, lo_width);
+            let hi_bits = b.bit_range(hi_u128, 0, hi_width);
+            let lo_field = b.cast_to_field(lo_bits);
+            let hi_field = b.cast_to_field(hi_bits);
+            let shift = b.field_const(two_pow(lo_width));
+            let hi_shifted = b.mul(hi_field, shift);
+            b.add(lo_field, hi_shifted)
+        };
+
+        let lo_pure = b.value_of(lo);
+        let lo_pure = b.cast_to(CastTarget::U(128), lo_pure);
+        let modulus_m1_lo_u = b.u_const(128, MODULUS_M1_LO);
+        let borrow_bool = b.lt(modulus_m1_lo_u, lo_pure);
+        let borrow_hint = b.cast_to_field(borrow_bool);
+        let borrow = b.write_witness(borrow_hint);
+        b.constrain(borrow, borrow, borrow);
+
+        let modulus_m1_lo = b.field_const(Field::from(MODULUS_M1_LO));
+        let modulus_hi = b.field_const(Field::from(MODULUS_HI));
+        let borrow_shifted = b.mul(borrow, two_128);
+        let lo_gap = b.sub(modulus_m1_lo, lo);
+        let lo_gap = b.add(lo_gap, borrow_shifted);
+        let hi_gap = b.sub(modulus_hi, hi);
+        let hi_gap = b.sub(hi_gap, borrow);
+        b.rangecheck(lo_gap, 128);
+        b.rangecheck(hi_gap, 128);
 
         b.emit(OpCode::Cast {
             result,
-            value: selection.value,
+            value: selected,
             target: CastTarget::Field,
         });
     }
@@ -251,126 +279,6 @@ impl LowerBitRangeOps {
 const MODULUS_HI: u128 = 0x30644e72e131a029b85045b68181585d;
 /// Low 128 bits of `p - 1`, so that `p - 1 = MODULUS_HI * 2^128 + MODULUS_M1_LO`.
 const MODULUS_M1_LO: u128 = 0x2833e84879b9709143e1f593f0000000;
-
-struct FieldLimbs {
-    lo: ValueId,
-    hi: ValueId,
-    lo_u128: ValueId,
-    hi_u128: ValueId,
-    two_128: ValueId,
-}
-
-/// Split a `WitnessOf<Field>` into `lo` (low 128 bits) and `hi` limbs. The caller must prove both
-/// limbs are range-checked, either through bit extraction or through standalone rangechecks, then
-/// assert canonicality with `assert_field_canonical`.
-fn decompose_field_limbs(b: &mut HLBlockEmitter<'_>, value: ValueId) -> FieldLimbs {
-    let two_128 = b.field_const(two_pow(128));
-
-    let hi = witness_high_limb(b, value, two_128);
-    let lo = recover_low_limb(b, value, hi, two_128);
-
-    let lo_u128 = b.cast_to(CastTarget::U(128), lo);
-    let hi_u128 = b.cast_to(CastTarget::U(128), hi);
-    FieldLimbs {
-        lo,
-        hi,
-        lo_u128,
-        hi_u128,
-        two_128,
-    }
-}
-
-fn witness_high_limb(b: &mut HLBlockEmitter<'_>, value: ValueId, two_128: ValueId) -> ValueId {
-    let value = b.value_of(value);
-    let low = b.cast_to(CastTarget::U(128), value);
-    let low = b.cast_to_field(low);
-    let high = b.sub(value, low);
-    let high = b.div(high, two_128);
-    b.write_witness(high)
-}
-
-fn recover_low_limb(
-    b: &mut HLBlockEmitter<'_>,
-    value: ValueId,
-    hi: ValueId,
-    two_128: ValueId,
-) -> ValueId {
-    let value = b.cast_to_field(value);
-    let hi_shifted = b.mul(hi, two_128);
-    b.sub(value, hi_shifted)
-}
-
-/// Assert `lo + hi * 2^128 <= p - 1` (i.e. the limbs are the canonical representation), by
-/// performing the 254-bit subtraction `(p - 1) - value` with a hinted borrow and range-checking
-/// that both resulting limbs are non-negative.
-fn assert_field_canonical(b: &mut HLBlockEmitter<'_>, lo: ValueId, hi: ValueId, two_128: ValueId) {
-    let lo_pure = b.value_of(lo);
-    let lo_pure = b.cast_to(CastTarget::U(128), lo_pure);
-    let modulus_m1_lo_u = b.u_const(128, MODULUS_M1_LO);
-    let borrow_bool = b.lt(modulus_m1_lo_u, lo_pure);
-    let borrow_hint = b.cast_to_field(borrow_bool);
-    let borrow = b.write_witness(borrow_hint);
-    b.constrain(borrow, borrow, borrow);
-
-    let modulus_m1_lo = b.field_const(Field::from(MODULUS_M1_LO));
-    let modulus_hi = b.field_const(Field::from(MODULUS_HI));
-    let borrow_shifted = b.mul(borrow, two_128);
-
-    let lo_gap = b.sub(modulus_m1_lo, lo);
-    let lo_gap = b.add(lo_gap, borrow_shifted);
-    let hi_gap = b.sub(modulus_hi, hi);
-    let hi_gap = b.sub(hi_gap, borrow);
-    b.rangecheck(lo_gap, 128);
-    b.rangecheck(hi_gap, 128);
-}
-
-struct FieldBitSelection {
-    value: ValueId,
-    lo_rangechecked: bool,
-    hi_rangechecked: bool,
-}
-
-/// Select bits `[offset, offset + width)` from the 128-bit `lo` limb and high `hi` limb. A selected
-/// limb is range-checked by the integer `BitRange` proof, so the caller can skip its standalone
-/// limb rangecheck.
-fn select_field_bits_from_limbs(
-    b: &mut HLBlockEmitter<'_>,
-    lo: ValueId,
-    hi: ValueId,
-    offset: usize,
-    width: usize,
-) -> FieldBitSelection {
-    const SPLIT: usize = 128;
-    if offset + width <= SPLIT {
-        let bits = b.bit_range(lo, offset, width);
-        FieldBitSelection {
-            value: b.cast_to_field(bits),
-            lo_rangechecked: true,
-            hi_rangechecked: false,
-        }
-    } else if offset >= SPLIT {
-        let bits = b.bit_range(hi, offset - SPLIT, width);
-        FieldBitSelection {
-            value: b.cast_to_field(bits),
-            lo_rangechecked: false,
-            hi_rangechecked: true,
-        }
-    } else {
-        let lo_width = SPLIT - offset;
-        let hi_width = offset + width - SPLIT;
-        let lo_bits = b.bit_range(lo, offset, lo_width);
-        let hi_bits = b.bit_range(hi, 0, hi_width);
-        let lo_field = b.cast_to_field(lo_bits);
-        let hi_field = b.cast_to_field(hi_bits);
-        let shift = b.field_const(two_pow(lo_width));
-        let hi_shifted = b.mul(hi_field, shift);
-        FieldBitSelection {
-            value: b.add(lo_field, hi_shifted),
-            lo_rangechecked: true,
-            hi_rangechecked: true,
-        }
-    }
-}
 
 fn lower_pure_bit_range_value(
     b: &mut HLBlockEmitter<'_>,
