@@ -96,6 +96,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Call { .. }
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
+            | OpCode::RefTupleSplice { .. }
             | OpCode::MemOp { .. }
             | OpCode::Constrain { .. }
             | OpCode::Lookup { .. }

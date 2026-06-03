@@ -981,6 +981,24 @@ impl CodeGen {
                         field_size,
                     });
                 }
+                hlssa::OpCode::RefTupleSplice {
+                    result: r,
+                    tuple_ref,
+                    field_idx,
+                } => {
+                    let res = layouter.alloc_ptr(*r);
+                    let tuple_type = type_info.get_value_type(*tuple_ref).get_pointed();
+                    let tuple_elems = tuple_type.get_tuple_elements();
+                    let field_offset: usize = tuple_elems[..*field_idx]
+                        .iter()
+                        .map(|elem_type| layouter.type_size(elem_type))
+                        .sum();
+                    emitter.push_op(bytecode::OpCode::RefTupleSplice {
+                        res,
+                        parent: layouter.get_value(*tuple_ref),
+                        field_offset,
+                    });
+                }
                 hlssa::OpCode::ArraySet {
                     result: r,
                     array: arr,

@@ -66,6 +66,7 @@ impl WitnessWriteToFresh {
                         | OpCode::Not { .. }
                         | OpCode::Store { .. }
                         | OpCode::Load { .. }
+                        | OpCode::RefTupleSplice { .. }
                         | OpCode::Assert { .. }
                         | OpCode::AssertCmp { .. }
                         | OpCode::AssertR1C { .. }

@@ -49,6 +49,7 @@ pub enum Value {
     Array(Rc<RefCell<ArrayData>>),
     Tuple(Rc<RefCell<TupleData>>),
     Ptr(Rc<RefCell<Value>>),
+    PtrToTupleField(Box<Value>, usize),
     Invalid,
 }
 
@@ -236,6 +237,30 @@ impl Value {
     pub fn expect_ptr(&self) -> Rc<RefCell<Value>> {
         match self {
             Value::Ptr(ptr) => ptr.clone(),
+            _ => panic!("expected ptr"),
+        }
+    }
+
+    fn ptr_read_value(&self) -> Value {
+        match self {
+            Value::Ptr(ptr) => ptr.borrow().clone(),
+            Value::PtrToTupleField(parent, index) => {
+                let parent_value = parent.ptr_read_value();
+                parent_value.expect_tuple().borrow().data[*index].clone()
+            }
+            _ => panic!("expected ptr"),
+        }
+    }
+
+    fn ptr_write_value(&self, value: &Value) {
+        match self {
+            Value::Ptr(ptr) => {
+                *ptr.borrow_mut() = value.clone();
+            }
+            Value::PtrToTupleField(parent, index) => {
+                let parent_value = parent.ptr_read_value();
+                parent_value.expect_tuple().borrow_mut().data[*index] = value.clone();
+            }
             _ => panic!("expected ptr"),
         }
     }
@@ -771,14 +796,16 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Ptr(Rc::new(RefCell::new(Value::Invalid)))
     }
 
+    fn ref_tuple_splice(&self, index: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+        Value::PtrToTupleField(Box::new(self.clone()), index)
+    }
+
     fn ptr_write(&self, value: &Self, _ctx: &mut R1CGen) {
-        let ptr = self.expect_ptr();
-        *ptr.borrow_mut() = value.clone();
+        self.ptr_write_value(value);
     }
 
     fn ptr_read(&self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        let ptr = self.expect_ptr();
-        ptr.borrow().clone()
+        self.ptr_read_value()
     }
 
     fn expect_constant_bool(&self, _ctx: &mut R1CGen) -> bool {

@@ -460,6 +460,8 @@ impl<'a> ExpressionConverter<'a> {
         noirc_frontend::monomorphization::ast::Type,
         Vec<AccessStep>,
     ) {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+
         match lvalue {
             LValue::Ident(ident) => match &ident.definition {
                 Definition::Local(local_id) => {
@@ -469,6 +471,9 @@ impl<'a> ExpressionConverter<'a> {
                             .get(local_id)
                             .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
                         (ptr, ident.typ.clone(), vec![])
+                    } else if let AstType::Reference(inner, _) = &ident.typ {
+                        let ptr = self.convert_ident(ident, b).unwrap();
+                        (ptr, inner.as_ref().clone(), vec![])
                     } else {
                         panic!("Cannot assign to immutable local variable: {}", ident.name)
                     }
@@ -755,25 +760,8 @@ impl<'a> ExpressionConverter<'a> {
         }
         match unary.operator {
             noirc_frontend::ast::UnaryOp::Reference { .. } => {
-                // &mut x on a let-mut local: return the ptr directly (no load)
-                if let Expression::Ident(ident) = unary.rhs.as_ref() {
-                    if let Definition::Local(local_id) = &ident.definition {
-                        if self.mutable_locals.contains(local_id) {
-                            let ptr = *self.bindings.get(local_id).unwrap();
-                            return Some(ptr);
-                        }
-                    }
-                }
-                // &mut expr.field — would require splicing a pointer into an
-                // existing allocation (aliasing). Not yet supported.
-                if let Expression::ExtractTupleField(inner, _) = unary.rhs.as_ref() {
-                    let is_deref = matches!(inner.as_ref(), Expression::Unary(u) if matches!(u.operator, noirc_frontend::ast::UnaryOp::Dereference { .. }));
-                    if !is_deref {
-                        todo!(
-                            "&mut on tuple field requiring pointer splicing not yet supported: {:?}",
-                            unary.rhs
-                        );
-                    }
+                if let Some(ptr) = self.convert_place_to_ref(&unary.rhs, b) {
+                    return Some(ptr);
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
@@ -819,6 +807,48 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    fn convert_place_to_ref(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match expr {
+            Expression::Ident(ident) => {
+                if let Definition::Local(local_id) = &ident.definition {
+                    if self.mutable_locals.contains(local_id) {
+                        return Some(*self.bindings.get(local_id).unwrap());
+                    }
+                }
+                None
+            }
+            Expression::Unary(unary)
+                if !unary.skip
+                    && matches!(
+                        unary.operator,
+                        noirc_frontend::ast::UnaryOp::Dereference { .. }
+                    ) =>
+            {
+                self.convert_expression(&unary.rhs, b)
+            }
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                let parent_ref = if matches!(
+                    tuple_expr.return_type().as_deref(),
+                    Some(noirc_frontend::monomorphization::ast::Type::Reference(_, _))
+                ) {
+                    self.convert_expression(tuple_expr, b).unwrap()
+                } else {
+                    self.convert_place_to_ref(tuple_expr, b)?
+                };
+                Some(
+                    b.block(self.current_block)
+                        .ref_tuple_splice(parent_ref, *idx),
+                )
+            }
+            Expression::Clone(inner) => self.convert_place_to_ref(inner, b),
+            _ => None,
+        }
+    }
+
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
@@ -842,13 +872,23 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         if let Some(typ) = tuple_expr.return_type() {
-            if matches!(
-                typ.as_ref(),
-                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
-            ) {
-                panic!(
-                    "Unsupported tuple/struct field extraction on Noir reference: field .{idx} of `{tuple_expr}` has type `{typ}`. Mavros needs reference-place projection here; auto-deref would produce invalid SSA."
-                );
+            if let noirc_frontend::monomorphization::ast::Type::Reference(inner, _) = typ.as_ref() {
+                let parent_ref = self.convert_expression(tuple_expr, b).unwrap();
+                let mut e = b.block(self.current_block);
+                let child_ref = e.ref_tuple_splice(parent_ref, idx);
+                let child_type = match inner.as_ref() {
+                    noirc_frontend::monomorphization::ast::Type::Tuple(fields) => &fields[idx],
+                    other => {
+                        panic!("Reference field extraction on non-tuple type: {:?}", other);
+                    }
+                };
+                return Some(match child_type {
+                    noirc_frontend::monomorphization::ast::Type::Tuple(_)
+                    | noirc_frontend::monomorphization::ast::Type::Array(_, _)
+                    | noirc_frontend::monomorphization::ast::Type::Vector(_)
+                    | noirc_frontend::monomorphization::ast::Type::Reference(_, _) => child_ref,
+                    _ => e.load(child_ref),
+                });
             }
         }
         let value = self.convert_expression(tuple_expr, b).unwrap();

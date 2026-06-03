@@ -4,7 +4,7 @@ use crate::{ConstraintsLayout, Field, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _, Field as _};
 use mavros_opcode_gen::interpreter;
 
-use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
+use crate::array::{BoxedLayout, BoxedValue, RefTupleSplice, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
 use crate::array::DataType;
@@ -1126,6 +1126,24 @@ mod def {
     }
 
     #[opcode]
+    fn ref_tuple_splice(
+        #[out] res: *mut BoxedValue,
+        #[frame] parent: BoxedValue,
+        field_offset: usize,
+        vm: &mut VM,
+    ) {
+        let cell = BoxedValue::alloc(BoxedLayout::ref_tuple_splice(), vm);
+        parent.inc_rc(1);
+        unsafe {
+            *(cell.as_ref_tuple_splice()) = RefTupleSplice {
+                parent,
+                field_offset,
+            };
+            *res = cell;
+        }
+    }
+
+    #[opcode]
     #[inline(never)]
     fn ref_store(
         #[frame] cell: BoxedValue,
@@ -1135,21 +1153,23 @@ mod def {
         frame: Frame,
         vm: &mut VM,
     ) {
+        let target = cell.ref_data();
         if elem_rc != 0 {
-            let old = unsafe { *(cell.data() as *mut BoxedValue) };
+            let old = unsafe { *(target as *mut BoxedValue) };
             if !old.0.is_null() {
                 old.dec_rc(vm);
             }
         }
         unsafe {
-            frame.write_to(cell.data(), source.0 as isize, stride);
+            frame.write_to(target, source.0 as isize, stride);
         }
     }
 
     #[opcode]
     fn ref_load(#[out] res: *mut u64, #[frame] cell: BoxedValue, stride: usize) {
+        let source = cell.ref_data();
         unsafe {
-            ptr::copy_nonoverlapping(cell.data(), res, stride);
+            ptr::copy_nonoverlapping(source, res, stride);
         }
     }
 

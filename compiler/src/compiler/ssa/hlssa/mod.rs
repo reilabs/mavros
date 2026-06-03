@@ -97,6 +97,11 @@ pub enum OpCode {
         result: ValueId,
         ptr: ValueId,
     },
+    RefTupleSplice {
+        result: ValueId,
+        tuple_ref: ValueId,
+        field_idx: usize,
+    },
     Assert {
         value: ValueId,
     },
@@ -682,6 +687,19 @@ impl Instruction for OpCode {
                     idx
                 )
             }
+            OpCode::RefTupleSplice {
+                result,
+                tuple_ref,
+                field_idx,
+            } => {
+                format!(
+                    "v{}{} = ref_tuple_splice(v{}, {})",
+                    result.0,
+                    annotate_value(*result),
+                    tuple_ref.0,
+                    field_idx
+                )
+            }
             OpCode::MkTuple {
                 result,
                 elems,
@@ -843,6 +861,11 @@ impl Instruction for OpCode {
                 value: c,
                 offset: _,
                 width: _,
+            }
+            | Self::RefTupleSplice {
+                result: _,
+                tuple_ref: c,
+                field_idx: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -968,6 +991,7 @@ impl Instruction for OpCode {
             | Self::SlicePush { result: r, .. }
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
+            | Self::RefTupleSplice { result: r, .. }
             | Self::MkSeq { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
@@ -1024,6 +1048,7 @@ impl Instruction for OpCode {
             | Self::SlicePush { result: r, .. }
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
+            | Self::RefTupleSplice { result: r, .. }
             | Self::MkSeq { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
@@ -1168,6 +1193,11 @@ impl Instruction for OpCode {
                 value: c,
                 offset: _,
                 width: _,
+            }
+            | Self::RefTupleSplice {
+                result: _,
+                tuple_ref: c,
+                field_idx: _,
             } => vec![c].into_iter(),
             Self::Call {
                 results: _,
@@ -1357,6 +1387,11 @@ impl Instruction for OpCode {
             Self::AssertR1C { a, b, c } | Self::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             Self::Store { ptr: a, value: b }
             | Self::Load { result: a, ptr: b }
+            | Self::RefTupleSplice {
+                result: a,
+                tuple_ref: b,
+                field_idx: _,
+            }
             | Self::AssertCmp {
                 kind: _,
                 lhs: a,

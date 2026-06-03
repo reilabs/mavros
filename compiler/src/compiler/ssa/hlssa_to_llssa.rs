@@ -1165,6 +1165,10 @@ fn lower_instruction(
             lower_ref_load(e, val_map, *result, *ptr, &inner_type);
         }
 
+        OpCode::RefTupleSplice { .. } => {
+            panic!("RefTupleSplice is not supported by HLSSA->LLSSA lowering yet");
+        }
+
         OpCode::Assert { value } => {
             let ll_value = val_map[value];
             assert(e, ll_value);

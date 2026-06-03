@@ -180,7 +180,9 @@ impl Types {
 
             for instruction in block.get_instructions() {
                 self.run_opcode(instruction, &mut function_info, function_types)
-                    .unwrap_or_else(|_| panic!("Error running opcode {:?}", instruction));
+                    .unwrap_or_else(|err| {
+                        panic!("Error running opcode {:?}: {}", instruction, err)
+                    });
             }
         }
 
@@ -264,6 +266,28 @@ impl Types {
                 function_info
                     .values
                     .insert(*result, ptr_type.get_refered().clone());
+                Ok(())
+            }
+            OpCode::RefTupleSplice {
+                result,
+                tuple_ref,
+                field_idx,
+            } => {
+                let ptr_type = function_info.values.get(tuple_ref).ok_or_else(|| {
+                    format!(
+                        "Pointer value {:?} not found in type assignments",
+                        tuple_ref
+                    )
+                })?;
+                if !ptr_type.is_ref() {
+                    return Err(format!(
+                        "RefTupleSplice expects a reference type, got {}",
+                        ptr_type
+                    ));
+                }
+                let tuple_type = ptr_type.get_refered();
+                let element_type = tuple_type.get_tuple_element(*field_idx);
+                function_info.values.insert(*result, element_type.ref_of());
                 Ok(())
             }
             OpCode::MemOp { kind: _, value: _ } => Ok(()),

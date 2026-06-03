@@ -106,6 +106,7 @@ impl DCE {
             OpCode::FreshWitness { .. } => self.config.witness_shape_frozen,
             OpCode::ToBits { .. } | OpCode::ToRadix { .. } => !self.config.witness_shape_frozen,
             OpCode::Load { .. }
+            | OpCode::RefTupleSplice { .. }
             | OpCode::BinaryArithOp { .. }
             | OpCode::Cmp { .. }
             | OpCode::Alloc { .. }

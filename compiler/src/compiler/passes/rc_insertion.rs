@@ -460,6 +460,26 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*ptr);
                     }
+                    OpCode::RefTupleSplice {
+                        result,
+                        tuple_ref,
+                        field_idx: _,
+                    } => {
+                        if self.needs_rc(type_info, result) && !currently_live.contains(result) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: RefCountOp::Drop,
+                                value: *result,
+                            });
+                        }
+                        if !currently_live.contains(tuple_ref) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: RefCountOp::Drop,
+                                value: *tuple_ref,
+                            });
+                        }
+                        new_instructions.push(instruction.clone());
+                        currently_live.insert(*tuple_ref);
+                    }
                     OpCode::Call {
                         results: returns,
                         function: _,

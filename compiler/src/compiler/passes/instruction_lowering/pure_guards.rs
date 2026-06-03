@@ -85,6 +85,7 @@ impl LowerPureGuards {
             | OpCode::AssertR1C { .. }
             | OpCode::Constrain { .. }
             | OpCode::MemOp { .. }
+            | OpCode::RefTupleSplice { .. }
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. } => false,
 

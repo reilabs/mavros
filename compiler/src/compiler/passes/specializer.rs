@@ -554,6 +554,16 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
+    fn ref_tuple_splice(
+        &self,
+        index: usize,
+        _out_type: &Type,
+        ctx: &mut SpecializationState,
+    ) -> Self {
+        let val = HLEmitter::ref_tuple_splice(ctx, self.0, index);
+        Self(val)
+    }
+
     fn ptr_write(&self, val: &Self, ctx: &mut SpecializationState) {
         ctx.store(self.0, val.0);
     }

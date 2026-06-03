@@ -22,6 +22,7 @@ pub enum DataType {
     ADMulConst = 5,
     Struct = 6,
     RefCell = 7,
+    RefTupleSplice = 8,
 }
 
 /// Per-shape struct layout, interned by the compiler and shared across all
@@ -148,6 +149,10 @@ impl BoxedLayout {
         (self.0 as usize >> 8) & 0x8 != 0
     }
 
+    pub fn ref_tuple_splice() -> Self {
+        Self::new(DataType::RefTupleSplice)
+    }
+
     pub fn ad_const() -> Self {
         Self::new(DataType::ADConst)
     }
@@ -197,6 +202,7 @@ impl BoxedLayout {
             DataType::BoxedArray | DataType::PrimArray => 8 * self.array_size(),
             DataType::Struct => 8 * self.as_struct(struct_layouts).total_size(),
             DataType::RefCell => 8 * self.ref_cell_elem_size(),
+            DataType::RefTupleSplice => size_of::<RefTupleSplice>(),
         };
         base_byte_size.div_ceil(8) + 3
     }
@@ -228,6 +234,12 @@ pub struct ADSum {
     pub da: Field,
     pub db: Field,
     pub dc: Field,
+}
+
+#[derive(Clone, Copy)]
+pub struct RefTupleSplice {
+    pub parent: BoxedValue,
+    pub field_offset: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -280,6 +292,22 @@ impl BoxedValue {
         self.data() as *mut ADSum
     }
 
+    pub fn as_ref_tuple_splice(&self) -> *mut RefTupleSplice {
+        self.data() as *mut RefTupleSplice
+    }
+
+    pub fn ref_data(&self) -> *mut u64 {
+        match self.layout().data_type() {
+            DataType::RefCell => self.data(),
+            DataType::RefTupleSplice => {
+                let splice = unsafe { *self.as_ref_tuple_splice() };
+                let parent_tuple = unsafe { *(splice.parent.ref_data() as *mut BoxedValue) };
+                unsafe { parent_tuple.data().add(splice.field_offset) }
+            }
+            other => panic!("ref_data called on non-ref boxed value: {:?}", other),
+        }
+    }
+
     #[inline(always)]
     pub fn bump_da(&self, amount: Field, vm: &mut VM) {
         match self.layout().data_type() {
@@ -311,6 +339,9 @@ impl BoxedValue {
             }
             DataType::RefCell => {
                 panic!("bump_da for RefCell")
+            }
+            DataType::RefTupleSplice => {
+                panic!("bump_da for RefTupleSplice")
             }
         }
     }
@@ -347,6 +378,9 @@ impl BoxedValue {
             DataType::RefCell => {
                 panic!("bump_db for RefCell")
             }
+            DataType::RefTupleSplice => {
+                panic!("bump_db for RefTupleSplice")
+            }
         }
     }
 
@@ -381,6 +415,9 @@ impl BoxedValue {
             }
             DataType::RefCell => {
                 panic!("bump_dc for RefCell")
+            }
+            DataType::RefTupleSplice => {
+                panic!("bump_dc for RefTupleSplice")
             }
         }
     }
@@ -449,6 +486,11 @@ impl BoxedValue {
                                 queue.push_back(elem);
                             }
                         }
+                        item.free(vm);
+                    }
+                    DataType::RefTupleSplice => {
+                        let splice = unsafe { *item.as_ref_tuple_splice() };
+                        queue.push_back(splice.parent);
                         item.free(vm);
                     }
                     DataType::ADConst => {

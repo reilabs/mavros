@@ -413,6 +413,7 @@ impl WitnessLowering {
                         | OpCode::SExt { .. }
                         | OpCode::BitRange { .. }
                         | OpCode::Load { .. }
+                        | OpCode::RefTupleSplice { .. }
                         | OpCode::Assert { .. }
                         | OpCode::AssertCmp { .. }
                         | OpCode::AssertR1C { .. }

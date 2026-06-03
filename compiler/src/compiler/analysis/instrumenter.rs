@@ -1480,6 +1480,13 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
+    fn ref_tuple_splice(&self, _index: usize, out_type: &Type, _ctx: &mut CostAnalysis) -> Self {
+        Self {
+            unspecialized: Value::unknown_from_type(out_type),
+            specialized: Value::unknown_from_type(out_type),
+        }
+    }
+
     fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::WitnessOf(Box::new(self.unspecialized.clone())),

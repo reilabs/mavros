@@ -17,7 +17,7 @@ use crate::compiler::{
     ssa::{
         BlockId, Terminator, ValueId,
         hlssa::{
-            HLFunction, HLSSA, OpCode, Type, TypeExpr,
+            HLFunction, HLSSA, OpCode, Type,
             builder::{HLFunctionBuilder, HLSSABuilder},
         },
     },
@@ -124,7 +124,14 @@ impl Mem2Reg {
                         result: lhs,
                         ptr: rhs,
                     } => {
-                        let replacement = values.get(&rhs).expect("Uninitialized ptr value");
+                        let replacement = values.get(&rhs).unwrap_or_else(|| {
+                            panic!(
+                                "Uninitialized ptr value v{} in function {} block {}",
+                                rhs.0,
+                                function.get_name(),
+                                block_id.0
+                            )
+                        });
                         value_replacements.insert(lhs, *replacement);
                     }
                     _ => {
@@ -357,6 +364,9 @@ impl Mem2Reg {
                             return false;
                         }
                     }
+                    OpCode::RefTupleSplice { .. } => {
+                        return false;
+                    }
                     OpCode::Call {
                         results: rets,
                         function: _,
@@ -388,16 +398,6 @@ impl Mem2Reg {
     }
 
     fn type_contains_ptr(&self, typ: &Type) -> bool {
-        match typ {
-            Type {
-                expr: TypeExpr::Ref(_),
-                ..
-            } => true,
-            Type {
-                expr: TypeExpr::Array(inner, _),
-                ..
-            } => self.type_contains_ptr(inner),
-            _ => false,
-        }
+        typ.contains_ptrs()
     }
 }

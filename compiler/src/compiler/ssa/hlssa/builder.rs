@@ -309,6 +309,16 @@ pub trait HLEmitter {
         r
     }
 
+    fn ref_tuple_splice(&mut self, tuple_ref: ValueId, field_idx: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::RefTupleSplice {
+            result: r,
+            tuple_ref,
+            field_idx,
+        });
+        r
+    }
+
     fn mk_tuple(&mut self, elems: Vec<ValueId>, element_types: Vec<Type>) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::MkTuple {

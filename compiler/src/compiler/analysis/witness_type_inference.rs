@@ -612,6 +612,32 @@ impl WitnessTypeInference {
                         }
                     }
                 }
+                OpCode::RefTupleSplice {
+                    result: r,
+                    tuple_ref,
+                    field_idx,
+                } => {
+                    let ptr_wt = value_wt.get(tuple_ref).unwrap();
+                    let ptr_info = ptr_wt.toplevel_info();
+                    let origin = Self::find_alloc_origin(tuple_ref, alloc_inner);
+                    let tuple_inner = if let Some(origin_id) = origin {
+                        alloc_inner.get(&origin_id).unwrap().clone()
+                    } else {
+                        match ptr_wt {
+                            WitnessShape::Ref(_, inner) => *inner.clone(),
+                            _ => panic!("RefTupleSplice from non-ref witness type"),
+                        }
+                    };
+
+                    let child = match tuple_inner {
+                        WitnessShape::Tuple(top, children) => {
+                            let elem_wt = children[*field_idx].clone();
+                            elem_wt.with_toplevel_info(top.join(elem_wt.toplevel_info()))
+                        }
+                        other => panic!("RefTupleSplice on non-tuple witness type: {:?}", other),
+                    };
+                    value_wt.insert(*r, WitnessShape::Ref(ptr_info, Box::new(child)));
+                }
                 OpCode::ReadGlobal {
                     result: r,
                     offset: _,

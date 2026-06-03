@@ -69,6 +69,7 @@ where
     ) -> Self;
     fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type]) -> Self;
     fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
+    fn ref_tuple_splice(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
@@ -327,6 +328,21 @@ impl SymbolicExecutor {
                     crate::compiler::ssa::hlssa::OpCode::Load { result: r, ptr } => {
                         let ptr = &scope[ptr];
                         scope.insert(*r, ptr.ptr_read(&fn_type_info.get_value_type(*r), ctx));
+                    }
+                    crate::compiler::ssa::hlssa::OpCode::RefTupleSplice {
+                        result: r,
+                        tuple_ref,
+                        field_idx,
+                    } => {
+                        let tuple_ref = &scope[tuple_ref];
+                        scope.insert(
+                            *r,
+                            tuple_ref.ref_tuple_splice(
+                                *field_idx,
+                                fn_type_info.get_value_type(*r),
+                                ctx,
+                            ),
+                        );
                     }
                     crate::compiler::ssa::hlssa::OpCode::AssertR1C { a, b, c } => {
                         let a = &scope[a];
