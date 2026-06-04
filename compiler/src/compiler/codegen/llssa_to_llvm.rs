@@ -10,6 +10,7 @@ use std::path::Path;
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
@@ -27,11 +28,55 @@ use crate::compiler::ssa::llssa::{
     Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
     Type,
 };
+use crate::compiler::ssa::traits::Instruction;
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
 use mavros_wasm_layout::WASM_PTR_SIZE;
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
+
+struct InputFieldTapeEntry {
+    input_offset: u32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum PointerKey {
+    Value(ValueId),
+    StructField { ptr: ValueId, struct_type: LLStruct, field: usize },
+}
+
+#[derive(Clone)]
+struct StructFieldPtrInfo {
+    ptr: ValueId,
+    struct_type: LLStruct,
+    field: usize,
+}
+
+#[derive(Clone)]
+struct ArrayElemPtrInfo {
+    ptr: ValueId,
+    ptr_key: PointerKey,
+    elem_type: LLStruct,
+    index: u64,
+}
+
+struct ArrayCopyEntry {
+    dst_ptr: ValueId,
+    dst_key: PointerKey,
+    src_ptr: ValueId,
+    src_key: PointerKey,
+    elem_type: LLStruct,
+    dst_index: u64,
+    src_index: u64,
+}
+
+struct InputArrayCopyEntry {
+    dst_ptr: ValueId,
+    dst_key: PointerKey,
+    elem_type: LLStruct,
+    dst_index: u64,
+    input_offset: u32,
+}
 
 fn ll_type_size_bytes(ty: &Type) -> u32 {
     match ty {
@@ -57,6 +102,14 @@ fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
     }
 }
 
+fn mask_int_constant(value: u128, bits: u32) -> u128 {
+    if bits >= 128 {
+        value
+    } else {
+        value & ((1u128 << bits) - 1)
+    }
+}
+
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
@@ -64,9 +117,15 @@ pub struct LLVMCodeGen<'ctx> {
     builder: Builder<'ctx>,
     value_map: HashMap<ValueId, BasicValueEnum<'ctx>>,
     constant_values: HashMap<ValueId, BasicValueEnum<'ctx>>,
+    constant_ints: HashMap<ValueId, (u32, u128)>,
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
+    main_input_base: Option<PointerValue<'ctx>>,
+    main_param_input_offsets: HashMap<ValueId, (u32, Type)>,
+    struct_field_ptrs: HashMap<ValueId, StructFieldPtrInfo>,
+    array_elem_ptrs: HashMap<ValueId, ArrayElemPtrInfo>,
+    loaded_array_elems: HashMap<ValueId, ArrayElemPtrInfo>,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
@@ -92,9 +151,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             builder,
             value_map: HashMap::new(),
             constant_values: HashMap::new(),
+            constant_ints: HashMap::new(),
             block_map: HashMap::new(),
             function_map: HashMap::new(),
             vm_ptr: None,
+            main_input_base: None,
+            main_param_input_offsets: HashMap::new(),
+            struct_field_ptrs: HashMap::new(),
+            array_elem_ptrs: HashMap::new(),
+            loaded_array_elems: HashMap::new(),
             field_mul_fn: None,
             field_add_fn: None,
             field_sub_fn: None,
@@ -325,6 +390,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     // ── Runtime functions ───────────────────────────────────────────────
 
+    fn mark_noinline(&self, function: FunctionValue<'ctx>) {
+        let noinline = Attribute::get_named_enum_kind_id("noinline");
+        let attr = self.context.create_enum_attribute(noinline, 0);
+        function.add_attribute(AttributeLoc::Function, attr);
+    }
+
     fn declare_runtime_functions(&mut self) {
         let field_type = self.field_llvm_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -335,10 +406,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // __field_mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_mul_fn = Some(
-            self.module
-                .add_function("__field_mul", field_mul_type, None),
-        );
+        let field_mul = self
+            .module
+            .add_function("__field_mul", field_mul_type, None);
+        self.mark_noinline(field_mul);
+        self.field_mul_fn = Some(field_mul);
 
         // malloc(i32) -> ptr  (i32 size for wasm32)
         let malloc_type = ptr_type.fn_type(&[i32_type.into()], false);
@@ -357,28 +429,33 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // __field_add(FieldElem, FieldElem) -> FieldElem
         let field_add_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_add_fn = Some(
-            self.module
-                .add_function("__field_add", field_add_type, None),
-        );
+        let field_add = self
+            .module
+            .add_function("__field_add", field_add_type, None);
+        self.mark_noinline(field_add);
+        self.field_add_fn = Some(field_add);
 
         // __field_sub(FieldElem, FieldElem) -> FieldElem
         let field_sub_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_sub_fn = Some(
-            self.module
-                .add_function("__field_sub", field_sub_type, None),
-        );
+        let field_sub = self
+            .module
+            .add_function("__field_sub", field_sub_type, None);
+        self.mark_noinline(field_sub);
+        self.field_sub_fn = Some(field_sub);
 
         // __field_div(FieldElem, FieldElem) -> FieldElem
         let field_div_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_div_fn = Some(
-            self.module
-                .add_function("__field_div", field_div_type, None),
-        );
+        let field_div = self
+            .module
+            .add_function("__field_div", field_div_type, None);
+        self.mark_noinline(field_div);
+        self.field_div_fn = Some(field_div);
 
         // __field_lt(FieldElem, FieldElem) -> bool
         let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
+        let field_lt = self.module.add_function("__field_lt", field_lt_type, None);
+        self.mark_noinline(field_lt);
+        self.field_lt_fn = Some(field_lt);
 
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
@@ -421,6 +498,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .const_snapshot()
             .into_iter()
             .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
+            .collect();
+        self.constant_ints = llssa
+            .const_snapshot()
+            .into_iter()
+            .filter_map(|(vid, c)| match c.as_ref() {
+                Constant::Int { bits, value } => Some((vid, (*bits, *value))),
+                _ => None,
+            })
             .collect();
 
         // First pass: declare all functions
@@ -470,6 +555,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         };
 
         let fn_value = self.module.add_function(name, fn_type, None);
+        self.mark_noinline(fn_value);
         self.function_map.insert(fn_id, fn_value);
     }
 
@@ -484,6 +570,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.value_map
             .extend(self.constant_values.iter().map(|(vid, val)| (*vid, *val)));
         self.block_map.clear();
+        self.main_input_base = None;
+        self.main_param_input_offsets.clear();
+        self.struct_field_ptrs.clear();
+        self.array_elem_ptrs.clear();
+        self.loaded_array_elems.clear();
 
         let fn_value = self.function_map[&fn_id];
         let entry_block_id = function.get_entry_id();
@@ -534,10 +625,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 match terminator {
                     Terminator::Jmp(target_id, args) => {
                         for (i, arg_id) in args.iter().enumerate() {
-                            if let Some(phi) = phi_nodes.get(&(*target_id, i)) {
-                                if let Some(arg_val) = self.value_map.get(arg_id) {
-                                    phi.add_incoming(&[(arg_val, current_bb)]);
-                                }
+                            if let Some(phi) = phi_nodes.get(&(*target_id, i)).copied() {
+                                let arg_val = self.value(*arg_id);
+                                phi.add_incoming(&[(&arg_val, current_bb)]);
                             }
                         }
                     }
@@ -555,8 +645,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .vm_ptr
             .expect("main parameters are loaded relative to the VM pointer");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
-        let i32_type = self.context.i32_type();
         let mut parameters = parameters;
         if let Some((vm_param, _)) = parameters.next() {
             self.value_map.insert(*vm_param, vm_ptr.into());
@@ -573,32 +661,53 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "inputs_slot",
             )
             .unwrap();
-        let mut input_ptr = self
+        let input_ptr = self
             .builder
             .build_load(ptr_type, input_slot, "inputs_ptr")
             .unwrap()
             .into_pointer_value();
+        self.main_input_base = Some(input_ptr);
 
+        let mut offset = 0u32;
         for (param_id, param_type) in parameters {
-            let llvm_type = self.convert_type(param_type);
-            let value = self
-                .builder
-                .build_load(llvm_type, input_ptr, &format!("v{}", param_id.0))
-                .unwrap();
-            self.value_map.insert(*param_id, value);
-
-            let offset = ll_type_size_bytes(param_type);
-            input_ptr = unsafe {
-                self.builder
-                    .build_gep(
-                        i8_type,
-                        input_ptr,
-                        &[i32_type.const_int(offset as u64, false)],
-                        "next_input",
-                    )
-                    .unwrap()
-            };
+            self.main_param_input_offsets
+                .insert(*param_id, (offset, param_type.clone()));
+            let param_size = ll_type_size_bytes(param_type);
+            offset += param_size;
         }
+    }
+
+    fn value(&mut self, value: ValueId) -> BasicValueEnum<'ctx> {
+        if let Some(existing) = self.value_map.get(&value).copied() {
+            return existing;
+        }
+
+        let (offset, ty) = self
+            .main_param_input_offsets
+            .get(&value)
+            .cloned()
+            .unwrap_or_else(|| panic!("Value v{} has not been lowered", value.0));
+        let input_base = self
+            .main_input_base
+            .expect("main input value requested outside main");
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
+        let input_ptr = unsafe {
+            self.builder
+                .build_gep(
+                    i8_type,
+                    input_base,
+                    &[i32_type.const_int(offset as u64, false)],
+                    "lazy_input",
+                )
+                .unwrap()
+        };
+        let loaded = self
+            .builder
+            .build_load(self.convert_type(&ty), input_ptr, &format!("v{}", value.0))
+            .unwrap();
+        self.value_map.insert(value, loaded);
+        loaded
     }
 
     fn compile_block(
@@ -627,12 +736,456 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         self.builder.position_at_end(bb);
 
-        for instruction in block.get_instructions() {
-            self.compile_instruction(instruction);
+        let instructions: Vec<&LLOp> = block.get_instructions().collect();
+        let mut i = 0;
+        while i < instructions.len() {
+            if let Some(next) =
+                self.try_compile_main_input_field_tape_run(&instructions, i, block.get_terminator())
+            {
+                i = next;
+            } else if let Some(next) =
+                self.try_compile_input_array_copy_run(&instructions, i, block.get_terminator())
+            {
+                i = next;
+            } else if let Some(next) =
+                self.try_compile_contiguous_array_copy_run(&instructions, i, block.get_terminator())
+            {
+                i = next;
+            } else {
+                self.compile_instruction(instructions[i]);
+                i += 1;
+            }
         }
 
         if let Some(terminator) = block.get_terminator() {
             self.compile_terminator(terminator);
+        }
+    }
+
+    fn try_compile_main_input_field_tape_run(
+        &mut self,
+        instructions: &[&LLOp],
+        start: usize,
+        terminator: Option<&Terminator>,
+    ) -> Option<usize> {
+        const MIN_RUN_LEN: usize = 16;
+
+        let input_base = self.main_input_base?;
+        let field_type = Type::Struct(LLStruct::field_elem());
+        let field_size = ll_type_size_bytes(&field_type);
+
+        let first = self.match_main_input_field_tape_entry(instructions, start)?;
+        let mut entries = vec![first];
+        let mut cursor = start + 5;
+
+        while let Some(entry) = self.match_main_input_field_tape_entry(instructions, cursor) {
+            let expected = entries[0].input_offset + field_size * entries.len() as u32;
+            if entry.input_offset != expected {
+                break;
+            }
+            entries.push(entry);
+            cursor += 5;
+        }
+
+        if entries.len() < MIN_RUN_LEN {
+            return None;
+        }
+
+        if self.tape_entry_results_used_after(instructions, start, cursor, terminator) {
+            return None;
+        }
+
+        let vm_type = self
+            .convert_struct_type(&LLStruct::witgen_vm())
+            .into_struct_type();
+        let vm_ptr = self
+            .vm_ptr
+            .expect("main input tape writes require a VM pointer");
+        let cursor_slot = self
+            .builder
+            .build_struct_gep(
+                vm_type,
+                vm_ptr,
+                LLStruct::WITGEN_VM_WITNESS as u32,
+                "input_witness_cursor_slot",
+            )
+            .unwrap();
+        let cursor_ptr = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                cursor_slot,
+                "input_witness_cursor",
+            )
+            .unwrap()
+            .into_pointer_value();
+
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
+        let src = unsafe {
+            self.builder
+                .build_gep(
+                    i8_type,
+                    input_base,
+                    &[i32_type.const_int(entries[0].input_offset as u64, false)],
+                    "input_fields_src",
+                )
+                .unwrap()
+        };
+        let bytes = i32_type.const_int((entries.len() as u32 * field_size) as u64, false);
+        self.builder
+            .build_memcpy(cursor_ptr, 1, src, 1, bytes)
+            .unwrap();
+
+        let field_llvm_type = self.convert_struct_type(&LLStruct::field_elem());
+        let next = unsafe {
+            self.builder
+                .build_gep(
+                    field_llvm_type,
+                    cursor_ptr,
+                    &[i32_type.const_int(entries.len() as u64, false)],
+                    "input_witness_cursor_next",
+                )
+                .unwrap()
+        };
+        self.builder.build_store(cursor_slot, next).unwrap();
+
+        Some(cursor)
+    }
+
+    fn match_main_input_field_tape_entry(
+        &self,
+        instructions: &[&LLOp],
+        start: usize,
+    ) -> Option<InputFieldTapeEntry> {
+        let [slot, load, store_value, bump, store_next] = instructions.get(start..start + 5)?
+        else {
+            return None;
+        };
+
+        let value_id = match (*slot, *load, *store_value, *bump, *store_next) {
+            (
+                LLOp::StructFieldPtr {
+                    result: slot_id,
+                    struct_type,
+                    field,
+                    ..
+                },
+                LLOp::Load {
+                    result: cursor_id,
+                    ptr: load_ptr,
+                    ty,
+                },
+                LLOp::Store {
+                    ptr: store_ptr,
+                    value: value_id,
+                },
+                LLOp::ArrayElemPtr {
+                    result: next_id,
+                    ptr: bump_ptr,
+                    elem_type,
+                    index,
+                },
+                LLOp::Store {
+                    ptr: next_store_ptr,
+                    value: next_value,
+                },
+            ) if struct_type == &LLStruct::witgen_vm()
+                && *field == LLStruct::WITGEN_VM_WITNESS
+                && load_ptr == slot_id
+                && ty == &Type::Ptr
+                && store_ptr == cursor_id
+                && bump_ptr == cursor_id
+                && elem_type == &LLStruct::field_elem()
+                && self.is_one_const(*index)
+                && next_store_ptr == slot_id
+                && next_value == next_id =>
+            {
+                *value_id
+            }
+            _ => return None,
+        };
+
+        let (input_offset, input_type) = self.main_param_input_offsets.get(&value_id)?;
+        if input_type != &Type::Struct(LLStruct::field_elem()) {
+            return None;
+        }
+
+        Some(InputFieldTapeEntry {
+            input_offset: *input_offset,
+        })
+    }
+
+    fn is_one_const(&self, value: ValueId) -> bool {
+        self.constant_ints
+            .get(&value)
+            .is_some_and(|(_, constant)| *constant == 1)
+    }
+
+    fn try_compile_contiguous_array_copy_run(
+        &mut self,
+        instructions: &[&LLOp],
+        start: usize,
+        terminator: Option<&Terminator>,
+    ) -> Option<usize> {
+        const MIN_RUN_LEN: usize = 8;
+
+        let first = self.match_array_copy_entry(instructions, start)?;
+        if first.src_key == first.dst_key {
+            return None;
+        }
+
+        let mut entries = vec![first];
+        let mut cursor = start + 2;
+
+        while let Some(entry) = self.match_array_copy_entry(instructions, cursor) {
+            let expected_dst = entries[0].dst_index + entries.len() as u64;
+            let expected_src = entries[0].src_index + entries.len() as u64;
+            if entry.dst_key != entries[0].dst_key
+                || entry.src_key != entries[0].src_key
+                || entry.elem_type != entries[0].elem_type
+                || entry.dst_index != expected_dst
+                || entry.src_index != expected_src
+            {
+                break;
+            }
+            entries.push(entry);
+            cursor += 2;
+        }
+
+        if entries.len() < MIN_RUN_LEN {
+            return None;
+        }
+
+        if self.tape_entry_results_used_after(instructions, start, cursor, terminator) {
+            return None;
+        }
+
+        let elem_type = entries[0].elem_type.clone();
+        let llvm_elem_type = self.convert_struct_type(&elem_type);
+        let i32_type = self.context.i32_type();
+        let dst_base = self.value(entries[0].dst_ptr).into_pointer_value();
+        let src_base = self.value(entries[0].src_ptr).into_pointer_value();
+
+        let dst = unsafe {
+            self.builder
+                .build_gep(
+                    llvm_elem_type,
+                    dst_base,
+                    &[i32_type.const_int(entries[0].dst_index, false)],
+                    "array_copy_dst",
+                )
+                .unwrap()
+        };
+        let src = unsafe {
+            self.builder
+                .build_gep(
+                    llvm_elem_type,
+                    src_base,
+                    &[i32_type.const_int(entries[0].src_index, false)],
+                    "array_copy_src",
+                )
+                .unwrap()
+        };
+        let bytes = i32_type.const_int(
+            ll_struct_size_bytes(&elem_type) as u64 * entries.len() as u64,
+            false,
+        );
+        self.builder.build_memcpy(dst, 1, src, 1, bytes).unwrap();
+
+        Some(cursor)
+    }
+
+    fn try_compile_input_array_copy_run(
+        &mut self,
+        instructions: &[&LLOp],
+        start: usize,
+        terminator: Option<&Terminator>,
+    ) -> Option<usize> {
+        const MIN_RUN_LEN: usize = 8;
+
+        let first = self.match_input_array_copy_entry(instructions, start)?;
+        let mut entries = vec![first];
+        let mut cursor = start + 2;
+        let elem_size = ll_struct_size_bytes(&entries[0].elem_type);
+
+        while let Some(entry) = self.match_input_array_copy_entry(instructions, cursor) {
+            let expected_dst = entries[0].dst_index + entries.len() as u64;
+            let expected_input = entries[0].input_offset + elem_size * entries.len() as u32;
+            if entry.dst_key != entries[0].dst_key
+                || entry.elem_type != entries[0].elem_type
+                || entry.dst_index != expected_dst
+                || entry.input_offset != expected_input
+            {
+                break;
+            }
+            entries.push(entry);
+            cursor += 2;
+        }
+
+        if entries.len() < MIN_RUN_LEN {
+            return None;
+        }
+
+        if self.tape_entry_results_used_after(instructions, start, cursor, terminator) {
+            return None;
+        }
+
+        let input_base = self.main_input_base?;
+        let elem_type = entries[0].elem_type.clone();
+        let llvm_elem_type = self.convert_struct_type(&elem_type);
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
+        let dst_base = self.value(entries[0].dst_ptr).into_pointer_value();
+        let dst = unsafe {
+            self.builder
+                .build_gep(
+                    llvm_elem_type,
+                    dst_base,
+                    &[i32_type.const_int(entries[0].dst_index, false)],
+                    "input_array_copy_dst",
+                )
+                .unwrap()
+        };
+        let src = unsafe {
+            self.builder
+                .build_gep(
+                    i8_type,
+                    input_base,
+                    &[i32_type.const_int(entries[0].input_offset as u64, false)],
+                    "input_array_copy_src",
+                )
+                .unwrap()
+        };
+        let bytes = i32_type.const_int(elem_size as u64 * entries.len() as u64, false);
+        self.builder.build_memcpy(dst, 1, src, 1, bytes).unwrap();
+
+        Some(cursor)
+    }
+
+    fn match_array_copy_entry(
+        &self,
+        instructions: &[&LLOp],
+        start: usize,
+    ) -> Option<ArrayCopyEntry> {
+        let [aep, store] = instructions.get(start..start + 2)? else {
+            return None;
+        };
+
+        let (dst_ptr, elem_type, dst_index, value) = match (*aep, *store) {
+            (
+                LLOp::ArrayElemPtr {
+                    result,
+                    ptr,
+                    elem_type,
+                    index,
+                },
+                LLOp::Store {
+                    ptr: store_ptr,
+                    value,
+                },
+            ) if result == store_ptr => (*ptr, elem_type.clone(), self.const_u64(*index)?, *value),
+            _ => return None,
+        };
+
+        let src = self.loaded_array_elems.get(&value)?;
+        if src.elem_type != elem_type {
+            return None;
+        }
+
+        Some(ArrayCopyEntry {
+            dst_ptr,
+            dst_key: self.pointer_key(dst_ptr),
+            src_ptr: src.ptr,
+            src_key: src.ptr_key.clone(),
+            elem_type,
+            dst_index,
+            src_index: src.index,
+        })
+    }
+
+    fn match_input_array_copy_entry(
+        &self,
+        instructions: &[&LLOp],
+        start: usize,
+    ) -> Option<InputArrayCopyEntry> {
+        let [aep, store] = instructions.get(start..start + 2)? else {
+            return None;
+        };
+
+        let (dst_ptr, elem_type, dst_index, value) = match (*aep, *store) {
+            (
+                LLOp::ArrayElemPtr {
+                    result,
+                    ptr,
+                    elem_type,
+                    index,
+                },
+                LLOp::Store {
+                    ptr: store_ptr,
+                    value,
+                },
+            ) if result == store_ptr => (*ptr, elem_type.clone(), self.const_u64(*index)?, *value),
+            _ => return None,
+        };
+
+        let (input_offset, input_type) = self.main_param_input_offsets.get(&value)?;
+        if input_type != &Type::Struct(elem_type.clone()) {
+            return None;
+        }
+
+        Some(InputArrayCopyEntry {
+            dst_ptr,
+            dst_key: self.pointer_key(dst_ptr),
+            elem_type,
+            dst_index,
+            input_offset: *input_offset,
+        })
+    }
+
+    fn const_u64(&self, value: ValueId) -> Option<u64> {
+        let (_, constant) = self.constant_ints.get(&value)?;
+        (*constant).try_into().ok()
+    }
+
+    fn pointer_key(&self, value: ValueId) -> PointerKey {
+        match self.struct_field_ptrs.get(&value) {
+            Some(info) => PointerKey::StructField {
+                ptr: info.ptr,
+                struct_type: info.struct_type.clone(),
+                field: info.field,
+            },
+            None => PointerKey::Value(value),
+        }
+    }
+
+    fn tape_entry_results_used_after(
+        &self,
+        instructions: &[&LLOp],
+        start: usize,
+        end: usize,
+        terminator: Option<&Terminator>,
+    ) -> bool {
+        let mut results = std::collections::HashSet::new();
+        for instruction in &instructions[start..end] {
+            results.extend(instruction.get_results().copied());
+        }
+
+        for instruction in &instructions[end..] {
+            if instruction
+                .get_inputs()
+                .any(|input| results.contains(input))
+            {
+                return true;
+            }
+        }
+
+        match terminator {
+            Some(Terminator::Jmp(_, args)) | Some(Terminator::Return(args)) => {
+                args.iter().any(|arg| results.contains(arg))
+            }
+            Some(Terminator::JmpIf(cond, _, _)) => results.contains(cond),
+            None => false,
         }
     }
 
@@ -641,8 +1194,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn compile_instruction(&mut self, op: &LLOp) {
         match op {
             LLOp::IntArith { kind, result, a, b } => {
-                let lhs = self.value_map[a].into_int_value();
-                let rhs = self.value_map[b].into_int_value();
+                let lhs = self.value(*a).into_int_value();
+                let rhs = self.value(*b).into_int_value();
                 let name = &format!("v{}", result.0);
 
                 let val = match kind {
@@ -689,7 +1242,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 bits,
                 result_bits,
             } => {
-                let input = self.value_map[value].into_int_value();
+                let input = self.value(*value).into_int_value();
                 let val =
                     self.compile_spread_bits(input, *bits, *result_bits, &format!("v{}", result.0));
                 self.value_map.insert(*result, val.into());
@@ -703,7 +1256,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 odd_bits,
                 even_bits,
             } => {
-                let input = self.value_map[value].into_int_value();
+                let input = self.value(*value).into_int_value();
                 let active_input_bits = (*bits as u32) * 2;
                 let input = self
                     .builder
@@ -742,8 +1295,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::IntCmp { kind, result, a, b } => {
-                let lhs = self.value_map[a].into_int_value();
-                let rhs = self.value_map[b].into_int_value();
+                let lhs = self.value(*a).into_int_value();
+                let rhs = self.value(*b).into_int_value();
                 let predicate = match kind {
                     IntCmpOp::Eq => IntPredicate::EQ,
                     IntCmpOp::ULt => IntPredicate::ULT,
@@ -757,7 +1310,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::Not { result, value } => {
-                let val = self.value_map[value].into_int_value();
+                let val = self.value(*value).into_int_value();
                 let not_val = self
                     .builder
                     .build_not(val, &format!("v{}", result.0))
@@ -766,8 +1319,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldArith { kind, result, a, b } => {
-                let lhs = self.value_map[a];
-                let rhs = self.value_map[b];
+                let lhs = self.value(*a);
+                let rhs = self.value(*b);
 
                 let val = match kind {
                     FieldArithOp::Mul => {
@@ -822,7 +1375,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let llvm_type = self.convert_struct_type(struct_type).into_struct_type();
                 let mut agg = llvm_type.get_undef();
                 for (i, field_id) in fields.iter().enumerate() {
-                    let field_val = self.value_map[field_id];
+                    let field_val = self.value(*field_id);
                     agg = self
                         .builder
                         .build_insert_value(agg, field_val, i as u32, "mk")
@@ -838,7 +1391,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type: _,
                 field,
             } => {
-                let agg = self.value_map[value].into_struct_value();
+                let agg = self.value(*value).into_struct_value();
                 let val = self
                     .builder
                     .build_extract_value(agg, *field as u32, &format!("v{}", result.0))
@@ -852,9 +1405,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 if_t,
                 if_f,
             } => {
-                let c = self.value_map[cond].into_int_value();
-                let t = self.value_map[if_t];
-                let f = self.value_map[if_f];
+                let c = self.value(*cond).into_int_value();
+                let t = self.value(*if_t);
+                let f = self.value(*if_f);
                 let val = self
                     .builder
                     .build_select(c, t, f, &format!("v{}", result.0))
@@ -867,7 +1420,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 value,
                 to_bits,
             } => {
-                let val = self.value_map[value].into_int_value();
+                let val = self.value(*value).into_int_value();
                 let target_type = self
                     .context
                     .custom_width_int_type(
@@ -879,6 +1432,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .build_int_truncate(val, target_type, &format!("v{}", result.0))
                     .unwrap();
                 self.value_map.insert(*result, truncated.into());
+                if let Some((_, constant)) = self.constant_ints.get(value).copied() {
+                    self.constant_ints
+                        .insert(*result, (*to_bits, mask_int_constant(constant, *to_bits)));
+                }
             }
 
             LLOp::ZExt {
@@ -886,7 +1443,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 value,
                 to_bits,
             } => {
-                let val = self.value_map[value].into_int_value();
+                let val = self.value(*value).into_int_value();
                 let target_type = self
                     .context
                     .custom_width_int_type(
@@ -898,12 +1455,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .build_int_z_extend(val, target_type, &format!("v{}", result.0))
                     .unwrap();
                 self.value_map.insert(*result, extended.into());
+                if let Some((_, constant)) = self.constant_ints.get(value).copied() {
+                    self.constant_ints
+                        .insert(*result, (*to_bits, mask_int_constant(constant, *to_bits)));
+                }
             }
 
             LLOp::FieldEq { result, a, b } => {
                 // Field equality: compare all 4 limbs
-                let a_val = self.value_map[a].into_struct_value();
-                let b_val = self.value_map[b].into_struct_value();
+                let a_val = self.value(*a).into_struct_value();
+                let b_val = self.value(*b).into_struct_value();
                 let mut eq_acc = self.context.bool_type().const_int(1, false);
                 for i in 0..4u32 {
                     let a_limb = self
@@ -926,8 +1487,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldLt { result, a, b } => {
-                let lhs = self.value_map[a];
-                let rhs = self.value_map[b];
+                let lhs = self.value(*a);
+                let rhs = self.value(*b);
                 let lt_fn = self.field_lt_fn.expect("__field_lt not declared");
                 let call_site = self
                     .builder
@@ -941,7 +1502,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldFromLimbs { result, limbs } => {
                 // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
-                let limb_vals = self.value_map[limbs];
+                let limb_vals = self.value(*limbs);
                 let from_fn = self
                     .field_from_limbs_fn
                     .expect("__field_from_limbs not declared");
@@ -957,7 +1518,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldToLimbs { result, src } => {
                 // Convert Montgomery form to raw limbs via __field_to_limbs.
-                let field = self.value_map[src];
+                let field = self.value(*src);
                 let to_fn = self
                     .field_to_limbs_fn
                     .expect("__field_to_limbs not declared");
@@ -996,24 +1557,27 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::Free { ptr } => {
-                let p = self.value_map[ptr].into_pointer_value();
+                let p = self.value(*ptr).into_pointer_value();
                 let free_fn = self.free_fn.expect("free not declared");
                 self.builder.build_call(free_fn, &[p.into()], "").unwrap();
             }
 
             LLOp::Load { result, ptr, ty } => {
-                let p = self.value_map[ptr].into_pointer_value();
+                let p = self.value(*ptr).into_pointer_value();
                 let llvm_ty = self.convert_type(ty);
                 let val = self
                     .builder
                     .build_load(llvm_ty, p, &format!("v{}", result.0))
                     .unwrap();
                 self.value_map.insert(*result, val);
+                if let Some(ptr_info) = self.array_elem_ptrs.get(ptr).cloned() {
+                    self.loaded_array_elems.insert(*result, ptr_info);
+                }
             }
 
             LLOp::Store { ptr, value } => {
-                let p = self.value_map[ptr].into_pointer_value();
-                let v = self.value_map[value];
+                let p = self.value(*ptr).into_pointer_value();
+                let v = self.value(*value);
                 self.builder.build_store(p, v).unwrap();
             }
 
@@ -1023,13 +1587,21 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type,
                 field,
             } => {
-                let p = self.value_map[ptr].into_pointer_value();
+                let p = self.value(*ptr).into_pointer_value();
                 let llvm_struct_ty = self.convert_struct_type(struct_type).into_struct_type();
                 let gep = self
                     .builder
                     .build_struct_gep(llvm_struct_ty, p, *field as u32, "sfp")
                     .unwrap();
                 self.value_map.insert(*result, gep.into());
+                self.struct_field_ptrs.insert(
+                    *result,
+                    StructFieldPtrInfo {
+                        ptr: *ptr,
+                        struct_type: struct_type.clone(),
+                        field: *field,
+                    },
+                );
             }
 
             LLOp::ArrayElemPtr {
@@ -1038,8 +1610,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 elem_type,
                 index,
             } => {
-                let p = self.value_map[ptr].into_pointer_value();
-                let idx = self.value_map[index].into_int_value();
+                let p = self.value(*ptr).into_pointer_value();
+                let idx = self.value(*index).into_int_value();
                 let llvm_elem_ty = self.convert_struct_type(elem_type);
                 let gep = unsafe {
                     self.builder
@@ -1047,6 +1619,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         .unwrap()
                 };
                 self.value_map.insert(*result, gep.into());
+                if let Some(index) = self.const_u64(*index) {
+                    self.array_elem_ptrs.insert(
+                        *result,
+                        ArrayElemPtrInfo {
+                            ptr: *ptr,
+                            ptr_key: self.pointer_key(*ptr),
+                            elem_type: elem_type.clone(),
+                            index,
+                        },
+                    );
+                }
             }
 
             LLOp::Memcpy {
@@ -1055,12 +1638,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type,
                 count,
             } => {
-                let dst_ptr = self.value_map[dst].into_pointer_value();
-                let src_ptr = self.value_map[src].into_pointer_value();
+                let dst_ptr = self.value(*dst).into_pointer_value();
+                let src_ptr = self.value(*src).into_pointer_value();
                 let elem_ty = self.convert_struct_type(struct_type);
                 let elem_size = elem_ty.size_of().unwrap();
                 let total_size = if let Some(count_val) = count {
-                    let cnt = self.value_map[count_val].into_int_value();
+                    let cnt = self.value(*count_val).into_int_value();
                     let cnt_ext = self
                         .builder
                         .build_int_z_extend_or_bit_cast(cnt, elem_size.get_type(), "cnt_ext")
@@ -1102,7 +1685,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
                 let mut call_args: Vec<BasicMetadataValueEnum> = vec![vm_ptr.into()];
                 for arg in args {
-                    call_args.push(self.value_map[arg].into());
+                    call_args.push(self.value(*arg).into());
                 }
 
                 let call_result = self
@@ -1151,7 +1734,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.builder.build_unconditional_branch(target_bb).unwrap();
             }
             Terminator::JmpIf(cond, true_target, false_target) => {
-                let cond_val = self.value_map[cond].into_int_value();
+                let cond_val = self.value(*cond).into_int_value();
                 let true_bb = self.block_map[true_target];
                 let false_bb = self.block_map[false_target];
                 self.builder
@@ -1162,11 +1745,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 if values.is_empty() {
                     self.builder.build_return(None).unwrap();
                 } else if values.len() == 1 {
-                    let ret_val = self.value_map[&values[0]];
+                    let ret_val = self.value(values[0]);
                     self.builder.build_return(Some(&ret_val)).unwrap();
                 } else {
                     let ret_values: Vec<BasicValueEnum> =
-                        values.iter().map(|v| self.value_map[v]).collect();
+                        values.iter().map(|v| self.value(*v)).collect();
                     let ret_types: Vec<BasicTypeEnum> =
                         ret_values.iter().map(|v| v.get_type()).collect();
                     let struct_type = self.context.struct_type(&ret_types, false);

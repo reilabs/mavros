@@ -988,6 +988,18 @@ fn lower_instruction(
             );
         }
 
+        OpCode::SliceLen { result, slice } => {
+            let slice_type = fn_type_info.get_value_type(*slice);
+            let (_, count) =
+                concrete_array_or_slice_info(slice_type, *slice, slice_lengths, "SliceLen");
+            assert!(
+                count <= u32::MAX as usize,
+                "SliceLen result does not fit in u32: {count}"
+            );
+            let len = e.emit_int_const(32, count as u64);
+            val_map.insert(*result, len);
+        }
+
         // -- RC operations --
         OpCode::MemOp {
             kind: RefCountOp::Bump(n),
@@ -3315,11 +3327,95 @@ fn ad_bump_lookup_elem_db(
     }
 }
 
+fn lookup_leaf_elem_info(elem_type: &HLType) -> (&HLType, usize) {
+    match &elem_type.expr {
+        HLTypeExpr::Field | HLTypeExpr::U(_) | HLTypeExpr::I(_) | HLTypeExpr::WitnessOf(_) => {
+            (elem_type, 1)
+        }
+        HLTypeExpr::Array(inner, n) => {
+            let (leaf, inner_count) = lookup_leaf_elem_info(inner);
+            let count = n
+                .checked_mul(inner_count)
+                .expect("Array lookup table length overflow");
+            (leaf, count)
+        }
+        HLTypeExpr::Slice(_) => {
+            panic!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
+        }
+        _ => panic!("Unsupported array element type in lookup: {}", elem_type),
+    }
+}
+
+fn flattened_lookup_array_info(array_type: &HLType) -> (&HLType, usize) {
+    let (elem_type, count) = array_info(array_type);
+    let (leaf_type, elems_per_outer_elem) = lookup_leaf_elem_info(elem_type);
+    let flat_count = count
+        .checked_mul(elems_per_outer_elem)
+        .expect("Array lookup table length overflow");
+    (leaf_type, flat_count)
+}
+
+fn emit_flattened_lookup_entries<'a, F>(
+    e: &mut LLBlockEmitter<'_>,
+    array: ValueId,
+    array_type: &'a HLType,
+    start_index: ValueId,
+    emit_leaf: &mut F,
+) -> ValueId
+where
+    F: FnMut(&mut LLBlockEmitter<'_>, ValueId, ValueId, &'a HLType),
+{
+    let (elem_type, count) = array_info(array_type);
+    let rc_struct = rc_array_struct(elem_type, count);
+    let data = e.struct_field_ptr(array, rc_struct, 2);
+
+    match &elem_type.expr {
+        HLTypeExpr::Array(..) => {
+            let results = e.build_counted_loop(
+                count,
+                vec![(start_index, LLType::i64())],
+                |e, i_i64, accs| {
+                    let flat_index = accs[0];
+                    let elem_ptr = e.array_elem_ptr(data, elem_struct(elem_type), i_i64);
+                    let inner_array = e.ll_load(elem_ptr, LLType::Ptr);
+                    let next_index = emit_flattened_lookup_entries(
+                        e,
+                        inner_array,
+                        elem_type,
+                        flat_index,
+                        emit_leaf,
+                    );
+                    vec![next_index]
+                },
+            );
+            results[0]
+        }
+        HLTypeExpr::Slice(_) => {
+            panic!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
+        }
+        _ => {
+            let one_i64 = e.emit_int_const(64, 1);
+            let results = e.build_counted_loop(
+                count,
+                vec![(start_index, LLType::i64())],
+                |e, i_i64, accs| {
+                    let flat_index = accs[0];
+                    let elem_ptr = e.array_elem_ptr(data, elem_struct(elem_type), i_i64);
+                    emit_leaf(e, flat_index, elem_ptr, elem_type);
+                    let next_index = e.int_arith(IntArithOp::Add, flat_index, one_i64);
+                    vec![next_index]
+                },
+            );
+            results[0]
+        }
+    }
+}
+
 fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLFunction {
     let (elem_type, count) = array_info(array_type);
-    let lookup = LookupTableSpec::array(count);
+    let (_, flat_count) = flattened_lookup_array_info(array_type);
+    let lookup = LookupTableSpec::array(flat_count);
     let rc_struct = rc_array_struct(elem_type, count);
-    let elem_struct = elem_struct(elem_type);
     let mut func = new_ll_function(llssa, format!("__array_lookup_{}", array_type));
     let entry = func.get_entry_id();
 
@@ -3352,18 +3448,20 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         |e, inv_cnst_off| {
             let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
             let a_base = e.ll_load(a_base_slot, LLType::Ptr);
-            let data = e.struct_field_ptr(array, rc_struct.clone(), 2);
-            e.build_counted_loop(count, vec![], |e, i_i64, _| {
-                let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
-                let elem_field = load_pure_lookup_elem_as_field(e, elem_ptr, elem_type);
+            let zero_i64 = e.emit_int_const(64, 0);
+            let mut emit_leaf = |e: &mut LLBlockEmitter<'_>,
+                                 i_i64: ValueId,
+                                 elem_ptr: ValueId,
+                                 leaf_type: &HLType| {
+                let elem_field = load_pure_lookup_elem_as_field(e, elem_ptr, leaf_type);
                 let i_i32 = e.truncate(i_i64, 32);
                 let two_i32 = e.emit_int_const(32, 2);
                 let doubled_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
                 let table_slot_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, doubled_i);
                 let table_slot = e.array_elem_ptr(a_base, LLStruct::field_elem(), table_slot_idx);
                 e.ll_store(table_slot, elem_field);
-                vec![]
-            });
+            };
+            emit_flattened_lookup_entries(e, array, array_type, zero_i64, &mut emit_leaf);
         },
     );
 
@@ -3615,35 +3713,17 @@ fn emit_key_value_ad_table_init_body(
     let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
 
     e.build_counted_loop(lookup.length, vec![], |e, i_i64, _| {
-        let i_i32 = e.truncate(i_i64, 32);
-        let two_i32 = e.emit_int_const(32, 2);
-        let twice_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
-        let x_cnst_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, twice_i);
-        let one_i32 = e.emit_int_const(32, 1);
-        let y_cnst_idx = e.int_arith(IntArithOp::Add, x_cnst_idx, one_i32);
-        let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
-        let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
-
-        let x_wit_idx = e.int_arith(IntArithOp::Add, inv_wit_off, twice_i);
-        let y_wit_idx = e.int_arith(IntArithOp::Add, x_wit_idx, one_i32);
-
-        e.ad_write_witness(DMatrix::A, logup_beta_i32, x_coeff);
-        emit_value_db(e, i_i64, x_coeff);
-        let neg_x_coeff = field_neg_via_sub(e, x_coeff);
-        e.ad_write_witness(DMatrix::C, x_wit_idx, neg_x_coeff);
-
-        e.ad_write_witness(DMatrix::A, y_wit_idx, y_coeff);
-        e.ad_write_witness(DMatrix::B, logup_alpha_i32, y_coeff);
-        let i_field = u64_as_field(e, i_i64);
-        let neg_i_field = field_neg_via_sub(e, i_field);
-        e.ad_write_const(DMatrix::B, neg_i_field, y_coeff);
-        let neg_y_coeff = field_neg_via_sub(e, y_coeff);
-        e.ad_write_witness(DMatrix::B, x_wit_idx, neg_y_coeff);
-
-        let mults_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
-        e.ad_write_witness(DMatrix::C, mults_idx, y_coeff);
-        e.ad_write_witness(DMatrix::A, y_wit_idx, inv_sum_coeff);
-
+        emit_key_value_ad_table_entry(
+            e,
+            i_i64,
+            inv_cnst_off,
+            inv_wit_off,
+            mults_wit_off,
+            inv_sum_coeff,
+            logup_alpha_i32,
+            logup_beta_i32,
+            &mut emit_value_db,
+        );
         vec![]
     });
 
@@ -3652,6 +3732,48 @@ fn emit_key_value_ad_table_init_body(
     e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
 
     inv_cnst_off
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_key_value_ad_table_entry(
+    e: &mut LLBlockEmitter<'_>,
+    i_i64: ValueId,
+    inv_cnst_off: ValueId,
+    inv_wit_off: ValueId,
+    mults_wit_off: ValueId,
+    inv_sum_coeff: ValueId,
+    logup_alpha_i32: ValueId,
+    logup_beta_i32: ValueId,
+    emit_value_db: &mut impl FnMut(&mut LLBlockEmitter<'_>, ValueId, ValueId),
+) {
+    let i_i32 = e.truncate(i_i64, 32);
+    let two_i32 = e.emit_int_const(32, 2);
+    let twice_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
+    let x_cnst_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, twice_i);
+    let one_i32 = e.emit_int_const(32, 1);
+    let y_cnst_idx = e.int_arith(IntArithOp::Add, x_cnst_idx, one_i32);
+    let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
+    let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
+
+    let x_wit_idx = e.int_arith(IntArithOp::Add, inv_wit_off, twice_i);
+    let y_wit_idx = e.int_arith(IntArithOp::Add, x_wit_idx, one_i32);
+
+    e.ad_write_witness(DMatrix::A, logup_beta_i32, x_coeff);
+    emit_value_db(e, i_i64, x_coeff);
+    let neg_x_coeff = field_neg_via_sub(e, x_coeff);
+    e.ad_write_witness(DMatrix::C, x_wit_idx, neg_x_coeff);
+
+    e.ad_write_witness(DMatrix::A, y_wit_idx, y_coeff);
+    e.ad_write_witness(DMatrix::B, logup_alpha_i32, y_coeff);
+    let i_field = u64_as_field(e, i_i64);
+    let neg_i_field = field_neg_via_sub(e, i_field);
+    e.ad_write_const(DMatrix::B, neg_i_field, y_coeff);
+    let neg_y_coeff = field_neg_via_sub(e, y_coeff);
+    e.ad_write_witness(DMatrix::B, x_wit_idx, neg_y_coeff);
+
+    let mults_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
+    e.ad_write_witness(DMatrix::C, mults_idx, y_coeff);
+    e.ad_write_witness(DMatrix::A, y_wit_idx, inv_sum_coeff);
 }
 
 fn emit_key_value_ad_lookup_call_body(
@@ -3815,27 +3937,50 @@ fn emit_array_ad_init_body(
     witness_layout: WitnessLayout,
 ) -> ValueId {
     let (elem_type, count) = array_info(array_type);
-    let lookup = LookupTableSpec::array(count);
+    let (_, flat_count) = flattened_lookup_array_info(array_type);
+    let lookup = LookupTableSpec::array(flat_count);
     let rc_struct = rc_array_struct(elem_type, count);
-    let elem_struct = elem_struct(elem_type);
-    let data = e.struct_field_ptr(array, rc_struct.clone(), 2);
+    lookup.assert_key_value("AD array table init");
 
-    emit_key_value_ad_table_init_body(
-        e,
-        lookup,
-        witness_layout,
-        |e, inv_cnst_off| {
-            let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 1);
-            let one_i32 = e.emit_int_const(32, 1);
-            let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
-            let snap_u64 = e.zext(snap, 64);
-            e.ll_store(table_id_ptr, snap_u64);
-        },
-        |e, i_i64, x_coeff| {
-            let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
-            ad_bump_lookup_elem_db(e, elem_ptr, elem_type, x_coeff, bump_db_fn);
-        },
-    )
+    let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
+    let table_id_ptr = e.struct_field_ptr(array, rc_struct, 1);
+    let one_i32 = e.emit_int_const(32, 1);
+    let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
+    let snap_u64 = e.zext(snap, 64);
+    e.ll_store(table_id_ptr, snap_u64);
+
+    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
+    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
+    let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
+    let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
+
+    let zero_i64 = e.emit_int_const(64, 0);
+    let mut emit_leaf =
+        |e: &mut LLBlockEmitter<'_>, i_i64: ValueId, elem_ptr: ValueId, leaf_type: &HLType| {
+            let mut emit_value_db =
+                |e: &mut LLBlockEmitter<'_>, _i_i64: ValueId, x_coeff: ValueId| {
+                    ad_bump_lookup_elem_db(e, elem_ptr, leaf_type, x_coeff, bump_db_fn);
+                };
+            emit_key_value_ad_table_entry(
+                e,
+                i_i64,
+                inv_cnst_off,
+                inv_wit_off,
+                mults_wit_off,
+                inv_sum_coeff,
+                logup_alpha_i32,
+                logup_beta_i32,
+                &mut emit_value_db,
+            );
+        };
+    emit_flattened_lookup_entries(e, array, array_type, zero_i64, &mut emit_leaf);
+
+    let one_i64 = e.emit_int_const(64, 1);
+    let one_field = u64_as_field(e, one_i64);
+    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
+
+    inv_cnst_off
 }
 
 fn generate_darray_ad_call(
@@ -3847,7 +3992,8 @@ fn generate_darray_ad_call(
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
     let (elem_type, count) = array_info(array_type);
-    let lookup = LookupTableSpec::array(count);
+    let (_, flat_count) = flattened_lookup_array_info(array_type);
+    let lookup = LookupTableSpec::array(flat_count);
     let rc_struct = rc_array_struct(elem_type, count);
     let mut func = new_ll_function(llssa, format!("__darray_lookup_{}_ad_call", array_type));
     let entry = func.get_entry_id();
