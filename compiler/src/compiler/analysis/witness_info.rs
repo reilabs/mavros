@@ -109,6 +109,15 @@ impl WitnessShape {
         }
     }
 
+    pub fn contains_ref(&self) -> bool {
+        match self {
+            WitnessShape::Ref(_, _) => true,
+            WitnessShape::Array(_, inner) => inner.contains_ref(),
+            WitnessShape::Tuple(_, children) => children.iter().any(WitnessShape::contains_ref),
+            WitnessShape::Scalar(_) => false,
+        }
+    }
+
     pub fn child_witness_type(&self) -> Option<WitnessShape> {
         match self {
             WitnessShape::Array(_, inner) => Some(*inner.clone()),
