@@ -18,10 +18,12 @@ enum LengthFact {
 }
 
 type LengthFacts = HashMap<ValueId, LengthFact>;
+type TupleFieldFacts = HashMap<(ValueId, usize), LengthFact>;
 
 #[derive(Clone, Default)]
 pub struct FunctionSliceLengths {
     facts: HashMap<ValueId, LengthFact>,
+    tuple_fields: HashMap<(ValueId, usize), LengthFact>,
 }
 
 impl FunctionSliceLengths {
@@ -47,6 +49,13 @@ impl FunctionSliceLengths {
             }
         }
     }
+
+    pub fn get_tuple_field(&self, tuple: ValueId, index: usize) -> Option<&usize> {
+        match self.tuple_fields.get(&(tuple, index)) {
+            Some(LengthFact::Known(len)) => Some(len),
+            _ => None,
+        }
+    }
 }
 
 pub struct SliceLengthAnalysis {
@@ -56,6 +65,7 @@ pub struct SliceLengthAnalysis {
 impl SliceLengthAnalysis {
     pub fn run(ssa: &HLSSA, type_info: &TypeInfo) -> Self {
         let mut values: HashMap<FunctionId, LengthFacts> = HashMap::new();
+        let mut tuple_fields: HashMap<FunctionId, TupleFieldFacts> = HashMap::new();
         let mut returns: HashMap<FunctionId, HashMap<usize, LengthFact>> = HashMap::new();
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         let mut changed = true;
@@ -76,14 +86,29 @@ impl SliceLengthAnalysis {
                     fn_type_info,
                     ssa,
                     &mut values,
+                    &mut tuple_fields,
                     &mut returns,
                 );
             }
         }
 
-        let values = values
+        let values = function_ids
             .into_iter()
-            .map(|(function_id, facts)| (function_id, FunctionSliceLengths { facts }))
+            .filter_map(|function_id| {
+                let facts = values.remove(&function_id).unwrap_or_default();
+                let tuple_fields = tuple_fields.remove(&function_id).unwrap_or_default();
+                if facts.is_empty() && tuple_fields.is_empty() {
+                    None
+                } else {
+                    Some((
+                        function_id,
+                        FunctionSliceLengths {
+                            facts,
+                            tuple_fields,
+                        },
+                    ))
+                }
+            })
             .collect();
 
         Self { values }
@@ -121,6 +146,49 @@ fn record_unknown_slice_length(facts: &mut LengthFacts, value: ValueId, reason: 
         }
         None => {
             facts.insert(value, LengthFact::Unknown(reason));
+            true
+        }
+    }
+}
+
+fn record_tuple_field_length(
+    fields: &mut TupleFieldFacts,
+    tuple: ValueId,
+    index: usize,
+    len: usize,
+    reason: &str,
+) -> bool {
+    match fields.get(&(tuple, index)) {
+        Some(LengthFact::Known(old)) if *old == len => false,
+        Some(LengthFact::Known(old)) => {
+            fields.insert(
+                (tuple, index),
+                LengthFact::Unknown(format!("{reason}; observed lengths {old} and {len}")),
+            );
+            true
+        }
+        Some(LengthFact::Unknown(_)) => false,
+        None => {
+            fields.insert((tuple, index), LengthFact::Known(len));
+            true
+        }
+    }
+}
+
+fn record_unknown_tuple_field_length(
+    fields: &mut TupleFieldFacts,
+    tuple: ValueId,
+    index: usize,
+    reason: String,
+) -> bool {
+    match fields.get(&(tuple, index)) {
+        Some(LengthFact::Unknown(_)) => false,
+        Some(_) => {
+            fields.insert((tuple, index), LengthFact::Unknown(reason));
+            true
+        }
+        None => {
+            fields.insert((tuple, index), LengthFact::Unknown(reason));
             true
         }
     }
@@ -221,6 +289,7 @@ fn infer_function(
     fn_type_info: &FunctionTypeInfo,
     ssa: &HLSSA,
     values: &mut HashMap<FunctionId, LengthFacts>,
+    tuple_fields: &mut HashMap<FunctionId, TupleFieldFacts>,
     returns: &mut HashMap<FunctionId, HashMap<usize, LengthFact>>,
 ) -> bool {
     let mut changed = false;
@@ -372,6 +441,68 @@ fn infer_function(
                         };
                         if let Some(reason) = reason {
                             changed |= record_unknown_slice_length(facts, *result, reason);
+                        }
+                    }
+                }
+                OpCode::MkTuple {
+                    result,
+                    elems,
+                    element_types,
+                } => {
+                    let facts_snapshot = values.entry(function_id).or_default().clone();
+                    let fields = tuple_fields.entry(function_id).or_default();
+                    for (index, (elem, elem_type)) in
+                        elems.iter().zip(element_types.iter()).enumerate()
+                    {
+                        if is_slice_type(elem_type) {
+                            if let Some(len) =
+                                known_value_length(&facts_snapshot, fn_type_info, *elem)
+                            {
+                                changed |= record_tuple_field_length(
+                                    fields,
+                                    *result,
+                                    index,
+                                    len,
+                                    "tuple field has conflicting concrete slice lengths",
+                                );
+                            } else if let Some(LengthFact::Unknown(reason)) =
+                                facts_snapshot.get(elem)
+                            {
+                                changed |= record_unknown_tuple_field_length(
+                                    fields,
+                                    *result,
+                                    index,
+                                    reason.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                OpCode::TupleProj { result, tuple, idx }
+                    if matches!(
+                        fn_type_info.get_value_type(*result).expr,
+                        TypeExpr::Slice(_)
+                    ) =>
+                {
+                    let field_fact = tuple_fields
+                        .entry(function_id)
+                        .or_default()
+                        .get(&(*tuple, *idx))
+                        .cloned();
+                    if let Some(field_fact) = field_fact {
+                        let facts = values.entry(function_id).or_default();
+                        match field_fact {
+                            LengthFact::Known(len) => {
+                                changed |= record_slice_length(
+                                    facts,
+                                    *result,
+                                    len,
+                                    "tuple projection has conflicting concrete slice lengths",
+                                );
+                            }
+                            LengthFact::Unknown(reason) => {
+                                changed |= record_unknown_slice_length(facts, *result, reason);
+                            }
                         }
                     }
                 }
@@ -734,6 +865,50 @@ mod tests {
             analysis.function_values(main_id).unwrap().get(&push_result),
             Some(&3)
         );
+    }
+
+    #[test]
+    fn infers_slice_lengths_through_tuple_fields_and_projections() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_main_id();
+        let field = Type::field();
+        let slice = field.clone().slice_of();
+
+        let a = ssa.fresh_value();
+        let b = ssa.fresh_value();
+        let slice_value = ssa.fresh_value();
+        let tuple_value = ssa.fresh_value();
+        let projected_slice = ssa.fresh_value();
+        {
+            let main = ssa.get_function_mut(main_id);
+            let entry = main.get_entry_id();
+            main.get_block_mut(entry).push_parameter(a, field.clone());
+            main.get_block_mut(entry).push_parameter(b, field.clone());
+            main.get_block_mut(entry).push_instruction(OpCode::MkSeq {
+                result: slice_value,
+                elems: vec![a, b],
+                seq_type: SequenceTargetType::Slice,
+                elem_type: field.clone(),
+            });
+            main.get_block_mut(entry).push_instruction(OpCode::MkTuple {
+                result: tuple_value,
+                elems: vec![slice_value],
+                element_types: vec![slice.clone()],
+            });
+            main.get_block_mut(entry)
+                .push_instruction(OpCode::TupleProj {
+                    result: projected_slice,
+                    tuple: tuple_value,
+                    idx: 0,
+                });
+            main.terminate_block_with_return(entry, vec![]);
+        }
+
+        let analysis = analyze(&ssa);
+        let main_lengths = analysis.function_values(main_id).unwrap();
+
+        assert_eq!(main_lengths.get_tuple_field(tuple_value, 0), Some(&2));
+        assert_eq!(main_lengths.get(&projected_slice), Some(&2));
     }
 
     #[test]

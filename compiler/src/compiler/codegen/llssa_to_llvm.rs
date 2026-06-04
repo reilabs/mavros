@@ -868,6 +868,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .unwrap()
         };
         self.builder.build_store(cursor_slot, next).unwrap();
+        self.invalidate_memory_provenance();
 
         Some(cursor)
     }
@@ -1011,6 +1012,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             false,
         );
         self.builder.build_memcpy(dst, 1, src, 1, bytes).unwrap();
+        self.invalidate_memory_provenance();
 
         Some(cursor)
     }
@@ -1078,6 +1080,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         };
         let bytes = i32_type.const_int(elem_size as u64 * entries.len() as u64, false);
         self.builder.build_memcpy(dst, 1, src, 1, bytes).unwrap();
+        self.invalidate_memory_provenance();
 
         Some(cursor)
     }
@@ -1190,6 +1193,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let b_base = self.pointer_key_base(b);
         a_base != b_base
             && (self.heap_allocs.contains(&a_base) || self.heap_allocs.contains(&b_base))
+    }
+
+    fn invalidate_memory_provenance(&mut self) {
+        self.loaded_array_elems.clear();
     }
 
     fn tape_entry_results_used_after(
@@ -1594,6 +1601,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let p = self.value(*ptr).into_pointer_value();
                 let free_fn = self.free_fn.expect("free not declared");
                 self.builder.build_call(free_fn, &[p.into()], "").unwrap();
+                self.invalidate_memory_provenance();
             }
 
             LLOp::Load { result, ptr, ty } => {
@@ -1613,6 +1621,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let p = self.value(*ptr).into_pointer_value();
                 let v = self.value(*value);
                 self.builder.build_store(p, v).unwrap();
+                self.invalidate_memory_provenance();
             }
 
             LLOp::StructFieldPtr {
@@ -1696,6 +1705,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.builder
                     .build_memcpy(dst_ptr, 1, src_ptr, 1, total_i32)
                     .unwrap();
+                self.invalidate_memory_provenance();
             }
 
             LLOp::Trap => {
@@ -1726,6 +1736,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .builder
                     .build_call(callee, &call_args, &format!("call_f{}", func.0))
                     .unwrap();
+                self.invalidate_memory_provenance();
 
                 if results.len() == 1 {
                     if let Some(val) = call_result.try_as_basic_value().basic() {

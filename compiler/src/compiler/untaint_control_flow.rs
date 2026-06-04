@@ -949,6 +949,11 @@ fn emit_value_conversion(
             let mut converted_elems = vec![];
             for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
                 let proj = builder.tuple_proj(value, i);
+                if matches!(src_ft.expr, TypeExpr::Slice(_))
+                    && let Some(len) = slice_lengths.get_tuple_field(value, i)
+                {
+                    synthetic_slice_lengths.insert(proj, *len);
+                }
                 let converted = emit_value_conversion(
                     proj,
                     src_ft,
