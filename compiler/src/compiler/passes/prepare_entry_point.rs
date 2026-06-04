@@ -251,51 +251,57 @@ impl PrepareEntryPoint {
                     let block = fb.function.get_block_mut(bid);
                     let old_instructions = block.take_instructions();
 
-                    let mut replacements = ValueReplacements::new();
                     let mut new_instructions = Vec::new();
 
                     for mut instr in old_instructions {
-                        replacements.replace_instruction(&mut instr);
-
-                        let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
+                        let prepare_calls = if let OpCode::Call {
                             unconstrained: true,
                             results,
                             function: CallTarget::Static(callee_id),
                             ..
-                        } = &instr
+                        } = &mut instr
                         {
-                            callee_return_types
+                            let return_types = callee_return_types
                                 .get(callee_id)
-                                .map(|rt| {
-                                    results
-                                        .iter()
-                                        .zip(rt.iter())
-                                        .map(|(r, t)| (*r, t.clone()))
-                                        .collect()
+                                .expect("unconstrained static call return types should be known");
+                            assert_eq!(
+                                results.len(),
+                                return_types.len(),
+                                "ICE: unconstrained call result count does not match callee return count"
+                            );
+
+                            let original_results = results.clone();
+                            let fresh_results = original_results
+                                .iter()
+                                .map(|_| fb.ssa.fresh_value())
+                                .collect::<Vec<_>>();
+                            *results = fresh_results.clone();
+
+                            original_results
+                                .into_iter()
+                                .zip(fresh_results.into_iter())
+                                .zip(return_types.iter())
+                                .map(|((original_result, fresh_result), return_type)| {
+                                    let prepare_fn =
+                                        Self::find_prepare_fn(return_type, &prepare_fns);
+                                    OpCode::Call {
+                                        results: vec![original_result],
+                                        function: CallTarget::Static(prepare_fn),
+                                        args: vec![fresh_result],
+                                        unconstrained: false,
+                                    }
                                 })
-                                .unwrap_or_default()
+                                .collect::<Vec<_>>()
                         } else {
                             vec![]
                         };
 
                         new_instructions.push(instr);
-
-                        for (result_vid, return_type) in call_results {
-                            let reconstructed = fb.ssa.fresh_value();
-                            let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
-                            new_instructions.push(OpCode::Call {
-                                results: vec![reconstructed],
-                                function: CallTarget::Static(prepare_fn),
-                                args: vec![result_vid],
-                                unconstrained: false,
-                            });
-                            replacements.insert(result_vid, reconstructed);
-                        }
+                        new_instructions.extend(prepare_calls);
                     }
 
                     let block = fb.function.get_block_mut(bid);
                     block.put_instructions(new_instructions);
-                    replacements.replace_terminator(block.get_terminator_mut());
                 }
             });
         }
