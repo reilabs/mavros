@@ -295,7 +295,6 @@ impl WitnessTypeInference {
         // Inner state
         let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
         let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
-        let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::new();
 
         ssa.for_each_const(|vid, val| {
             let shape = match val.as_ref() {
@@ -322,21 +321,8 @@ impl WitnessTypeInference {
             block_cfg.insert(*block_id, cfg_witness); // function minimum
             for (value_id, tp) in block.get_parameters() {
                 if !value_wt.contains_key(value_id) {
-                    value_wt.insert(*value_id, Self::construct_pure_witness_for_type(tp));
-                }
-            }
-        }
-
-        // Initialize alloc sites
-        for block_id in &block_queue {
-            let block = func.get_block(*block_id);
-            for instruction in block.get_instructions() {
-                if let OpCode::Alloc {
-                    result,
-                    elem_type: tp,
-                } = instruction
-                {
-                    alloc_inner.insert(*result, Self::construct_pure_witness_for_type(tp));
+                    let wt = Self::construct_pure_witness_for_type(tp);
+                    value_wt.insert(*value_id, wt);
                 }
             }
         }
@@ -346,7 +332,6 @@ impl WitnessTypeInference {
         for _iteration in 0..max_iterations {
             let old_value_wt = value_wt.clone();
             let old_block_cfg = block_cfg.clone();
-            let old_alloc_inner = alloc_inner.clone();
 
             Self::propagate_once(
                 func,
@@ -355,15 +340,11 @@ impl WitnessTypeInference {
                 entry_id,
                 &mut value_wt,
                 &mut block_cfg,
-                &mut alloc_inner,
                 specializations,
                 ssa,
             );
 
-            if value_wt == old_value_wt
-                && block_cfg == old_block_cfg
-                && alloc_inner == old_alloc_inner
-            {
+            if value_wt == old_value_wt && block_cfg == old_block_cfg {
                 break;
             }
         }
@@ -428,22 +409,16 @@ impl WitnessTypeInference {
                 .collect();
         }
 
-        // Compute arg_types_out: for Ref args, reflect updated alloc_inner
+        // Compute arg_types_out: for Ref args, reflect any updates to the ref's inner shape.
         let arg_types_out: Vec<WitnessShape> = entry_params
             .iter()
             .zip(arg_types.iter())
-            .map(|((value_id, _), original_arg)| {
-                match original_arg {
-                    WitnessShape::Ref(_, _) => {
-                        // Look up the alloc_inner for this ref value
-                        if let Some(inner) = alloc_inner.get(value_id) {
-                            WitnessShape::Ref(WitnessType::Pure, Box::new(inner.clone()))
-                        } else {
-                            original_arg.clone()
-                        }
-                    }
-                    _ => original_arg.clone(),
-                }
+            .map(|((value_id, _), original_arg)| match original_arg {
+                WitnessShape::Ref(_, _) => value_wt
+                    .get(value_id)
+                    .cloned()
+                    .unwrap_or_else(|| original_arg.clone()),
+                _ => original_arg.clone(),
             })
             .collect();
 
@@ -464,7 +439,6 @@ impl WitnessTypeInference {
         _entry_id: BlockId,
         value_wt: &mut HashMap<ValueId, WitnessShape>,
         block_cfg: &mut HashMap<BlockId, WitnessType>,
-        alloc_inner: &mut HashMap<ValueId, WitnessShape>,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
     ) {
@@ -472,14 +446,7 @@ impl WitnessTypeInference {
             let block = func.get_block(*block_id);
             let block_cw = *block_cfg.get(block_id).unwrap();
 
-            Self::propagate_block_instructions(
-                block,
-                block_cw,
-                value_wt,
-                alloc_inner,
-                specializations,
-                ssa,
-            );
+            Self::propagate_block_instructions(block, block_cw, value_wt, specializations, ssa);
 
             // Handle terminator
             if let Some(terminator) = block.get_terminator() {
@@ -491,10 +458,13 @@ impl WitnessTypeInference {
                         let target_params: Vec<(ValueId, Type)> =
                             func.get_block(*target).get_parameters().cloned().collect();
                         for ((target_value, _), param) in target_params.iter().zip(params.iter()) {
-                            let param_wt = value_wt.get(param).unwrap();
-                            let existing = value_wt.get(target_value).unwrap();
-                            let joined = existing.join(param_wt);
-                            value_wt.insert(*target_value, joined);
+                            let param_wt = value_wt.get(param).unwrap().clone();
+                            let existing = value_wt.get(target_value).unwrap().clone();
+                            let joined = existing.join(&param_wt);
+                            value_wt.insert(*target_value, joined.clone());
+                            if matches!(&param_wt, WitnessShape::Ref(_, _)) {
+                                Self::merge_value_wt(value_wt, *param, joined);
+                            }
                         }
                     }
                     Terminator::JmpIf(cond, _if_true, _if_false) => {
@@ -525,13 +495,12 @@ impl WitnessTypeInference {
         }
     }
 
-    /// Process all instructions in a single block, updating `value_wt` and
-    /// `alloc_inner` according to each opcode's witness-type rules.
+    /// Process all instructions in a single block, updating `value_wt` according
+    /// to each opcode's witness-type rules.
     fn propagate_block_instructions(
         block: &HLBlock,
         block_cw: WitnessType,
         value_wt: &mut HashMap<ValueId, WitnessShape>,
-        alloc_inner: &mut HashMap<ValueId, WitnessShape>,
         specializations: &HashMap<SpecKey, SpecValue>,
         ssa: &HLSSA,
     ) {
@@ -570,47 +539,21 @@ impl WitnessTypeInference {
                 }
                 OpCode::Alloc {
                     result: r,
-                    elem_type: _tp,
+                    elem_type: tp,
                 } => {
-                    let inner = alloc_inner.get(r).unwrap().clone();
-                    value_wt.insert(*r, WitnessShape::Ref(WitnessType::Pure, Box::new(inner)));
+                    let inner = Self::construct_pure_witness_for_type(tp);
+                    let wt = WitnessShape::Ref(WitnessType::Pure, Box::new(inner));
+                    value_wt.insert(*r, wt.clone());
                 }
                 OpCode::Store { ptr, value: v } => {
                     let val_wt = value_wt.get(v).unwrap();
-                    // Find the alloc origin for this ptr
-                    let origin = Self::find_alloc_origin(ptr, alloc_inner);
-                    if let Some(origin_id) = origin {
-                        let current_inner = alloc_inner.get(&origin_id).unwrap().clone();
-                        // Join stored value into alloc inner;
-                        // cfg_witness contributes to toplevel of what's stored
-                        let store_wt =
-                            val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
-                        // The alloc's elem_type may not match the actual stored value's
-                        let new_inner = current_inner.join(&store_wt);
-                        alloc_inner.insert(origin_id, new_inner);
-                    }
+                    // cfg_witness contributes to the toplevel of what's stored.
+                    let store_wt = val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
+                    Self::merge_ref_inner(value_wt, *ptr, store_wt);
                 }
                 OpCode::Load { result: r, ptr } => {
-                    let ptr_wt = value_wt.get(ptr).unwrap();
-                    let origin = Self::find_alloc_origin(ptr, alloc_inner);
-                    if let Some(origin_id) = origin {
-                        let inner = alloc_inner.get(&origin_id).unwrap().clone();
-                        let ptr_toplevel = ptr_wt.toplevel_info();
-                        let result_wt =
-                            inner.with_toplevel_info(inner.toplevel_info().join(ptr_toplevel));
-                        value_wt.insert(*r, result_wt);
-                    } else {
-                        // Ref param — use the Ref's inner type
-                        match ptr_wt {
-                            WitnessShape::Ref(ptr_info, inner) => {
-                                value_wt.insert(
-                                    *r,
-                                    inner.with_toplevel_info(inner.toplevel_info().join(*ptr_info)),
-                                );
-                            }
-                            _ => panic!("Load from non-ref type"),
-                        }
-                    }
+                    let result_wt = Self::read_ref_inner(value_wt, *ptr);
+                    value_wt.insert(*r, result_wt);
                 }
                 OpCode::ReadGlobal {
                     result: r,
@@ -717,18 +660,10 @@ impl WitnessTypeInference {
                             {
                                 value_wt.insert(*result, ret_wt.clone());
                             }
-                            // Update alloc_inner from arg_types_out for Ref args
+                            // Merge callee argument effects back into caller argument shapes.
                             for (arg, arg_out) in args.iter().zip(callee_spec.arg_types_out.iter())
                             {
-                                if let WitnessShape::Ref(_, inner_out) = arg_out {
-                                    let origin = Self::find_alloc_origin(arg, alloc_inner);
-                                    if let Some(origin_id) = origin {
-                                        let current_inner =
-                                            alloc_inner.get(&origin_id).unwrap().clone();
-                                        let new_inner = current_inner.join(inner_out);
-                                        alloc_inner.insert(origin_id, new_inner);
-                                    }
-                                }
+                                Self::merge_value_wt(value_wt, *arg, arg_out.clone());
                             }
                         } else {
                             // Specialization not yet registered — use optimistic Pure returns
@@ -812,13 +747,13 @@ impl WitnessTypeInference {
                     );
                 }
                 OpCode::TupleProj { result, tuple, idx } => {
-                    let tuple_wt = value_wt.get(tuple).unwrap();
-                    match tuple_wt {
+                    let tuple_wt = value_wt.get(tuple).unwrap().clone();
+                    match &tuple_wt {
                         WitnessShape::Tuple(top, children) => {
                             let elem_wt = &children[*idx];
                             let result_wt =
                                 elem_wt.with_toplevel_info((*top).join(elem_wt.toplevel_info()));
-                            value_wt.insert(*result, result_wt);
+                            Self::merge_value_wt(value_wt, *result, result_wt);
                         }
                         _ => {
                             panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
@@ -830,7 +765,11 @@ impl WitnessTypeInference {
                         .iter()
                         .map(|v| value_wt.get(v).unwrap().clone())
                         .collect();
-                    value_wt.insert(*result, WitnessShape::Tuple(WitnessType::Pure, children));
+                    Self::merge_value_wt(
+                        value_wt,
+                        *result,
+                        WitnessShape::Tuple(WitnessType::Pure, children),
+                    );
                 }
                 OpCode::WriteWitness { result, .. } => {
                     // WriteWitness records a value on the witness tape.
@@ -850,8 +789,11 @@ impl WitnessTypeInference {
                 | OpCode::ValueOf { .. } => {
                     panic!("Should not be present at this stage {:?}", instruction);
                 }
-                OpCode::Guard { .. } => {
-                    panic!("ICE: Guard should not be present during witness type inference");
+                _ => {
+                    panic!(
+                        "Unsupported opcode during witness type inference: {:?}",
+                        instruction
+                    );
                 }
             }
         }
@@ -861,20 +803,40 @@ impl WitnessTypeInference {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /// Find the alloc origin for a pointer value.
-    /// Returns Some(value_id) if the ptr corresponds to a local alloc site.
-    /// Returns None for Ref-typed function parameters (external refs).
-    fn find_alloc_origin(
-        ptr: &ValueId,
-        alloc_inner: &HashMap<ValueId, WitnessShape>,
-    ) -> Option<ValueId> {
-        // In SSA, the alloc origin IS the ptr value itself if it was an Alloc instruction.
-        // If there's no alloc_inner entry, it's an external ref (function parameter).
-        if alloc_inner.contains_key(ptr) {
-            Some(*ptr)
-        } else {
-            None
+    fn merge_value_wt(
+        value_wt: &mut HashMap<ValueId, WitnessShape>,
+        value: ValueId,
+        new_wt: WitnessShape,
+    ) {
+        let joined = value_wt
+            .get(&value)
+            .map(|existing| existing.join(&new_wt))
+            .unwrap_or(new_wt);
+        value_wt.insert(value, joined);
+    }
+
+    fn read_ref_inner(value_wt: &HashMap<ValueId, WitnessShape>, ptr: ValueId) -> WitnessShape {
+        match value_wt.get(&ptr).unwrap() {
+            WitnessShape::Ref(ptr_info, inner) => {
+                inner.with_toplevel_info(inner.toplevel_info().join(*ptr_info))
+            }
+            other => panic!("Load from non-ref witness type: {:?}", other),
         }
+    }
+
+    fn merge_ref_inner(
+        value_wt: &mut HashMap<ValueId, WitnessShape>,
+        ptr: ValueId,
+        new_inner: WitnessShape,
+    ) {
+        let ptr_wt = value_wt.get(&ptr).unwrap().clone();
+        let updated = match ptr_wt {
+            WitnessShape::Ref(ptr_info, inner) => {
+                WitnessShape::Ref(ptr_info, Box::new(inner.join(&new_inner)))
+            }
+            other => panic!("Store to non-ref witness type: {:?}", other),
+        };
+        Self::merge_value_wt(value_wt, ptr, updated);
     }
 
     fn build_function_witness_type(
