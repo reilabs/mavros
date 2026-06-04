@@ -5,21 +5,19 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::witness_info::{FunctionWitnessType, WitnessShape, WitnessType};
 use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        value_definitions::{FunctionValueDefinitions, ValueDefinition},
-    },
+    analysis::flow_analysis::FlowAnalysis,
     ssa::{
         BlockId, FunctionId, Instruction, SSAAnotator, Terminator, ValueId,
         hlssa::{CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr},
     },
 };
 
-// ---------------------------------------------------------------------------
-// Specialization key and value
-// ---------------------------------------------------------------------------
+type VarShape = WitnessShape<VariableId>;
 
-#[derive(Eq, Hash, PartialEq, Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct VariableId(u32);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SpecKey {
     original_func_id: FunctionId,
     arg_types: Vec<WitnessShape>,
@@ -27,38 +25,25 @@ struct SpecKey {
 }
 
 #[derive(Clone, Debug)]
-struct SpecValue {
+struct SpecInstance {
+    original_func_id: FunctionId,
     specialized_func_id: FunctionId,
-    return_types: Vec<WitnessShape>,
-    return_constraints: Vec<WitnessShape>,
+    entry_params: Vec<VarShape>,
+    return_shapes: Vec<VarShape>,
+    cfg_var: VariableId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct RuleId {
-    function_id: FunctionId,
+struct CallSite {
+    caller_func_id: FunctionId,
     block_id: BlockId,
-    kind: RuleKind,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum RuleKind {
-    Instruction(usize),
-    Terminator,
+    instruction_idx: usize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum Event {
-    NewSpec(SpecKey),
-    SpecChanged(FunctionId),
-    ReturnConstraintChanged(FunctionId),
-    ValueChanged(ValueId),
-    BlockCfgChanged(FunctionId, BlockId),
-    Rule(RuleId),
+enum SpecRequest {
+    Call(CallSite),
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
 pub struct WitnessTypeInference {
@@ -90,71 +75,22 @@ impl WitnessTypeInference {
     pub fn run(&mut self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
         let main_id = ssa.get_main_id();
         let main_func = ssa.get_function(main_id);
-
-        let main_arg_types: Vec<WitnessShape> = main_func
-            .get_entry()
-            .get_parameters()
-            .map(|(_, tp)| Self::construct_pure_witness_for_type(tp))
-            .collect();
-        let main_return_types: Vec<WitnessShape> = main_func
-            .get_returns()
-            .iter()
-            .map(Self::construct_pure_witness_for_type)
-            .collect();
-
         let main_key = SpecKey {
             original_func_id: main_id,
-            arg_types: main_arg_types.clone(),
+            arg_types: main_func
+                .get_entry()
+                .get_parameters()
+                .map(|(_, tp)| Self::construct_pure_witness_for_type(tp))
+                .collect(),
             cfg_witness: WitnessType::Pure,
         };
 
-        let main_specialized_id = ssa.duplicate_function(main_id);
-        ssa.set_entry_point(main_specialized_id);
-
         let mut engine = WtiEngine::new(ssa, flow_analysis);
-        engine.install_existing_spec(main_key, main_specialized_id, main_return_types);
+        let root_spec = engine.ensure_spec(main_key);
         engine.run();
-        self.functions = engine.finish();
+        self.functions = engine.finish(root_spec);
 
         Ok(())
-    }
-
-    // ---------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------
-
-    fn resolve_key(key: &SpecKey, redirects: &HashMap<SpecKey, SpecKey>) -> SpecKey {
-        let mut current = key.clone();
-        let mut seen = HashSet::new();
-        while let Some(next) = redirects.get(&current) {
-            assert!(
-                seen.insert(current.clone()),
-                "Cycle in witness specialization redirects at {:?}",
-                current
-            );
-            current = next.clone();
-        }
-        current
-    }
-
-    fn array_element(array_wt: &WitnessShape) -> WitnessShape {
-        match array_wt {
-            WitnessShape::Array(_, elem) => *elem.clone(),
-            other => panic!(
-                "Array element access on non-array witness type: {:?}",
-                other
-            ),
-        }
-    }
-
-    fn tuple_element(tuple_wt: &WitnessShape, idx: usize) -> (WitnessType, WitnessShape) {
-        match tuple_wt {
-            WitnessShape::Tuple(tuple_info, children) => (*tuple_info, children[idx].clone()),
-            other => panic!(
-                "Tuple element access on non-tuple witness type: {:?}",
-                other
-            ),
-        }
     }
 
     fn construct_pure_witness_for_type(typ: &Type) -> WitnessShape {
@@ -192,263 +128,263 @@ impl WitnessTypeInference {
 struct WtiEngine<'a> {
     ssa: &'a mut HLSSA,
     flow_analysis: &'a FlowAnalysis,
-    functions: HashMap<FunctionId, FunctionWitnessType>,
 
-    specializations: HashMap<SpecKey, SpecValue>,
-    spec_by_func: HashMap<FunctionId, SpecKey>,
-    spec_remap: HashMap<SpecKey, SpecKey>,
+    specs: Vec<SpecInstance>,
+    specs_by_original: HashMap<FunctionId, Vec<usize>>,
 
-    value_wt: HashMap<ValueId, WitnessShape>,
-    block_cfg: HashMap<(FunctionId, BlockId), WitnessType>,
-    value_function: HashMap<ValueId, FunctionId>,
-    value_defs: HashMap<FunctionId, FunctionValueDefinitions>,
-    entry_arg: HashMap<ValueId, (FunctionId, usize)>,
+    value_shapes: HashMap<ValueId, VarShape>,
+    block_cfg_vars: HashMap<(FunctionId, BlockId), VariableId>,
+    graph: HashMap<VariableId, Vec<VariableId>>,
+    assignments: HashMap<VariableId, WitnessType>,
+    spec_deps: HashMap<VariableId, Vec<SpecRequest>>,
 
-    value_deps: HashMap<ValueId, Vec<ValueId>>,
-    effect_deps: HashMap<ValueId, Vec<RuleId>>,
-    block_rules: HashMap<(FunctionId, BlockId), Vec<RuleId>>,
-    return_rules: HashMap<FunctionId, Vec<RuleId>>,
-    spec_callers: HashMap<FunctionId, HashSet<RuleId>>,
-    pending_callers: HashMap<SpecKey, HashSet<RuleId>>,
-
-    events: VecDeque<Event>,
-    queued_events: HashSet<Event>,
+    spec_queue: VecDeque<SpecRequest>,
+    queued_specs: HashSet<SpecRequest>,
+    var_queue: VecDeque<VariableId>,
+    queued_vars: HashSet<VariableId>,
+    next_variable: u32,
 }
 
 impl<'a> WtiEngine<'a> {
     fn new(ssa: &'a mut HLSSA, flow_analysis: &'a FlowAnalysis) -> Self {
-        let mut value_wt = HashMap::new();
-        ssa.for_each_const(|vid, val| {
-            let shape = match val.as_ref() {
-                Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
-                    WitnessShape::Scalar(WitnessType::Pure)
-                }
-            };
-            value_wt.insert(*vid, shape);
-        });
-
-        Self {
+        let mut engine = Self {
             ssa,
             flow_analysis,
-            functions: HashMap::new(),
-            specializations: HashMap::new(),
-            spec_by_func: HashMap::new(),
-            spec_remap: HashMap::new(),
-            value_wt,
-            block_cfg: HashMap::new(),
-            value_function: HashMap::new(),
-            value_defs: HashMap::new(),
-            entry_arg: HashMap::new(),
-            value_deps: HashMap::new(),
-            effect_deps: HashMap::new(),
-            block_rules: HashMap::new(),
-            return_rules: HashMap::new(),
-            spec_callers: HashMap::new(),
-            pending_callers: HashMap::new(),
-            events: VecDeque::new(),
-            queued_events: HashSet::new(),
-        }
-    }
+            specs: Vec::new(),
+            specs_by_original: HashMap::new(),
+            value_shapes: HashMap::new(),
+            block_cfg_vars: HashMap::new(),
+            graph: HashMap::new(),
+            assignments: HashMap::new(),
+            spec_deps: HashMap::new(),
+            spec_queue: VecDeque::new(),
+            queued_specs: HashSet::new(),
+            var_queue: VecDeque::new(),
+            queued_vars: HashSet::new(),
+            next_variable: 0,
+        };
 
-    fn install_existing_spec(
-        &mut self,
-        key: SpecKey,
-        specialized_func_id: FunctionId,
-        return_types: Vec<WitnessShape>,
-    ) {
-        let key = self.resolve_key(&key);
-        if self.specializations.contains_key(&key) {
-            return;
+        let consts: Vec<_> = engine
+            .ssa
+            .const_snapshot()
+            .iter()
+            .map(|(vid, constant)| (*vid, constant.as_ref().clone()))
+            .collect();
+        for (vid, constant) in consts {
+            let shape = match constant {
+                Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
+                    WitnessShape::Scalar(engine.fresh_var())
+                }
+            };
+            engine.value_shapes.insert(vid, shape);
         }
 
-        self.specializations.insert(
-            key.clone(),
-            SpecValue {
-                specialized_func_id,
-                return_types: return_types.clone(),
-                return_constraints: return_types,
-            },
-        );
-        self.spec_by_func.insert(specialized_func_id, key.clone());
-        self.register_function(&key, specialized_func_id);
-        self.flush_pending_callers(&key);
+        engine
     }
 
     fn run(&mut self) {
-        while let Some(event) = self.events.pop_front() {
-            self.queued_events.remove(&event);
-            match event {
-                Event::NewSpec(key) => self.install_new_spec(key),
-                Event::SpecChanged(function_id) => {
-                    for rule in self
-                        .spec_callers
-                        .get(&function_id)
-                        .cloned()
-                        .unwrap_or_default()
-                    {
-                        self.enqueue(Event::Rule(rule));
-                    }
+        while !self.var_queue.is_empty() || !self.spec_queue.is_empty() {
+            while let Some(var) = self.var_queue.pop_front() {
+                self.queued_vars.remove(&var);
+                for dst in self.graph.get(&var).cloned().unwrap_or_default() {
+                    self.mark_witness(dst);
                 }
-                Event::ReturnConstraintChanged(function_id) => {
-                    for rule in self
-                        .return_rules
-                        .get(&function_id)
-                        .cloned()
-                        .unwrap_or_default()
-                    {
-                        self.enqueue(Event::Rule(rule));
-                    }
+                for request in self.spec_deps.get(&var).cloned().unwrap_or_default() {
+                    self.queue_spec(request);
                 }
-                Event::ValueChanged(value) => self.value_changed(value),
-                Event::BlockCfgChanged(function_id, block_id) => {
-                    for rule in self
-                        .block_rules
-                        .get(&(function_id, block_id))
-                        .cloned()
-                        .unwrap_or_default()
-                    {
-                        self.enqueue(Event::Rule(rule));
-                    }
-                }
-                Event::Rule(rule) => self.run_rule(rule),
+            }
+
+            if let Some(request) = self.spec_queue.pop_front() {
+                self.queued_specs.remove(&request);
+                self.process_spec_request(request);
             }
         }
     }
 
-    fn finish(mut self) -> HashMap<FunctionId, FunctionWitnessType> {
-        let specs: Vec<(SpecKey, SpecValue)> = self
-            .specializations
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
+    fn finish(mut self, root_spec: usize) -> HashMap<FunctionId, FunctionWitnessType> {
+        let mut groups = HashMap::<SpecKey, Vec<usize>>::new();
+        for idx in 0..self.specs.len() {
+            groups.entry(self.current_key(idx)).or_default().push(idx);
+        }
 
-        for (spec_key, spec_value) in specs {
-            let function_id = spec_value.specialized_func_id;
-            if self.spec_by_func.get(&function_id) != Some(&spec_key) {
-                continue;
-            }
+        let root_func = self.specs[root_spec].specialized_func_id;
+        let mut canonical_by_func = HashMap::<FunctionId, FunctionId>::new();
+        let mut canonical_by_key = HashMap::<SpecKey, FunctionId>::new();
+        let mut surviving_specs = HashSet::<usize>::new();
+        let mut duplicate_funcs = Vec::<FunctionId>::new();
 
-            let cfg = self
-                .flow_analysis
-                .get_function_cfg(spec_key.original_func_id);
-            let block_order: Vec<BlockId> = cfg.get_blocks_bfs().collect();
-            let mut specialized_func = self.ssa.take_function(function_id);
+        for (key, mut spec_indices) in groups {
+            spec_indices.sort_by_key(|idx| self.specs[*idx].specialized_func_id.0);
+            let representative = spec_indices
+                .iter()
+                .copied()
+                .find(|idx| self.specs[*idx].specialized_func_id == root_func)
+                .unwrap_or(spec_indices[0]);
+            let representative_func = self.specs[representative].specialized_func_id;
 
-            for block_id in &block_order {
-                let block_cw = self
-                    .block_cfg
-                    .get(&(function_id, *block_id))
-                    .copied()
-                    .unwrap_or(spec_key.cfg_witness);
-                let block = specialized_func.get_block_mut(*block_id);
-                for instruction in block.get_instructions_mut() {
-                    if let OpCode::Call {
-                        function: CallTarget::Static(callee_id),
-                        args,
-                        unconstrained,
-                        ..
-                    } = instruction
-                    {
-                        if *unconstrained {
-                            continue;
-                        }
-                        let callee_key = self.resolve_key(&SpecKey {
-                            original_func_id: *callee_id,
-                            arg_types: args.iter().map(|v| self.witness(*v).clone()).collect(),
-                            cfg_witness: block_cw,
-                        });
-                        let callee_spec =
-                            self.specializations.get(&callee_key).unwrap_or_else(|| {
-                                panic!("Missing witness specialization for {:?}", callee_key)
-                            });
-                        *callee_id = callee_spec.specialized_func_id;
-                    }
+            canonical_by_key.insert(key, representative_func);
+            surviving_specs.insert(representative);
+            for idx in spec_indices {
+                let func_id = self.specs[idx].specialized_func_id;
+                canonical_by_func.insert(func_id, representative_func);
+                if idx != representative {
+                    duplicate_funcs.push(func_id);
                 }
             }
+        }
 
-            self.ssa.put_function(function_id, specialized_func);
+        let rewritten_funcs: Vec<usize> = surviving_specs.iter().copied().collect();
+        for spec_idx in rewritten_funcs {
+            self.rewrite_calls(spec_idx, &canonical_by_key);
+        }
 
+        for func_id in duplicate_funcs {
+            self.ssa.delete_function(func_id);
+        }
+
+        let canonical_root = canonical_by_func[&root_func];
+        self.ssa.set_entry_point(canonical_root);
+
+        let mut functions = HashMap::new();
+        for spec_idx in surviving_specs {
+            let spec = &self.specs[spec_idx];
+            let function_id = spec.specialized_func_id;
+            let key = self.current_key(spec_idx);
             let func = self.ssa.get_function(function_id);
+            let block_order: Vec<BlockId> = self
+                .flow_analysis
+                .get_function_cfg(spec.original_func_id)
+                .get_blocks_bfs()
+                .collect();
+
             let mut block_cfg_witness = HashMap::new();
             let mut value_witness_types = HashMap::new();
             for block_id in block_order {
-                if let Some(block_wt) = self.block_cfg.get(&(function_id, block_id)) {
-                    block_cfg_witness.insert(block_id, *block_wt);
-                }
+                let cfg_var = self.block_cfg_vars[&(function_id, block_id)];
+                block_cfg_witness.insert(block_id, self.assignment(cfg_var));
+
                 let block = func.get_block(block_id);
                 for (value, _) in block.get_parameters() {
-                    if let Some(wt) = self.value_wt.get(value) {
-                        value_witness_types.insert(*value, wt.clone());
-                    }
+                    self.insert_concrete_value_shape(*value, &mut value_witness_types);
                 }
                 for instruction in block.get_instructions() {
                     for value in instruction.get_inputs().chain(instruction.get_results()) {
-                        if let Some(wt) = self.value_wt.get(value) {
-                            value_witness_types.insert(*value, wt.clone());
-                        }
+                        self.insert_concrete_value_shape(*value, &mut value_witness_types);
                     }
                 }
                 if let Some(terminator) = block.get_terminator() {
                     match terminator {
                         Terminator::Jmp(_, values) | Terminator::Return(values) => {
                             for value in values {
-                                if let Some(wt) = self.value_wt.get(value) {
-                                    value_witness_types.insert(*value, wt.clone());
-                                }
+                                self.insert_concrete_value_shape(*value, &mut value_witness_types);
                             }
                         }
                         Terminator::JmpIf(cond, _, _) => {
-                            if let Some(wt) = self.value_wt.get(cond) {
-                                value_witness_types.insert(*cond, wt.clone());
-                            }
+                            self.insert_concrete_value_shape(*cond, &mut value_witness_types);
                         }
                     }
                 }
             }
 
-            self.functions.insert(
+            functions.insert(
                 function_id,
                 FunctionWitnessType {
-                    returns_witness: spec_value.return_types,
-                    cfg_witness: spec_key.cfg_witness,
-                    parameters: spec_key.arg_types,
+                    returns_witness: spec
+                        .return_shapes
+                        .iter()
+                        .map(|shape| self.concretize_shape(shape))
+                        .collect(),
+                    cfg_witness: key.cfg_witness,
+                    parameters: key.arg_types,
                     block_cfg_witness,
                     value_witness_types,
                 },
             );
         }
 
-        self.functions
+        functions
     }
 
-    fn install_new_spec(&mut self, key: SpecKey) {
-        let key = self.resolve_key(&key);
-        if self.specializations.contains_key(&key) {
-            self.flush_pending_callers(&key);
-            return;
+    fn ensure_spec(&mut self, key: SpecKey) -> usize {
+        if let Some(indices) = self.specs_by_original.get(&key.original_func_id) {
+            for idx in indices.clone() {
+                if self.current_key(idx) == key {
+                    return idx;
+                }
+            }
         }
 
-        let callee_func = self.ssa.get_function(key.original_func_id);
-        let return_types: Vec<WitnessShape> = callee_func
-            .get_returns()
-            .iter()
-            .map(WitnessTypeInference::construct_pure_witness_for_type)
+        let specialized_func_id = self.ssa.duplicate_function(key.original_func_id);
+        let entry_func = self.ssa.get_function(specialized_func_id);
+        let entry_block = entry_func.get_entry_id();
+        let entry_param_types: Vec<Type> = entry_func
+            .get_entry()
+            .get_parameters()
+            .map(|(_, typ)| typ.clone())
             .collect();
-        let specialized_id = self.ssa.duplicate_function(key.original_func_id);
-        self.install_existing_spec(key, specialized_id, return_types);
+        let entry_params: Vec<VarShape> = entry_param_types
+            .iter()
+            .map(|typ| self.fresh_shape_for_type(typ))
+            .collect();
+        let return_types = self
+            .ssa
+            .get_function(key.original_func_id)
+            .get_returns()
+            .to_vec();
+        let return_shapes: Vec<VarShape> = return_types
+            .iter()
+            .map(|typ| self.fresh_shape_for_type(typ))
+            .collect();
+        let cfg_var = self.fresh_var();
+
+        let spec_idx = self.specs.len();
+        self.specs.push(SpecInstance {
+            original_func_id: key.original_func_id,
+            specialized_func_id,
+            entry_params: entry_params.clone(),
+            return_shapes,
+            cfg_var,
+        });
+        self.specs_by_original
+            .entry(key.original_func_id)
+            .or_default()
+            .push(spec_idx);
+
+        for (shape, concrete) in entry_params.iter().zip(&key.arg_types) {
+            self.seed_shape(shape, concrete);
+        }
+        if key.cfg_witness.is_witness() {
+            self.mark_witness(cfg_var);
+        }
+
+        let block_order: Vec<BlockId> = self
+            .flow_analysis
+            .get_function_cfg(key.original_func_id)
+            .get_blocks_bfs()
+            .collect();
+        for block_id in &block_order {
+            let block_cfg = if *block_id == entry_block {
+                cfg_var
+            } else {
+                self.fresh_var()
+            };
+            self.block_cfg_vars
+                .insert((specialized_func_id, *block_id), block_cfg);
+            self.add_edge(cfg_var, block_cfg);
+        }
+
+        self.scan_spec(spec_idx, block_order);
+        spec_idx
     }
 
-    fn register_function(&mut self, key: &SpecKey, function_id: FunctionId) {
-        let cfg = self.flow_analysis.get_function_cfg(key.original_func_id);
-        let block_order: Vec<BlockId> = cfg.get_blocks_bfs().collect();
-        let entry_id = self.ssa.get_function(function_id).get_entry_id();
-        self.value_defs.insert(
-            function_id,
-            FunctionValueDefinitions::from_function(self.ssa.get_function(function_id)),
-        );
-
+    fn scan_spec(&mut self, spec_idx: usize, block_order: Vec<BlockId>) {
+        let spec = self.specs[spec_idx].clone();
+        let entry_block = self
+            .ssa
+            .get_function(spec.specialized_func_id)
+            .get_entry_id();
         let blocks: Vec<_> = {
-            let func = self.ssa.get_function(function_id);
+            let func = self.ssa.get_function(spec.specialized_func_id);
             block_order
                 .iter()
                 .map(|block_id| {
@@ -463,179 +399,52 @@ impl<'a> WtiEngine<'a> {
                 .collect()
         };
 
-        for (block_id, params, instructions, terminator) in blocks {
-            self.block_cfg
-                .entry((function_id, block_id))
-                .or_insert(key.cfg_witness);
-
-            for (idx, (value, typ)) in params.iter().enumerate() {
-                self.value_function.insert(*value, function_id);
-                if block_id == entry_id {
-                    self.entry_arg.insert(*value, (function_id, idx));
-                    self.value_wt.insert(*value, key.arg_types[idx].clone());
-                } else {
-                    self.value_wt.entry(*value).or_insert_with(|| {
-                        WitnessTypeInference::construct_pure_witness_for_type(typ)
-                    });
+        for (block_id, params, _, _) in &blocks {
+            if *block_id == entry_block {
+                for ((value, _), shape) in params.iter().zip(&spec.entry_params) {
+                    self.value_shapes.insert(*value, shape.clone());
+                }
+            } else {
+                for (value, typ) in params {
+                    let shape = self.fresh_shape_for_type(typ);
+                    self.value_shapes.insert(*value, shape);
                 }
             }
+        }
 
+        for (block_id, _, instructions, terminator) in blocks {
             for (idx, instruction) in instructions.iter().enumerate() {
-                let rule = RuleId {
-                    function_id,
-                    block_id,
-                    kind: RuleKind::Instruction(idx),
-                };
-                self.block_rules
-                    .entry((function_id, block_id))
-                    .or_default()
-                    .push(rule);
-                self.register_instruction_deps(rule, instruction);
-                self.enqueue(Event::Rule(rule));
+                self.scan_instruction(
+                    CallSite {
+                        caller_func_id: spec.specialized_func_id,
+                        block_id,
+                        instruction_idx: idx,
+                    },
+                    instruction,
+                );
             }
 
             if let Some(terminator) = terminator {
-                let rule = RuleId {
-                    function_id,
-                    block_id,
-                    kind: RuleKind::Terminator,
-                };
-                self.block_rules
-                    .entry((function_id, block_id))
-                    .or_default()
-                    .push(rule);
-                self.register_terminator_deps(rule, &terminator);
-                self.enqueue(Event::Rule(rule));
+                self.scan_terminator(spec_idx, block_id, &terminator);
             }
         }
     }
 
-    fn register_instruction_deps(&mut self, rule: RuleId, instruction: &OpCode) {
-        let inputs: Vec<ValueId> = instruction.get_inputs().copied().collect();
-        let results: Vec<ValueId> = instruction.get_results().copied().collect();
-
-        for result in &results {
-            self.value_function.insert(*result, rule.function_id);
-            self.add_value_dep(*result, *result);
-        }
-        for input in &inputs {
-            for result in &results {
-                self.add_value_dep(*input, *result);
-            }
-        }
-
-        match instruction {
-            OpCode::Store { ptr, value } => {
-                self.add_effect_dep(*ptr, rule);
-                self.add_effect_dep(*value, rule);
-            }
-            OpCode::Call { results, args, .. } => {
-                for arg in args {
-                    self.add_effect_dep(*arg, rule);
-                }
-                for result in results {
-                    self.add_effect_dep(*result, rule);
-                    self.add_value_dep(*result, *result);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn register_terminator_deps(&mut self, rule: RuleId, terminator: &Terminator) {
-        match terminator {
-            Terminator::Return(values) => {
-                self.return_rules
-                    .entry(rule.function_id)
-                    .or_default()
-                    .push(rule);
-                for value in values {
-                    self.add_effect_dep(*value, rule);
-                }
-            }
-            Terminator::Jmp(target, params) => {
-                let target_params: Vec<ValueId> = self
-                    .ssa
-                    .get_function(rule.function_id)
-                    .get_block(*target)
-                    .get_parameters()
-                    .map(|(value, _)| *value)
-                    .collect();
-                for value in params.iter().chain(target_params.iter()) {
-                    self.add_effect_dep(*value, rule);
-                }
-            }
-            Terminator::JmpIf(cond, _, _) => {
-                self.add_effect_dep(*cond, rule);
-            }
-        }
-    }
-
-    fn value_changed(&mut self, value: ValueId) {
-        self.retype_entry_arg(value);
-
-        for target in self.value_deps.get(&value).cloned().unwrap_or_default() {
-            if let Some(rule) = self.defining_rule(target) {
-                self.enqueue(Event::Rule(rule));
-            }
-        }
-        for rule in self.effect_deps.get(&value).cloned().unwrap_or_default() {
-            self.enqueue(Event::Rule(rule));
-        }
-    }
-
-    fn run_rule(&mut self, rule: RuleId) {
-        if !self.spec_by_func.contains_key(&rule.function_id) {
-            return;
-        }
-
-        match rule.kind {
-            RuleKind::Instruction(idx) => {
-                let instruction = self
-                    .ssa
-                    .get_function(rule.function_id)
-                    .get_block(rule.block_id)
-                    .get_instruction(idx)
-                    .clone();
-                let block_cw = self.block_witness(rule.function_id, rule.block_id);
-                self.run_instruction(rule, block_cw, instruction);
-            }
-            RuleKind::Terminator => {
-                let Some(terminator) = self
-                    .ssa
-                    .get_function(rule.function_id)
-                    .get_block(rule.block_id)
-                    .get_terminator()
-                    .cloned()
-                else {
-                    return;
-                };
-                let block_cw = self.block_witness(rule.function_id, rule.block_id);
-                self.run_terminator(rule, block_cw, terminator);
-            }
-        }
-    }
-
-    fn run_instruction(&mut self, rule: RuleId, block_cw: WitnessType, instruction: OpCode) {
+    fn scan_instruction(&mut self, call_site: CallSite, instruction: &OpCode) {
         match instruction {
             OpCode::BinaryArithOp {
-                kind: _,
-                result,
-                lhs,
-                rhs,
+                result, lhs, rhs, ..
             }
             | OpCode::Cmp {
-                kind: _,
-                result,
-                lhs,
-                rhs,
+                result, lhs, rhs, ..
             } => {
-                let result_wt = WitnessShape::Scalar(
-                    self.witness(lhs)
-                        .toplevel_info()
-                        .join(self.witness(rhs).toplevel_info()),
-                );
-                self.join_value(result, result_wt);
+                let result_var = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Scalar(result_var));
+                let lhs_top = self.shape(*lhs).toplevel_info();
+                let rhs_top = self.shape(*rhs).toplevel_info();
+                let result_top = self.shape(*result).toplevel_info();
+                self.add_edge(lhs_top, result_top);
+                self.add_edge(rhs_top, result_top);
             }
             OpCode::Select {
                 result,
@@ -643,53 +452,50 @@ impl<'a> WtiEngine<'a> {
                 if_t,
                 if_f,
             } => {
-                let cond_wt = self.witness(cond);
-                let then_wt = self.witness(if_t);
-                let else_wt = self.witness(if_f);
-                let result_wt = then_wt.join(else_wt).with_toplevel_info(
-                    cond_wt
-                        .toplevel_info()
-                        .join(then_wt.toplevel_info())
-                        .join(else_wt.toplevel_info()),
-                );
-                let result_wt = self.join_value(result, result_wt);
-                if result_wt.contains_ref() {
-                    self.join_value(if_t, result_wt.clone());
-                    self.join_value(if_f, result_wt);
-                }
+                let then_shape = self.shape(*if_t).clone();
+                let else_shape = self.shape(*if_f).clone();
+                let cond_top = self.shape(*cond).toplevel_info();
+                let result_shape = self.fresh_like_shape(&then_shape);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                self.flow_shape(&then_shape, &result_shape);
+                self.flow_shape(&else_shape, &result_shape);
+                self.add_edge(cond_top, result_shape.toplevel_info());
+                self.flow_ref_positions(&result_shape, &then_shape);
+                self.flow_ref_positions(&result_shape, &else_shape);
             }
             OpCode::Alloc { result, elem_type } => {
-                let inner = WitnessTypeInference::construct_pure_witness_for_type(&elem_type);
-                self.join_value(
-                    result,
-                    WitnessShape::Ref(WitnessType::Pure, Box::new(inner)),
-                );
+                let inner = self.fresh_shape_for_type(elem_type);
+                let top = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Ref(top, Box::new(inner)));
             }
             OpCode::Store { ptr, value } => {
-                let val_wt = self.witness(value).clone();
-                let store_wt = val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
-                self.join_ref_inner(ptr, store_wt.clone());
-                if store_wt.contains_ref() {
-                    let stored_wt = self.read_ref_inner(ptr);
-                    self.join_value(value, stored_wt);
-                }
+                let block_cfg = self.block_cfg_var(call_site.caller_func_id, call_site.block_id);
+                let ptr_top = self.shape(*ptr).toplevel_info();
+                let ptr_inner = self.ref_inner(self.shape(*ptr));
+                let value_shape = self.shape(*value).clone();
+                self.add_edge(ptr_top, ptr_inner.toplevel_info());
+                self.add_edge(block_cfg, ptr_inner.toplevel_info());
+                self.flow_shape(&value_shape, &ptr_inner);
+                self.flow_ref_positions(&ptr_inner, &value_shape);
             }
             OpCode::Load { result, ptr } => {
-                let result_wt = self.read_ref_inner(ptr);
-                let result_wt = self.join_value(result, result_wt);
-                if result_wt.contains_ref() {
-                    self.join_ref_inner(ptr, result_wt);
-                }
+                let ptr_top = self.shape(*ptr).toplevel_info();
+                let ptr_inner = self.ref_inner(self.shape(*ptr));
+                let result_shape = self.fresh_like_shape(&ptr_inner);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                self.add_edge(ptr_top, result_shape.toplevel_info());
+                self.flow_shape(&ptr_inner, &result_shape);
+                self.flow_ref_positions(&result_shape, &ptr_inner);
             }
             OpCode::ReadGlobal {
                 result,
-                offset: _,
                 result_type,
+                ..
             } => {
-                self.join_value(
-                    result,
-                    WitnessTypeInference::construct_pure_witness_for_type(&result_type),
-                );
+                let shape = self.fresh_shape_for_type(result_type);
+                self.insert_value_shape(*result, shape);
             }
             OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }
@@ -703,14 +509,16 @@ impl<'a> WtiEngine<'a> {
                 array,
                 index,
             } => {
-                let arr_wt = self.witness(array);
-                let idx_wt = self.witness(index);
-                let result_wt = WitnessTypeInference::array_element(arr_wt)
-                    .with_witness_in_leaves(arr_wt.toplevel_info().join(idx_wt.toplevel_info()));
-                let result_wt = self.join_value(result, result_wt);
-                if result_wt.contains_ref() {
-                    self.join_array_element(array, &result_wt);
-                }
+                let elem = self.array_element(self.shape(*array));
+                let array_top = self.shape(*array).toplevel_info();
+                let index_top = self.shape(*index).toplevel_info();
+                let result_shape = self.fresh_like_shape(&elem);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                self.flow_shape(&elem, &result_shape);
+                self.flow_ref_positions(&result_shape, &elem);
+                self.top_to_leaves(array_top, &result_shape);
+                self.top_to_leaves(index_top, &result_shape);
             }
             OpCode::ArraySet {
                 result,
@@ -718,53 +526,43 @@ impl<'a> WtiEngine<'a> {
                 index,
                 value,
             } => {
-                let arr_wt = self.witness(array);
-                let idx_wt = self.witness(index);
-                let val_wt = self.witness(value);
-                let arr_elem_wt = WitnessTypeInference::array_element(arr_wt);
-                let arr_top = arr_wt.toplevel_info();
-                let result_elem_wt = arr_elem_wt.join(val_wt).with_toplevel_info(
-                    arr_elem_wt
-                        .toplevel_info()
-                        .join(val_wt.toplevel_info())
-                        .join(idx_wt.toplevel_info()),
-                );
-                self.join_value(
-                    result,
-                    WitnessShape::Array(arr_top, Box::new(result_elem_wt)),
-                );
-                let result_elem_wt = WitnessTypeInference::array_element(self.witness(result));
-                if result_elem_wt.contains_ref() {
-                    self.join_array_element(array, &result_elem_wt);
-                    self.join_value(value, result_elem_wt);
-                }
+                let array_shape = self.shape(*array).clone();
+                let array_elem = self.array_element(&array_shape);
+                let result_shape = self.fresh_like_shape(&array_shape);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                let result_elem = self.array_element(&result_shape);
+                let value_shape = self.shape(*value).clone();
+                let index_top = self.shape(*index).toplevel_info();
+                self.flow_shape(&array_shape, &result_shape);
+                self.flow_shape(&value_shape, &result_elem);
+                self.top_to_leaves(index_top, &result_elem);
+                self.flow_ref_positions(&result_elem, &array_elem);
+                self.flow_ref_positions(&result_elem, &value_shape);
             }
             OpCode::SlicePush {
-                dir: _,
                 result,
                 slice,
                 values,
+                ..
             } => {
-                let slice_wt = self.witness(slice);
-                let slice_top = slice_wt.toplevel_info();
-                let mut result_elem_wt = WitnessTypeInference::array_element(slice_wt);
-                for value in &values {
-                    result_elem_wt = result_elem_wt.join(self.witness(*value));
+                let slice_shape = self.shape(*slice).clone();
+                let slice_elem = self.array_element(&slice_shape);
+                let result_shape = self.fresh_like_shape(&slice_shape);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                let result_elem = self.array_element(&result_shape);
+                self.flow_shape(&slice_shape, &result_shape);
+                for value in values {
+                    let value_shape = self.shape(*value).clone();
+                    self.flow_shape(&value_shape, &result_elem);
+                    self.flow_ref_positions(&result_elem, &value_shape);
                 }
-                self.join_value(
-                    result,
-                    WitnessShape::Array(slice_top, Box::new(result_elem_wt)),
-                );
-                let result_elem_wt = WitnessTypeInference::array_element(self.witness(result));
-                if result_elem_wt.contains_ref() {
-                    self.join_array_element(slice, &result_elem_wt);
-                    for value in values {
-                        self.join_value(value, result_elem_wt.clone());
-                    }
-                }
+                self.flow_ref_positions(&result_elem, &slice_elem);
             }
-            OpCode::SliceLen { result, slice: _ } => {
-                self.join_value(result, WitnessShape::Scalar(WitnessType::Pure));
+            OpCode::SliceLen { result, .. } => {
+                let result_var = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Scalar(result_var));
             }
             OpCode::Call {
                 results,
@@ -772,7 +570,21 @@ impl<'a> WtiEngine<'a> {
                 args,
                 unconstrained,
             } => {
-                self.run_call(rule, block_cw, results, callee_id, args, unconstrained);
+                let return_types = self.ssa.get_function(*callee_id).get_returns().to_vec();
+                for (result, return_type) in results.iter().zip(return_types.iter()) {
+                    let shape = self.fresh_shape_for_type(return_type);
+                    self.insert_value_shape(*result, shape);
+                }
+                if !unconstrained {
+                    let request = SpecRequest::Call(call_site);
+                    for arg in args {
+                        let arg_shape = self.shape(*arg).clone();
+                        self.register_spec_dep_for_shape(&arg_shape, request.clone());
+                    }
+                    let cfg_var = self.block_cfg_var(call_site.caller_func_id, call_site.block_id);
+                    self.register_spec_dep(cfg_var, request.clone());
+                    self.queue_spec(request);
+                }
             }
             OpCode::Call {
                 function: CallTarget::Dynamic(_),
@@ -783,42 +595,32 @@ impl<'a> WtiEngine<'a> {
             OpCode::MkSeq {
                 result,
                 elems,
-                seq_type: _,
                 elem_type,
+                ..
             } => {
-                let result_elem_wt = elems.iter().fold(
-                    WitnessTypeInference::construct_pure_witness_for_type(&elem_type),
-                    |acc, elem| acc.join(self.witness(*elem)),
-                );
-                self.join_value(
-                    result,
-                    WitnessShape::Array(WitnessType::Pure, Box::new(result_elem_wt)),
-                );
-                let result_elem_wt = WitnessTypeInference::array_element(self.witness(result));
-                if result_elem_wt.contains_ref() {
-                    for elem in elems {
-                        self.join_value(elem, result_elem_wt.clone());
-                    }
+                let elem_shape = self.fresh_shape_for_type(elem_type);
+                let top = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Array(top, Box::new(elem_shape)));
+                let result_elem = self.array_element(self.shape(*result));
+                for elem in elems {
+                    let elem_shape = self.shape(*elem).clone();
+                    self.flow_shape(&elem_shape, &result_elem);
+                    self.flow_ref_positions(&result_elem, &elem_shape);
                 }
             }
             OpCode::MkRepeated {
                 result,
                 element,
-                seq_type: _,
-                count: _,
                 elem_type,
+                ..
             } => {
-                let result_elem_wt =
-                    WitnessTypeInference::construct_pure_witness_for_type(&elem_type)
-                        .join(self.witness(element));
-                self.join_value(
-                    result,
-                    WitnessShape::Array(WitnessType::Pure, Box::new(result_elem_wt)),
-                );
-                let result_elem_wt = WitnessTypeInference::array_element(self.witness(result));
-                if result_elem_wt.contains_ref() {
-                    self.join_value(element, result_elem_wt);
-                }
+                let elem_shape = self.fresh_shape_for_type(elem_type);
+                let top = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Array(top, Box::new(elem_shape)));
+                let result_elem = self.array_element(self.shape(*result));
+                let element_shape = self.shape(*element).clone();
+                self.flow_shape(&element_shape, &result_elem);
+                self.flow_ref_positions(&result_elem, &element_shape);
             }
             OpCode::Unspread {
                 result_odd,
@@ -826,62 +628,71 @@ impl<'a> WtiEngine<'a> {
                 value,
                 ..
             } => {
-                let val_wt = self.witness(value).clone();
-                let odd_wt = self.join_value(result_odd, val_wt.clone());
-                let even_wt = self.join_value(result_even, val_wt);
-                if odd_wt.contains_ref() {
-                    self.join_value(value, odd_wt);
-                }
-                if even_wt.contains_ref() {
-                    self.join_value(value, even_wt);
-                }
+                let value_shape = self.shape(*value).clone();
+                let odd_shape = self.fresh_like_shape(&value_shape);
+                let even_shape = self.fresh_like_shape(&value_shape);
+                self.insert_value_shape(*result_odd, odd_shape);
+                self.insert_value_shape(*result_even, even_shape);
+                let odd_shape = self.shape(*result_odd).clone();
+                let even_shape = self.shape(*result_even).clone();
+                self.flow_shape(&value_shape, &odd_shape);
+                self.flow_shape(&value_shape, &even_shape);
+                self.flow_ref_positions(&odd_shape, &value_shape);
+                self.flow_ref_positions(&even_shape, &value_shape);
             }
             OpCode::Spread { result, value, .. }
             | OpCode::Cast { result, value, .. }
             | OpCode::SExt { result, value, .. }
             | OpCode::BitRange { result, value, .. }
             | OpCode::Not { result, value } => {
-                let input_wt = self.witness(value).clone();
-                let result_wt = self.join_value(result, input_wt);
-                if result_wt.contains_ref() {
-                    self.join_value(value, result_wt);
-                }
+                let value_shape = self.shape(*value).clone();
+                let result_shape = self.fresh_like_shape(&value_shape);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                self.flow_shape(&value_shape, &result_shape);
+                self.flow_ref_positions(&result_shape, &value_shape);
             }
             OpCode::ToBits { result, value, .. } | OpCode::ToRadix { result, value, .. } => {
-                let input_wt = self.witness(value).clone();
-                self.join_value(
-                    result,
-                    WitnessShape::Array(WitnessType::Pure, Box::new(input_wt)),
-                );
-                let result_elem_wt = WitnessTypeInference::array_element(self.witness(result));
-                if result_elem_wt.contains_ref() {
-                    self.join_value(value, result_elem_wt);
-                }
+                let value_shape = self.shape(*value).clone();
+                let elem_shape = self.fresh_like_shape(&value_shape);
+                let top = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Array(top, Box::new(elem_shape)));
+                let result_elem = self.array_element(self.shape(*result));
+                self.flow_shape(&value_shape, &result_elem);
+                self.flow_ref_positions(&result_elem, &value_shape);
             }
             OpCode::TupleProj { result, tuple, idx } => {
-                let (tuple_top, elem_wt) =
-                    WitnessTypeInference::tuple_element(self.witness(tuple), idx);
-                let result_wt = elem_wt.with_toplevel_info(tuple_top.join(elem_wt.toplevel_info()));
-                let result_wt = self.join_value(result, result_wt);
-                if result_wt.contains_ref() {
-                    self.join_tuple_element(tuple, idx, &result_wt);
-                }
+                let (tuple_top, child) = self.tuple_element(self.shape(*tuple), *idx);
+                let result_shape = self.fresh_like_shape(&child);
+                self.insert_value_shape(*result, result_shape);
+                let result_shape = self.shape(*result).clone();
+                self.add_edge(tuple_top, result_shape.toplevel_info());
+                self.flow_shape(&child, &result_shape);
+                self.flow_ref_positions(&result_shape, &child);
             }
             OpCode::MkTuple { result, elems, .. } => {
-                let children: Vec<WitnessShape> =
-                    elems.iter().map(|v| self.witness(*v).clone()).collect();
-                self.join_value(result, WitnessShape::Tuple(WitnessType::Pure, children));
-                if let WitnessShape::Tuple(_, children) = self.witness(result).clone() {
-                    for (elem, child_wt) in elems.iter().zip(children.iter()) {
-                        if child_wt.contains_ref() {
-                            self.join_value(*elem, child_wt.clone());
-                        }
+                let elem_shapes: Vec<_> = elems
+                    .iter()
+                    .map(|value| self.shape(*value).clone())
+                    .collect();
+                let children: Vec<_> = elem_shapes
+                    .iter()
+                    .map(|shape| self.fresh_like_shape(shape))
+                    .collect();
+                let top = self.fresh_var();
+                self.insert_value_shape(*result, WitnessShape::Tuple(top, children));
+                if let WitnessShape::Tuple(_, children) = self.shape(*result).clone() {
+                    for (elem_shape, child) in elem_shapes.iter().zip(children.iter()) {
+                        self.flow_shape(&elem_shape, child);
+                        self.flow_ref_positions(child, &elem_shape);
                     }
                 }
             }
             OpCode::WriteWitness { result, .. } => {
                 if let Some(result) = result {
-                    self.join_value(result, WitnessShape::Scalar(WitnessType::Witness));
+                    let var = self.fresh_var();
+                    self.insert_value_shape(*result, WitnessShape::Scalar(var));
+                    self.mark_witness(var);
                 }
             }
             OpCode::Constrain { .. }
@@ -895,7 +706,7 @@ impl<'a> WtiEngine<'a> {
             | OpCode::ValueOf { .. } => {
                 panic!("Should not be present at this stage {:?}", instruction);
             }
-            _ => {
+            OpCode::Guard { .. } => {
                 panic!(
                     "Unsupported opcode during witness type inference: {:?}",
                     instruction
@@ -904,368 +715,494 @@ impl<'a> WtiEngine<'a> {
         }
     }
 
-    fn run_call(
-        &mut self,
-        rule: RuleId,
-        block_cw: WitnessType,
-        results: Vec<ValueId>,
-        callee_id: FunctionId,
-        args: Vec<ValueId>,
-        unconstrained: bool,
-    ) {
-        if unconstrained {
-            self.join_pure_returns(callee_id, &results);
-            return;
-        }
-
-        let callee_key = self.resolve_key(&SpecKey {
-            original_func_id: callee_id,
-            arg_types: args.iter().map(|v| self.witness(*v).clone()).collect(),
-            cfg_witness: block_cw,
-        });
-
-        let Some(callee_spec) = self.specializations.get(&callee_key).cloned() else {
-            self.pending_callers
-                .entry(callee_key.clone())
-                .or_default()
-                .insert(rule);
-            self.enqueue(Event::NewSpec(callee_key));
-            self.join_pure_returns(callee_id, &results);
-            return;
-        };
-
-        self.spec_callers
-            .entry(callee_spec.specialized_func_id)
-            .or_default()
-            .insert(rule);
-
-        for (result, ret_wt) in results.iter().zip(&callee_spec.return_types) {
-            self.join_value(*result, ret_wt.clone());
-        }
-        for (arg, arg_wt) in args.iter().zip(&callee_key.arg_types) {
-            self.join_value(*arg, arg_wt.clone());
-        }
-        self.join_return_constraints(callee_spec.specialized_func_id, &results);
-    }
-
-    fn run_terminator(&mut self, rule: RuleId, block_cw: WitnessType, terminator: Terminator) {
+    fn scan_terminator(&mut self, spec_idx: usize, block_id: BlockId, terminator: &Terminator) {
+        let spec = self.specs[spec_idx].clone();
         match terminator {
             Terminator::Return(values) => {
-                let spec_key = self.spec_by_func.get(&rule.function_id).unwrap().clone();
-                let constraints = self
-                    .specializations
-                    .get(&spec_key)
-                    .unwrap()
-                    .return_constraints
-                    .clone();
-                let mut ret_wts = Vec::new();
-                for (value, constraint) in values.iter().zip(constraints.iter()) {
-                    if constraint.contains_ref() {
-                        self.join_value(*value, constraint.clone());
-                    }
-                    ret_wts.push(self.witness(*value).join(constraint));
+                for (value, return_shape) in values.iter().zip(&spec.return_shapes) {
+                    let value_shape = self.shape(*value).clone();
+                    self.equal_shape(&value_shape, return_shape);
                 }
-                self.join_return_types(rule.function_id, ret_wts);
             }
             Terminator::Jmp(target, params) => {
                 let target_params: Vec<ValueId> = self
                     .ssa
-                    .get_function(rule.function_id)
-                    .get_block(target)
+                    .get_function(spec.specialized_func_id)
+                    .get_block(*target)
                     .get_parameters()
                     .map(|(value, _)| *value)
                     .collect();
-                for (target_value, param) in target_params.iter().zip(params.iter()) {
-                    let param_wt = self.witness(*param).clone();
-                    let joined = self.join_value(*target_value, param_wt);
-                    if joined.contains_ref() {
-                        self.join_value(*param, joined);
-                    }
+                for (arg, param) in params.iter().zip(target_params.iter()) {
+                    let arg_shape = self.shape(*arg).clone();
+                    let param_shape = self.shape(*param).clone();
+                    self.equal_shape(&arg_shape, &param_shape);
                 }
             }
             Terminator::JmpIf(cond, _if_true, _if_false) => {
-                let cond_toplevel = self.witness(cond).toplevel_info();
-                let spec_key = self.spec_by_func.get(&rule.function_id).unwrap();
-                let cfg = self
-                    .flow_analysis
-                    .get_function_cfg(spec_key.original_func_id);
-                let merge = cfg.get_merge_point(rule.block_id);
+                let cond_top = self.shape(*cond).toplevel_info();
+                let block_cfg = self.block_cfg_var(spec.specialized_func_id, block_id);
+                let cfg = self.flow_analysis.get_function_cfg(spec.original_func_id);
+                for body_block_id in cfg.get_if_body(block_id) {
+                    let body_cfg = self.block_cfg_var(spec.specialized_func_id, body_block_id);
+                    self.add_edge(cond_top, body_cfg);
+                    self.add_edge(block_cfg, body_cfg);
+                }
+
+                let merge = cfg.get_merge_point(block_id);
                 let merge_params: Vec<ValueId> = self
                     .ssa
-                    .get_function(rule.function_id)
+                    .get_function(spec.specialized_func_id)
                     .get_block(merge)
                     .get_parameters()
                     .map(|(value, _)| *value)
                     .collect();
-                for param_id in merge_params {
-                    let joined = self.witness(param_id).with_witness_in_leaves(cond_toplevel);
-                    self.join_value(param_id, joined);
-                }
-
-                for body_block_id in cfg.get_if_body(rule.block_id) {
-                    self.join_block_cfg(
-                        rule.function_id,
-                        body_block_id,
-                        cond_toplevel.join(block_cw),
-                    );
+                for param in merge_params {
+                    let param_shape = self.shape(param).clone();
+                    self.top_to_leaves(cond_top, &param_shape);
                 }
             }
         }
     }
 
-    fn retype_entry_arg(&mut self, value: ValueId) {
-        let Some((function_id, idx)) = self.entry_arg.get(&value).copied() else {
-            return;
-        };
-        let Some(old_key) = self.spec_by_func.get(&function_id).cloned() else {
-            return;
-        };
-        if !old_key.arg_types[idx].contains_ref() {
-            return;
+    fn process_spec_request(&mut self, request: SpecRequest) {
+        match request {
+            SpecRequest::Call(call_site) => self.process_call_request(call_site),
         }
-
-        let joined = old_key.arg_types[idx].join(self.witness(value));
-        if joined == old_key.arg_types[idx] {
-            return;
-        }
-
-        let mut new_arg_types = old_key.arg_types.clone();
-        new_arg_types[idx] = joined;
-        let new_key = self.resolve_key(&SpecKey {
-            original_func_id: old_key.original_func_id,
-            arg_types: new_arg_types,
-            cfg_witness: old_key.cfg_witness,
-        });
-        self.remap_spec(function_id, old_key, new_key);
     }
 
-    fn remap_spec(&mut self, function_id: FunctionId, old_key: SpecKey, new_key: SpecKey) {
-        if old_key == new_key {
+    fn process_call_request(&mut self, call_site: CallSite) {
+        let instruction = self
+            .ssa
+            .get_function(call_site.caller_func_id)
+            .get_block(call_site.block_id)
+            .get_instruction(call_site.instruction_idx)
+            .clone();
+
+        let OpCode::Call {
+            results,
+            function: CallTarget::Static(callee_id),
+            args,
+            unconstrained,
+        } = instruction
+        else {
+            return;
+        };
+        if unconstrained {
             return;
         }
-        self.spec_remap.insert(old_key.clone(), new_key.clone());
-        if let Some(pending) = self.pending_callers.remove(&old_key) {
-            self.pending_callers
-                .entry(new_key.clone())
-                .or_default()
-                .extend(pending);
-        }
 
-        let old_value = self.specializations.remove(&old_key).unwrap();
-        if let Some(existing) = self.specializations.get_mut(&new_key) {
-            let existing_function_id = existing.specialized_func_id;
-            existing.return_types =
-                Self::join_shapes(&existing.return_types, &old_value.return_types);
-            existing.return_constraints =
-                Self::join_shapes(&existing.return_constraints, &old_value.return_constraints);
-            self.spec_by_func.remove(&function_id);
-            if let Some(callers) = self.spec_callers.remove(&function_id) {
-                self.spec_callers
-                    .entry(existing_function_id)
-                    .or_default()
-                    .extend(callers);
-            }
-            self.enqueue(Event::SpecChanged(existing_function_id));
-            self.enqueue(Event::ReturnConstraintChanged(existing_function_id));
-        } else {
-            self.specializations.insert(new_key.clone(), old_value);
-            self.spec_by_func.insert(function_id, new_key);
-            self.enqueue(Event::SpecChanged(function_id));
-            self.enqueue(Event::ReturnConstraintChanged(function_id));
-            for rule in self
-                .block_rules
+        let key = SpecKey {
+            original_func_id: callee_id,
+            arg_types: args
                 .iter()
-                .filter_map(|((fid, _), rules)| {
-                    if *fid == function_id {
-                        Some(rules.clone())
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .collect::<Vec<_>>()
-            {
-                self.enqueue(Event::Rule(rule));
-            }
-        }
-    }
+                .map(|arg| self.concretize_shape(self.shape(*arg)))
+                .collect(),
+            cfg_witness: self
+                .assignment(self.block_cfg_var(call_site.caller_func_id, call_site.block_id)),
+        };
+        let callee_spec = self.ensure_spec(key);
 
-    fn join_return_types(&mut self, function_id: FunctionId, ret_wts: Vec<WitnessShape>) {
-        let spec_key = self.spec_by_func.get(&function_id).unwrap().clone();
-        let spec = self.specializations.get_mut(&spec_key).unwrap();
-        let joined = Self::join_shapes(&spec.return_types, &ret_wts);
-        if joined != spec.return_types {
-            spec.return_types = joined;
-            self.enqueue(Event::SpecChanged(function_id));
-        }
-    }
-
-    fn join_return_constraints(&mut self, function_id: FunctionId, results: &[ValueId]) {
-        let spec_key = self.spec_by_func.get(&function_id).unwrap().clone();
-        let result_types: Vec<WitnessShape> = results
+        for (arg, param_shape) in args
             .iter()
-            .map(|result| self.witness(*result).clone())
+            .zip(self.specs[callee_spec].entry_params.clone().iter())
+        {
+            let arg_shape = self.shape(*arg).clone();
+            self.equal_shape(&arg_shape, param_shape);
+        }
+        for (result, return_shape) in results
+            .iter()
+            .zip(self.specs[callee_spec].return_shapes.clone().iter())
+        {
+            let result_shape = self.shape(*result).clone();
+            self.equal_shape(return_shape, &result_shape);
+        }
+    }
+
+    fn rewrite_calls(&mut self, spec_idx: usize, canonical_by_key: &HashMap<SpecKey, FunctionId>) {
+        let spec = self.specs[spec_idx].clone();
+        let block_order: Vec<BlockId> = self
+            .flow_analysis
+            .get_function_cfg(spec.original_func_id)
+            .get_blocks_bfs()
             .collect();
-        let spec = self.specializations.get_mut(&spec_key).unwrap();
-        assert_eq!(
-            spec.return_constraints.len(),
-            result_types.len(),
-            "Cannot join return constraints of different lengths"
-        );
+        let mut rewrites = HashMap::<(BlockId, usize), FunctionId>::new();
 
-        let joined: Vec<WitnessShape> = spec
-            .return_constraints
-            .iter()
-            .zip(result_types.iter())
-            .map(|(current, seen)| {
-                if current.contains_ref() || seen.contains_ref() {
-                    current.join(seen)
-                } else {
-                    current.clone()
+        for block_id in &block_order {
+            let block_cfg =
+                self.assignment(self.block_cfg_var(spec.specialized_func_id, *block_id));
+            let block = self
+                .ssa
+                .get_function(spec.specialized_func_id)
+                .get_block(*block_id);
+            for (idx, instruction) in block.get_instructions().enumerate() {
+                let OpCode::Call {
+                    function: CallTarget::Static(callee_id),
+                    args,
+                    unconstrained,
+                    ..
+                } = instruction
+                else {
+                    continue;
+                };
+                if *unconstrained {
+                    continue;
                 }
-            })
-            .collect();
-        if joined != spec.return_constraints {
-            spec.return_constraints = joined;
-            self.enqueue(Event::ReturnConstraintChanged(function_id));
-        }
-    }
 
-    fn join_pure_returns(&mut self, function_id: FunctionId, results: &[ValueId]) {
-        let return_types = self.ssa.get_function(function_id).get_returns().to_vec();
-        for (result, ret_type) in results.iter().zip(return_types.iter()) {
-            self.join_value(
-                *result,
-                WitnessTypeInference::construct_pure_witness_for_type(ret_type),
-            );
-        }
-    }
-
-    fn flush_pending_callers(&mut self, key: &SpecKey) {
-        let key = self.resolve_key(key);
-        if let Some(callers) = self.pending_callers.remove(&key) {
-            for rule in callers {
-                self.enqueue(Event::Rule(rule));
+                let key = SpecKey {
+                    original_func_id: *callee_id,
+                    arg_types: args
+                        .iter()
+                        .map(|arg| self.concretize_shape(self.shape(*arg)))
+                        .collect(),
+                    cfg_witness: block_cfg,
+                };
+                let specialized = *canonical_by_key
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("Missing witness specialization for {:?}", key));
+                rewrites.insert((*block_id, idx), specialized);
             }
         }
-    }
 
-    fn defining_rule(&self, value: ValueId) -> Option<RuleId> {
-        let function_id = *self.value_function.get(&value)?;
-        match self.value_defs.get(&function_id)?.get_definition(value)? {
-            ValueDefinition::Instruction(block_id, idx, _) => Some(RuleId {
-                function_id,
-                block_id: *block_id,
-                kind: RuleKind::Instruction(*idx),
-            }),
-            ValueDefinition::Param(_, _, _) => None,
+        let function = self.ssa.get_function_mut(spec.specialized_func_id);
+        for ((block_id, idx), callee_id) in rewrites {
+            let instruction = function
+                .get_block_mut(block_id)
+                .get_instructions_mut()
+                .nth(idx)
+                .unwrap_or_else(|| {
+                    panic!("Missing call instruction {} in block {:?}", idx, block_id)
+                });
+            let OpCode::Call { function, .. } = instruction else {
+                panic!("Call rewrite target is no longer a call");
+            };
+            let CallTarget::Static(target) = function else {
+                panic!("Call rewrite target is no longer a static call");
+            };
+            *target = callee_id;
         }
     }
 
-    fn add_value_dep(&mut self, source: ValueId, target: ValueId) {
-        self.value_deps.entry(source).or_default().push(target);
-    }
-
-    fn add_effect_dep(&mut self, source: ValueId, rule: RuleId) {
-        self.effect_deps.entry(source).or_default().push(rule);
-    }
-
-    fn enqueue(&mut self, event: Event) {
-        if self.queued_events.insert(event.clone()) {
-            self.events.push_back(event);
+    fn current_key(&self, spec_idx: usize) -> SpecKey {
+        let spec = &self.specs[spec_idx];
+        SpecKey {
+            original_func_id: spec.original_func_id,
+            arg_types: spec
+                .entry_params
+                .iter()
+                .map(|shape| self.concretize_shape(shape))
+                .collect(),
+            cfg_witness: self.assignment(spec.cfg_var),
         }
     }
 
-    fn resolve_key(&self, key: &SpecKey) -> SpecKey {
-        WitnessTypeInference::resolve_key(key, &self.spec_remap)
+    fn insert_concrete_value_shape(
+        &self,
+        value: ValueId,
+        output: &mut HashMap<ValueId, WitnessShape>,
+    ) {
+        if let Some(shape) = self.value_shapes.get(&value) {
+            output.insert(value, self.concretize_shape(shape));
+        }
     }
 
-    fn block_witness(&self, function_id: FunctionId, block_id: BlockId) -> WitnessType {
+    fn insert_value_shape(&mut self, value: ValueId, shape: VarShape) {
+        self.value_shapes.entry(value).or_insert(shape);
+    }
+
+    fn shape(&self, value: ValueId) -> &VarShape {
+        self.value_shapes
+            .get(&value)
+            .unwrap_or_else(|| panic!("Missing witness shape for value {:?}", value))
+    }
+
+    fn block_cfg_var(&self, function_id: FunctionId, block_id: BlockId) -> VariableId {
         *self
-            .block_cfg
+            .block_cfg_vars
             .get(&(function_id, block_id))
-            .unwrap_or_else(|| panic!("Missing block witness for {:?} {:?}", function_id, block_id))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing block cfg variable for {:?} {:?}",
+                    function_id, block_id
+                )
+            })
     }
 
-    fn join_block_cfg(&mut self, function_id: FunctionId, block_id: BlockId, wt: WitnessType) {
-        let current = self
-            .block_cfg
-            .get(&(function_id, block_id))
-            .copied()
-            .unwrap_or(WitnessType::Pure);
-        let joined = current.join(wt);
-        if joined != current {
-            self.block_cfg.insert((function_id, block_id), joined);
-            self.enqueue(Event::BlockCfgChanged(function_id, block_id));
+    fn fresh_var(&mut self) -> VariableId {
+        let var = VariableId(self.next_variable);
+        self.next_variable += 1;
+        self.assignments.insert(var, WitnessType::Pure);
+        var
+    }
+
+    fn assignment(&self, var: VariableId) -> WitnessType {
+        *self
+            .assignments
+            .get(&var)
+            .unwrap_or_else(|| panic!("Missing assignment for {:?}", var))
+    }
+
+    fn mark_witness(&mut self, var: VariableId) {
+        if self.assignment(var).is_witness() {
+            return;
+        }
+        self.assignments.insert(var, WitnessType::Witness);
+        if self.queued_vars.insert(var) {
+            self.var_queue.push_back(var);
         }
     }
 
-    fn witness(&self, value: ValueId) -> &WitnessShape {
-        self.value_wt
-            .get(&value)
-            .unwrap_or_else(|| panic!("Missing witness type for value {:?}", value))
-    }
-
-    fn join_value(&mut self, value: ValueId, wt: WitnessShape) -> WitnessShape {
-        let joined = self
-            .value_wt
-            .get(&value)
-            .map(|existing| existing.join(&wt))
-            .unwrap_or(wt);
-        if self.value_wt.get(&value) != Some(&joined) {
-            self.value_wt.insert(value, joined.clone());
-            self.enqueue(Event::ValueChanged(value));
+    fn add_edge(&mut self, source: VariableId, target: VariableId) {
+        let edges = self.graph.entry(source).or_default();
+        if edges.contains(&target) {
+            return;
         }
-        joined
-    }
-
-    fn read_ref_inner(&self, ptr: ValueId) -> WitnessShape {
-        match self.witness(ptr) {
-            WitnessShape::Ref(ptr_info, inner) => {
-                inner.with_toplevel_info(inner.toplevel_info().join(*ptr_info))
-            }
-            other => panic!("Load from non-ref witness type: {:?}", other),
+        edges.push(target);
+        if self.assignment(source).is_witness() {
+            self.mark_witness(target);
         }
     }
 
-    fn join_ref_inner(&mut self, ptr: ValueId, inner_wt: WitnessShape) {
-        let updated = match self.witness(ptr).clone() {
-            WitnessShape::Ref(ptr_info, inner) => {
-                WitnessShape::Ref(ptr_info, Box::new(inner.join(&inner_wt)))
-            }
-            other => panic!("Store to non-ref witness type: {:?}", other),
-        };
-        self.join_value(ptr, updated);
+    fn queue_spec(&mut self, request: SpecRequest) {
+        if self.queued_specs.insert(request.clone()) {
+            self.spec_queue.push_back(request);
+        }
     }
 
-    fn join_array_element(&mut self, array: ValueId, elem_wt: &WitnessShape) {
-        let updated = match self.witness(array).clone() {
-            WitnessShape::Array(array_info, elem) => {
-                WitnessShape::Array(array_info, Box::new(elem.join(elem_wt)))
-            }
-            other => panic!("Array element merge on non-array witness type: {:?}", other),
-        };
-        self.join_value(array, updated);
+    fn register_spec_dep(&mut self, var: VariableId, request: SpecRequest) {
+        let deps = self.spec_deps.entry(var).or_default();
+        if !deps.contains(&request) {
+            deps.push(request);
+        }
     }
 
-    fn join_tuple_element(&mut self, tuple: ValueId, idx: usize, elem_wt: &WitnessShape) {
-        let updated = match self.witness(tuple).clone() {
-            WitnessShape::Tuple(tuple_info, mut children) => {
-                children[idx] = children[idx].join(elem_wt);
-                WitnessShape::Tuple(tuple_info, children)
-            }
-            other => panic!("Tuple element merge on non-tuple witness type: {:?}", other),
-        };
-        self.join_value(tuple, updated);
+    fn register_spec_dep_for_shape(&mut self, shape: &VarShape, request: SpecRequest) {
+        for var in Self::shape_vars(shape) {
+            self.register_spec_dep(var, request.clone());
+        }
     }
 
-    fn join_shapes(lhs: &[WitnessShape], rhs: &[WitnessShape]) -> Vec<WitnessShape> {
-        assert_eq!(
-            lhs.len(),
-            rhs.len(),
-            "Cannot join witness shape vectors of different lengths"
-        );
-        lhs.iter().zip(rhs.iter()).map(|(a, b)| a.join(b)).collect()
+    fn seed_shape(&mut self, shape: &VarShape, concrete: &WitnessShape) {
+        match (shape, concrete) {
+            (WitnessShape::Scalar(var), WitnessShape::Scalar(wt)) => {
+                if wt.is_witness() {
+                    self.mark_witness(*var);
+                }
+            }
+            (WitnessShape::Array(var, inner), WitnessShape::Array(wt, concrete_inner))
+            | (WitnessShape::Ref(var, inner), WitnessShape::Ref(wt, concrete_inner)) => {
+                if wt.is_witness() {
+                    self.mark_witness(*var);
+                }
+                self.seed_shape(inner, concrete_inner);
+            }
+            (WitnessShape::Tuple(var, children), WitnessShape::Tuple(wt, concrete_children)) => {
+                if wt.is_witness() {
+                    self.mark_witness(*var);
+                }
+                for (child, concrete_child) in children.iter().zip(concrete_children.iter()) {
+                    self.seed_shape(child, concrete_child);
+                }
+            }
+            _ => panic!(
+                "Cannot seed mismatched witness shapes: {:?} vs {:?}",
+                shape, concrete
+            ),
+        }
+    }
+
+    fn fresh_shape_for_type(&mut self, typ: &Type) -> VarShape {
+        match &typ.expr {
+            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field => {
+                WitnessShape::Scalar(self.fresh_var())
+            }
+            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+                let top = self.fresh_var();
+                let inner = self.fresh_shape_for_type(inner);
+                WitnessShape::Array(top, Box::new(inner))
+            }
+            TypeExpr::Ref(inner) => {
+                let top = self.fresh_var();
+                let inner = self.fresh_shape_for_type(inner);
+                WitnessShape::Ref(top, Box::new(inner))
+            }
+            TypeExpr::Tuple(elements) => {
+                let top = self.fresh_var();
+                let children = elements
+                    .iter()
+                    .map(|typ| self.fresh_shape_for_type(typ))
+                    .collect();
+                WitnessShape::Tuple(top, children)
+            }
+            TypeExpr::WitnessOf(_) => {
+                panic!("ICE: WitnessOf should not be present at this stage");
+            }
+            TypeExpr::Function => WitnessShape::Scalar(self.fresh_var()),
+        }
+    }
+
+    fn fresh_like_shape(&mut self, shape: &VarShape) -> VarShape {
+        match shape {
+            WitnessShape::Scalar(_) => WitnessShape::Scalar(self.fresh_var()),
+            WitnessShape::Array(_, inner) => {
+                let top = self.fresh_var();
+                let inner = self.fresh_like_shape(inner);
+                WitnessShape::Array(top, Box::new(inner))
+            }
+            WitnessShape::Ref(_, inner) => {
+                let top = self.fresh_var();
+                let inner = self.fresh_like_shape(inner);
+                WitnessShape::Ref(top, Box::new(inner))
+            }
+            WitnessShape::Tuple(_, children) => {
+                let top = self.fresh_var();
+                let children = children
+                    .iter()
+                    .map(|child| self.fresh_like_shape(child))
+                    .collect();
+                WitnessShape::Tuple(top, children)
+            }
+        }
+    }
+
+    fn concretize_shape(&self, shape: &VarShape) -> WitnessShape {
+        match shape {
+            WitnessShape::Scalar(var) => WitnessShape::Scalar(self.assignment(*var)),
+            WitnessShape::Array(var, inner) => WitnessShape::Array(
+                self.assignment(*var),
+                Box::new(self.concretize_shape(inner)),
+            ),
+            WitnessShape::Ref(var, inner) => WitnessShape::Ref(
+                self.assignment(*var),
+                Box::new(self.concretize_shape(inner)),
+            ),
+            WitnessShape::Tuple(var, children) => WitnessShape::Tuple(
+                self.assignment(*var),
+                children
+                    .iter()
+                    .map(|child| self.concretize_shape(child))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn equal_shape(&mut self, lhs: &VarShape, rhs: &VarShape) {
+        self.flow_shape(lhs, rhs);
+        self.flow_shape(rhs, lhs);
+    }
+
+    fn flow_shape(&mut self, source: &VarShape, target: &VarShape) {
+        match (source, target) {
+            (WitnessShape::Scalar(source), WitnessShape::Scalar(target)) => {
+                self.add_edge(*source, *target);
+            }
+            (
+                WitnessShape::Array(source, source_inner),
+                WitnessShape::Array(target, target_inner),
+            )
+            | (WitnessShape::Ref(source, source_inner), WitnessShape::Ref(target, target_inner)) => {
+                self.add_edge(*source, *target);
+                self.flow_shape(source_inner, target_inner);
+            }
+            (
+                WitnessShape::Tuple(source, source_children),
+                WitnessShape::Tuple(target, target_children),
+            ) => {
+                self.add_edge(*source, *target);
+                for (source_child, target_child) in
+                    source_children.iter().zip(target_children.iter())
+                {
+                    self.flow_shape(source_child, target_child);
+                }
+            }
+            _ => panic!(
+                "Cannot flow mismatched witness shapes: {:?} -> {:?}",
+                source, target
+            ),
+        }
+    }
+
+    fn flow_ref_positions(&mut self, source: &VarShape, target: &VarShape) {
+        match (source, target) {
+            (WitnessShape::Ref(_, _), WitnessShape::Ref(_, _)) => self.flow_shape(source, target),
+            (WitnessShape::Array(_, source_inner), WitnessShape::Array(_, target_inner)) => {
+                self.flow_ref_positions(source_inner, target_inner);
+            }
+            (WitnessShape::Tuple(_, source_children), WitnessShape::Tuple(_, target_children)) => {
+                for (source_child, target_child) in
+                    source_children.iter().zip(target_children.iter())
+                {
+                    self.flow_ref_positions(source_child, target_child);
+                }
+            }
+            (WitnessShape::Scalar(_), WitnessShape::Scalar(_)) => {}
+            _ => panic!(
+                "Cannot flow ref positions through mismatched witness shapes: {:?} -> {:?}",
+                source, target
+            ),
+        }
+    }
+
+    fn top_to_leaves(&mut self, source: VariableId, target: &VarShape) {
+        match target {
+            WitnessShape::Scalar(target) | WitnessShape::Ref(target, _) => {
+                self.add_edge(source, *target);
+            }
+            WitnessShape::Array(_, inner) => self.top_to_leaves(source, inner),
+            WitnessShape::Tuple(_, children) => {
+                for child in children {
+                    self.top_to_leaves(source, child);
+                }
+            }
+        }
+    }
+
+    fn shape_vars(shape: &VarShape) -> Vec<VariableId> {
+        let mut vars = Vec::new();
+        Self::collect_shape_vars(shape, &mut vars);
+        vars
+    }
+
+    fn collect_shape_vars(shape: &VarShape, vars: &mut Vec<VariableId>) {
+        match shape {
+            WitnessShape::Scalar(var) => vars.push(*var),
+            WitnessShape::Array(var, inner) | WitnessShape::Ref(var, inner) => {
+                vars.push(*var);
+                Self::collect_shape_vars(inner, vars);
+            }
+            WitnessShape::Tuple(var, children) => {
+                vars.push(*var);
+                for child in children {
+                    Self::collect_shape_vars(child, vars);
+                }
+            }
+        }
+    }
+
+    fn array_element(&self, shape: &VarShape) -> VarShape {
+        match shape {
+            WitnessShape::Array(_, inner) => *inner.clone(),
+            other => panic!(
+                "Array element access on non-array witness shape: {:?}",
+                other
+            ),
+        }
+    }
+
+    fn ref_inner(&self, shape: &VarShape) -> VarShape {
+        match shape {
+            WitnessShape::Ref(_, inner) => *inner.clone(),
+            other => panic!("Ref inner access on non-ref witness shape: {:?}", other),
+        }
+    }
+
+    fn tuple_element(&self, shape: &VarShape, idx: usize) -> (VariableId, VarShape) {
+        match shape {
+            WitnessShape::Tuple(top, children) => (*top, children[idx].clone()),
+            other => panic!(
+                "Tuple element access on non-tuple witness shape: {:?}",
+                other
+            ),
+        }
     }
 }
 

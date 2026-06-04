@@ -44,14 +44,14 @@ impl WitnessType {
 pub type WitnessInfo = WitnessType;
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
-pub enum WitnessShape {
-    Scalar(WitnessInfo),
-    Array(WitnessInfo, Box<WitnessShape>),
-    Ref(WitnessInfo, Box<WitnessShape>),
-    Tuple(WitnessInfo, Vec<WitnessShape>),
+pub enum WitnessShape<T = WitnessType> {
+    Scalar(T),
+    Array(T, Box<WitnessShape<T>>),
+    Ref(T, Box<WitnessShape<T>>),
+    Tuple(T, Vec<WitnessShape<T>>),
 }
 
-impl Display for WitnessShape {
+impl<T: Display> Display for WitnessShape<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WitnessShape::Scalar(info) => write!(f, "{info}"),
@@ -72,7 +72,49 @@ impl Display for WitnessShape {
     }
 }
 
-impl WitnessShape {
+impl<T: Copy> WitnessShape<T> {
+    pub fn toplevel_info(&self) -> T {
+        match self {
+            WitnessShape::Scalar(info) => *info,
+            WitnessShape::Array(info, _) => *info,
+            WitnessShape::Ref(info, _) => *info,
+            WitnessShape::Tuple(info, _) => *info,
+        }
+    }
+}
+
+impl<T: Clone> WitnessShape<T> {
+    pub fn contains_ref(&self) -> bool {
+        match self {
+            WitnessShape::Ref(_, _) => true,
+            WitnessShape::Array(_, inner) => inner.contains_ref(),
+            WitnessShape::Tuple(_, children) => children.iter().any(WitnessShape::contains_ref),
+            WitnessShape::Scalar(_) => false,
+        }
+    }
+
+    pub fn child_witness_type(&self) -> Option<WitnessShape<T>> {
+        match self {
+            WitnessShape::Array(_, inner) => Some(*inner.clone()),
+            WitnessShape::Ref(_, inner) => Some(*inner.clone()),
+            WitnessShape::Scalar(_) => None,
+            WitnessShape::Tuple(_, _) => {
+                panic!("Error: child_witness_type shouldn't be called for Tuple values")
+            }
+        }
+    }
+
+    pub fn with_toplevel_info(&self, toplevel: T) -> WitnessShape<T> {
+        match self {
+            WitnessShape::Scalar(_) => WitnessShape::Scalar(toplevel),
+            WitnessShape::Array(_, inner) => WitnessShape::Array(toplevel, inner.clone()),
+            WitnessShape::Ref(_, inner) => WitnessShape::Ref(toplevel, inner.clone()),
+            WitnessShape::Tuple(_, inner) => WitnessShape::Tuple(toplevel, inner.clone()),
+        }
+    }
+}
+
+impl WitnessShape<WitnessType> {
     /// Join two witness types (least upper bound). Eagerly computes concrete result.
     pub fn join(&self, other: &WitnessShape) -> WitnessShape {
         match (self, other) {
@@ -97,44 +139,6 @@ impl WitnessShape {
                 "Cannot join different witness types: {:?} vs {:?}",
                 self, other
             ),
-        }
-    }
-
-    pub fn toplevel_info(&self) -> WitnessType {
-        match self {
-            WitnessShape::Scalar(info) => *info,
-            WitnessShape::Array(info, _) => *info,
-            WitnessShape::Ref(info, _) => *info,
-            WitnessShape::Tuple(info, _) => *info,
-        }
-    }
-
-    pub fn contains_ref(&self) -> bool {
-        match self {
-            WitnessShape::Ref(_, _) => true,
-            WitnessShape::Array(_, inner) => inner.contains_ref(),
-            WitnessShape::Tuple(_, children) => children.iter().any(WitnessShape::contains_ref),
-            WitnessShape::Scalar(_) => false,
-        }
-    }
-
-    pub fn child_witness_type(&self) -> Option<WitnessShape> {
-        match self {
-            WitnessShape::Array(_, inner) => Some(*inner.clone()),
-            WitnessShape::Ref(_, inner) => Some(*inner.clone()),
-            WitnessShape::Scalar(_) => None,
-            WitnessShape::Tuple(_, _) => {
-                panic!("Error: child_witness_type shouldn't be called for Tuple values")
-            }
-        }
-    }
-
-    pub fn with_toplevel_info(&self, toplevel: WitnessInfo) -> WitnessShape {
-        match self {
-            WitnessShape::Scalar(_) => WitnessShape::Scalar(toplevel),
-            WitnessShape::Array(_, inner) => WitnessShape::Array(toplevel, inner.clone()),
-            WitnessShape::Ref(_, inner) => WitnessShape::Ref(toplevel, inner.clone()),
-            WitnessShape::Tuple(_, inner) => WitnessShape::Tuple(toplevel, inner.clone()),
         }
     }
 
