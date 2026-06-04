@@ -40,6 +40,8 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
         HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => LLType::Int(*bits as u32),
         HLTypeExpr::Array(..) => LLType::Ptr,
+        HLTypeExpr::Slice(_) => LLType::Ptr,
+
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
         HLTypeExpr::Tuple(_) => LLType::Ptr,
@@ -69,12 +71,18 @@ fn rc_array_struct(elem_type: &HLType, count: usize) -> LLStruct {
     LLStruct::rc_array(elem_struct(elem_type), count)
 }
 
+/// Get the RC'd slice struct for an Array<T, N> type.
+fn rc_slice_struct(elem_type: &HLType) -> LLStruct {
+    LLStruct::rc_slice(elem_struct(elem_type))
+}
+
 /// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
 fn tuple_field_type(ty: &HLType) -> LLFieldType {
     match &ty.expr {
         HLTypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
         HLTypeExpr::U(bits) | HLTypeExpr::I(bits) => LLFieldType::Int(*bits as u32),
         HLTypeExpr::Array(..) => LLFieldType::Ptr,
+        HLTypeExpr::Slice(_) => LLFieldType::Ptr,
         HLTypeExpr::Tuple(_) => LLFieldType::Ptr,
         HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
         HLTypeExpr::Ref(_) => LLFieldType::Ptr,
@@ -105,6 +113,14 @@ fn array_info(ty: &HLType) -> (&HLType, usize) {
     match &ty.expr {
         HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
         _ => panic!("Expected array type, got: {}", ty),
+    }
+}
+
+fn seq_rc_struct(ty: &HLType) -> (&HLType, LLStruct) {
+    match &ty.expr {
+        HLTypeExpr::Array(inner, n) => (inner.as_ref(), rc_array_struct(inner, *n)),
+        HLTypeExpr::Slice(inner) => (inner.as_ref(), rc_slice_struct(inner)),
+        _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
 
@@ -152,7 +168,7 @@ fn get_or_create_drop_fn(
 
     // Recursively create drop fns for inner heap-allocated elements first
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) => {
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
             }
@@ -178,6 +194,7 @@ fn get_or_create_drop_fn(
         HLTypeExpr::Array(_inner, _) => llssa.add_function(format!("drop_{}", ty)),
         HLTypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
         HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
+        HLTypeExpr::Slice(_inner) => llssa.add_function(format!("drop_{}", ty)),
         _ => panic!("{} is not supported yet", ty),
     };
     drop_fns.push(DropFnEntry::new(ty.clone(), fn_id));
@@ -875,6 +892,20 @@ fn lower_instruction(
             lower_mk_repeated(e, val_map, *result, *element, elem_type, *count);
         }
 
+        OpCode::MkRepeatedDyn {
+            result,
+            element,
+            seq_type: _,
+            count,
+            elem_type,
+        } => {
+            lower_mk_repeated_dyn(e, val_map, *result, *element, *count, elem_type);
+        }
+
+        OpCode::SliceLen { result, slice } => {
+            lower_slice_len(e, val_map, fn_type_info, *result, *slice);
+        }
+
         OpCode::ArrayGet {
             result,
             array,
@@ -1025,6 +1056,9 @@ fn lower_instruction(
                         ),
                     };
                     val_map.insert(*result, ll_result);
+                }
+                CastTarget::ArrayToSlice => {
+                    val_map.insert(*result, ll_value);
                 }
                 _ => panic!(
                     "Unsupported cast target in HLSSA->LLSSA lowering: {:?}",
@@ -1445,12 +1479,15 @@ fn lower_mk_array(
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let len_ptr = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let length64 = e.emit_int_const(64, count as u64);
+    e.ll_store(len_ptr, length64);
+    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 2);
     let unassigned = e.emit_int_const(64, u64::MAX);
     e.ll_store(table_id, unassigned);
 
     // Store elements
-    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let data = e.struct_field_ptr(arr, rc_struct, 3);
     for (i, elem) in elems.iter().enumerate() {
         let idx = e.emit_int_const(64, i as u64);
         let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
@@ -1483,11 +1520,14 @@ fn lower_mk_repeated(
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let len_ptr = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let length64 = e.emit_int_const(64, count as u64);
+    e.ll_store(len_ptr, length64);
+    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 2);
     let unassigned = e.emit_int_const(64, u64::MAX);
     e.ll_store(table_id, unassigned);
 
-    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let data = e.struct_field_ptr(arr, rc_struct, 3);
     let ll_element = val_map[&element];
 
     e.build_counted_loop(count, vec![], |emitter, i, _accs| {
@@ -1495,6 +1535,85 @@ fn lower_mk_repeated(
         emitter.ll_store(elem_ptr, ll_element);
         vec![]
     });
+
+    val_map.insert(result, arr);
+}
+
+fn lower_mk_repeated_dyn(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    element: ValueId,
+    count: ValueId,
+    elem_type: &HLType,
+) {
+    let rc_struct = rc_slice_struct(elem_type);
+    let es = elem_struct(elem_type);
+    let elem_needs_rc = needs_drop(&elem_type.expr);
+
+    let ll_element = val_map[&element];
+    let ll_length32 = val_map[&count];
+    let length64 = e.zext(ll_length32, 64);
+
+    // Allocate with runtime flex tail.
+    let arr = e.heap_alloc(rc_struct.clone(), Some(length64));
+
+    // Init RC to 1
+    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.emit_int_const(64, 1);
+    e.ll_store(rc_word, one);
+
+    // Store len in field 1 (slice's length slot).
+    let len_ptr = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    e.ll_store(len_ptr, length64);
+
+    // For boxed elements, bump source RC by `count` *before* the fill so every
+    // slot we're about to alias has accurate accounting at all times.
+    if elem_needs_rc {
+        let zero_chk = e.emit_int_const(64, 0);
+        let is_zero = e.int_eq(length64, zero_chk);
+        let nonzero = e.not(is_zero);
+        e.build_if_else(
+            nonzero,
+            vec![],
+            |then_e| {
+                let elem_rc_struct = match &elem_type.expr {
+                    HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
+                    HLTypeExpr::Slice(inner) => rc_slice_struct(inner),
+                    HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+                    HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
+                    HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
+                    _ => panic!(
+                        "Unsupported RC element type in mk_repeated_dyn: {}",
+                        elem_type
+                    ),
+                };
+                let hdr = then_e.struct_field_ptr(ll_element, elem_rc_struct, 0);
+                let rc_ptr = then_e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+                let rc = then_e.ll_load(rc_ptr, LLType::i64());
+                let new_rc = then_e.int_add(rc, length64);
+                then_e.ll_store(rc_ptr, new_rc);
+                vec![]
+            },
+            |_| vec![],
+        );
+    }
+
+    // Fill: for i in 0..length { data[i] = element }
+    let data = e.struct_field_ptr(arr, rc_struct, 3);
+    let zero = e.emit_int_const(64, 0);
+    e.build_loop(
+        vec![(zero, LLType::i64())],
+        |b, params| b.int_ult(params[0], length64),
+        |body, params| {
+            let i_val = params[0];
+            let slot = body.array_elem_ptr(data, es.clone(), i_val);
+            body.ll_store(slot, ll_element);
+            let next = body.int_add(i_val, one);
+            vec![next]
+        },
+    );
 
     val_map.insert(result, arr);
 }
@@ -1554,12 +1673,15 @@ fn lower_to_bytes(
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let len_ptr = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let length64 = e.emit_int_const(64, count as u64);
+    e.ll_store(len_ptr, length64);
+    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 2);
     let unassigned = e.emit_int_const(64, u64::MAX);
     e.ll_store(table_id, unassigned);
 
     // Store bytes into the array
-    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let data = e.struct_field_ptr(arr, rc_struct, 3);
     for i in 0..count {
         let src_idx = match endianness {
             Endianness::Big => count - 1 - i,
@@ -1703,6 +1825,26 @@ fn lower_ref_load(
     val_map.insert(result, val);
 }
 
+fn lower_slice_len(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    result: ValueId,
+    slice: ValueId,
+) {
+    let slice_type = fn_type_info.get_value_type(slice);
+    let inner = match &slice_type.expr {
+        HLTypeExpr::Slice(inner) => inner.as_ref(),
+        _ => panic!("SliceLen expects a Slice value, got: {}", slice_type),
+    };
+    let rc_struct = rc_slice_struct(inner);
+    let ll_slice = val_map[&slice];
+    let len_ptr = e.struct_field_ptr(ll_slice, rc_struct, 1);
+    let len64 = e.ll_load(len_ptr, LLType::i64());
+    let len32 = e.truncate(len64, 32);
+    val_map.insert(result, len32);
+}
+
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
 fn lower_array_get(
     e: &mut LLBlockEmitter<'_>,
@@ -1713,8 +1855,7 @@ fn lower_array_get(
     index: ValueId,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let (et, count) = array_info(arr_type);
-    let rc_struct = rc_array_struct(et, count);
+    let (et, rc_struct) = seq_rc_struct(arr_type);
     let es = elem_struct(et);
     let ll_elem_type = lower_type(et);
 
@@ -1724,7 +1865,7 @@ fn lower_array_get(
     // ZExt index from u32 to i64 for pointer arithmetic
     let idx64 = e.zext(ll_idx, 64);
 
-    let data = e.struct_field_ptr(ll_arr, rc_struct, 2);
+    let data = e.struct_field_ptr(ll_arr, rc_struct, 3);
     let elem_ptr = e.array_elem_ptr(data, es, idx64);
     let val = e.ll_load(elem_ptr, ll_elem_type);
 
@@ -1750,10 +1891,10 @@ fn lower_array_set(
     ad_fns: &mut AdFunctions,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let (et, count) = array_info(arr_type);
-    let rc_struct = rc_array_struct(et, count);
+    let (et, rc_struct) = seq_rc_struct(arr_type);
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);
+    let is_slice = matches!(arr_type.expr, HLTypeExpr::Slice(_));
 
     let inner_drop_fn = if elem_is_rc {
         Some(get_or_create_drop_fn(et, e.ssa, drop_fns, ad_fns))
@@ -1763,7 +1904,9 @@ fn lower_array_set(
     let inner_rc_struct = if elem_is_rc {
         Some(match &et.expr {
             HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
+            HLTypeExpr::Slice(inner) => rc_slice_struct(inner),
             HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+            HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
             HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
             _ => panic!("Unsupported RC element type: {}", et),
         })
@@ -1785,12 +1928,23 @@ fn lower_array_set(
     let one = e.emit_int_const(64, 1);
     let unique = e.int_eq(rc, one);
 
+    let count_val = if is_slice {
+        let len_ptr = e.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
+        e.ll_load(len_ptr, LLType::i64())
+    } else {
+        let count = match &arr_type.expr {
+            HLTypeExpr::Array(_, n) => *n,
+            _ => unreachable!(),
+        };
+        e.emit_int_const(64, count as u64)
+    };
+
     let merge_results = e.build_if_else(
         unique,
         vec![LLType::Ptr],
         // -- Mutate in place --
         |me| {
-            let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 2);
+            let data = me.struct_field_ptr(ll_arr, rc_struct.clone(), 3);
             let slot = me.array_elem_ptr(data, es.clone(), idx64);
 
             // Drop old element's RC before overwriting
@@ -1800,9 +1954,6 @@ fn lower_array_set(
             }
 
             me.ll_store(slot, ll_val);
-            let table_id = me.struct_field_ptr(ll_arr, rc_struct.clone(), 1);
-            let unassigned = me.emit_int_const(64, u64::MAX);
-            me.ll_store(table_id, unassigned);
             vec![ll_arr]
         },
         // -- Copy then mutate --
@@ -1811,48 +1962,64 @@ fn lower_array_set(
             let new_rc = ce.int_sub(rc, one);
             ce.ll_store(rc_ptr, new_rc);
 
-            // Allocate new array
-            let new_arr = ce.heap_alloc(rc_struct.clone(), None);
+            // Allocate new array or slice.
+            let flex = if is_slice { Some(count_val) } else { None };
+            let new_arr = ce.heap_alloc(rc_struct.clone(), flex);
 
             // Init new RC to 1
             let new_hdr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 0);
             let new_rc_ptr = ce.struct_field_ptr(new_hdr, LLStruct::rc_header(), 0);
             ce.ll_store(new_rc_ptr, one);
-            let new_table_id = ce.struct_field_ptr(new_arr, rc_struct.clone(), 1);
+
+            // Field 1 is the length slot for both arrays and slices.
+            let new_len_ptr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 1);
+            ce.ll_store(new_len_ptr, count_val);
+
+            // Field 2 is the table_id slot (sentinel for arrays, unused for slices).
+            let new_table_id_ptr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 2);
             let unassigned = ce.emit_int_const(64, u64::MAX);
-            ce.ll_store(new_table_id, unassigned);
+            ce.ll_store(new_table_id_ptr, unassigned);
 
             // Copy all data
-            let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 2);
-            let new_data = ce.struct_field_ptr(new_arr, rc_struct.clone(), 2);
-            let count_val = ce.emit_int_const(64, count as u64);
+            let old_data = ce.struct_field_ptr(ll_arr, rc_struct.clone(), 3);
+            let new_data = ce.struct_field_ptr(new_arr, rc_struct.clone(), 3);
             ce.memcpy(new_data, old_data, es.clone(), Some(count_val));
 
             // Bump RC of all copied elements except the one we're overwriting
             if inner_drop_fn.is_some() {
-                ce.build_counted_loop(count, vec![], |ce, i_val, _| {
-                    let elem_ptr = ce.array_elem_ptr(new_data, es.clone(), i_val);
-                    let elem_val = ce.ll_load(elem_ptr, LLType::Ptr);
-                    let is_replaced = ce.int_eq(i_val, idx64);
-                    // Bump RC only if this is NOT the replaced element
-                    let not_replaced = ce.not(is_replaced);
-                    ce.build_if_else(
-                        not_replaced,
-                        vec![],
-                        |be| {
-                            let inner_hdr =
-                                be.struct_field_ptr(elem_val, inner_rc_struct.clone().unwrap(), 0);
-                            let inner_rc_ptr =
-                                be.struct_field_ptr(inner_hdr, LLStruct::rc_header(), 0);
-                            let inner_rc = be.ll_load(inner_rc_ptr, LLType::i64());
-                            let new_inner_rc = be.int_add(inner_rc, one);
-                            be.ll_store(inner_rc_ptr, new_inner_rc);
-                            vec![]
-                        },
-                        |_| vec![],
-                    );
-                    vec![]
-                });
+                let zero = ce.emit_int_const(64, 0);
+                ce.build_loop(
+                    vec![(zero, LLType::i64())],
+                    |b, params| b.int_ult(params[0], count_val),
+                    |body, params| {
+                        let i_val = params[0];
+                        let elem_ptr = body.array_elem_ptr(new_data, es.clone(), i_val);
+                        let elem_val = body.ll_load(elem_ptr, LLType::Ptr);
+                        let is_replaced = body.int_eq(i_val, idx64);
+                        // Bump RC only if this is NOT the replaced element
+                        let not_replaced = body.not(is_replaced);
+                        body.build_if_else(
+                            not_replaced,
+                            vec![],
+                            |be| {
+                                let inner_hdr = be.struct_field_ptr(
+                                    elem_val,
+                                    inner_rc_struct.clone().unwrap(),
+                                    0,
+                                );
+                                let inner_rc_ptr =
+                                    be.struct_field_ptr(inner_hdr, LLStruct::rc_header(), 0);
+                                let inner_rc = be.ll_load(inner_rc_ptr, LLType::i64());
+                                let new_inner_rc = be.int_add(inner_rc, one);
+                                be.ll_store(inner_rc_ptr, new_inner_rc);
+                                vec![]
+                            },
+                            |_| vec![],
+                        );
+                        let next = body.int_add(i_val, one);
+                        vec![next]
+                    },
+                );
             }
 
             // Write new value at index
@@ -1880,6 +2047,7 @@ fn lower_rc_bump(
         HLTypeExpr::Array(inner, count) => rc_array_struct(inner, *count),
         HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
+        HLTypeExpr::Slice(inner) => rc_slice_struct(inner),
         _ => panic!("lower_rc_bump: unexpected type {}", val_type),
     };
 
@@ -2368,6 +2536,7 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     for entry in drop_fns {
         let func = match &entry.ty.expr {
             HLTypeExpr::Array(..) => generate_drop_function_for_array(llssa, &entry.ty, drop_fns),
+            HLTypeExpr::Slice(_) => generate_drop_function_for_slice(llssa, &entry.ty, drop_fns),
             HLTypeExpr::Tuple(elements) => {
                 generate_drop_function_for_tuple(llssa, elements, &entry.ty, drop_fns)
             }
@@ -2386,6 +2555,7 @@ fn needs_drop(expr: &HLTypeExpr) -> bool {
     matches!(
         expr,
         HLTypeExpr::Array(..)
+            | HLTypeExpr::Slice(..)
             | HLTypeExpr::Tuple(..)
             | HLTypeExpr::WitnessOf(..)
             | HLTypeExpr::Ref(..)
@@ -2441,7 +2611,7 @@ fn generate_drop_function_for_array(
                     .expect("inner drop fn should exist")
                     .fn_id;
 
-                let data = e.struct_field_ptr(ptr, rc_struct, 2);
+                let data = e.struct_field_ptr(ptr, rc_struct, 3);
                 e.build_counted_loop(count, vec![], |e, i_val, _| {
                     let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
                     let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
@@ -2457,6 +2627,87 @@ fn generate_drop_function_for_array(
 
     e.terminate_return(vec![]);
     // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.
+    drop(e);
+
+    func
+}
+
+/// Generate a drop function for a slice type. Same shape as the array
+/// drop function but loops over the runtime `len` field instead of a
+/// compile-time count.
+///
+/// Pseudocode:
+///   fn drop(ptr):
+///     rc = --ptr.header.rc
+///     if rc == 0:
+///       len = ptr.len
+///       for i in 0..len:          // only if elements are RC'd
+///         drop(ptr.data[i])
+///       free(ptr)
+///     return
+fn generate_drop_function_for_slice(
+    llssa: &mut LLSSA,
+    ty: &HLType,
+    drop_fns: &[DropFnEntry],
+) -> LLFunction {
+    let et = match &ty.expr {
+        HLTypeExpr::Slice(inner) => inner.as_ref(),
+        _ => panic!("Expected slice type, got: {}", ty),
+    };
+    let rc_struct = rc_slice_struct(et);
+    let es = elem_struct(et);
+    let elem_is_rc = needs_drop(&et.expr);
+
+    let mut func = new_ll_function(llssa, format!("drop_{}", ty));
+    let entry = func.get_entry_id();
+
+    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let ptr = e.add_parameter(LLType::Ptr);
+
+    // Decrement RC
+    let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
+    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let one = e.emit_int_const(64, 1);
+    let new_rc = e.int_sub(rc, one);
+    e.ll_store(rc_ptr, new_rc);
+
+    let zero = e.emit_int_const(64, 0);
+    let dead = e.int_eq(new_rc, zero);
+    e.build_if_else(
+        dead,
+        vec![],
+        |e| {
+            if elem_is_rc {
+                let inner_drop_fn = drop_fns
+                    .iter()
+                    .find(|entry| entry.ty == *et)
+                    .expect("inner drop fn should exist")
+                    .fn_id;
+
+                let len_ptr = e.struct_field_ptr(ptr, rc_struct.clone(), 1);
+                let len = e.ll_load(len_ptr, LLType::i64());
+                let data = e.struct_field_ptr(ptr, rc_struct.clone(), 3);
+                e.build_loop(
+                    vec![(zero, LLType::i64())],
+                    |b, params| b.int_ult(params[0], len),
+                    |body, params| {
+                        let i_val = params[0];
+                        let elem_ptr = body.array_elem_ptr(data, es.clone(), i_val);
+                        let elem_val = body.ll_load(elem_ptr, LLType::Ptr);
+                        body.call(inner_drop_fn, vec![elem_val], 0);
+                        let next = body.int_add(i_val, one);
+                        vec![next]
+                    },
+                );
+            }
+            e.free(ptr);
+            vec![]
+        },
+        |_| vec![],
+    );
+
+    e.terminate_return(vec![]);
     drop(e);
 
     func
@@ -3153,7 +3404,7 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         assert(&mut e, ok);
     }
 
-    let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 1);
+    let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 2);
     let table_id_or_sentinel = e.ll_load(table_id_ptr, LLType::i64());
     let (mults_base, table_idx_i32) = get_or_init_forward_lookup_table(
         &mut e,
@@ -3165,7 +3416,7 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         |e, inv_cnst_off| {
             let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
             let a_base = e.ll_load(a_base_slot, LLType::Ptr);
-            let data = e.struct_field_ptr(array, rc_struct.clone(), 2);
+            let data = e.struct_field_ptr(array, rc_struct.clone(), 3);
             e.build_counted_loop(count, vec![], |e, i_i64, _| {
                 let elem_ptr = e.array_elem_ptr(data, elem_struct.clone(), i_i64);
                 let elem_field = load_pure_lookup_elem_as_field(e, elem_ptr, elem_type);
@@ -3631,14 +3882,14 @@ fn emit_array_ad_init_body(
     let lookup = LookupTableSpec::array(count);
     let rc_struct = rc_array_struct(elem_type, count);
     let elem_struct = elem_struct(elem_type);
-    let data = e.struct_field_ptr(array, rc_struct.clone(), 2);
+    let data = e.struct_field_ptr(array, rc_struct.clone(), 3);
 
     emit_key_value_ad_table_init_body(
         e,
         lookup,
         witness_layout,
         |e, inv_cnst_off| {
-            let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 1);
+            let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 2);
             let one_i32 = e.emit_int_const(32, 1);
             let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
             let snap_u64 = e.zext(snap, 64);
@@ -3671,7 +3922,7 @@ fn generate_darray_ad_call(
     let result_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
 
-    let table_id_ptr = e.struct_field_ptr(array, rc_struct, 1);
+    let table_id_ptr = e.struct_field_ptr(array, rc_struct, 2);
     let snap = e.ll_load(table_id_ptr, LLType::i64());
     let sentinel = e.emit_int_const(64, u64::MAX);
     let is_unalloc = e.int_eq(snap, sentinel);

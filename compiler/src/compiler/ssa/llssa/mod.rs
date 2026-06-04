@@ -714,12 +714,28 @@ impl LLStruct {
         Self::new(vec![LLFieldType::Int(64)])
     }
 
-    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
+    /// RC'd fixed-size array:
+    /// `{ Inline(RcHeader), Int(64) length, Int(64) table_id, InlineArray(elem_struct, count) }`.
+    /// `length` is materialized for prefix-compatibility with `rc_slice` so an
+    /// `ArrayToSlice` cast can be a runtime no-op (pointer reinterpretation).
     pub fn rc_array(elem: LLStruct, count: usize) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(64),
+            LLFieldType::Int(64),
             LLFieldType::InlineArray(elem, count),
+        ])
+    }
+
+    /// RC'd slice: `{ Inline(RcHeader), Int(64) length, Int(64) table_id, FlexArray(elem_struct) }`.
+    /// `table_id` is unused for slices today but matches the array prefix so
+    /// `ArrayToSlice` is a pointer reinterpretation.
+    pub fn rc_slice(elem: LLStruct) -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::FlexArray(elem),
         ])
     }
 
