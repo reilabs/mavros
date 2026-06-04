@@ -280,7 +280,7 @@ impl PrepareEntryPoint {
                             new_instructions.push(instr);
                             for ((original_result, fresh_result), return_type) in original_results
                                 .into_iter()
-                                .zip(fresh_results.into_iter())
+                                .zip(fresh_results)
                                 .zip(return_types.iter())
                             {
                                 let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
