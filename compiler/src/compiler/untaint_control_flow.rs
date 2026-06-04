@@ -296,6 +296,7 @@ impl UntaintControlFlow {
 
         for block_id in cfg.get_blocks_bfs() {
             self.process_block(
+                function_id,
                 block_id,
                 function,
                 ssa,
@@ -311,6 +312,7 @@ impl UntaintControlFlow {
 
     fn process_block(
         &self,
+        function_id: FunctionId,
         block_id: BlockId,
         function: &mut HLFunction,
         ssa: &mut HLSSA,
@@ -329,6 +331,7 @@ impl UntaintControlFlow {
 
         for instruction in old_instructions {
             self.process_instruction(
+                function_id,
                 instruction,
                 function,
                 ssa,
@@ -554,6 +557,7 @@ impl UntaintControlFlow {
     /// Process a single instruction: apply cast insertion, then Guard-wrap if tainted.
     fn process_instruction(
         &self,
+        function_id: FunctionId,
         instruction: OpCode,
         function: &mut HLFunction,
         ssa: &mut HLSSA,
@@ -569,6 +573,42 @@ impl UntaintControlFlow {
                 mut args,
                 unconstrained: false,
             } => {
+                if let Some(ti) = type_info {
+                    let regular_arg_count = args.len();
+                    let expected_types: Vec<Type> = if tgt == function_id {
+                        function
+                            .get_entry()
+                            .get_parameters()
+                            .take(regular_arg_count)
+                            .map(|(_, typ)| typ.clone())
+                            .collect()
+                    } else {
+                        ssa.get_function(tgt)
+                            .get_entry()
+                            .get_parameters()
+                            .take(regular_arg_count)
+                            .map(|(_, typ)| typ.clone())
+                            .collect()
+                    };
+                    assert_eq!(
+                        expected_types.len(),
+                        regular_arg_count,
+                        "Constrained call argument count does not match callee parameters"
+                    );
+                    let mut cast_instrs = Vec::new();
+                    args = {
+                        let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
+                        args.into_iter()
+                            .zip(expected_types.iter())
+                            .map(|(arg, expected_type)| {
+                                convert_if_needed(arg, expected_type, ti, &mut builder)
+                            })
+                            .collect()
+                    };
+                    for instr in cast_instrs {
+                        maybe_guard(new_instructions, block_taint, instr);
+                    }
+                }
                 if let Some(arg) = block_taint {
                     args.push(arg);
                 }
