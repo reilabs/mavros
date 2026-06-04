@@ -39,6 +39,7 @@
 | noir_tests/spread_and_cast | ✅ | ✅ | 1308 | 2111 | 39920 | 31264 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/struct | ✅ | ✅ | 1 | 4 | 9088 | 9352 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/struct_literals | ✅ | ✅ | 2 | 9 | 8896 | 9248 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/unconstrained_cross_block | ✅ | ✅ | 1 | 3 | 7808 | 7688 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/unconstrained_sqrt | ✅ | ✅ | 1 | 3 | 8032 | 7176 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/witness_array_select | ✅ | ✅ | 6 | 9 | 9104 | 10160 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_1327_concrete_in_generic | ✅ | ✅ | 2 | 4 | 10160 | 10416 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
