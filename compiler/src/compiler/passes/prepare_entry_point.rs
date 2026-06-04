@@ -254,7 +254,7 @@ impl PrepareEntryPoint {
                     let mut new_instructions = Vec::new();
 
                     for mut instr in old_instructions {
-                        let prepare_calls = if let OpCode::Call {
+                        if let OpCode::Call {
                             unconstrained: true,
                             results,
                             function: CallTarget::Static(callee_id),
@@ -277,27 +277,23 @@ impl PrepareEntryPoint {
                                 .collect::<Vec<_>>();
                             *results = fresh_results.clone();
 
-                            original_results
+                            new_instructions.push(instr);
+                            for ((original_result, fresh_result), return_type) in original_results
                                 .into_iter()
                                 .zip(fresh_results.into_iter())
                                 .zip(return_types.iter())
-                                .map(|((original_result, fresh_result), return_type)| {
-                                    let prepare_fn =
-                                        Self::find_prepare_fn(return_type, &prepare_fns);
-                                    OpCode::Call {
-                                        results: vec![original_result],
-                                        function: CallTarget::Static(prepare_fn),
-                                        args: vec![fresh_result],
-                                        unconstrained: false,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
+                            {
+                                let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
+                                new_instructions.push(OpCode::Call {
+                                    results: vec![original_result],
+                                    function: CallTarget::Static(prepare_fn),
+                                    args: vec![fresh_result],
+                                    unconstrained: false,
+                                });
+                            }
                         } else {
-                            vec![]
-                        };
-
-                        new_instructions.push(instr);
-                        new_instructions.extend(prepare_calls);
+                            new_instructions.push(instr);
+                        }
                     }
 
                     let block = fb.function.get_block_mut(bid);
