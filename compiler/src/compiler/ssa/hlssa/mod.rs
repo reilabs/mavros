@@ -9,7 +9,7 @@ use std::fmt::Display;
 use crate::compiler::ssa::{
     Block, Function, FunctionId, Instruction, SSA, SSAConstants, SSAConstantsSnapshot, ValueId,
 };
-pub use type_system::{Type, TypeExpr};
+pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr};
 
 // HLSSA
 // ================================================================================================

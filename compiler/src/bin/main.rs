@@ -98,7 +98,7 @@ pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS
     driver.run_noir_compiler()?;
     driver.make_struct_access_static()?;
     driver.monomorphize()?;
-    driver.explictize_witness()?;
+    driver.spill_witness()?;
 
     let r1cs = driver.generate_r1cs()?;
     Ok((driver, r1cs))

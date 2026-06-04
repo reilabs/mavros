@@ -12,7 +12,8 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::ssa::{
     BlockId, FunctionId, ValueId,
     hlssa::{
-        CastTarget, Constant, Endianness, Radix, SequenceTargetType, Type,
+        CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix, SequenceTargetType,
+        Type,
         builder::{HLEmitter, HLFunctionBuilder},
     },
 };
@@ -940,6 +941,10 @@ impl<'a> ExpressionConverter<'a> {
                         use noirc_frontend::shared::Signedness;
                         let bits: usize = bit_size.bit_size() as usize;
                         if *signedness == Signedness::Signed {
+                            assert!(
+                                bits <= MAX_SUPPORTED_SIGNED_BITS,
+                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            );
                             let signed_val = field_element.to_i128();
                             let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
                             Some(b.emit_const(Constant::I(bits, twos_complement)))
@@ -1296,6 +1301,11 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 b.block(self.current_block).rangecheck(value, bit_size);
                 None
+            }
+            "field_less_than" => {
+                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
+                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                Some(b.block(self.current_block).lt(lhs, rhs))
             }
             "is_unconstrained" => {
                 let value = b

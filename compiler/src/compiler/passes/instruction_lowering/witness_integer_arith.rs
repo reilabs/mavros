@@ -8,7 +8,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode, Type,
+            TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -154,14 +155,46 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
         let product_range = context.range(lhs).mul(&context.range(rhs));
+        if bits == 128 && !range_fits_field_injectively(&product_range) {
+            let lhs_limbs = split_u128_value(b, lhs);
+            let rhs_limbs = split_u128_value(b, rhs);
+            let lhs_lo = b.cast_to_field(lhs_limbs.lo);
+            let lhs_hi = b.cast_to_field(lhs_limbs.hi);
+            let rhs_lo = b.cast_to_field(rhs_limbs.lo);
+            let rhs_hi = b.cast_to_field(rhs_limbs.hi);
+
+            let lo_product = b.mul(lhs_lo, rhs_lo);
+            let lhs_cross = b.mul(lhs_lo, rhs_hi);
+            let rhs_cross = b.mul(lhs_hi, rhs_lo);
+            let high_product = b.mul(lhs_hi, rhs_hi);
+            let zero = b.field_const(Field::ZERO);
+            let flag = guard
+                .map(|condition| b.cast_to_field(condition))
+                .unwrap_or_else(|| b.field_const(Field::ONE));
+            b.constrain(flag, high_product, zero);
+
+            let cross = b.add(lhs_cross, rhs_cross);
+            let shift = b.field_const(two_pow(64));
+            let shifted_cross = b.mul(cross, shift);
+            let value = b.add(lo_product, shifted_cross);
+            guarded_rangecheck(b, value, bits, guard);
+            let value = guarded_or_zero_field(b, value, guard);
+            b.emit(OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::U(bits),
+            });
+            return;
+        }
+
         assert!(
             range_fits_field_injectively(&product_range),
             "unsigned multiplication product range is too wide for a single-field product"
         );
 
+        let lhs_field = b.cast_to_field(lhs);
+        let rhs_field = b.cast_to_field(rhs);
         let value = b.mul(lhs_field, rhs_field);
         if !product_range.fits_in_unsigned_bits(bits) {
             let rc_bits = narrow_rangecheck_width(&product_range, bits);
@@ -187,6 +220,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
         let sign_l = match known_sign(&lhs_range, bits) {
@@ -261,6 +298,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
         let product_range = lhs_range.mul(&rhs_range);
@@ -364,6 +405,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(
+            bits <= MAX_SUPPORTED_SIGNED_BITS,
+            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+        );
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_range = context.range(lhs);
@@ -541,12 +586,6 @@ fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
 
-fn bn254_modulus() -> BigInt {
-    let limbs = <Field as PrimeField>::MODULUS.0;
-    let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
-    BigInt::from_bytes_le(Sign::Plus, &bytes_le)
-}
-
 fn guarded_rangecheck(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
@@ -565,6 +604,17 @@ fn guarded_rangecheck(
         });
     } else {
         b.emit(rangecheck);
+    }
+}
+
+fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
+    if let Some(condition) = guard {
+        b.emit(OpCode::Guard {
+            condition,
+            inner: Box::new(op),
+        });
+    } else {
+        b.emit(op);
     }
 }
 
@@ -589,19 +639,14 @@ fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
     }
 }
 
-fn unsigned_bit_width(range: &IntInterval) -> Option<usize> {
-    let lo = range.lo()?;
-    let hi = range.hi()?;
-    if lo.is_negative() {
-        return None;
-    }
-    Some(hi.bits() as usize)
-}
-
 fn narrow_rangecheck_width(range: &IntInterval, default_bits: usize) -> usize {
-    let Some(width) = unsigned_bit_width(range) else {
+    let (Some(lo), Some(hi)) = (range.lo(), range.hi()) else {
         return default_bits;
     };
+    if lo.is_negative() {
+        return default_bits;
+    }
+    let width = hi.bits() as usize;
     width.max(1).min(default_bits)
 }
 
@@ -612,7 +657,9 @@ fn range_fits_field_injectively(range: &IntInterval) -> bool {
     let Some(hi) = range.hi() else {
         return false;
     };
-    let p = bn254_modulus();
+    let limbs = <Field as PrimeField>::MODULUS.0;
+    let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
+    let p = BigInt::from_bytes_le(Sign::Plus, &bytes_le);
     // All integer representatives in this range have distinct BN254 field
     // encodings when their pairwise distance is less than p.
     hi - lo < p
@@ -663,30 +710,19 @@ fn encode_signed_value(
     let sign_shifted = b.mul(sign, sign_shift);
     let encoded = b.add(signed_value, sign_shifted);
     if !signed_range.fits_in_signed_bits(bits) || known_sign(signed_range, bits).is_none() {
-        enforce_signed_encoding_sign(b, encoded, sign, bits, guard);
+        if bits == 1 {
+            let diff = b.sub(encoded, sign);
+            guarded_rangecheck(b, diff, 1, guard);
+            let neg_diff = b.sub(sign, encoded);
+            guarded_rangecheck(b, neg_diff, 1, guard);
+        } else {
+            let half = b.field_const(two_pow(bits - 1));
+            let sign_half = b.mul(sign, half);
+            let sign_limb = b.sub(encoded, sign_half);
+            guarded_rangecheck(b, sign_limb, bits - 1, guard);
+        }
     }
     guarded_or_zero_field(b, encoded, guard)
-}
-
-fn enforce_signed_encoding_sign(
-    b: &mut HLBlockEmitter<'_>,
-    encoded: ValueId,
-    sign: ValueId,
-    bits: usize,
-    guard: Option<ValueId>,
-) {
-    if bits == 1 {
-        let diff = b.sub(encoded, sign);
-        guarded_rangecheck(b, diff, 1, guard);
-        let neg_diff = b.sub(sign, encoded);
-        guarded_rangecheck(b, neg_diff, 1, guard);
-        return;
-    }
-
-    let half = b.field_const(two_pow(bits - 1));
-    let sign_half = b.mul(sign, half);
-    let sign_limb = b.sub(encoded, sign_half);
-    guarded_rangecheck(b, sign_limb, bits - 1, guard);
 }
 
 fn is_strictly_negative(range: &IntInterval) -> bool {
@@ -698,6 +734,25 @@ struct DivModResult {
     r: ValueId,
     q_is_witness: bool,
     r_is_witness: bool,
+}
+
+#[derive(Clone, Copy)]
+struct U128Limbs {
+    lo: ValueId,
+    hi: ValueId,
+}
+
+fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
+    let value = b.cast_to(CastTarget::U(128), value);
+    U128Limbs {
+        lo: split_u128_limb(b, value, 0),
+        hi: split_u128_limb(b, value, 64),
+    }
+}
+
+fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
+    let limb = b.bit_range(value, offset, 64);
+    b.cast_to(CastTarget::U(64), limb)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -713,6 +768,121 @@ fn lower_unsigned_divmod(
     guard: Option<ValueId>,
     guard_is_witness: bool,
 ) -> DivModResult {
+    if bits == 128 {
+        if dividend == divisor {
+            let active = if let Some(condition) = guard {
+                b.cast_to_field(condition)
+            } else {
+                b.field_const(Field::ONE)
+            };
+            let zero = b.field_const(Field::ZERO);
+            let one = b.field_const(Field::ONE);
+            let divisor_field = b.cast_to_field(divisor);
+            let divisor_minus_one = b.sub(divisor_field, one);
+            guarded_rangecheck(b, divisor_minus_one, 128, guard);
+            return DivModResult {
+                q: active,
+                r: zero,
+                q_is_witness: guard_is_witness,
+                r_is_witness: false,
+            };
+        }
+
+        let dividend_pure = if dividend_is_witness {
+            b.value_of(dividend)
+        } else {
+            dividend
+        };
+        let divisor_pure = if divisor_is_witness {
+            b.value_of(divisor)
+        } else {
+            divisor
+        };
+
+        let mut dividend_hint = b.cast_to(CastTarget::U(128), dividend_pure);
+        let mut divisor_hint = b.cast_to(CastTarget::U(128), divisor_pure);
+        if let Some(condition) = guard {
+            let condition = if guard_is_witness {
+                b.value_of(condition)
+            } else {
+                condition
+            };
+            let zero = b.u_const(128, 0);
+            let one = b.u_const(128, 1);
+            dividend_hint = b.select(condition, dividend_hint, zero);
+            divisor_hint = b.select(condition, divisor_hint, one);
+        }
+
+        let q_hint = b.div(dividend_hint, divisor_hint);
+        let r_hint = b.modulo(dividend_hint, divisor_hint);
+        let q_hint_field = b.cast_to_field(q_hint);
+        let r_hint_field = b.cast_to_field(r_hint);
+        let q_wit = b.write_witness(q_hint_field);
+        let r_wit = b.write_witness(r_hint_field);
+        guarded_rangecheck(
+            b,
+            q_wit,
+            narrow_rangecheck_width(&quotient_bound(dividend_range, divisor_range), 128),
+            guard,
+        );
+        guarded_rangecheck(
+            b,
+            r_wit,
+            narrow_rangecheck_width(&remainder_bound(divisor_range), 128),
+            guard,
+        );
+
+        let r_u128 = b.cast_to(CastTarget::U(128), r_wit);
+        let q_u128 = b.cast_to(CastTarget::U(128), q_wit);
+        let product = b.fresh_value();
+        emit_guarded(
+            b,
+            guard,
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Mul,
+                result: product,
+                lhs: divisor,
+                rhs: q_u128,
+            },
+        );
+        let sum = b.fresh_value();
+        emit_guarded(
+            b,
+            guard,
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: sum,
+                lhs: product,
+                rhs: r_u128,
+            },
+        );
+        emit_guarded(
+            b,
+            guard,
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: sum,
+                rhs: dividend,
+            },
+        );
+        emit_guarded(
+            b,
+            guard,
+            OpCode::AssertCmp {
+                kind: CmpKind::Lt,
+                lhs: r_u128,
+                rhs: divisor,
+            },
+        );
+
+        return DivModResult {
+            q: guarded_or_zero_field(b, q_wit, guard),
+            r: guarded_or_zero_field(b, r_wit, guard),
+            q_is_witness: true,
+            r_is_witness: true,
+        };
+    }
+
     if dividend == divisor {
         let active = if let Some(condition) = guard {
             b.cast_to_field(condition)

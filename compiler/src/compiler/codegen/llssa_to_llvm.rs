@@ -79,6 +79,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_add_fn: Option<FunctionValue<'ctx>>,
     field_sub_fn: Option<FunctionValue<'ctx>>,
     field_div_fn: Option<FunctionValue<'ctx>>,
+    field_lt_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
@@ -105,6 +106,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_add_fn: None,
             field_sub_fn: None,
             field_div_fn: None,
+            field_lt_fn: None,
             malloc_fn: None,
             free_fn: None,
             field_from_limbs_fn: None,
@@ -267,7 +269,26 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.widen_or_trunc_int(x, result_bits, name)
     }
 
-    /// Convert an LLStruct to an LLVM struct type.
+    /// Materialise an LLSSA constant as an LLVM constant value, recursively.
+    fn materialize_const(&self, c: &Constant) -> BasicValueEnum<'ctx> {
+        match c {
+            Constant::Int { bits, value } => self.int_mask(*bits, *value).into(),
+            Constant::NullPtr => self
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+            Constant::Struct { layout, values } => {
+                let fields: Vec<BasicValueEnum<'ctx>> =
+                    values.iter().map(|v| self.materialize_const(v)).collect();
+                self.convert_struct_type(layout)
+                    .into_struct_type()
+                    .const_named_struct(&fields)
+                    .into()
+            }
+        }
+    }
+
     fn convert_struct_type(&self, s: &LLStruct) -> BasicTypeEnum<'ctx> {
         let fields: Vec<BasicTypeEnum<'ctx>> = s
             .fields
@@ -316,6 +337,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_type = self.field_llvm_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
+        let bool_type = self.context.bool_type();
         let void_type = self.context.void_type();
         let limbs_type = self.limbs_llvm_type();
 
@@ -362,6 +384,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .add_function("__field_div", field_div_type, None),
         );
 
+        // __field_lt(FieldElem, FieldElem) -> bool
+        let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
+        self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
+
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
         self.field_from_limbs_fn = Some(self.module.add_function(
@@ -397,29 +423,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.globals.push(global);
         }
 
-        // Materialise module-level LLSSA constants once; each function body will re-seed its
-        // `value_map` from this table. This is a HACK, to be removed once we compile to proper
-        // LLVM constants (#184).
-        self.constant_values.clear();
-        for (vid, c) in llssa.const_snapshot().iter() {
-            let val: BasicValueEnum<'ctx> = match c.as_ref() {
-                Constant::Int { bits, value } => {
-                    let int_type = self
-                        .context
-                        .custom_width_int_type(
-                            NonZeroU32::new(*bits).expect("Cannot have zero-width integer"),
-                        )
-                        .expect("A basic integer type can be created");
-                    int_type.const_int(*value, false).into()
-                }
-                Constant::NullPtr => self
-                    .context
-                    .ptr_type(AddressSpace::default())
-                    .const_null()
-                    .into(),
-            };
-            self.constant_values.insert(*vid, val);
-        }
+        // Materialise module-level LLSSA constants once, allowing each function to re-seed from
+        // this map.
+        self.constant_values = llssa
+            .const_snapshot()
+            .into_iter()
+            .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
+            .collect();
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -653,6 +663,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     IntArithOp::URem => {
                         self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap()
                     }
+                    IntArithOp::SDiv => self.builder.build_int_signed_div(lhs, rhs, name).unwrap(),
+                    IntArithOp::SRem => self.builder.build_int_signed_rem(lhs, rhs, name).unwrap(),
                     IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
                     IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
                     IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
@@ -928,6 +940,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     eq_acc = self.builder.build_and(eq_acc, limb_eq, "eq").unwrap();
                 }
                 self.value_map.insert(*result, eq_acc.into());
+            }
+
+            LLOp::FieldLt { result, a, b } => {
+                let lhs = self.value_map[a];
+                let rhs = self.value_map[b];
+                let lt_fn = self.field_lt_fn.expect("__field_lt not declared");
+                let call_site = self
+                    .builder
+                    .build_call(lt_fn, &[lhs.into(), rhs.into()], "field_lt")
+                    .unwrap();
+                let val = call_site
+                    .try_as_basic_value()
+                    .expect_basic("field_lt should return a value");
+                self.value_map.insert(*result, val);
             }
 
             LLOp::FieldFromLimbs { result, limbs } => {
