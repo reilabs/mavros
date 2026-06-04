@@ -27,7 +27,7 @@ struct SpecKey {
 struct SpecValue {
     specialized_func_id: FunctionId,
     return_types: Vec<WitnessShape>,
-    arg_types_out: Vec<WitnessShape>,
+    return_constraints: Vec<WitnessShape>,
 }
 
 // ---------------------------------------------------------------------------
@@ -36,10 +36,10 @@ struct SpecValue {
 
 struct PropagationResult {
     return_types: Vec<WitnessShape>,
-    arg_types_out: Vec<WitnessShape>,
+    arg_types: Vec<WitnessShape>,
     value_wt: HashMap<ValueId, WitnessShape>,
     block_cfg: HashMap<BlockId, WitnessType>,
-    /// Call sites discovered: (callee_func_id, arg_types, cfg_witness, return_value_ids, arg_value_ids)
+    /// Call sites discovered after local propagation has reached a fixed point.
     call_sites: Vec<CallSiteInfo>,
 }
 
@@ -47,6 +47,7 @@ struct PropagationResult {
 struct CallSiteInfo {
     callee_func_id: FunctionId,
     arg_types: Vec<WitnessShape>,
+    result_types: Vec<WitnessShape>,
     cfg_witness: WitnessType,
 }
 
@@ -95,7 +96,7 @@ impl WitnessTypeInference {
         let main_return_types: Vec<WitnessShape> = main_func
             .get_returns()
             .iter()
-            .map(|_| WitnessShape::Scalar(WitnessType::Pure)) // optimistic
+            .map(Self::construct_pure_witness_for_type)
             .collect();
 
         let main_cfg_witness = WitnessType::Pure;
@@ -114,6 +115,7 @@ impl WitnessTypeInference {
         let mut specializations: HashMap<SpecKey, SpecValue> = HashMap::new();
         let mut worklist: VecDeque<SpecKey> = VecDeque::new();
         let mut queued: HashSet<SpecKey> = HashSet::new();
+        let mut redirects: HashMap<SpecKey, SpecKey> = HashMap::new();
         // Track which specializations call which (for re-queuing callers)
         let mut callers: HashMap<SpecKey, HashSet<SpecKey>> = HashMap::new();
 
@@ -121,17 +123,24 @@ impl WitnessTypeInference {
             main_key.clone(),
             SpecValue {
                 specialized_func_id: main_specialized_id,
-                return_types: main_return_types,
-                arg_types_out: main_arg_types.clone(),
+                return_types: main_return_types.clone(),
+                return_constraints: main_return_types,
             },
         );
         worklist.push_back(main_key.clone());
         queued.insert(main_key.clone());
 
         // 3. Global worklist loop
-        while let Some(spec_key) = worklist.pop_front() {
+        while let Some(queued_key) = worklist.pop_front() {
+            queued.remove(&queued_key);
+            let spec_key = Self::resolve_key(&queued_key, &redirects);
             queued.remove(&spec_key);
-            let specialized_func_id = specializations.get(&spec_key).unwrap().specialized_func_id;
+            let Some(spec_value_snapshot) = specializations.get(&spec_key).cloned() else {
+                continue;
+            };
+
+            let specialized_func_id = spec_value_snapshot.specialized_func_id;
+            let return_constraints = spec_value_snapshot.return_constraints;
             let func = ssa.get_function(specialized_func_id);
             let cfg = flow_analysis.get_function_cfg(spec_key.original_func_id);
 
@@ -139,19 +148,60 @@ impl WitnessTypeInference {
                 func,
                 cfg,
                 &spec_key.arg_types,
+                &return_constraints,
                 spec_key.cfg_witness,
                 &specializations,
+                &redirects,
                 ssa,
             );
 
+            let closed_arg_types = Self::join_shape_vec(&spec_key.arg_types, &result.arg_types);
+            if closed_arg_types != spec_key.arg_types {
+                let closed_key = SpecKey {
+                    original_func_id: spec_key.original_func_id,
+                    arg_types: closed_arg_types,
+                    cfg_witness: spec_key.cfg_witness,
+                };
+
+                let mut old_value = specializations.remove(&spec_key).unwrap();
+                old_value.return_types =
+                    Self::join_shape_vec(&old_value.return_types, &result.return_types);
+                redirects.insert(spec_key.clone(), closed_key.clone());
+                self.functions.remove(&old_value.specialized_func_id);
+
+                if let Some(old_callers) = callers.remove(&spec_key) {
+                    callers
+                        .entry(closed_key.clone())
+                        .or_default()
+                        .extend(old_callers);
+                }
+
+                if let Some(existing) = specializations.get_mut(&closed_key) {
+                    existing.return_types =
+                        Self::join_shape_vec(&existing.return_types, &old_value.return_types);
+                    existing.return_constraints = Self::join_shape_vec(
+                        &existing.return_constraints,
+                        &old_value.return_constraints,
+                    );
+                } else {
+                    specializations.insert(closed_key.clone(), old_value);
+                }
+
+                Self::enqueue_key(&mut worklist, &mut queued, closed_key.clone(), &redirects);
+                Self::enqueue_callers(
+                    &mut worklist,
+                    &mut queued,
+                    &callers,
+                    &closed_key,
+                    &redirects,
+                );
+                continue;
+            }
+
             let spec_value = specializations.get_mut(&spec_key).unwrap();
-            let changed = result.return_types != spec_value.return_types
-                || result.arg_types_out != spec_value.arg_types_out;
-
+            let changed = result.return_types != spec_value.return_types;
             spec_value.return_types = result.return_types;
-            spec_value.arg_types_out = result.arg_types_out;
 
-            // Store the propagation result for later FunctionWitnessType construction
             let spec_func_id = spec_value.specialized_func_id;
             let fwt = Self::build_function_witness_type(
                 &spec_key,
@@ -163,11 +213,14 @@ impl WitnessTypeInference {
 
             // Process call sites: register new specializations
             for call_site in &result.call_sites {
-                let callee_key = SpecKey {
-                    original_func_id: call_site.callee_func_id,
-                    arg_types: call_site.arg_types.clone(),
-                    cfg_witness: call_site.cfg_witness,
-                };
+                let callee_key = Self::resolve_key(
+                    &SpecKey {
+                        original_func_id: call_site.callee_func_id,
+                        arg_types: call_site.arg_types.clone(),
+                        cfg_witness: call_site.cfg_witness,
+                    },
+                    &redirects,
+                );
 
                 // Track caller relationship
                 callers
@@ -190,25 +243,27 @@ impl WitnessTypeInference {
                         callee_key.clone(),
                         SpecValue {
                             specialized_func_id: specialized_id,
-                            return_types: callee_return_types,
-                            arg_types_out: callee_key.arg_types.clone(),
+                            return_types: callee_return_types.clone(),
+                            return_constraints: callee_return_types,
                         },
                     );
-                    queued.insert(callee_key.clone());
-                    worklist.push_back(callee_key);
+                    Self::enqueue_key(&mut worklist, &mut queued, callee_key.clone(), &redirects);
+                }
+
+                let callee_spec = specializations.get_mut(&callee_key).unwrap();
+                let new_constraints = Self::join_return_constraints(
+                    &callee_spec.return_constraints,
+                    &call_site.result_types,
+                );
+                if new_constraints != callee_spec.return_constraints {
+                    callee_spec.return_constraints = new_constraints;
+                    Self::enqueue_key(&mut worklist, &mut queued, callee_key, &redirects);
                 }
             }
 
             // If output changed, re-queue callers
             if changed {
-                if let Some(caller_set) = callers.get(&spec_key) {
-                    for caller_key in caller_set {
-                        if !queued.contains(caller_key) {
-                            queued.insert(caller_key.clone());
-                            worklist.push_back(caller_key.clone());
-                        }
-                    }
-                }
+                Self::enqueue_callers(&mut worklist, &mut queued, &callers, &spec_key, &redirects);
             }
         }
 
@@ -222,8 +277,10 @@ impl WitnessTypeInference {
                 func,
                 cfg,
                 &spec_key.arg_types,
+                &spec_value.return_constraints,
                 spec_key.cfg_witness,
                 &specializations,
+                &redirects,
                 ssa,
             );
 
@@ -247,11 +304,14 @@ impl WitnessTypeInference {
                             continue;
                         }
                         let call_site = call_site_iter.next().unwrap();
-                        let callee_key = SpecKey {
-                            original_func_id: call_site.callee_func_id,
-                            arg_types: call_site.arg_types.clone(),
-                            cfg_witness: call_site.cfg_witness,
-                        };
+                        let callee_key = Self::resolve_key(
+                            &SpecKey {
+                                original_func_id: call_site.callee_func_id,
+                                arg_types: call_site.arg_types.clone(),
+                                cfg_witness: call_site.cfg_witness,
+                            },
+                            &redirects,
+                        );
                         let callee_spec = specializations.get(&callee_key).unwrap();
                         *func_id = callee_spec.specialized_func_id;
                     }
@@ -285,8 +345,10 @@ impl WitnessTypeInference {
         func: &HLFunction,
         cfg: &flow_analysis::CFG,
         arg_types: &[WitnessShape],
+        return_constraints: &[WitnessShape],
         cfg_witness: WitnessType,
         specializations: &HashMap<SpecKey, SpecValue>,
+        redirects: &HashMap<SpecKey, SpecKey>,
         ssa: &HLSSA,
     ) -> PropagationResult {
         let entry_id = func.get_entry_id();
@@ -338,9 +400,11 @@ impl WitnessTypeInference {
                 cfg,
                 &block_queue,
                 entry_id,
+                return_constraints,
                 &mut value_wt,
                 &mut block_cfg,
                 specializations,
+                redirects,
                 ssa,
             );
 
@@ -361,7 +425,7 @@ impl WitnessTypeInference {
 
             for instruction in block.get_instructions() {
                 if let OpCode::Call {
-                    results: _,
+                    results,
                     function: CallTarget::Static(callee_id),
                     args,
                     unconstrained,
@@ -375,10 +439,23 @@ impl WitnessTypeInference {
                         .iter()
                         .map(|v| value_wt.get(v).unwrap().clone())
                         .collect();
+                    let callee_key = Self::resolve_key(
+                        &SpecKey {
+                            original_func_id: *callee_id,
+                            arg_types: callee_arg_types,
+                            cfg_witness: block_cw,
+                        },
+                        redirects,
+                    );
+                    let result_types: Vec<WitnessShape> = results
+                        .iter()
+                        .map(|v| value_wt.get(v).unwrap().clone())
+                        .collect();
                     call_sites.push(CallSiteInfo {
-                        callee_func_id: *callee_id,
-                        arg_types: callee_arg_types,
-                        cfg_witness: block_cw,
+                        callee_func_id: callee_key.original_func_id,
+                        arg_types: callee_key.arg_types,
+                        result_types,
+                        cfg_witness: callee_key.cfg_witness,
                     });
                 }
             }
@@ -386,7 +463,8 @@ impl WitnessTypeInference {
             if let Some(Terminator::Return(values)) = block.get_terminator() {
                 let ret_wts: Vec<WitnessShape> = values
                     .iter()
-                    .map(|v| value_wt.get(v).unwrap().clone())
+                    .zip(return_constraints.iter())
+                    .map(|(v, constraint)| value_wt.get(v).unwrap().join(constraint))
                     .collect();
                 if return_types.is_empty() {
                     return_types = ret_wts;
@@ -409,12 +487,13 @@ impl WitnessTypeInference {
                 .collect();
         }
 
-        // Compute arg_types_out: for Ref args, reflect any updates to the ref's inner shape.
-        let arg_types_out: Vec<WitnessShape> = entry_params
+        // Compute closed argument types: for values that may contain references,
+        // reflect any bidirectional alias updates discovered inside the function.
+        let arg_types: Vec<WitnessShape> = entry_params
             .iter()
             .zip(arg_types.iter())
             .map(|((value_id, _), original_arg)| match original_arg {
-                WitnessShape::Ref(_, _) => value_wt
+                _ if Self::contains_ref(original_arg) => value_wt
                     .get(value_id)
                     .cloned()
                     .unwrap_or_else(|| original_arg.clone()),
@@ -424,7 +503,7 @@ impl WitnessTypeInference {
 
         PropagationResult {
             return_types,
-            arg_types_out,
+            arg_types,
             value_wt,
             block_cfg,
             call_sites,
@@ -437,22 +516,35 @@ impl WitnessTypeInference {
         cfg: &flow_analysis::CFG,
         block_queue: &[BlockId],
         _entry_id: BlockId,
+        return_constraints: &[WitnessShape],
         value_wt: &mut HashMap<ValueId, WitnessShape>,
         block_cfg: &mut HashMap<BlockId, WitnessType>,
         specializations: &HashMap<SpecKey, SpecValue>,
+        redirects: &HashMap<SpecKey, SpecKey>,
         ssa: &HLSSA,
     ) {
         for block_id in block_queue {
             let block = func.get_block(*block_id);
             let block_cw = *block_cfg.get(block_id).unwrap();
 
-            Self::propagate_block_instructions(block, block_cw, value_wt, specializations, ssa);
+            Self::propagate_block_instructions(
+                block,
+                block_cw,
+                value_wt,
+                specializations,
+                redirects,
+                ssa,
+            );
 
             // Handle terminator
             if let Some(terminator) = block.get_terminator() {
                 match terminator {
-                    Terminator::Return(_) => {
-                        // Return types collected after convergence
+                    Terminator::Return(values) => {
+                        for (value, constraint) in values.iter().zip(return_constraints.iter()) {
+                            if Self::contains_ref(constraint) {
+                                Self::merge_value_wt(value_wt, *value, constraint.clone());
+                            }
+                        }
                     }
                     Terminator::Jmp(target, params) => {
                         let target_params: Vec<(ValueId, Type)> =
@@ -462,7 +554,7 @@ impl WitnessTypeInference {
                             let existing = value_wt.get(target_value).unwrap().clone();
                             let joined = existing.join(&param_wt);
                             value_wt.insert(*target_value, joined.clone());
-                            if matches!(&param_wt, WitnessShape::Ref(_, _)) {
+                            if Self::contains_ref(&joined) {
                                 Self::merge_value_wt(value_wt, *param, joined);
                             }
                         }
@@ -502,6 +594,7 @@ impl WitnessTypeInference {
         block_cw: WitnessType,
         value_wt: &mut HashMap<ValueId, WitnessShape>,
         specializations: &HashMap<SpecKey, SpecValue>,
+        redirects: &HashMap<SpecKey, SpecKey>,
         ssa: &HLSSA,
     ) {
         for instruction in block.get_instructions() {
@@ -536,6 +629,11 @@ impl WitnessTypeInference {
                         value_wt.get(if_f).unwrap(),
                     );
                     value_wt.insert(*r, result_wt);
+                    let result_wt = value_wt.get(r).unwrap().clone();
+                    if Self::contains_ref(&result_wt) {
+                        Self::merge_value_wt(value_wt, *if_t, result_wt.clone());
+                        Self::merge_value_wt(value_wt, *if_f, result_wt);
+                    }
                 }
                 OpCode::Alloc {
                     result: r,
@@ -546,14 +644,22 @@ impl WitnessTypeInference {
                     value_wt.insert(*r, wt.clone());
                 }
                 OpCode::Store { ptr, value: v } => {
-                    let val_wt = value_wt.get(v).unwrap();
+                    let val_wt = value_wt.get(v).unwrap().clone();
                     // cfg_witness contributes to the toplevel of what's stored.
                     let store_wt = val_wt.with_toplevel_info(val_wt.toplevel_info().join(block_cw));
-                    Self::merge_ref_inner(value_wt, *ptr, store_wt);
+                    Self::merge_ref_inner(value_wt, *ptr, store_wt.clone());
+                    if Self::contains_ref(&store_wt) {
+                        let stored_wt = Self::read_ref_inner(value_wt, *ptr);
+                        Self::merge_value_wt(value_wt, *v, stored_wt);
+                    }
                 }
                 OpCode::Load { result: r, ptr } => {
                     let result_wt = Self::read_ref_inner(value_wt, *ptr);
-                    value_wt.insert(*r, result_wt);
+                    Self::merge_value_wt(value_wt, *r, result_wt);
+                    let result_wt = value_wt.get(r).unwrap().clone();
+                    if Self::contains_ref(&result_wt) {
+                        Self::merge_ref_inner(value_wt, *ptr, result_wt);
+                    }
                 }
                 OpCode::ReadGlobal {
                     result: r,
@@ -580,7 +686,11 @@ impl WitnessTypeInference {
                     let elem_wt = arr_wt.child_witness_type().unwrap();
                     let pushed_info = arr_wt.toplevel_info().join(idx_wt.toplevel_info());
                     let result_wt = elem_wt.with_witness_in_leaves(pushed_info);
-                    value_wt.insert(*r, result_wt);
+                    Self::merge_value_wt(value_wt, *r, result_wt);
+                    let result_wt = value_wt.get(r).unwrap().clone();
+                    if Self::contains_ref(&result_wt) {
+                        Self::merge_array_element(value_wt, *arr, result_wt);
+                    }
                 }
                 OpCode::ArraySet {
                     result: r,
@@ -602,7 +712,12 @@ impl WitnessTypeInference {
                     );
                     let result_wt =
                         WitnessShape::Array(arr_wt.toplevel_info(), Box::new(result_arr_elem));
-                    value_wt.insert(*r, result_wt);
+                    Self::merge_value_wt(value_wt, *r, result_wt);
+                    let result_elem_wt = value_wt.get(r).unwrap().child_witness_type().unwrap();
+                    if Self::contains_ref(&result_elem_wt) {
+                        Self::merge_array_element(value_wt, *arr, result_elem_wt.clone());
+                        Self::merge_value_wt(value_wt, *value, result_elem_wt);
+                    }
                 }
                 OpCode::SlicePush {
                     dir: _,
@@ -619,7 +734,14 @@ impl WitnessTypeInference {
                     }
                     let result_wt =
                         WitnessShape::Array(slice_wt.toplevel_info(), Box::new(result_elem_wt));
-                    value_wt.insert(*r, result_wt);
+                    Self::merge_value_wt(value_wt, *r, result_wt);
+                    let result_elem_wt = value_wt.get(r).unwrap().child_witness_type().unwrap();
+                    if Self::contains_ref(&result_elem_wt) {
+                        Self::merge_array_element(value_wt, *sl, result_elem_wt.clone());
+                        for value in values {
+                            Self::merge_value_wt(value_wt, *value, result_elem_wt.clone());
+                        }
+                    }
                 }
                 OpCode::SliceLen {
                     result: r,
@@ -647,23 +769,25 @@ impl WitnessTypeInference {
                             .iter()
                             .map(|v| value_wt.get(v).unwrap().clone())
                             .collect();
-                        let callee_key = SpecKey {
-                            original_func_id: *callee_id,
-                            arg_types: callee_arg_types,
-                            cfg_witness: block_cw,
-                        };
+                        let callee_key = Self::resolve_key(
+                            &SpecKey {
+                                original_func_id: *callee_id,
+                                arg_types: callee_arg_types,
+                                cfg_witness: block_cw,
+                            },
+                            redirects,
+                        );
 
                         if let Some(callee_spec) = specializations.get(&callee_key) {
                             // Use callee's return types
                             for (result, ret_wt) in
                                 results.iter().zip(callee_spec.return_types.iter())
                             {
-                                value_wt.insert(*result, ret_wt.clone());
+                                Self::merge_value_wt(value_wt, *result, ret_wt.clone());
                             }
-                            // Merge callee argument effects back into caller argument shapes.
-                            for (arg, arg_out) in args.iter().zip(callee_spec.arg_types_out.iter())
-                            {
-                                Self::merge_value_wt(value_wt, *arg, arg_out.clone());
+                            // A resolved key is closed over by-reference argument effects.
+                            for (arg, arg_wt) in args.iter().zip(callee_key.arg_types.iter()) {
+                                Self::merge_value_wt(value_wt, *arg, arg_wt.clone());
                             }
                         } else {
                             // Specialization not yet registered — use optimistic Pure returns
@@ -699,10 +823,18 @@ impl WitnessTypeInference {
                     let result_wt = elems
                         .iter()
                         .fold(base, |acc, v| acc.join(value_wt.get(v).unwrap()));
-                    value_wt.insert(
+                    Self::merge_value_wt(
+                        value_wt,
                         *result,
                         WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
                     );
+                    let result_elem_wt =
+                        value_wt.get(result).unwrap().child_witness_type().unwrap();
+                    if Self::contains_ref(&result_elem_wt) {
+                        for elem in elems {
+                            Self::merge_value_wt(value_wt, *elem, result_elem_wt.clone());
+                        }
+                    }
                 }
                 OpCode::MkRepeated {
                     result,
@@ -713,10 +845,16 @@ impl WitnessTypeInference {
                 } => {
                     let base = Self::construct_pure_witness_for_type(tp);
                     let result_wt = base.join(value_wt.get(element).unwrap());
-                    value_wt.insert(
+                    Self::merge_value_wt(
+                        value_wt,
                         *result,
                         WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
                     );
+                    let result_elem_wt =
+                        value_wt.get(result).unwrap().child_witness_type().unwrap();
+                    if Self::contains_ref(&result_elem_wt) {
+                        Self::merge_value_wt(value_wt, *element, result_elem_wt);
+                    }
                 }
                 OpCode::Spread { result, value, .. } => {
                     let val_wt = value_wt.get(value).unwrap().clone();
@@ -754,6 +892,10 @@ impl WitnessTypeInference {
                             let result_wt =
                                 elem_wt.with_toplevel_info((*top).join(elem_wt.toplevel_info()));
                             Self::merge_value_wt(value_wt, *result, result_wt);
+                            let result_wt = value_wt.get(result).unwrap().clone();
+                            if Self::contains_ref(&result_wt) {
+                                Self::merge_tuple_element(value_wt, *tuple, *idx, result_wt);
+                            }
                         }
                         _ => {
                             panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
@@ -770,6 +912,14 @@ impl WitnessTypeInference {
                         *result,
                         WitnessShape::Tuple(WitnessType::Pure, children),
                     );
+                    let result_wt = value_wt.get(result).unwrap().clone();
+                    if let WitnessShape::Tuple(_, children) = result_wt {
+                        for (elem, child_wt) in elems.iter().zip(children.iter()) {
+                            if Self::contains_ref(child_wt) {
+                                Self::merge_value_wt(value_wt, *elem, child_wt.clone());
+                            }
+                        }
+                    }
                 }
                 OpCode::WriteWitness { result, .. } => {
                     // WriteWitness records a value on the witness tape.
@@ -803,6 +953,86 @@ impl WitnessTypeInference {
     // Helpers
     // ---------------------------------------------------------------------------
 
+    fn resolve_key(key: &SpecKey, redirects: &HashMap<SpecKey, SpecKey>) -> SpecKey {
+        let mut current = key.clone();
+        let mut seen = HashSet::new();
+        while let Some(next) = redirects.get(&current) {
+            assert!(
+                seen.insert(current.clone()),
+                "Cycle in witness specialization redirects at {:?}",
+                current
+            );
+            current = next.clone();
+        }
+        current
+    }
+
+    fn enqueue_key(
+        worklist: &mut VecDeque<SpecKey>,
+        queued: &mut HashSet<SpecKey>,
+        key: SpecKey,
+        redirects: &HashMap<SpecKey, SpecKey>,
+    ) {
+        let key = Self::resolve_key(&key, redirects);
+        if queued.insert(key.clone()) {
+            worklist.push_back(key);
+        }
+    }
+
+    fn enqueue_callers(
+        worklist: &mut VecDeque<SpecKey>,
+        queued: &mut HashSet<SpecKey>,
+        callers: &HashMap<SpecKey, HashSet<SpecKey>>,
+        key: &SpecKey,
+        redirects: &HashMap<SpecKey, SpecKey>,
+    ) {
+        if let Some(caller_set) = callers.get(key) {
+            for caller_key in caller_set {
+                Self::enqueue_key(worklist, queued, caller_key.clone(), redirects);
+            }
+        }
+    }
+
+    fn join_shape_vec(lhs: &[WitnessShape], rhs: &[WitnessShape]) -> Vec<WitnessShape> {
+        assert_eq!(
+            lhs.len(),
+            rhs.len(),
+            "Cannot join witness shape vectors of different lengths"
+        );
+        lhs.iter().zip(rhs.iter()).map(|(a, b)| a.join(b)).collect()
+    }
+
+    fn join_return_constraints(
+        existing: &[WitnessShape],
+        observed: &[WitnessShape],
+    ) -> Vec<WitnessShape> {
+        assert_eq!(
+            existing.len(),
+            observed.len(),
+            "Cannot join return constraints of different lengths"
+        );
+        existing
+            .iter()
+            .zip(observed.iter())
+            .map(|(current, seen)| {
+                if Self::contains_ref(current) || Self::contains_ref(seen) {
+                    current.join(seen)
+                } else {
+                    current.clone()
+                }
+            })
+            .collect()
+    }
+
+    fn contains_ref(wt: &WitnessShape) -> bool {
+        match wt {
+            WitnessShape::Ref(_, _) => true,
+            WitnessShape::Array(_, inner) => Self::contains_ref(inner),
+            WitnessShape::Tuple(_, children) => children.iter().any(Self::contains_ref),
+            WitnessShape::Scalar(_) => false,
+        }
+    }
+
     fn merge_value_wt(
         value_wt: &mut HashMap<ValueId, WitnessShape>,
         value: ValueId,
@@ -813,6 +1043,44 @@ impl WitnessTypeInference {
             .map(|existing| existing.join(&new_wt))
             .unwrap_or(new_wt);
         value_wt.insert(value, joined);
+    }
+
+    fn merge_array_element(
+        value_wt: &mut HashMap<ValueId, WitnessShape>,
+        array: ValueId,
+        new_elem: WitnessShape,
+    ) {
+        if !Self::contains_ref(&new_elem) {
+            return;
+        }
+        let array_wt = value_wt.get(&array).unwrap().clone();
+        let updated = match array_wt {
+            WitnessShape::Array(array_info, elem) => {
+                WitnessShape::Array(array_info, Box::new(elem.join(&new_elem)))
+            }
+            other => panic!("Array element merge on non-array witness type: {:?}", other),
+        };
+        Self::merge_value_wt(value_wt, array, updated);
+    }
+
+    fn merge_tuple_element(
+        value_wt: &mut HashMap<ValueId, WitnessShape>,
+        tuple: ValueId,
+        idx: usize,
+        new_elem: WitnessShape,
+    ) {
+        if !Self::contains_ref(&new_elem) {
+            return;
+        }
+        let tuple_wt = value_wt.get(&tuple).unwrap().clone();
+        let updated = match tuple_wt {
+            WitnessShape::Tuple(tuple_info, mut children) => {
+                children[idx] = children[idx].join(&new_elem);
+                WitnessShape::Tuple(tuple_info, children)
+            }
+            other => panic!("Tuple element merge on non-tuple witness type: {:?}", other),
+        };
+        Self::merge_value_wt(value_wt, tuple, updated);
     }
 
     fn read_ref_inner(value_wt: &HashMap<ValueId, WitnessShape>, ptr: ValueId) -> WitnessShape {
@@ -900,6 +1168,249 @@ impl WitnessTypeInference {
             ),
             TypeExpr::Function => WitnessShape::Scalar(WitnessType::Pure),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_bn254::Fr;
+
+    use super::*;
+    use crate::compiler::{
+        analysis::flow_analysis::FlowAnalysis,
+        ssa::hlssa::{
+            CallTarget, HLFunction, HLSSA, OpCode, Type,
+            builder::{HLEmitter, HLSSABuilder},
+        },
+    };
+
+    fn pure_field() -> WitnessShape {
+        WitnessShape::Scalar(WitnessType::Pure)
+    }
+
+    fn witness_field() -> WitnessShape {
+        WitnessShape::Scalar(WitnessType::Witness)
+    }
+
+    fn pure_ref(inner: WitnessShape) -> WitnessShape {
+        WitnessShape::Ref(WitnessType::Pure, Box::new(inner))
+    }
+
+    fn run_wti(mut ssa: HLSSA) -> (HLSSA, WitnessTypeInference) {
+        let flow = FlowAnalysis::run(&ssa);
+        let mut witness_inference = WitnessTypeInference::new();
+        witness_inference.run(&mut ssa, &flow).unwrap();
+        (ssa, witness_inference)
+    }
+
+    fn only_static_call(function: &HLFunction) -> (FunctionId, Vec<ValueId>, Vec<ValueId>) {
+        let mut calls = function
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .filter_map(|instruction| match instruction {
+                OpCode::Call {
+                    results,
+                    function: CallTarget::Static(function_id),
+                    args,
+                    unconstrained: false,
+                } => Some((*function_id, results.clone(), args.clone())),
+                _ => None,
+            });
+        let call = calls.next().expect("expected one static call");
+        assert!(calls.next().is_none(), "expected only one static call");
+        call
+    }
+
+    #[test]
+    fn ref_arg_store_closes_specialization_key() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let callee_id = sb.ssa().add_function("write_ref".to_string());
+
+        sb.modify_function(callee_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let ptr = block.add_parameter(Type::field().ref_of());
+            let value = block.field_const(Fr::from(7u64));
+            let witness = block.write_witness(value);
+            block.store(ptr, witness);
+            block.terminate_return(vec![]);
+        });
+
+        let main_id = sb.ssa().get_main_id();
+        sb.modify_function(main_id, |fb| {
+            fb.function.add_return_type(Type::field());
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let ptr = block.alloc(Type::field());
+            let zero = block.field_const(Fr::from(0u64));
+            block.store(ptr, zero);
+            block.call(callee_id, vec![ptr], 0);
+            let loaded = block.load(ptr);
+            block.terminate_return(vec![loaded]);
+        });
+
+        let (ssa, witness_inference) = run_wti(ssa);
+        let main_func = ssa.get_main();
+        let (specialized_callee, _, args) = only_static_call(main_func);
+        assert_ne!(specialized_callee, callee_id);
+
+        let expected = pure_ref(witness_field());
+        let callee_wt = witness_inference
+            .try_get_function_witness_type(specialized_callee)
+            .unwrap();
+        assert_eq!(callee_wt.parameters, vec![expected.clone()]);
+
+        let main_wt = witness_inference
+            .try_get_function_witness_type(ssa.get_main_id())
+            .unwrap();
+        assert_eq!(main_wt.get_value_witness_type(args[0]), &expected);
+    }
+
+    #[test]
+    fn tuple_projection_of_ref_propagates_back_to_argument_key() {
+        let tuple_type = Type::tuple_of(vec![Type::field().ref_of(), Type::field()]);
+        let expected = WitnessShape::Tuple(
+            WitnessType::Pure,
+            vec![pure_ref(witness_field()), pure_field()],
+        );
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let callee_id = sb.ssa().add_function("write_tuple_ref".to_string());
+
+        sb.modify_function(callee_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let tuple = block.add_parameter(tuple_type.clone());
+            let ptr = block.tuple_proj(tuple, 0);
+            let value = block.field_const(Fr::from(11u64));
+            let witness = block.write_witness(value);
+            block.store(ptr, witness);
+            block.terminate_return(vec![]);
+        });
+
+        let main_id = sb.ssa().get_main_id();
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let ptr = block.alloc(Type::field());
+            let zero = block.field_const(Fr::from(0u64));
+            block.store(ptr, zero);
+            let tuple =
+                block.mk_tuple(vec![ptr, zero], vec![Type::field().ref_of(), Type::field()]);
+            block.call(callee_id, vec![tuple], 0);
+            block.terminate_return(vec![]);
+        });
+
+        let (ssa, witness_inference) = run_wti(ssa);
+        let (specialized_callee, _, args) = only_static_call(ssa.get_main());
+        let callee_wt = witness_inference
+            .try_get_function_witness_type(specialized_callee)
+            .unwrap();
+        assert_eq!(callee_wt.parameters, vec![expected.clone()]);
+
+        let main_wt = witness_inference
+            .try_get_function_witness_type(ssa.get_main_id())
+            .unwrap();
+        assert_eq!(main_wt.get_value_witness_type(args[0]), &expected);
+    }
+
+    #[test]
+    fn array_projection_of_ref_propagates_back_to_argument_key() {
+        let array_type = Type::field().ref_of().array_of(2);
+        let expected = WitnessShape::Array(WitnessType::Pure, Box::new(pure_ref(witness_field())));
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let callee_id = sb.ssa().add_function("write_array_ref".to_string());
+
+        sb.modify_function(callee_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let array = block.add_parameter(array_type.clone());
+            let zero = block.u_const(32, 0);
+            let ptr = block.array_get(array, zero);
+            let value = block.field_const(Fr::from(13u64));
+            let witness = block.write_witness(value);
+            block.store(ptr, witness);
+            block.terminate_return(vec![]);
+        });
+
+        let main_id = sb.ssa().get_main_id();
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let ptr0 = block.alloc(Type::field());
+            let ptr1 = block.alloc(Type::field());
+            let zero = block.field_const(Fr::from(0u64));
+            block.store(ptr0, zero);
+            block.store(ptr1, zero);
+            let array = block.mk_seq(
+                vec![ptr0, ptr1],
+                crate::compiler::ssa::hlssa::SequenceTargetType::Array(2),
+                Type::field().ref_of(),
+            );
+            block.call(callee_id, vec![array], 0);
+            block.terminate_return(vec![]);
+        });
+
+        let (ssa, witness_inference) = run_wti(ssa);
+        let (specialized_callee, _, args) = only_static_call(ssa.get_main());
+        let callee_wt = witness_inference
+            .try_get_function_witness_type(specialized_callee)
+            .unwrap();
+        assert_eq!(callee_wt.parameters, vec![expected.clone()]);
+
+        let main_wt = witness_inference
+            .try_get_function_witness_type(ssa.get_main_id())
+            .unwrap();
+        assert_eq!(main_wt.get_value_witness_type(args[0]), &expected);
+    }
+
+    #[test]
+    fn returned_ref_mutation_flows_back_to_callee_boundary() {
+        let expected = pure_ref(witness_field());
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let callee_id = sb.ssa().add_function("identity_ref".to_string());
+
+        sb.modify_function(callee_id, |fb| {
+            fb.function.add_return_type(Type::field().ref_of());
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let ptr = block.add_parameter(Type::field().ref_of());
+            block.terminate_return(vec![ptr]);
+        });
+
+        let main_id = sb.ssa().get_main_id();
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut block = fb.block(entry);
+            let ptr = block.alloc(Type::field());
+            let zero = block.field_const(Fr::from(0u64));
+            block.store(ptr, zero);
+            let returned = block.call(callee_id, vec![ptr], 1)[0];
+            let value = block.field_const(Fr::from(17u64));
+            let witness = block.write_witness(value);
+            block.store(returned, witness);
+            block.terminate_return(vec![]);
+        });
+
+        let (ssa, witness_inference) = run_wti(ssa);
+        let (specialized_callee, results, args) = only_static_call(ssa.get_main());
+        let callee_wt = witness_inference
+            .try_get_function_witness_type(specialized_callee)
+            .unwrap();
+        assert_eq!(callee_wt.parameters, vec![expected.clone()]);
+        assert_eq!(callee_wt.returns_witness, vec![expected.clone()]);
+
+        let main_wt = witness_inference
+            .try_get_function_witness_type(ssa.get_main_id())
+            .unwrap();
+        assert_eq!(main_wt.get_value_witness_type(args[0]), &expected);
+        assert_eq!(main_wt.get_value_witness_type(results[0]), &expected);
     }
 }
 
