@@ -21,7 +21,7 @@ use super::{
     BlockId, FunctionId, Terminator, ValueId,
     hlssa::{
         BinaryArithOpKind, CmpKind, Constant, DMatrix, HLFunction, HLSSA, HLSSAConstantsSnapshot,
-        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type as HLType,
+        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir, Type as HLType,
         TypeExpr as HLTypeExpr,
     },
     llssa::{
@@ -985,6 +985,24 @@ fn lower_instruction(
                 *value,
                 drop_fns,
                 ad_fns,
+            );
+        }
+
+        OpCode::SlicePush {
+            dir,
+            result,
+            slice,
+            values,
+        } => {
+            lower_slice_push(
+                e,
+                val_map,
+                fn_type_info,
+                slice_lengths,
+                *result,
+                *slice,
+                values,
+                *dir,
             );
         }
 
@@ -2017,6 +2035,81 @@ fn lower_array_set(
     );
 
     val_map.insert(result, merge_results[0]);
+}
+
+/// Lower SlicePush by materializing a new fixed-size slice allocation.
+///
+/// The current LLSSA slice representation stores slices as RC arrays whose
+/// concrete length is inferred before lowering. Push therefore becomes an
+/// allocation of the result length, a copy of the old data to the correct
+/// offset, and stores for the newly pushed values.
+fn lower_slice_push(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    slice_lengths: &FunctionSliceLengths,
+    result: ValueId,
+    slice: ValueId,
+    pushed_values: &[ValueId],
+    dir: SliceOpDir,
+) {
+    let slice_type = fn_type_info.get_value_type(slice);
+    let (elem_type, old_len) =
+        concrete_array_or_slice_info(slice_type, slice, slice_lengths, "SlicePush input");
+    let result_type = fn_type_info.get_value_type(result);
+    let (_, new_len) =
+        concrete_array_or_slice_info(result_type, result, slice_lengths, "SlicePush result");
+    assert_eq!(
+        new_len,
+        old_len + pushed_values.len(),
+        "SlicePush inferred result length does not match input plus pushed values"
+    );
+    assert!(
+        !needs_drop(&elem_type.expr),
+        "SlicePush with RC'd elements is not supported in HLSSA->LLSSA lowering"
+    );
+
+    let old_rc_struct = rc_array_struct(elem_type, old_len);
+    let new_rc_struct = rc_array_struct(elem_type, new_len);
+    let elem_struct = elem_struct(elem_type);
+
+    let old_slice = val_map[&slice];
+    let new_slice = e.heap_alloc(new_rc_struct.clone(), None);
+
+    let rc_hdr = e.struct_field_ptr(new_slice, new_rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.emit_int_const(64, 1);
+    e.ll_store(rc_word, one);
+    let table_id = e.struct_field_ptr(new_slice, new_rc_struct.clone(), 1);
+    let unassigned = e.emit_int_const(64, u64::MAX);
+    e.ll_store(table_id, unassigned);
+
+    let old_data = e.struct_field_ptr(old_slice, old_rc_struct, 2);
+    let new_data = e.struct_field_ptr(new_slice, new_rc_struct, 2);
+    let pushed_len = pushed_values.len();
+    let (old_dst_start, pushed_start) = match dir {
+        SliceOpDir::Front => (pushed_len, 0),
+        SliceOpDir::Back => (0, old_len),
+    };
+
+    if old_len > 0 {
+        let old_dst = if old_dst_start == 0 {
+            new_data
+        } else {
+            let idx = e.emit_int_const(64, old_dst_start as u64);
+            e.array_elem_ptr(new_data, elem_struct.clone(), idx)
+        };
+        let count = e.emit_int_const(64, old_len as u64);
+        e.memcpy(old_dst, old_data, elem_struct.clone(), Some(count));
+    }
+
+    for (offset, value) in pushed_values.iter().enumerate() {
+        let idx = e.emit_int_const(64, (pushed_start + offset) as u64);
+        let slot = e.array_elem_ptr(new_data, elem_struct.clone(), idx);
+        e.ll_store(slot, val_map[value]);
+    }
+
+    val_map.insert(result, new_slice);
 }
 
 /// Modify the provided `rc_ptr` by `delta` and store it back.

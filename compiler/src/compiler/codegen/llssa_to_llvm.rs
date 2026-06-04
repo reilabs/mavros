@@ -3,7 +3,7 @@
 //! Translates LLSSA into LLVM IR, which can then be compiled to WebAssembly.
 //! Operates on LLSSA + Type — types are explicit in the LLSSA ops, no TypeInfo needed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -122,10 +122,12 @@ pub struct LLVMCodeGen<'ctx> {
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
     main_input_base: Option<PointerValue<'ctx>>,
+    main_input_entry_block: Option<inkwell::basic_block::BasicBlock<'ctx>>,
     main_param_input_offsets: HashMap<ValueId, (u32, Type)>,
     struct_field_ptrs: HashMap<ValueId, StructFieldPtrInfo>,
     array_elem_ptrs: HashMap<ValueId, ArrayElemPtrInfo>,
     loaded_array_elems: HashMap<ValueId, ArrayElemPtrInfo>,
+    heap_allocs: HashSet<ValueId>,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
@@ -156,10 +158,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             function_map: HashMap::new(),
             vm_ptr: None,
             main_input_base: None,
+            main_input_entry_block: None,
             main_param_input_offsets: HashMap::new(),
             struct_field_ptrs: HashMap::new(),
             array_elem_ptrs: HashMap::new(),
             loaded_array_elems: HashMap::new(),
+            heap_allocs: HashSet::new(),
             field_mul_fn: None,
             field_add_fn: None,
             field_sub_fn: None,
@@ -571,10 +575,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .extend(self.constant_values.iter().map(|(vid, val)| (*vid, *val)));
         self.block_map.clear();
         self.main_input_base = None;
+        self.main_input_entry_block = None;
         self.main_param_input_offsets.clear();
         self.struct_field_ptrs.clear();
         self.array_elem_ptrs.clear();
         self.loaded_array_elems.clear();
+        self.heap_allocs.clear();
 
         let fn_value = self.function_map[&fn_id];
         let entry_block_id = function.get_entry_id();
@@ -601,6 +607,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         let entry = function.get_entry();
         if fn_id == main_id {
+            self.main_input_entry_block = Some(entry_bb);
             self.load_main_params_from_memory(entry.get_parameters());
         } else {
             for (i, (param_id, _)) in entry.get_parameters().enumerate() {
@@ -690,6 +697,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let input_base = self
             .main_input_base
             .expect("main input value requested outside main");
+        let entry_block = self
+            .main_input_entry_block
+            .expect("main input value requested without an entry block");
+        let restore_block = self.builder.get_insert_block();
+        if let Some(terminator) = entry_block.get_terminator() {
+            self.builder.position_before(&terminator);
+        } else {
+            self.builder.position_at_end(entry_block);
+        }
         let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
         let input_ptr = unsafe {
@@ -707,6 +723,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .build_load(self.convert_type(&ty), input_ptr, &format!("v{}", value.0))
             .unwrap();
         self.value_map.insert(value, loaded);
+        if let Some(block) = restore_block {
+            self.builder.position_at_end(block);
+        }
         loaded
     }
 
@@ -931,7 +950,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         const MIN_RUN_LEN: usize = 8;
 
         let first = self.match_array_copy_entry(instructions, start)?;
-        if first.src_key == first.dst_key {
+        if !self.pointer_keys_known_non_alias(&first.src_key, &first.dst_key) {
             return None;
         }
 
@@ -1157,6 +1176,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             },
             None => PointerKey::Value(value),
         }
+    }
+
+    fn pointer_key_base(&self, key: &PointerKey) -> ValueId {
+        match key {
+            PointerKey::Value(value) => *value,
+            PointerKey::StructField { ptr, .. } => *ptr,
+        }
+    }
+
+    fn pointer_keys_known_non_alias(&self, a: &PointerKey, b: &PointerKey) -> bool {
+        let a_base = self.pointer_key_base(a);
+        let b_base = self.pointer_key_base(b);
+        a_base != b_base
+            && (self.heap_allocs.contains(&a_base) || self.heap_allocs.contains(&b_base))
     }
 
     fn tape_entry_results_used_after(
@@ -1554,6 +1587,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .try_as_basic_value()
                     .expect_basic("malloc should return a value");
                 self.value_map.insert(*result, ptr_val);
+                self.heap_allocs.insert(*result);
             }
 
             LLOp::Free { ptr } => {

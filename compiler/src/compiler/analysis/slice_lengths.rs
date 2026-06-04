@@ -37,11 +37,13 @@ impl FunctionSliceLengths {
             Some(LengthFact::Known(len)) => *len,
             Some(LengthFact::Unknown(reason)) => {
                 panic!(
-                    "{context}: slice value {value:?} does not have a single concrete length: {reason}"
+                    "{context}: slice value {value:?} does not have a single concrete length. The current LLSSA backend requires every slice value to have one statically inferred concrete length: {reason}"
                 )
             }
             None => {
-                panic!("{context}: concrete length for slice value {value:?} is not available")
+                panic!(
+                    "{context}: concrete length for slice value {value:?} is not available. The current LLSSA backend requires every slice value to have one statically inferred concrete length"
+                )
             }
         }
     }
@@ -113,7 +115,14 @@ fn record_slice_length(facts: &mut LengthFacts, value: ValueId, len: usize, reas
 fn record_unknown_slice_length(facts: &mut LengthFacts, value: ValueId, reason: String) -> bool {
     match facts.get(&value) {
         Some(LengthFact::Unknown(_)) => false,
-        _ => facts.insert(value, LengthFact::Unknown(reason)).is_none(),
+        Some(_) => {
+            facts.insert(value, LengthFact::Unknown(reason));
+            true
+        }
+        None => {
+            facts.insert(value, LengthFact::Unknown(reason));
+            true
+        }
     }
 }
 
@@ -167,9 +176,14 @@ fn record_unknown_return_length(
     let function_returns = returns.entry(function_id).or_default();
     match function_returns.get(&index) {
         Some(LengthFact::Unknown(_)) => false,
-        _ => function_returns
-            .insert(index, LengthFact::Unknown(reason))
-            .is_none(),
+        Some(_) => {
+            function_returns.insert(index, LengthFact::Unknown(reason));
+            true
+        }
+        None => {
+            function_returns.insert(index, LengthFact::Unknown(reason));
+            true
+        }
     }
 }
 
@@ -498,6 +512,45 @@ mod tests {
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
         SliceLengthAnalysis::run(ssa, &type_info)
+    }
+
+    #[test]
+    fn unknown_downgrades_report_changes() {
+        let mut facts = LengthFacts::new();
+        let value = ValueId(1);
+        assert!(record_slice_length(&mut facts, value, 3, "first length"));
+        assert!(record_unknown_slice_length(
+            &mut facts,
+            value,
+            "ambiguous".to_string()
+        ));
+        assert!(!record_unknown_slice_length(
+            &mut facts,
+            value,
+            "still ambiguous".to_string()
+        ));
+
+        let mut returns = HashMap::new();
+        let function = FunctionId(0);
+        assert!(record_return_length(
+            &mut returns,
+            function,
+            0,
+            3,
+            "first return"
+        ));
+        assert!(record_unknown_return_length(
+            &mut returns,
+            function,
+            0,
+            "ambiguous return".to_string()
+        ));
+        assert!(!record_unknown_return_length(
+            &mut returns,
+            function,
+            0,
+            "still ambiguous".to_string()
+        ));
     }
 
     #[test]
