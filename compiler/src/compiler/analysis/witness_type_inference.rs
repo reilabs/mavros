@@ -137,6 +137,7 @@ struct WtiEngine<'a> {
     graph: HashMap<VariableId, Vec<VariableId>>,
     assignments: HashMap<VariableId, WitnessType>,
     spec_deps: HashMap<VariableId, Vec<SpecRequest>>,
+    resolved_calls: HashMap<CallSite, usize>,
 
     spec_queue: VecDeque<SpecRequest>,
     queued_specs: HashSet<SpecRequest>,
@@ -157,6 +158,7 @@ impl<'a> WtiEngine<'a> {
             graph: HashMap::new(),
             assignments: HashMap::new(),
             spec_deps: HashMap::new(),
+            resolved_calls: HashMap::new(),
             spec_queue: VecDeque::new(),
             queued_specs: HashSet::new(),
             var_queue: VecDeque::new(),
@@ -721,7 +723,8 @@ impl<'a> WtiEngine<'a> {
             Terminator::Return(values) => {
                 for (value, return_shape) in values.iter().zip(&spec.return_shapes) {
                     let value_shape = self.shape(*value).clone();
-                    self.equal_shape(&value_shape, return_shape);
+                    self.flow_shape(&value_shape, return_shape);
+                    self.flow_ref_positions(return_shape, &value_shape);
                 }
             }
             Terminator::Jmp(target, params) => {
@@ -735,7 +738,8 @@ impl<'a> WtiEngine<'a> {
                 for (arg, param) in params.iter().zip(target_params.iter()) {
                     let arg_shape = self.shape(*arg).clone();
                     let param_shape = self.shape(*param).clone();
-                    self.equal_shape(&arg_shape, &param_shape);
+                    self.flow_shape(&arg_shape, &param_shape);
+                    self.flow_ref_positions(&param_shape, &arg_shape);
                 }
             }
             Terminator::JmpIf(cond, _if_true, _if_false) => {
@@ -801,20 +805,23 @@ impl<'a> WtiEngine<'a> {
                 .assignment(self.block_cfg_var(call_site.caller_func_id, call_site.block_id)),
         };
         let callee_spec = self.ensure_spec(key);
+        self.resolved_calls.insert(call_site, callee_spec);
 
         for (arg, param_shape) in args
             .iter()
             .zip(self.specs[callee_spec].entry_params.clone().iter())
         {
             let arg_shape = self.shape(*arg).clone();
-            self.equal_shape(&arg_shape, param_shape);
+            self.flow_shape(&arg_shape, param_shape);
+            self.flow_ref_positions(param_shape, &arg_shape);
         }
         for (result, return_shape) in results
             .iter()
             .zip(self.specs[callee_spec].return_shapes.clone().iter())
         {
             let result_shape = self.shape(*result).clone();
-            self.equal_shape(return_shape, &result_shape);
+            self.flow_shape(return_shape, &result_shape);
+            self.flow_ref_positions(&result_shape, return_shape);
         }
     }
 
@@ -848,14 +855,19 @@ impl<'a> WtiEngine<'a> {
                     continue;
                 }
 
-                let key = SpecKey {
-                    original_func_id: *callee_id,
-                    arg_types: args
-                        .iter()
-                        .map(|arg| self.concretize_shape(self.shape(*arg)))
-                        .collect(),
-                    cfg_witness: block_cfg,
+                let call_site = CallSite {
+                    caller_func_id: spec.specialized_func_id,
+                    block_id: *block_id,
+                    instruction_idx: idx,
                 };
+                let callee_spec = self
+                    .resolved_calls
+                    .get(&call_site)
+                    .unwrap_or_else(|| panic!("Unresolved witness call site {:?}", call_site));
+                let key = self.current_key(*callee_spec);
+                assert_eq!(*callee_id, key.original_func_id);
+                assert_eq!(block_cfg, key.cfg_witness);
+                assert_eq!(args.len(), key.arg_types.len());
                 let specialized = *canonical_by_key
                     .get(&key)
                     .unwrap_or_else(|| panic!("Missing witness specialization for {:?}", key));
@@ -1083,11 +1095,6 @@ impl<'a> WtiEngine<'a> {
                     .collect(),
             ),
         }
-    }
-
-    fn equal_shape(&mut self, lhs: &VarShape, rhs: &VarShape) {
-        self.flow_shape(lhs, rhs);
-        self.flow_shape(rhs, lhs);
     }
 
     fn flow_shape(&mut self, source: &VarShape, target: &VarShape) {
