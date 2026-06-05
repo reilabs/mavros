@@ -1091,14 +1091,12 @@ impl CodeGen {
                         other => panic!("MkSeqOfBlob result must be an array, got {:?}", other),
                     };
                     let blob_start = layouter.get_value(*blob);
-                    let args = (0..len)
-                        .map(|i| blob_start.offset((i * stride) as isize))
-                        .collect::<Vec<_>>();
-                    emitter.push_op(bytecode::OpCode::ArrayAlloc {
+                    emitter.push_op(bytecode::OpCode::ArrayAllocFromFrame {
                         res,
                         stride,
                         meta: vm::array::BoxedLayout::array(len * stride, false),
-                        items: args,
+                        count: len,
+                        source: blob_start,
                     });
                 }
                 hlssa::OpCode::MkRepeated {
