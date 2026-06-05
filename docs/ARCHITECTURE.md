@@ -107,8 +107,7 @@ for R1CS compilation, with values split into two categories:
 - **Witness values** (`Witness`) are values that depend on the input, and are placed in the witness
   vector.
 
-**Witness type inference**
-([algorithm overview](WITNESS_TYPE_INFERENCE.md),
+**Witness type inference** ([algorithm overview](WITNESS_TYPE_INFERENCE.md),
 [`implementation`](../compiler/src/compiler/analysis/witness_type_inference.rs)) propagates this
 information through the program. It computes summary constraints for each function boundary,
 materializes closed specializations, and records the taint of every value in the specialized

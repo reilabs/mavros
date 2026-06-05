@@ -16,8 +16,8 @@ The implementation lives under
 ## Core Model
 
 The pass represents each witness-relevant position in a value with a variable. Scalars have one
-variable. Arrays, slices, refs, and tuples have a variable for the container plus variables for their
-nested positions.
+variable. Arrays, slices, refs, and tuples have a variable for the container plus variables for
+their nested positions.
 
 A directed edge `a -> b` means:
 
@@ -81,13 +81,13 @@ witness-returning form before lookup or cloning.
 ## Materialization and Rewriting
 
 The specialization engine maintains a queue of closed keys. For each new key it duplicates the
-original function, builds the specialization graph, computes reachable witness variables, and records
-the concrete witness type of every value and block CFG.
+original function, builds the specialization graph, computes reachable witness variables, and
+records the concrete witness type of every value and block CFG.
 
 While scanning a specialization, constrained static calls produce new callee keys from the caller's
-actual argument, result, and CFG variables. Those keys are closed before being queued. Once the queue
-is exhausted, the engine rewrites every constrained static call target to the specialized callee
-selected during scanning and sets the entry point to the root specialization.
+actual argument, result, and CFG variables. Those keys are closed before being queued. Once the
+queue is exhausted, the engine rewrites every constrained static call target to the specialized
+callee selected during scanning and sets the entry point to the root specialization.
 
 Unused cloned specs are not removed by WTI itself; later cleanup passes can remove unreachable
 functions.
