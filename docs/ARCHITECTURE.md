@@ -108,9 +108,11 @@ for R1CS compilation, with values split into two categories:
   vector.
 
 **Witness type inference**
-([`witness_type_inference.rs`](../compiler/src/compiler/analysis/witness_type_inference.rs))
-propagates this information through the program. Starting from main function parameters (which are
-marked as `Witness`), we compute the taint of every value in the program.
+([algorithm overview](WITNESS_TYPE_INFERENCE.md),
+[`implementation`](../compiler/src/compiler/analysis/witness_type_inference.rs)) propagates this
+information through the program. It computes summary constraints for each function boundary,
+materializes closed specializations, and records the taint of every value in the specialized
+program.
 
 **Untainting control flow**
 ([`untaint_control_flow.rs`](../compiler/src/compiler/untaint_control_flow.rs)) ensures that all
