@@ -489,7 +489,7 @@ impl CSE {
                 Constant::U(bits, value) => interner.uconst(*bits, *value),
                 Constant::I(bits, value) => interner.iconst(*bits, *value),
                 Constant::Field(value) => interner.fconst(*value),
-                Constant::FnPtr(_) => continue,
+                Constant::FnPtr(_) | Constant::Blob(_) => continue,
             };
             exprs.insert(*vid, id);
         }
@@ -1016,6 +1016,7 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::MkSeqOfBlob { .. }
                     | OpCode::MkRepeated { .. }
                     | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }

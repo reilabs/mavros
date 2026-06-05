@@ -181,6 +181,7 @@ impl Value {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
             TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
+            TypeExpr::Blob(_) => panic!("Cannot create unknown value for Blob type"),
         }
     }
 

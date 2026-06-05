@@ -24,8 +24,8 @@ use super::{
         TypeExpr as HLTypeExpr,
     },
     llssa::{
-        Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
-        LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
+        Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType,
+        LLFunction, LLOp, LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
         builder::{LLBlockEmitter, LLEmitter},
     },
 };
@@ -557,43 +557,52 @@ fn lower_constants_llssa(
     referenced.sort_by_key(|v| v.0);
 
     for vid in referenced {
-        match constants.get(&vid).expect("vid is in constants").as_ref() {
-            Constant::U(bits, val) => {
-                let ll_val = llssa.add_const(LLConstant::Int {
-                    bits: *bits as u32,
-                    value: *val,
-                });
-                val_map.insert(vid, ll_val);
+        let ll_constant = lower_constant_to_ll_constant(
+            constants.get(&vid).expect("vid is in constants").as_ref(),
+        );
+        let ll_val = llssa.add_const(ll_constant);
+        val_map.insert(vid, ll_val);
+    }
+}
+
+fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
+    match constant {
+        Constant::U(bits, val) => LLConstant::Int {
+            bits: *bits as u32,
+            value: *val,
+        },
+        Constant::I(bits, val) => {
+            assert!(
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            LLConstant::Int {
+                bits: *bits as u32,
+                value: *val,
             }
-            Constant::I(bits, val) => {
-                assert!(
-                    *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                let ll_val = llssa.add_const(LLConstant::Int {
-                    bits: *bits as u32,
-                    value: *val,
-                });
-                val_map.insert(vid, ll_val);
-            }
-            Constant::Field(fr) => {
-                let limbs = fr.0.0; // We want to keep this in montgomery form
-                let values = limbs
+        }
+        Constant::Field(fr) => {
+            let values =
+                fr.0.0
                     .iter()
-                    .map(|&l| LLConstant::Int {
+                    .map(|&limb| LLConstant::Int {
                         bits: 64,
-                        value: l as u128,
+                        value: limb as u128,
                     })
                     .collect();
-                let ll_val = llssa.add_const(LLConstant::Struct {
-                    layout: LLStruct::field_elem(),
-                    values,
-                });
-                val_map.insert(vid, ll_val);
+            LLConstant::Struct {
+                layout: LLStruct::field_elem(),
+                values,
             }
-            Constant::FnPtr(_) => {
-                panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
-            }
+        }
+        Constant::Blob(blob) => LLConstant::Blob(LLBlob::new(
+            blob.elements
+                .iter()
+                .map(lower_constant_to_ll_constant)
+                .collect(),
+        )),
+        Constant::FnPtr(_) => {
+            panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
         }
     }
 }
@@ -893,6 +902,18 @@ fn lower_instruction(
             elem_type,
         } => {
             lower_mk_array(e, val_map, *result, elems, elem_type, *count);
+        }
+
+        OpCode::MkSeqOfBlob {
+            result,
+            element_type,
+            blob,
+        } => {
+            let count = match &fn_type_info.get_value_type(*result).expr {
+                HLTypeExpr::Array(_, count) => *count,
+                other => panic!("MkSeqOfBlob result must be an array, got {:?}", other),
+            };
+            lower_mk_blob_array(e, val_map, *result, *blob, element_type, count);
         }
 
         OpCode::MkRepeated {
@@ -1518,20 +1539,8 @@ fn lower_mk_array(
     elem_type: &HLType,
     count: usize,
 ) {
-    let rc_struct = rc_array_struct(elem_type, count);
     let es = elem_struct(elem_type);
-
-    // Allocate
-    let arr = e.heap_alloc(rc_struct.clone(), None);
-
-    // Init RC to 1
-    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
-    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let one = e.emit_int_const(64, 1);
-    e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
+    let (arr, rc_struct) = lower_alloc_rc_array(e, elem_type, count);
 
     // Store elements
     let data = e.struct_field_ptr(arr, rc_struct, 2);
@@ -1543,6 +1552,48 @@ fn lower_mk_array(
     }
 
     val_map.insert(result, arr);
+}
+
+/// Lower MkSeqOfBlob(Array) to heap allocation + memcpy from constant data.
+fn lower_mk_blob_array(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    blob: ValueId,
+    elem_type: &HLType,
+    count: usize,
+) {
+    let es = elem_struct(elem_type);
+    let (arr, rc_struct) = lower_alloc_rc_array(e, elem_type, count);
+
+    if count > 0 {
+        let data = e.struct_field_ptr(arr, rc_struct, 2);
+        let ll_blob = val_map[&blob];
+        let rodata = e.const_data_ptr(es.clone(), ll_blob);
+        let count_val = e.emit_int_const(64, count as u64);
+        e.memcpy(data, rodata, es, Some(count_val));
+    }
+
+    val_map.insert(result, arr);
+}
+
+fn lower_alloc_rc_array(
+    e: &mut LLBlockEmitter<'_>,
+    elem_type: &HLType,
+    count: usize,
+) -> (ValueId, LLStruct) {
+    let rc_struct = rc_array_struct(elem_type, count);
+    let arr = e.heap_alloc(rc_struct.clone(), None);
+
+    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
+    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
+    let one = e.emit_int_const(64, 1);
+    e.ll_store(rc_word, one);
+    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
+    let unassigned = e.emit_int_const(64, u64::MAX);
+    e.ll_store(table_id, unassigned);
+
+    (arr, rc_struct)
 }
 
 /// Lower MkRepeated to heap allocation + a counted loop that stores the
@@ -1558,18 +1609,8 @@ fn lower_mk_repeated(
     elem_type: &HLType,
     count: usize,
 ) {
-    let rc_struct = rc_array_struct(elem_type, count);
     let es = elem_struct(elem_type);
-
-    let arr = e.heap_alloc(rc_struct.clone(), None);
-
-    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
-    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let one = e.emit_int_const(64, 1);
-    e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
+    let (arr, rc_struct) = lower_alloc_rc_array(e, elem_type, count);
 
     let data = e.struct_field_ptr(arr, rc_struct, 2);
     let ll_element = val_map[&element];
@@ -4082,5 +4123,51 @@ mod tests {
             "felt constant should not lower to an MkStruct instruction:\n{dump}"
         );
         assert_eq!(val_map.len(), 1, "the felt constant should be mapped");
+    }
+
+    #[test]
+    fn mk_seq_of_blob_lowers_to_const_data_memcpy() {
+        use crate::compiler::analysis::types::Types;
+        use crate::compiler::ssa::hlssa::{
+            Blob as HLBlob, Constant as HLConstant,
+            builder::{HLEmitter, HLSSABuilder},
+        };
+
+        let mut hlssa = HLSSA::with_main("blob_seq_test".to_string());
+        let main_id = hlssa.get_main_id();
+        hlssa
+            .get_function_mut(main_id)
+            .add_return_type(HLType::u(8).array_of(3));
+
+        let mut hb = HLSSABuilder::new(&mut hlssa);
+        hb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry);
+            let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(vec![
+                HLConstant::U(8, 1),
+                HLConstant::U(8, 2),
+                HLConstant::U(8, 3),
+            ])));
+            let arr = e.mk_seq_of_blob(HLType::u(8), blob);
+            e.terminate_return(vec![arr]);
+        });
+
+        let flow = FlowAnalysis::run(&hlssa);
+        let types = Types::new().run(&hlssa, &flow);
+        let llssa = lower_inner(&hlssa, &flow, &types, None);
+        let dump = llssa.to_string(&DefaultSSAAnnotator);
+
+        assert!(
+            dump.contains("Blob(Blob"),
+            "expected lowered blob constant in LLSSA dump:\n{dump}"
+        );
+        assert!(
+            dump.contains("const_data"),
+            "expected ConstDataPtr in LLSSA dump:\n{dump}"
+        );
+        assert!(
+            dump.contains("memcpy"),
+            "expected memcpy from const data in LLSSA dump:\n{dump}"
+        );
     }
 }

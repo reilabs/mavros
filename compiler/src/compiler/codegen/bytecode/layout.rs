@@ -55,6 +55,13 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
+    pub fn alloc_long_data(&mut self, value: ValueId, cells: usize) -> bytecode::FramePosition {
+        self.variables.insert(value, self.next_free);
+        let r = self.next_free;
+        self.next_free += cells;
+        bytecode::FramePosition(r)
+    }
+
     pub fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
         let r = self.next_free;
         self.next_free += bytecode::FELT_LIMBS;

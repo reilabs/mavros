@@ -18,14 +18,14 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
 };
 
 use crate::compiler::analysis::flow_analysis;
 use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::ssa::llssa::{
-    Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
-    Type,
+    Blob as LLBlob, Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
+    LLSSA, LLStruct, Type,
 };
 use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
 
@@ -64,6 +64,7 @@ pub struct LLVMCodeGen<'ctx> {
     builder: Builder<'ctx>,
     value_map: HashMap<ValueId, BasicValueEnum<'ctx>>,
     constant_values: HashMap<ValueId, BasicValueEnum<'ctx>>,
+    constant_blobs: HashMap<ValueId, LLBlob>,
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
@@ -79,6 +80,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
     // Globals
     globals: Vec<inkwell::values::GlobalValue<'ctx>>,
+    const_data_counter: usize,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -92,6 +94,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             builder,
             value_map: HashMap::new(),
             constant_values: HashMap::new(),
+            constant_blobs: HashMap::new(),
             block_map: HashMap::new(),
             function_map: HashMap::new(),
             vm_ptr: None,
@@ -105,6 +108,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
             globals: Vec::new(),
+            const_data_counter: 0,
         };
 
         codegen.declare_runtime_functions();
@@ -279,6 +283,79 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .const_named_struct(&fields)
                     .into()
             }
+            Constant::Blob(_) => {
+                panic!("Blob constants cannot be materialized as normal LLVM values")
+            }
+        }
+    }
+
+    fn materialize_const_data_element(
+        &self,
+        elem_type: &LLStruct,
+        value: &Constant,
+    ) -> StructValue<'ctx> {
+        if let Constant::Struct { layout, .. } = value {
+            if layout == elem_type {
+                return self.materialize_const(value).into_struct_value();
+            }
+        }
+
+        assert_eq!(
+            elem_type.fields.len(),
+            1,
+            "scalar const data must target a single-field element struct"
+        );
+        assert!(
+            value.matches_field(&elem_type.fields[0]),
+            "const data element {:?} does not match {}",
+            value,
+            elem_type
+        );
+        let field = self.materialize_const(value);
+        self.convert_struct_type(elem_type)
+            .into_struct_type()
+            .const_named_struct(&[field])
+    }
+
+    fn materialize_const_data(
+        &mut self,
+        elem_type: &LLStruct,
+        blob: &LLBlob,
+    ) -> PointerValue<'ctx> {
+        assert!(
+            !blob.is_empty(),
+            "ConstDataPtr should not be emitted for empty data"
+        );
+        let elem_ty = self.convert_struct_type(elem_type).into_struct_type();
+        let values: Vec<StructValue<'ctx>> = blob
+            .elements
+            .iter()
+            .map(|value| self.materialize_const_data_element(elem_type, value))
+            .collect();
+        let array_ty = elem_ty.array_type(values.len() as u32);
+        let array_value = elem_ty.const_array(&values);
+        let name = format!("__mavros_const_data_{}", self.const_data_counter);
+        self.const_data_counter += 1;
+
+        let global = self
+            .module
+            .add_global(array_ty, Some(AddressSpace::default()), &name);
+        global.set_initializer(&array_value);
+        global.set_constant(true);
+        global.set_linkage(Linkage::Private);
+        global.set_unnamed_addr(true);
+        global.set_section(Some(".rodata"));
+
+        let zero = self.context.i32_type().const_zero();
+        unsafe {
+            self.builder
+                .build_gep(
+                    array_ty,
+                    global.as_pointer_value(),
+                    &[zero, zero],
+                    "const_data",
+                )
+                .unwrap()
         }
     }
 
@@ -417,11 +494,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // Materialise module-level LLSSA constants once, allowing each function to re-seed from
         // this map.
-        self.constant_values = llssa
-            .const_snapshot()
-            .into_iter()
-            .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
-            .collect();
+        self.constant_values.clear();
+        self.constant_blobs.clear();
+        for (vid, c) in llssa.const_snapshot() {
+            match c.as_ref() {
+                Constant::Blob(blob) => {
+                    self.constant_blobs.insert(vid, blob.clone());
+                }
+                _ => {
+                    let value = self.materialize_const(c.as_ref());
+                    self.constant_values.insert(vid, value);
+                }
+            }
+        }
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -1079,6 +1164,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.builder
                     .build_memcpy(dst_ptr, 1, src_ptr, 1, total_i32)
                     .unwrap();
+            }
+
+            LLOp::ConstDataPtr {
+                result,
+                elem_type,
+                blob,
+            } => {
+                let blob_data = self
+                    .constant_blobs
+                    .get(blob)
+                    .unwrap_or_else(|| panic!("ConstDataPtr input v{} is not a blob", blob.0))
+                    .clone();
+                let ptr = self.materialize_const_data(elem_type, &blob_data);
+                self.value_map.insert(*result, ptr.into());
             }
 
             LLOp::Trap => {

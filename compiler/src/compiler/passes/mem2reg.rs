@@ -340,6 +340,15 @@ impl Mem2Reg {
                             return false;
                         }
                     }
+                    OpCode::MkSeqOfBlob {
+                        result: _,
+                        element_type: typ,
+                        blob: _,
+                    } => {
+                        if self.type_contains_ptr(typ) {
+                            return false;
+                        }
+                    }
                     OpCode::MkRepeated {
                         result: _,
                         element: _,

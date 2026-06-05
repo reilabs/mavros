@@ -157,7 +157,9 @@ impl SymbolicExecutor {
         // Materialize the SSA constants into `V`s once, up front. Constant ids are global and stable
         // across functions, so we build this map a single time and share it by reference with every
         // `run_fn` instead of rebuilding it (via the emitting `of_*` path) on every function entry.
-        let consts = materialize_constants(ssa, context);
+        let constants = ssa.const_snapshot();
+        let consts = materialize_constants(&constants, context);
+        let blobs = collect_blob_constants(&constants);
 
         self.run_fn(
             ssa,
@@ -166,6 +168,7 @@ impl SymbolicExecutor {
             params,
             &mut globals,
             &consts,
+            &blobs,
             context,
         );
     }
@@ -179,6 +182,7 @@ impl SymbolicExecutor {
         mut inputs: Vec<V>,
         globals: &mut Vec<Option<V>>,
         consts: &HashMap<ValueId, V>,
+        blobs: &HashMap<ValueId, crate::compiler::ssa::hlssa::Blob>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
@@ -302,6 +306,29 @@ impl SymbolicExecutor {
                         let a = a.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
+                    crate::compiler::ssa::hlssa::OpCode::MkSeqOfBlob {
+                        result: r,
+                        element_type,
+                        blob,
+                    } => {
+                        let blob_data = blobs.get(blob).unwrap_or_else(|| {
+                            panic!("MkSeqOfBlob input v{} is not a blob", blob.0)
+                        });
+                        let a = blob_data
+                            .elements
+                            .iter()
+                            .map(|constant| materialize_constant_value(constant, ctx))
+                            .collect::<Vec<_>>();
+                        scope.insert(
+                            *r,
+                            V::mk_array(
+                                a,
+                                ctx,
+                                SequenceTargetType::Array(blob_data.len()),
+                                element_type,
+                            ),
+                        );
+                    }
                     crate::compiler::ssa::hlssa::OpCode::MkRepeated {
                         result: r,
                         element,
@@ -360,7 +387,16 @@ impl SymbolicExecutor {
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally
-                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)
+                            self.run_fn(
+                                ssa,
+                                type_info,
+                                *function_id,
+                                params,
+                                globals,
+                                consts,
+                                blobs,
+                                ctx,
+                            )
                         };
                         for (i, val) in returns.iter().enumerate() {
                             scope.insert(*val, outputs[i].clone());
@@ -723,21 +759,49 @@ impl<V> std::ops::Index<&ValueId> for Scope<'_, V> {
 /// rather than [`HLSSA::for_each_const`], which holds the read lock across the walk. The `of_*`
 /// calls below may intern constants via `add_const` (which takes the constants write lock), so
 /// running them while the read lock is held would deadlock.
-fn materialize_constants<V, Ctx>(ssa: &HLSSA, ctx: &mut Ctx) -> HashMap<ValueId, V>
+fn materialize_constants<V, Ctx>(
+    constants: &crate::compiler::ssa::SSAConstantsSnapshot<Constant>,
+    ctx: &mut Ctx,
+) -> HashMap<ValueId, V>
 where
     V: Value<Ctx>,
 {
     let mut consts = HashMap::new();
-    for (vid, cv) in ssa.const_snapshot() {
-        let v = match cv.as_ref() {
-            Constant::U(size, val) => V::of_u(*size, *val, ctx),
-            Constant::I(size, val) => V::of_i(*size, *val, ctx),
-            Constant::Field(val) => V::of_field(*val, ctx),
-            Constant::FnPtr(_) => {
-                todo!("FnPtrConst in symbolic executor");
-            }
-        };
-        consts.insert(vid, v);
+    for (vid, cv) in constants {
+        if matches!(cv.as_ref(), Constant::Blob(_)) {
+            continue;
+        }
+        let v = materialize_constant_value(cv.as_ref(), ctx);
+        consts.insert(*vid, v);
     }
     consts
+}
+
+fn collect_blob_constants(
+    constants: &crate::compiler::ssa::SSAConstantsSnapshot<Constant>,
+) -> HashMap<ValueId, crate::compiler::ssa::hlssa::Blob> {
+    constants
+        .iter()
+        .filter_map(|(vid, cv)| match cv.as_ref() {
+            Constant::Blob(blob) => Some((*vid, blob.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn materialize_constant_value<V, Ctx>(constant: &Constant, ctx: &mut Ctx) -> V
+where
+    V: Value<Ctx>,
+{
+    match constant {
+        Constant::U(size, val) => V::of_u(*size, *val, ctx),
+        Constant::I(size, val) => V::of_i(*size, *val, ctx),
+        Constant::Field(val) => V::of_field(*val, ctx),
+        Constant::FnPtr(_) => {
+            todo!("FnPtrConst in symbolic executor");
+        }
+        Constant::Blob(_) => {
+            panic!("Nested Blob constants are not supported in symbolic executor")
+        }
+    }
 }
