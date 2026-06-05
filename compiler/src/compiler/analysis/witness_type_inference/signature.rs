@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::super::witness_info::{WitnessShape, WitnessType};
 use crate::compiler::ssa::{
-    BlockId, FunctionId, ValueId,
+    BlockId, FunctionId,
     hlssa::{HLSSA, Type, TypeExpr},
 };
 
@@ -29,15 +29,6 @@ pub(super) struct CallSite {
     pub(super) caller_func_id: FunctionId,
     pub(super) block_id: BlockId,
     pub(super) instruction_idx: usize,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct PendingCall {
-    pub(super) call_site: CallSite,
-    pub(super) callee_id: FunctionId,
-    pub(super) args: Vec<ValueId>,
-    pub(super) results: Vec<ValueId>,
-    pub(super) cfg_var: VariableId,
 }
 
 /// Stable port layout for a function boundary.
@@ -204,7 +195,7 @@ pub(super) fn witness_of_var(var: VariableId, witness_vars: &HashSet<VariableId>
 
 /// Seeds concrete witness requirements into a variable graph.
 ///
-/// Specialization starts from a closed `SpecKey`; every witness position in that key becomes an
+/// Spec solving starts from a closed `SpecKey`; every witness position in that key becomes an
 /// edge from `always`, so normal reachability computes all implied witness variables.
 pub(super) fn seed_shape(
     graph: &mut DependencyGraph,

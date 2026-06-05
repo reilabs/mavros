@@ -5,6 +5,7 @@
 
 mod fixpoint;
 mod signature;
+mod solver;
 mod specialization;
 
 use std::collections::HashMap;
@@ -12,7 +13,8 @@ use std::collections::HashMap;
 use self::{
     fixpoint::infer_summaries,
     signature::{BoundaryLayout, SpecKey, pure_shape_for_type},
-    specialization::SpecializationEngine,
+    solver::SpecSolver,
+    specialization::Specializer,
 };
 use super::witness_info::{FunctionWitnessType, WitnessType};
 use crate::compiler::{
@@ -47,16 +49,21 @@ impl WitnessTypeInference {
         self.functions.remove(&func_id);
     }
 
-    /// Runs summary inference, materializes the closed specialization graph, and installs the
-    /// resulting witness annotations for the specialized SSA functions.
+    /// Runs WTI as explicit phases: initialize boundary data, infer summaries, solve specs,
+    /// materialize clones, then install annotations for the specialized SSA functions.
     pub fn run(&mut self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
+        // Phase 1: initialize the fixed boundary layout for every original function.
         let function_ids = ssa.get_function_ids().collect::<Vec<_>>();
         let layouts = function_ids
             .iter()
             .map(|function_id| (*function_id, BoundaryLayout::new(*function_id, ssa)))
             .collect::<HashMap<_, _>>();
+
+        // Phase 2: infer whole-program boundary summaries over the original call graph.
         let summaries = infer_summaries(ssa, flow_analysis, &function_ids, &layouts);
 
+        // Phase 3: build the root key. `main` starts pure at the boundary; closure decides what
+        // the program actually needs from there.
         let main_id = ssa.get_main_id();
         let main_func = ssa.get_function(main_id);
         let main_key = SpecKey {
@@ -74,10 +81,11 @@ impl WitnessTypeInference {
             cfg_witness: WitnessType::Pure,
         };
 
-        let mut engine = SpecializationEngine::new(ssa, flow_analysis, layouts, summaries);
-        let root_spec = engine.ensure_spec(main_key);
-        engine.run();
-        self.functions = engine.finish(root_spec);
+        // Phase 4: solve the closed specialization graph without mutating SSA.
+        let solved = SpecSolver::new(&*ssa, flow_analysis, &layouts, &summaries).solve(main_key);
+
+        // Phase 5: clone solved specs, rewrite calls, and emit annotations for cloned functions.
+        self.functions = Specializer::new(ssa, flow_analysis, solved).materialize();
 
         Ok(())
     }

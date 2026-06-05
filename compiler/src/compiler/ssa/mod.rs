@@ -217,12 +217,15 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         new_id
     }
 
-    /// Creates a unique copy of the function identified by `function_id` under the returned
-    /// function identifier.
+    /// Creates a unique copy of the function identified by `function_id`.
     ///
     /// The copy has been inserted into the SSA, and while it contains the same block identifiers,
     /// all value identifiers barring those for constants are now unique to the new occurrences.
-    pub fn duplicate_function(&mut self, function_id: FunctionId) -> FunctionId {
+    /// The returned map contains the original-to-duplicate mapping for every remapped value.
+    pub fn duplicate_function(
+        &mut self,
+        function_id: FunctionId,
+    ) -> (FunctionId, HashMap<ValueId, ValueId>) {
         let mut cloned = self
             .functions
             .get(&function_id)
@@ -296,7 +299,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             }
         }
 
-        self.insert_function(cloned)
+        (self.insert_function(cloned), remap)
     }
 
     /// Allocate a fresh `ValueId` from the SSA-wide counter.

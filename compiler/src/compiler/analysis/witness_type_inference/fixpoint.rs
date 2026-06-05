@@ -7,8 +7,8 @@ use petgraph::{
 
 use super::super::witness_info::WitnessShape;
 use super::signature::{
-    BoundaryLayout, CallSite, DependencyGraph, FunctionSummary, PendingCall, SpecKey, VarShape,
-    VariableId, array_element, map_ports_to_vars, port_shape_to_var_shape, ref_inner, seed_shape,
+    BoundaryLayout, CallSite, DependencyGraph, FunctionSummary, SpecKey, VarShape, VariableId,
+    array_element, map_ports_to_vars, port_shape_to_var_shape, ref_inner, seed_shape,
     tuple_element, var_shape_for_type,
 };
 use crate::compiler::{
@@ -30,13 +30,13 @@ pub(super) struct BodyBuild {
     pub(super) always: VariableId,
     boundary_nodes: Vec<VariableId>,
     port_by_boundary_node: HashMap<VariableId, usize>,
-    pub(super) pending_calls: Vec<PendingCall>,
+    pub(super) constrained_calls: Vec<CallSite>,
 }
 
 /// Builds the dependency graph used by both summary inference and concrete specialization.
 ///
 /// Summary inference gives boundary ports fresh variables and then collapses reachability back to
-/// boundary edges. Specialization gives real SSA values fresh variables, seeds the requested key,
+/// boundary edges. Spec solving gives original SSA values fresh variables, seeds the requested key,
 /// and reads the variables reachable from `always`.
 pub(super) struct BodyBuilder<'a> {
     ssa: &'a HLSSA,
@@ -54,7 +54,7 @@ pub(super) struct BodyBuilder<'a> {
     always: VariableId,
     boundary_nodes: Vec<VariableId>,
     port_by_boundary_node: HashMap<VariableId, usize>,
-    pending_calls: Vec<PendingCall>,
+    constrained_calls: Vec<CallSite>,
 }
 
 impl<'a> BodyBuilder<'a> {
@@ -104,13 +104,12 @@ impl<'a> BodyBuilder<'a> {
             always,
             boundary_nodes,
             port_by_boundary_node,
-            pending_calls: Vec::new(),
+            constrained_calls: Vec::new(),
         }
     }
 
     pub(super) fn for_spec(
         key: &SpecKey,
-        specialized_func_id: FunctionId,
         ssa: &'a HLSSA,
         flow_analysis: &'a FlowAnalysis,
         layouts: &'a HashMap<FunctionId, BoundaryLayout>,
@@ -118,7 +117,7 @@ impl<'a> BodyBuilder<'a> {
     ) -> Self {
         let mut graph = DependencyGraph::new();
         let always = graph.fresh_var();
-        let function = ssa.get_function(specialized_func_id);
+        let function = ssa.get_function(key.original_func_id);
         let entry_params = function
             .get_entry()
             .get_parameters()
@@ -148,7 +147,7 @@ impl<'a> BodyBuilder<'a> {
             layouts,
             summaries,
             original_func_id: key.original_func_id,
-            function_id: specialized_func_id,
+            function_id: key.original_func_id,
             graph,
             value_shapes: HashMap::new(),
             block_cfg_vars: HashMap::new(),
@@ -158,7 +157,7 @@ impl<'a> BodyBuilder<'a> {
             always,
             boundary_nodes: Vec::new(),
             port_by_boundary_node: HashMap::new(),
-            pending_calls: Vec::new(),
+            constrained_calls: Vec::new(),
         }
     }
 
@@ -213,7 +212,7 @@ impl<'a> BodyBuilder<'a> {
             always: self.always,
             boundary_nodes: self.boundary_nodes,
             port_by_boundary_node: self.port_by_boundary_node,
-            pending_calls: self.pending_calls,
+            constrained_calls: self.constrained_calls,
         }
     }
 
@@ -284,7 +283,7 @@ impl<'a> BodyBuilder<'a> {
     /// Registers the witness-flow rule for one SSA instruction.
     ///
     /// Each opcode either allocates fresh variables for its results, adds dependency edges between
-    /// input and output positions, or records a constrained static call for later specialization.
+    /// input and output positions, or records a constrained static call site for key solving.
     fn scan_instruction(&mut self, call_site: CallSite, instruction: &OpCode) {
         match instruction {
             OpCode::BinaryArithOp {
@@ -436,13 +435,7 @@ impl<'a> BodyBuilder<'a> {
                 if !unconstrained {
                     let cfg_var = self.block_cfg_var(call_site.block_id);
                     self.project_call_summary(*callee_id, args, results, cfg_var);
-                    self.pending_calls.push(PendingCall {
-                        call_site,
-                        callee_id: *callee_id,
-                        args: args.clone(),
-                        results: results.clone(),
-                        cfg_var,
-                    });
+                    self.constrained_calls.push(call_site);
                 }
             }
             OpCode::Call {

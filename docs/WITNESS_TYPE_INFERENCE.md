@@ -10,7 +10,8 @@ The implementation lives under
 - `signature.rs` defines the boundary representation: specialization keys, boundary ports,
   summaries, variable-shaped witness shapes, and the shape conversion/query helpers.
 - `fixpoint.rs` builds dependency graphs from SSA bodies and computes function summaries.
-- `specialization.rs` materializes closed specializations, rewires calls, and emits the final
+- `solver.rs` solves the closed specialization graph over original functions without mutating SSA.
+- `specialization.rs` materializes solved specs as clones, rewires calls, and emits the final
   `FunctionWitnessType` annotations.
 
 ## Core Model
@@ -78,16 +79,22 @@ The closed key is the canonical specialization identity. If a call asks for an a
 callee summary proves that this key necessarily returns a witness ref, the key is closed to the
 witness-returning form before lookup or cloning.
 
+## Solving Specs
+
+The solver maintains a queue of closed keys. Solving a key never clones or rewrites SSA. It builds
+the specialization graph over the original function, computes reachable witness variables, records
+the concrete witness type of every original value and block CFG, and queues closed callee keys for
+constrained static call sites.
+
+The collected fixpoint result is a `SolvedProgram`: solved specs, the root spec id, and the resolved
+callee spec for every constrained call site in every caller spec.
+
 ## Materialization and Rewriting
 
-The specialization engine maintains a queue of closed keys. For each new key it duplicates the
-original function, builds the specialization graph, computes reachable witness variables, and
-records the concrete witness type of every value and block CFG.
-
-While scanning a specialization, constrained static calls produce new callee keys from the caller's
-actual argument, result, and CFG variables. Those keys are closed before being queued. Once the
-queue is exhausted, the engine rewrites every constrained static call target to the specialized
-callee selected during scanning and sets the entry point to the root specialization.
+Once the solve queue is exhausted, materialization begins. Each solved key gets one duplicate of its
+original function plus an original-to-clone value map. The engine then rewrites every constrained
+static call target in the cloned functions to the specialized callee selected during solving and
+sets the entry point to the root specialization.
 
 Unused cloned specs are not removed by WTI itself; later cleanup passes can remove unreachable
 functions.

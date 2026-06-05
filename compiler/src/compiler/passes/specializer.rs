@@ -947,7 +947,7 @@ impl Specializer {
             // Clone the original via the SSA helper. The clone has fresh `ValueId`s and
             // becomes the dispatcher's fallback target; the original's slot is then
             // overwritten with the dispatcher itself.
-            let unspecialized_id = ssa.duplicate_function(signature.get_fun_id());
+            let (unspecialized_id, _) = ssa.duplicate_function(signature.get_fun_id());
             ssa.get_function_mut(unspecialized_id)
                 .set_name(format!("{}#unspecialized", original_name));
 
