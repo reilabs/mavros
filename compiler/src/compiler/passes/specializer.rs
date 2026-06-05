@@ -21,7 +21,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
+            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
             MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
             TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
@@ -51,6 +51,7 @@ enum ConstVal {
     Field(Field),
     Array(Vec<ValueId>),
     Tuple(Vec<ValueId>),
+    Blob(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
@@ -530,6 +531,46 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
+    fn of_blob(elements: Vec<Self>, ctx: &mut SpecializationState) -> Self {
+        fn constant_for(ctx: &SpecializationState<'_>, value: ValueId) -> Constant {
+            match ctx
+                .const_vals
+                .get(&value)
+                .unwrap_or_else(|| panic!("Blob element v{} is not a constant", value.0))
+            {
+                ConstVal::U(bits, value) => Constant::U(*bits, *value),
+                ConstVal::I(bits, value) => Constant::I(*bits, *value),
+                ConstVal::Field(value) => Constant::Field(*value),
+                ConstVal::Blob(elements) => Constant::Blob(Blob::new(
+                    elements
+                        .iter()
+                        .map(|element| constant_for(ctx, *element))
+                        .collect(),
+                )),
+                other => panic!(
+                    "Blob element v{} is not a scalar/blob constant: {:?}",
+                    value.0, other
+                ),
+            }
+        }
+
+        let element_ids = elements.iter().map(|v| v.0).collect::<Vec<_>>();
+        let constants = element_ids
+            .iter()
+            .map(|element| constant_for(ctx, *element))
+            .collect();
+        let val = ctx.emit_constant(Constant::Blob(Blob::new(constants)));
+        ctx.const_vals.insert(val, ConstVal::Blob(element_ids));
+        Self(val)
+    }
+
+    fn expect_blob(&self, ctx: &mut SpecializationState) -> Vec<Self> {
+        match ctx.const_vals.get(&self.0) {
+            Some(ConstVal::Blob(elements)) => elements.iter().copied().map(Self).collect(),
+            other => panic!("Expected blob, got {:?}", other),
+        }
+    }
+
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut SpecializationState,
@@ -887,6 +928,10 @@ impl Specializer {
                     info!("TODO: Aborting specialization on an array value");
                     return;
                 }
+                ValueSignature::Blob(_) => {
+                    info!("TODO: Aborting specialization on a blob value");
+                    return;
+                }
                 ValueSignature::Unknown(_)
                 | ValueSignature::UnknownSlice
                 | ValueSignature::WitnessOf(_) => {
@@ -1008,6 +1053,9 @@ impl Specializer {
                         todo!();
                     }
                     ValueSignature::Array(_) => {
+                        todo!();
+                    }
+                    ValueSignature::Blob(_) => {
                         todo!();
                     }
                     ValueSignature::Unknown(_)

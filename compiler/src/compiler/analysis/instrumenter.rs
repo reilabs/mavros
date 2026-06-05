@@ -52,6 +52,7 @@ pub enum ValueSignature {
     I { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
+    Blob(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
     Unknown(ScalarKind),
     UnknownSlice,
@@ -68,6 +69,7 @@ impl ValueSignature {
             ValueSignature::Array(vals) => {
                 Value::Array(vals.iter().map(|v| v.to_value()).collect())
             }
+            ValueSignature::Blob(vals) => Value::Blob(vals.iter().map(|v| v.to_value()).collect()),
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
             ValueSignature::Unknown(kind) => Value::Unknown(*kind),
             ValueSignature::UnknownSlice => Value::UnknownSlice,
@@ -92,6 +94,14 @@ impl ValueSignature {
                     format!("[...]")
                 }
             }
+            ValueSignature::Blob(items) => {
+                if full {
+                    let items = items.iter().map(|v| v.pretty_print(full)).join(", ");
+                    format!("blob[{items}]")
+                } else {
+                    "blob[...]".to_string()
+                }
+            }
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
             ValueSignature::Unknown(_) => "?".to_string(),
             ValueSignature::UnknownSlice => "?slice".to_string(),
@@ -114,6 +124,7 @@ pub enum Value {
     I(usize, u128),
     Field(Field),
     Array(Vec<Value>),
+    Blob(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
     UnknownSlice,
@@ -510,6 +521,11 @@ impl Value {
                     val.blind();
                 }
             }
+            Value::Blob(vals) => {
+                for val in vals {
+                    val.blind();
+                }
+            }
             Value::Pointer(val) => {
                 val.borrow_mut().blind();
             }
@@ -531,6 +547,11 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Array(vals) => {
+                for val in vals {
+                    val.forget_concrete();
+                }
+            }
+            Value::Blob(vals) => {
                 for val in vals {
                     val.forget_concrete();
                 }
@@ -564,6 +585,9 @@ impl Value {
             Value::Field(f) => ValueSignature::Field(*f),
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
+            }
+            Value::Blob(vals) => {
+                ValueSignature::Blob(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
             }
             Value::Pointer(val) => {
                 ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig()))
@@ -601,6 +625,7 @@ impl Value {
     fn is_witness(&self) -> bool {
         match self {
             Value::Unknown(_) => false,
+            Value::Blob(_) => false,
             Value::WitnessOf(_) => true,
             _ => false,
         }
@@ -1471,6 +1496,38 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         Self {
             unspecialized: Value::Field(f),
             specialized: Value::Field(f),
+        }
+    }
+
+    fn of_blob(values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
+        let (unspecialized, specialized) = values
+            .into_iter()
+            .map(|v| (v.unspecialized, v.specialized))
+            .unzip();
+        Self {
+            unspecialized: Value::Blob(unspecialized),
+            specialized: Value::Blob(specialized),
+        }
+    }
+
+    fn expect_blob(&self, _ctx: &mut CostAnalysis) -> Vec<Self> {
+        match (&self.unspecialized, &self.specialized) {
+            (Value::Blob(unspecialized), Value::Blob(specialized)) => {
+                assert_eq!(unspecialized.len(), specialized.len());
+                unspecialized
+                    .iter()
+                    .cloned()
+                    .zip(specialized.iter().cloned())
+                    .map(|(unspecialized, specialized)| Self {
+                        unspecialized,
+                        specialized,
+                    })
+                    .collect()
+            }
+            _ => panic!(
+                "Expected blob, got unspecialized={:?}, specialized={:?}",
+                self.unspecialized, self.specialized
+            ),
         }
     }
 

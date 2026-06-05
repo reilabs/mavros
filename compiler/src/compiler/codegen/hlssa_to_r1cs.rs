@@ -48,6 +48,7 @@ pub enum Value {
     LC(LC),
     Array(Rc<RefCell<ArrayData>>),
     Tuple(Rc<RefCell<TupleData>>),
+    Blob(Vec<Value>),
     Ptr(Rc<RefCell<Value>>),
     Invalid,
 }
@@ -261,6 +262,13 @@ impl Value {
         match self {
             Value::Tuple(fields) => fields.clone(),
             _ => panic!("expected tuple"),
+        }
+    }
+
+    pub fn expect_blob(&self) -> Vec<Value> {
+        match self {
+            Value::Blob(elements) => elements.clone(),
+            _ => panic!("expected blob"),
         }
     }
 
@@ -752,6 +760,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
         Value::Const(ark_bn254::Fr::from(f))
+    }
+
+    fn of_blob(elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
+        Value::Blob(elements)
+    }
+
+    fn expect_blob(&self, _ctx: &mut R1CGen) -> Vec<Self> {
+        self.expect_blob()
     }
 
     fn mk_array(

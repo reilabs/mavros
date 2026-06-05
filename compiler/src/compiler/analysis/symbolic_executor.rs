@@ -61,6 +61,8 @@ where
     fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_i(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_field(f: Field, ctx: &mut Context) -> Self;
+    fn of_blob(elements: Vec<Self>, ctx: &mut Context) -> Self;
+    fn expect_blob(&self, ctx: &mut Context) -> Vec<Self>;
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut Context,
@@ -159,7 +161,6 @@ impl SymbolicExecutor {
         // `run_fn` instead of rebuilding it (via the emitting `of_*` path) on every function entry.
         let constants = ssa.const_snapshot();
         let consts = materialize_constants(&constants, context);
-        let blobs = collect_blob_constants(&constants);
 
         self.run_fn(
             ssa,
@@ -168,7 +169,6 @@ impl SymbolicExecutor {
             params,
             &mut globals,
             &consts,
-            &blobs,
             context,
         );
     }
@@ -182,7 +182,6 @@ impl SymbolicExecutor {
         mut inputs: Vec<V>,
         globals: &mut Vec<Option<V>>,
         consts: &HashMap<ValueId, V>,
-        blobs: &HashMap<ValueId, crate::compiler::ssa::hlssa::Blob>,
         ctx: &mut Ctx,
     ) -> Vec<V>
     where
@@ -311,22 +310,11 @@ impl SymbolicExecutor {
                         element_type,
                         blob,
                     } => {
-                        let blob_data = blobs.get(blob).unwrap_or_else(|| {
-                            panic!("MkSeqOfBlob input v{} is not a blob", blob.0)
-                        });
-                        let a = blob_data
-                            .elements
-                            .iter()
-                            .map(|constant| materialize_constant_value(constant, ctx))
-                            .collect::<Vec<_>>();
+                        let a = scope[blob].expect_blob(ctx);
+                        let len = a.len();
                         scope.insert(
                             *r,
-                            V::mk_array(
-                                a,
-                                ctx,
-                                SequenceTargetType::Array(blob_data.len()),
-                                element_type,
-                            ),
+                            V::mk_array(a, ctx, SequenceTargetType::Array(len), element_type),
                         );
                     }
                     crate::compiler::ssa::hlssa::OpCode::MkRepeated {
@@ -387,16 +375,7 @@ impl SymbolicExecutor {
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally
-                            self.run_fn(
-                                ssa,
-                                type_info,
-                                *function_id,
-                                params,
-                                globals,
-                                consts,
-                                blobs,
-                                ctx,
-                            )
+                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)
                         };
                         for (i, val) in returns.iter().enumerate() {
                             scope.insert(*val, outputs[i].clone());
@@ -768,25 +747,10 @@ where
 {
     let mut consts = HashMap::new();
     for (vid, cv) in constants {
-        if matches!(cv.as_ref(), Constant::Blob(_)) {
-            continue;
-        }
         let v = materialize_constant_value(cv.as_ref(), ctx);
         consts.insert(*vid, v);
     }
     consts
-}
-
-fn collect_blob_constants(
-    constants: &crate::compiler::ssa::SSAConstantsSnapshot<Constant>,
-) -> HashMap<ValueId, crate::compiler::ssa::hlssa::Blob> {
-    constants
-        .iter()
-        .filter_map(|(vid, cv)| match cv.as_ref() {
-            Constant::Blob(blob) => Some((*vid, blob.clone())),
-            _ => None,
-        })
-        .collect()
 }
 
 fn materialize_constant_value<V, Ctx>(constant: &Constant, ctx: &mut Ctx) -> V
@@ -800,8 +764,13 @@ where
         Constant::FnPtr(_) => {
             todo!("FnPtrConst in symbolic executor");
         }
-        Constant::Blob(_) => {
-            panic!("Nested Blob constants are not supported in symbolic executor")
+        Constant::Blob(blob) => {
+            let elements = blob
+                .elements
+                .iter()
+                .map(|element| materialize_constant_value(element, ctx))
+                .collect();
+            V::of_blob(elements, ctx)
         }
     }
 }
