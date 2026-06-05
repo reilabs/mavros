@@ -11,6 +11,10 @@ use crate::compiler::{
         hlssa::{CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr},
     },
 };
+use petgraph::{
+    algo::{condensation, toposort},
+    graph::DiGraph,
+};
 
 type VarShape = WitnessShape<VariableId>;
 type PortShape = WitnessShape<PortId>;
@@ -1332,19 +1336,60 @@ fn infer_summaries(
         .map(|function_id| (*function_id, FunctionSummary::new(&layouts[function_id])))
         .collect::<HashMap<_, _>>();
 
-    loop {
-        let mut changed = false;
-        for function_id in function_ids {
-            let build =
-                BodyBuilder::for_summary(*function_id, ssa, flow_analysis, layouts, &summaries)
-                    .build();
-            let summary = summarize_body(&build, &layouts[function_id]);
-            changed |= summaries.get_mut(function_id).unwrap().absorb(&summary);
-        }
-        if !changed {
-            return summaries;
+    for scc in summary_scc_order(ssa, function_ids) {
+        loop {
+            let mut changed = false;
+            for function_id in &scc {
+                let build =
+                    BodyBuilder::for_summary(*function_id, ssa, flow_analysis, layouts, &summaries)
+                        .build();
+                let summary = summarize_body(&build, &layouts[function_id]);
+                changed |= summaries.get_mut(function_id).unwrap().absorb(&summary);
+            }
+            if !changed {
+                break;
+            }
         }
     }
+
+    summaries
+}
+
+fn summary_scc_order(ssa: &HLSSA, function_ids: &[FunctionId]) -> Vec<Vec<FunctionId>> {
+    let mut call_graph = DiGraph::<FunctionId, ()>::new();
+    let mut func_to_node = HashMap::new();
+    let function_set = function_ids.iter().copied().collect::<HashSet<_>>();
+
+    for function_id in function_ids {
+        let node = call_graph.add_node(*function_id);
+        func_to_node.insert(*function_id, node);
+    }
+
+    for caller_id in function_ids {
+        let caller = func_to_node[caller_id];
+        let function = ssa.get_function(*caller_id);
+        for (_, block) in function.get_blocks() {
+            for instruction in block.get_instructions() {
+                for callee_id in instruction.get_static_call_targets() {
+                    if function_set.contains(&callee_id) {
+                        call_graph.add_edge(caller, func_to_node[&callee_id], ());
+                    }
+                }
+            }
+        }
+    }
+
+    let condensed = condensation(call_graph, true);
+    let mut ordered = toposort(&condensed, None).expect("condensed call graph must be acyclic");
+    ordered.reverse();
+    ordered
+        .into_iter()
+        .map(|scc_idx| {
+            let mut scc = condensed[scc_idx].clone();
+            scc.sort_by_key(|function_id| function_id.0);
+            scc
+        })
+        .collect()
 }
 
 fn summarize_body(build: &BodyBuild, layout: &BoundaryLayout) -> FunctionSummary {
