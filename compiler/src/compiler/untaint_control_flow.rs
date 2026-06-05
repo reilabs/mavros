@@ -7,7 +7,6 @@ use tracing::{Level, instrument};
 use crate::compiler::{
     analysis::{
         flow_analysis::{CFG, FlowAnalysis},
-        slice_lengths::{FunctionSliceLengths, SliceLengthAnalysis},
         types::{FunctionTypeInfo, Types},
         witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
         witness_type_inference::WitnessTypeInference,
@@ -229,7 +228,6 @@ impl UntaintControlFlow {
         // Recompute flow + type info (types changed in step 1)
         let flow_analysis = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow_analysis);
-        let slice_lengths = SliceLengthAnalysis::run(&ssa, &type_info);
 
         // Step 2: cast insertion + control flow linearization
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
@@ -241,10 +239,6 @@ impl UntaintControlFlow {
                 } else {
                     None
                 };
-                let fn_slice_lengths = slice_lengths
-                    .function_values(function_id)
-                    .cloned()
-                    .unwrap_or_default();
                 let mut function = ssa.take_function(function_id);
                 self.run_function(
                     function_id,
@@ -253,7 +247,6 @@ impl UntaintControlFlow {
                     function_wt,
                     &flow_analysis,
                     func_type_info,
-                    &fn_slice_lengths,
                 );
                 ssa.put_function(function_id, function);
             }
@@ -271,7 +264,6 @@ impl UntaintControlFlow {
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
         type_info: Option<&FunctionTypeInfo>,
-        slice_lengths: &FunctionSliceLengths,
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
@@ -313,7 +305,6 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
-                slice_lengths,
             );
         }
     }
@@ -329,7 +320,6 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
-        slice_lengths: &FunctionSliceLengths,
     ) {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
@@ -343,7 +333,6 @@ impl UntaintControlFlow {
                 function,
                 ssa,
                 type_info,
-                slice_lengths,
                 block_taint,
                 &mut new_instructions,
             );
@@ -526,13 +515,7 @@ impl UntaintControlFlow {
                         args.iter()
                             .zip(param_types.iter())
                             .map(|(arg, expected_type)| {
-                                convert_if_needed(
-                                    *arg,
-                                    expected_type,
-                                    ti,
-                                    &mut builder,
-                                    slice_lengths,
-                                )
+                                convert_if_needed(*arg, expected_type, ti, &mut builder)
                             })
                             .collect()
                     };
@@ -551,13 +534,7 @@ impl UntaintControlFlow {
                             .iter()
                             .zip(return_types.iter())
                             .map(|(val, expected_type)| {
-                                convert_if_needed(
-                                    *val,
-                                    expected_type,
-                                    ti,
-                                    &mut builder,
-                                    slice_lengths,
-                                )
+                                convert_if_needed(*val, expected_type, ti, &mut builder)
                             })
                             .collect()
                     };
@@ -581,7 +558,6 @@ impl UntaintControlFlow {
         function: &mut HLFunction,
         ssa: &mut HLSSA,
         type_info: Option<&FunctionTypeInfo>,
-        slice_lengths: &FunctionSliceLengths,
         block_taint: Option<ValueId>,
         new_instructions: &mut Vec<OpCode>,
     ) {
@@ -663,15 +639,7 @@ impl UntaintControlFlow {
                 let new_vs: Vec<_> = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     vs.iter()
-                        .map(|v| {
-                            convert_if_needed(
-                                *v,
-                                &target_elem_type,
-                                ti,
-                                &mut builder,
-                                slice_lengths,
-                            )
-                        })
+                        .map(|v| convert_if_needed(*v, &target_elem_type, ti, &mut builder))
                         .collect()
                 };
                 for instr in cast_instrs {
@@ -701,7 +669,7 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let new_element = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    convert_if_needed(element, &target_elem_type, ti, &mut builder, slice_lengths)
+                    convert_if_needed(element, &target_elem_type, ti, &mut builder)
                 };
                 for instr in cast_instrs {
                     maybe_guard(new_instructions, block_taint, instr);
@@ -735,14 +703,8 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    let ca = convert_if_needed(array, result_type, ti, &mut builder, slice_lengths);
-                    let cv = convert_if_needed(
-                        value,
-                        &expected_elem_type,
-                        ti,
-                        &mut builder,
-                        slice_lengths,
-                    );
+                    let ca = convert_if_needed(array, result_type, ti, &mut builder);
+                    let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
                     (ca, cv)
                 };
                 for instr in cast_instrs {
@@ -777,15 +739,7 @@ impl UntaintControlFlow {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     values
                         .iter()
-                        .map(|v| {
-                            convert_if_needed(
-                                *v,
-                                &expected_elem_type,
-                                ti,
-                                &mut builder,
-                                slice_lengths,
-                            )
-                        })
+                        .map(|v| convert_if_needed(*v, &expected_elem_type, ti, &mut builder))
                         .collect()
                 };
                 for instr in cast_instrs {
@@ -810,7 +764,7 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let converted = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    convert_if_needed(value, &target_type, ti, &mut builder, slice_lengths)
+                    convert_if_needed(value, &target_type, ti, &mut builder)
                 };
                 for instr in cast_instrs {
                     maybe_guard(new_instructions, block_taint, instr);
@@ -838,8 +792,8 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let (new_if_t, new_if_f) = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    let t = convert_if_needed(if_t, &target_type, ti, &mut builder, slice_lengths);
-                    let f = convert_if_needed(if_f, &target_type, ti, &mut builder, slice_lengths);
+                    let t = convert_if_needed(if_t, &target_type, ti, &mut builder);
+                    let f = convert_if_needed(if_f, &target_type, ti, &mut builder);
                     (t, f)
                 };
                 for instr in cast_instrs {
@@ -871,32 +825,23 @@ fn convert_if_needed(
     target_type: &Type,
     type_info: &FunctionTypeInfo,
     builder: &mut HLInstrBuilder<'_>,
-    slice_lengths: &FunctionSliceLengths,
 ) -> ValueId {
     let value_type = type_info.get_value_type(value);
     if *value_type == *target_type {
         return value;
     }
-    let mut synthetic_slice_lengths = HashMap::new();
-    emit_value_conversion(
-        value,
-        value_type,
-        target_type,
-        builder,
-        slice_lengths,
-        &mut synthetic_slice_lengths,
-    )
+    emit_value_conversion(value, value_type, target_type, builder)
 }
 
 /// Convert a value from source_type to target_type. Uses unrolled element-wise
-/// conversion for arrays (no loop blocks needed), so this is safe inside guarded regions.
+/// conversion for fixed arrays (no loop blocks needed), so this is safe inside
+/// guarded regions. Slice element conversion is deliberately not handled here:
+/// doing it correctly needs a later principled slice-lowering pass.
 fn emit_value_conversion(
     value: ValueId,
     source_type: &Type,
     target_type: &Type,
     builder: &mut HLInstrBuilder<'_>,
-    slice_lengths: &FunctionSliceLengths,
-    synthetic_slice_lengths: &mut HashMap<ValueId, usize>,
 ) -> ValueId {
     if source_type == target_type {
         return value;
@@ -919,24 +864,12 @@ fn emit_value_conversion(
                 *src_size,
                 SequenceTargetType::Array(*src_size),
                 builder,
-                slice_lengths,
-                synthetic_slice_lengths,
             )
         }
         (TypeExpr::Slice(src_inner), TypeExpr::Slice(tgt_inner)) => {
-            let size = synthetic_slice_lengths
-                .get(&value)
-                .copied()
-                .unwrap_or_else(|| slice_lengths.require(value, "witness cast insertion"));
-            emit_unrolled_sequence_conversion(
-                value,
-                src_inner,
-                tgt_inner,
-                size,
-                SequenceTargetType::Slice,
-                builder,
-                slice_lengths,
-                synthetic_slice_lengths,
+            panic!(
+                "witness cast insertion cannot convert slice elements before principled slice lowering: {:?} -> {:?}",
+                src_inner, tgt_inner
             )
         }
         // Tuple: decompose, per-field recursive, recompose
@@ -949,19 +882,7 @@ fn emit_value_conversion(
             let mut converted_elems = vec![];
             for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
                 let proj = builder.tuple_proj(value, i);
-                if matches!(src_ft.expr, TypeExpr::Slice(_))
-                    && let Some(len) = slice_lengths.get_tuple_field(value, i)
-                {
-                    synthetic_slice_lengths.insert(proj, *len);
-                }
-                let converted = emit_value_conversion(
-                    proj,
-                    src_ft,
-                    tgt_ft,
-                    builder,
-                    slice_lengths,
-                    synthetic_slice_lengths,
-                );
+                let converted = emit_value_conversion(proj, src_ft, tgt_ft, builder);
                 converted_elems.push(converted);
             }
             builder.mk_tuple(converted_elems, tgt_fields.clone())
@@ -982,28 +903,15 @@ fn emit_unrolled_sequence_conversion(
     size: usize,
     seq_type: SequenceTargetType,
     builder: &mut HLInstrBuilder<'_>,
-    slice_lengths: &FunctionSliceLengths,
-    synthetic_slice_lengths: &mut HashMap<ValueId, usize>,
 ) -> ValueId {
     let mut elems = Vec::with_capacity(size);
     for i in 0..size {
         let idx = builder.u_const(32, i as u128);
         let elem = builder.array_get(source_seq, idx);
-        let converted = emit_value_conversion(
-            elem,
-            src_elem_type,
-            tgt_elem_type,
-            builder,
-            slice_lengths,
-            synthetic_slice_lengths,
-        );
+        let converted = emit_value_conversion(elem, src_elem_type, tgt_elem_type, builder);
         elems.push(converted);
     }
-    let result = builder.mk_seq(elems, seq_type, tgt_elem_type.clone());
-    if matches!(seq_type, SequenceTargetType::Slice) {
-        synthetic_slice_lengths.insert(result, size);
-    }
-    result
+    builder.mk_seq(elems, seq_type, tgt_elem_type.clone())
 }
 
 /// Recursively strip WitnessOf from a value (for unconstrained call args).

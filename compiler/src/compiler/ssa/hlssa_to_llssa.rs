@@ -11,7 +11,6 @@ use std::{
 use crate::compiler::{
     analysis::{
         flow_analysis::{self, FlowAnalysis},
-        slice_lengths::{FunctionSliceLengths, SliceLengthAnalysis},
         types::{FunctionTypeInfo, TypeInfo},
     },
     ssa::{Instruction, hlssa::Endianness},
@@ -21,7 +20,7 @@ use super::{
     BlockId, FunctionId, Terminator, ValueId,
     hlssa::{
         BinaryArithOpKind, CmpKind, Constant, DMatrix, HLFunction, HLSSA, HLSSAConstantsSnapshot,
-        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir, Type as HLType,
+        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type as HLType,
         TypeExpr as HLTypeExpr,
     },
     llssa::{
@@ -129,36 +128,14 @@ fn array_info(ty: &HLType) -> (&HLType, usize) {
     }
 }
 
-/// Extract the element type and LL layout count for an array-or-slice value.
-///
-/// Slices do not currently carry a runtime length in LLSSA. For operations
-/// that only need the shared header/table/data offsets, use a zero-length
-/// trailing array layout; producers that know the concrete length still
-/// allocate the exact number of elements.
+/// Slices do not have a principled LLSSA layout yet. For the fixed slice
+/// literals that reach the passport WASM path, the RC-array header/data offsets
+/// match a zero-length trailing-array layout; producers still allocate the
+/// concrete element count they know locally.
 fn array_or_slice_info(ty: &HLType) -> (&HLType, usize) {
     match &ty.expr {
         HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
         HLTypeExpr::Slice(inner) => (inner.as_ref(), 0),
-        _ => panic!("Expected array or slice type, got: {}", ty),
-    }
-}
-
-/// Extract the element type and concrete element count for an array-or-slice
-/// value. Arrays carry their count in the type; slices need a count inferred
-/// from their producer because the current LLSSA slice layout has no length
-/// field.
-fn concrete_array_or_slice_info<'a>(
-    ty: &'a HLType,
-    value: ValueId,
-    slice_lengths: &FunctionSliceLengths,
-    context: &str,
-) -> (&'a HLType, usize) {
-    match &ty.expr {
-        HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
-        HLTypeExpr::Slice(inner) => {
-            let count = slice_lengths.require(value, context);
-            (inner.as_ref(), count)
-        }
         _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
@@ -503,15 +480,10 @@ fn lower_inner(
     // Second pass: lower each function body. Snapshot the constants once; every function lowering
     // reads from the same lock-free view.
     let constants = hlssa.const_snapshot();
-    let slice_lengths = SliceLengthAnalysis::run(hlssa, type_info);
     for (fn_id, function) in hlssa.iter_functions() {
         let ll_fn_id = fn_map[fn_id];
         let fn_type_info = type_info.get_function(*fn_id);
         let cfg = flow_analysis.get_function_cfg(*fn_id);
-        let fn_slice_lengths = slice_lengths
-            .function_values(*fn_id)
-            .cloned()
-            .unwrap_or_default();
 
         let ll_func = lower_function(
             function,
@@ -524,7 +496,6 @@ fn lower_inner(
             &mut lookup_fns,
             &hlssa_global_types,
             &constants,
-            &fn_slice_lengths,
         );
 
         llssa.put_function(ll_fn_id, ll_func);
@@ -653,11 +624,11 @@ fn lower_function(
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
     constants: &HLSSAConstantsSnapshot,
-    slice_lengths: &FunctionSliceLengths,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
     let mut block_map: HashMap<BlockId, BlockId> = HashMap::new();
+    let mut local_slice_lengths: HashMap<ValueId, usize> = HashMap::new();
 
     let hl_entry_id = function.get_entry_id();
     let ll_entry_id = ll_func.get_entry_id();
@@ -707,9 +678,9 @@ fn lower_function(
                 instruction,
                 &mut emitter,
                 &mut val_map,
+                &mut local_slice_lengths,
                 fn_type_info,
                 fn_map,
-                slice_lengths,
                 drop_fns,
                 ad_fns,
                 lookup_fns,
@@ -756,9 +727,9 @@ fn lower_instruction(
     instruction: &crate::compiler::ssa::hlssa::OpCode,
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
+    local_slice_lengths: &mut HashMap<ValueId, usize>,
     fn_type_info: &FunctionTypeInfo,
     fn_map: &HashMap<FunctionId, FunctionId>,
-    slice_lengths: &FunctionSliceLengths,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
@@ -928,6 +899,15 @@ fn lower_instruction(
             let ll_if_t = val_map[if_t];
             let ll_if_f = val_map[if_f];
             let ll_result = e.select(ll_cond, ll_if_t, ll_if_f);
+            if matches!(
+                fn_type_info.get_value_type(*result).expr,
+                HLTypeExpr::Slice(_)
+            ) && let (Some(t_len), Some(f_len)) =
+                (local_slice_lengths.get(if_t), local_slice_lengths.get(if_f))
+                && t_len == f_len
+            {
+                local_slice_lengths.insert(*result, *t_len);
+            }
             val_map.insert(*result, ll_result);
         }
 
@@ -947,16 +927,20 @@ fn lower_instruction(
             seq_type: SequenceTargetType::Slice,
             elem_type,
         } => {
+            local_slice_lengths.insert(*result, elems.len());
             lower_mk_array(e, val_map, *result, elems, elem_type, elems.len());
         }
 
         OpCode::MkRepeated {
             result,
             element,
-            seq_type: _,
+            seq_type,
             count,
             elem_type,
         } => {
+            if matches!(seq_type, SequenceTargetType::Slice) {
+                local_slice_lengths.insert(*result, *count);
+            }
             lower_mk_repeated(e, val_map, *result, *element, elem_type, *count);
         }
 
@@ -978,7 +962,6 @@ fn lower_instruction(
                 e,
                 val_map,
                 fn_type_info,
-                slice_lengths,
                 *result,
                 *array,
                 *index,
@@ -988,34 +971,17 @@ fn lower_instruction(
             );
         }
 
-        OpCode::SlicePush {
-            dir,
-            result,
-            slice,
-            values,
-        } => {
-            lower_slice_push(
-                e,
-                val_map,
-                fn_type_info,
-                slice_lengths,
-                *result,
-                *slice,
-                values,
-                *dir,
-            );
-        }
-
         OpCode::SliceLen { result, slice } => {
-            let slice_type = fn_type_info.get_value_type(*slice);
-            let (_, count) =
-                concrete_array_or_slice_info(slice_type, *slice, slice_lengths, "SliceLen");
+            let len = local_slice_lengths
+                .get(slice)
+                .copied()
+                .unwrap_or_else(|| panic!("SliceLen requires a locally fixed slice length"));
             assert!(
-                count <= u32::MAX as usize,
-                "SliceLen result does not fit in u32: {count}"
+                len <= u32::MAX as usize,
+                "SliceLen result does not fit in u32: {len}"
             );
-            let len = e.emit_int_const(32, count as u64);
-            val_map.insert(*result, len);
+            let ll_len = e.emit_int_const(32, len as u64);
+            val_map.insert(*result, ll_len);
         }
 
         // -- RC operations --
@@ -1185,6 +1151,17 @@ fn lower_instruction(
                     val_map.insert(*result, ll_result);
                 }
                 CastTarget::Nop | CastTarget::ArrayToSlice => {
+                    match (&source_type.expr, &result_type.expr) {
+                        (HLTypeExpr::Array(_, len), HLTypeExpr::Slice(_)) => {
+                            local_slice_lengths.insert(*result, *len);
+                        }
+                        (HLTypeExpr::Slice(_), HLTypeExpr::Slice(_)) => {
+                            if let Some(len) = local_slice_lengths.get(value).copied() {
+                                local_slice_lengths.insert(*result, len);
+                            }
+                        }
+                        _ => {}
+                    }
                     val_map.insert(*result, ll_value);
                 }
             }
@@ -1913,7 +1890,6 @@ fn lower_array_set(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
-    slice_lengths: &FunctionSliceLengths,
     result: ValueId,
     array: ValueId,
     index: ValueId,
@@ -1922,8 +1898,7 @@ fn lower_array_set(
     ad_fns: &mut AdFunctions,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let (et, count) =
-        concrete_array_or_slice_info(arr_type, array, slice_lengths, "ArraySet/SliceSet");
+    let (et, count) = array_info(arr_type);
     let rc_struct = rc_array_struct(et, count);
     let es = elem_struct(et);
     let elem_is_rc = needs_drop(&et.expr);
@@ -1936,7 +1911,6 @@ fn lower_array_set(
     let inner_rc_struct = if elem_is_rc {
         Some(match &et.expr {
             HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
-            HLTypeExpr::Slice(inner) => rc_array_struct(inner, 0),
             HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
             HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
             _ => panic!("Unsupported RC element type: {}", et),
@@ -2035,81 +2009,6 @@ fn lower_array_set(
     );
 
     val_map.insert(result, merge_results[0]);
-}
-
-/// Lower SlicePush by materializing a new fixed-size slice allocation.
-///
-/// The current LLSSA slice representation stores slices as RC arrays whose
-/// concrete length is inferred before lowering. Push therefore becomes an
-/// allocation of the result length, a copy of the old data to the correct
-/// offset, and stores for the newly pushed values.
-fn lower_slice_push(
-    e: &mut LLBlockEmitter<'_>,
-    val_map: &mut HashMap<ValueId, ValueId>,
-    fn_type_info: &FunctionTypeInfo,
-    slice_lengths: &FunctionSliceLengths,
-    result: ValueId,
-    slice: ValueId,
-    pushed_values: &[ValueId],
-    dir: SliceOpDir,
-) {
-    let slice_type = fn_type_info.get_value_type(slice);
-    let (elem_type, old_len) =
-        concrete_array_or_slice_info(slice_type, slice, slice_lengths, "SlicePush input");
-    let result_type = fn_type_info.get_value_type(result);
-    let (_, new_len) =
-        concrete_array_or_slice_info(result_type, result, slice_lengths, "SlicePush result");
-    assert_eq!(
-        new_len,
-        old_len + pushed_values.len(),
-        "SlicePush inferred result length does not match input plus pushed values"
-    );
-    assert!(
-        !needs_drop(&elem_type.expr),
-        "SlicePush with RC'd elements is not supported in HLSSA->LLSSA lowering"
-    );
-
-    let old_rc_struct = rc_array_struct(elem_type, old_len);
-    let new_rc_struct = rc_array_struct(elem_type, new_len);
-    let elem_struct = elem_struct(elem_type);
-
-    let old_slice = val_map[&slice];
-    let new_slice = e.heap_alloc(new_rc_struct.clone(), None);
-
-    let rc_hdr = e.struct_field_ptr(new_slice, new_rc_struct.clone(), 0);
-    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let one = e.emit_int_const(64, 1);
-    e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(new_slice, new_rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
-
-    let old_data = e.struct_field_ptr(old_slice, old_rc_struct, 2);
-    let new_data = e.struct_field_ptr(new_slice, new_rc_struct, 2);
-    let pushed_len = pushed_values.len();
-    let (old_dst_start, pushed_start) = match dir {
-        SliceOpDir::Front => (pushed_len, 0),
-        SliceOpDir::Back => (0, old_len),
-    };
-
-    if old_len > 0 {
-        let old_dst = if old_dst_start == 0 {
-            new_data
-        } else {
-            let idx = e.emit_int_const(64, old_dst_start as u64);
-            e.array_elem_ptr(new_data, elem_struct.clone(), idx)
-        };
-        let count = e.emit_int_const(64, old_len as u64);
-        e.memcpy(old_dst, old_data, elem_struct.clone(), Some(count));
-    }
-
-    for (offset, value) in pushed_values.iter().enumerate() {
-        let idx = e.emit_int_const(64, (pushed_start + offset) as u64);
-        let slot = e.array_elem_ptr(new_data, elem_struct.clone(), idx);
-        e.ll_store(slot, val_map[value]);
-    }
-
-    val_map.insert(result, new_slice);
 }
 
 /// Modify the provided `rc_ptr` by `delta` and store it back.
@@ -3426,11 +3325,11 @@ fn lookup_leaf_elem_info(elem_type: &HLType) -> (&HLType, usize) {
             (elem_type, 1)
         }
         HLTypeExpr::Array(inner, n) => {
-            let (leaf, inner_count) = lookup_leaf_elem_info(inner);
+            let (leaf_type, inner_count) = lookup_leaf_elem_info(inner);
             let count = n
                 .checked_mul(inner_count)
                 .expect("Array lookup table length overflow");
-            (leaf, count)
+            (leaf_type, count)
         }
         HLTypeExpr::Slice(_) => {
             panic!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
@@ -3448,58 +3347,32 @@ fn flattened_lookup_array_info(array_type: &HLType) -> (&HLType, usize) {
     (leaf_type, flat_count)
 }
 
-fn emit_flattened_lookup_entries<'a, F>(
+fn flat_lookup_elem_ptr<'a>(
     e: &mut LLBlockEmitter<'_>,
     array: ValueId,
     array_type: &'a HLType,
-    start_index: ValueId,
-    emit_leaf: &mut F,
-) -> ValueId
-where
-    F: FnMut(&mut LLBlockEmitter<'_>, ValueId, ValueId, &'a HLType),
-{
+    flat_index: ValueId,
+) -> (ValueId, &'a HLType) {
     let (elem_type, count) = array_info(array_type);
     let rc_struct = rc_array_struct(elem_type, count);
     let data = e.struct_field_ptr(array, rc_struct, 2);
 
     match &elem_type.expr {
         HLTypeExpr::Array(..) => {
-            let results = e.build_counted_loop(
-                count,
-                vec![(start_index, LLType::i64())],
-                |e, i_i64, accs| {
-                    let flat_index = accs[0];
-                    let elem_ptr = e.array_elem_ptr(data, elem_struct(elem_type), i_i64);
-                    let inner_array = e.ll_load(elem_ptr, LLType::Ptr);
-                    let next_index = emit_flattened_lookup_entries(
-                        e,
-                        inner_array,
-                        elem_type,
-                        flat_index,
-                        emit_leaf,
-                    );
-                    vec![next_index]
-                },
-            );
-            results[0]
+            let (_, inner_flat_count) = flattened_lookup_array_info(elem_type);
+            let inner_count_i64 = e.emit_int_const(64, inner_flat_count as u64);
+            let outer_index = e.int_arith(IntArithOp::UDiv, flat_index, inner_count_i64);
+            let inner_index = e.int_arith(IntArithOp::URem, flat_index, inner_count_i64);
+            let outer_elem_ptr = e.array_elem_ptr(data, elem_struct(elem_type), outer_index);
+            let inner_array = e.ll_load(outer_elem_ptr, LLType::Ptr);
+            flat_lookup_elem_ptr(e, inner_array, elem_type, inner_index)
         }
         HLTypeExpr::Slice(_) => {
             panic!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
         }
         _ => {
-            let one_i64 = e.emit_int_const(64, 1);
-            let results = e.build_counted_loop(
-                count,
-                vec![(start_index, LLType::i64())],
-                |e, i_i64, accs| {
-                    let flat_index = accs[0];
-                    let elem_ptr = e.array_elem_ptr(data, elem_struct(elem_type), i_i64);
-                    emit_leaf(e, flat_index, elem_ptr, elem_type);
-                    let next_index = e.int_arith(IntArithOp::Add, flat_index, one_i64);
-                    vec![next_index]
-                },
-            );
-            results[0]
+            let elem_ptr = e.array_elem_ptr(data, elem_struct(elem_type), flat_index);
+            (elem_ptr, elem_type)
         }
     }
 }
@@ -3541,11 +3414,8 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         |e, inv_cnst_off| {
             let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
             let a_base = e.ll_load(a_base_slot, LLType::Ptr);
-            let zero_i64 = e.emit_int_const(64, 0);
-            let mut emit_leaf = |e: &mut LLBlockEmitter<'_>,
-                                 i_i64: ValueId,
-                                 elem_ptr: ValueId,
-                                 leaf_type: &HLType| {
+            e.build_counted_loop(flat_count, vec![], |e, i_i64, _| {
+                let (elem_ptr, leaf_type) = flat_lookup_elem_ptr(e, array, array_type, i_i64);
                 let elem_field = load_pure_lookup_elem_as_field(e, elem_ptr, leaf_type);
                 let i_i32 = e.truncate(i_i64, 32);
                 let two_i32 = e.emit_int_const(32, 2);
@@ -3553,8 +3423,8 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
                 let table_slot_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, doubled_i);
                 let table_slot = e.array_elem_ptr(a_base, LLStruct::field_elem(), table_slot_idx);
                 e.ll_store(table_slot, elem_field);
-            };
-            emit_flattened_lookup_entries(e, array, array_type, zero_i64, &mut emit_leaf);
+                vec![]
+            });
         },
     );
 
@@ -3806,17 +3676,35 @@ fn emit_key_value_ad_table_init_body(
     let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
 
     e.build_counted_loop(lookup.length, vec![], |e, i_i64, _| {
-        emit_key_value_ad_table_entry(
-            e,
-            i_i64,
-            inv_cnst_off,
-            inv_wit_off,
-            mults_wit_off,
-            inv_sum_coeff,
-            logup_alpha_i32,
-            logup_beta_i32,
-            &mut emit_value_db,
-        );
+        let i_i32 = e.truncate(i_i64, 32);
+        let two_i32 = e.emit_int_const(32, 2);
+        let twice_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
+        let x_cnst_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, twice_i);
+        let one_i32 = e.emit_int_const(32, 1);
+        let y_cnst_idx = e.int_arith(IntArithOp::Add, x_cnst_idx, one_i32);
+        let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
+        let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
+
+        let x_wit_idx = e.int_arith(IntArithOp::Add, inv_wit_off, twice_i);
+        let y_wit_idx = e.int_arith(IntArithOp::Add, x_wit_idx, one_i32);
+
+        e.ad_write_witness(DMatrix::A, logup_beta_i32, x_coeff);
+        emit_value_db(e, i_i64, x_coeff);
+        let neg_x_coeff = field_neg_via_sub(e, x_coeff);
+        e.ad_write_witness(DMatrix::C, x_wit_idx, neg_x_coeff);
+
+        e.ad_write_witness(DMatrix::A, y_wit_idx, y_coeff);
+        e.ad_write_witness(DMatrix::B, logup_alpha_i32, y_coeff);
+        let i_field = u64_as_field(e, i_i64);
+        let neg_i_field = field_neg_via_sub(e, i_field);
+        e.ad_write_const(DMatrix::B, neg_i_field, y_coeff);
+        let neg_y_coeff = field_neg_via_sub(e, y_coeff);
+        e.ad_write_witness(DMatrix::B, x_wit_idx, neg_y_coeff);
+
+        let mults_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::C, mults_idx, y_coeff);
+        e.ad_write_witness(DMatrix::A, y_wit_idx, inv_sum_coeff);
+
         vec![]
     });
 
@@ -3825,48 +3713,6 @@ fn emit_key_value_ad_table_init_body(
     e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
 
     inv_cnst_off
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_key_value_ad_table_entry(
-    e: &mut LLBlockEmitter<'_>,
-    i_i64: ValueId,
-    inv_cnst_off: ValueId,
-    inv_wit_off: ValueId,
-    mults_wit_off: ValueId,
-    inv_sum_coeff: ValueId,
-    logup_alpha_i32: ValueId,
-    logup_beta_i32: ValueId,
-    emit_value_db: &mut impl FnMut(&mut LLBlockEmitter<'_>, ValueId, ValueId),
-) {
-    let i_i32 = e.truncate(i_i64, 32);
-    let two_i32 = e.emit_int_const(32, 2);
-    let twice_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
-    let x_cnst_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, twice_i);
-    let one_i32 = e.emit_int_const(32, 1);
-    let y_cnst_idx = e.int_arith(IntArithOp::Add, x_cnst_idx, one_i32);
-    let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
-    let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
-
-    let x_wit_idx = e.int_arith(IntArithOp::Add, inv_wit_off, twice_i);
-    let y_wit_idx = e.int_arith(IntArithOp::Add, x_wit_idx, one_i32);
-
-    e.ad_write_witness(DMatrix::A, logup_beta_i32, x_coeff);
-    emit_value_db(e, i_i64, x_coeff);
-    let neg_x_coeff = field_neg_via_sub(e, x_coeff);
-    e.ad_write_witness(DMatrix::C, x_wit_idx, neg_x_coeff);
-
-    e.ad_write_witness(DMatrix::A, y_wit_idx, y_coeff);
-    e.ad_write_witness(DMatrix::B, logup_alpha_i32, y_coeff);
-    let i_field = u64_as_field(e, i_i64);
-    let neg_i_field = field_neg_via_sub(e, i_field);
-    e.ad_write_const(DMatrix::B, neg_i_field, y_coeff);
-    let neg_y_coeff = field_neg_via_sub(e, y_coeff);
-    e.ad_write_witness(DMatrix::B, x_wit_idx, neg_y_coeff);
-
-    let mults_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
-    e.ad_write_witness(DMatrix::C, mults_idx, y_coeff);
-    e.ad_write_witness(DMatrix::A, y_wit_idx, inv_sum_coeff);
 }
 
 fn emit_key_value_ad_lookup_call_body(
@@ -4033,47 +3879,23 @@ fn emit_array_ad_init_body(
     let (_, flat_count) = flattened_lookup_array_info(array_type);
     let lookup = LookupTableSpec::array(flat_count);
     let rc_struct = rc_array_struct(elem_type, count);
-    lookup.assert_key_value("AD array table init");
 
-    let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
-    let table_id_ptr = e.struct_field_ptr(array, rc_struct, 1);
-    let one_i32 = e.emit_int_const(32, 1);
-    let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
-    let snap_u64 = e.zext(snap, 64);
-    e.ll_store(table_id_ptr, snap_u64);
-
-    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
-    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
-    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
-    let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
-    let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
-
-    let zero_i64 = e.emit_int_const(64, 0);
-    let mut emit_leaf =
-        |e: &mut LLBlockEmitter<'_>, i_i64: ValueId, elem_ptr: ValueId, leaf_type: &HLType| {
-            let mut emit_value_db =
-                |e: &mut LLBlockEmitter<'_>, _i_i64: ValueId, x_coeff: ValueId| {
-                    ad_bump_lookup_elem_db(e, elem_ptr, leaf_type, x_coeff, bump_db_fn);
-                };
-            emit_key_value_ad_table_entry(
-                e,
-                i_i64,
-                inv_cnst_off,
-                inv_wit_off,
-                mults_wit_off,
-                inv_sum_coeff,
-                logup_alpha_i32,
-                logup_beta_i32,
-                &mut emit_value_db,
-            );
-        };
-    emit_flattened_lookup_entries(e, array, array_type, zero_i64, &mut emit_leaf);
-
-    let one_i64 = e.emit_int_const(64, 1);
-    let one_field = u64_as_field(e, one_i64);
-    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
-
-    inv_cnst_off
+    emit_key_value_ad_table_init_body(
+        e,
+        lookup,
+        witness_layout,
+        |e, inv_cnst_off| {
+            let table_id_ptr = e.struct_field_ptr(array, rc_struct.clone(), 1);
+            let one_i32 = e.emit_int_const(32, 1);
+            let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
+            let snap_u64 = e.zext(snap, 64);
+            e.ll_store(table_id_ptr, snap_u64);
+        },
+        |e, i_i64, x_coeff| {
+            let (elem_ptr, leaf_type) = flat_lookup_elem_ptr(e, array, array_type, i_i64);
+            ad_bump_lookup_elem_db(e, elem_ptr, leaf_type, x_coeff, bump_db_fn);
+        },
+    )
 }
 
 fn generate_darray_ad_call(
