@@ -236,9 +236,6 @@ impl PrepareEntryPoint {
             }
         }
 
-        let prepare_fn_ids: std::collections::HashSet<FunctionId> =
-            prepare_fns.iter().map(|p| p.fn_id).collect();
-
         // Process each function/block: single pass over instructions, handling
         // all unconstrained calls inline so indices never go stale.
         let mut sb = HLSSABuilder::new(ssa);
@@ -250,73 +247,57 @@ impl PrepareEntryPoint {
                 .map(|(id, _)| *id)
                 .collect();
             sb.modify_function(fid, |fb| {
-                let mut replacements = ValueReplacements::new();
-                for bid in &block_ids {
-                    let block = fb.function.get_block_mut(*bid);
+                for bid in block_ids {
+                    let block = fb.function.get_block_mut(bid);
                     let old_instructions = block.take_instructions();
 
                     let mut new_instructions = Vec::new();
 
-                    for instr in old_instructions {
-                        let call_results: Vec<(ValueId, Type)> = if let OpCode::Call {
+                    for mut instr in old_instructions {
+                        if let OpCode::Call {
                             unconstrained: true,
                             results,
                             function: CallTarget::Static(callee_id),
                             ..
-                        } = &instr
+                        } = &mut instr
                         {
-                            callee_return_types
+                            let return_types = callee_return_types
                                 .get(callee_id)
-                                .map(|rt| {
-                                    results
-                                        .iter()
-                                        .zip(rt.iter())
-                                        .map(|(r, t)| (*r, t.clone()))
-                                        .collect()
-                                })
-                                .unwrap_or_default()
+                                .expect("unconstrained static call return types should be known");
+                            assert_eq!(
+                                results.len(),
+                                return_types.len(),
+                                "ICE: unconstrained call result count does not match callee return count"
+                            );
+
+                            let original_results = results.clone();
+                            let fresh_results = original_results
+                                .iter()
+                                .map(|_| fb.ssa.fresh_value())
+                                .collect::<Vec<_>>();
+                            *results = fresh_results.clone();
+
+                            new_instructions.push(instr);
+                            for ((original_result, fresh_result), return_type) in original_results
+                                .into_iter()
+                                .zip(fresh_results)
+                                .zip(return_types.iter())
+                            {
+                                let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
+                                new_instructions.push(OpCode::Call {
+                                    results: vec![original_result],
+                                    function: CallTarget::Static(prepare_fn),
+                                    args: vec![fresh_result],
+                                    unconstrained: false,
+                                });
+                            }
                         } else {
-                            vec![]
-                        };
-
-                        new_instructions.push(instr);
-
-                        for (result_vid, return_type) in call_results {
-                            let reconstructed = fb.ssa.fresh_value();
-                            let prepare_fn = Self::find_prepare_fn(&return_type, &prepare_fns);
-                            new_instructions.push(OpCode::Call {
-                                results: vec![reconstructed],
-                                function: CallTarget::Static(prepare_fn),
-                                args: vec![result_vid],
-                                unconstrained: false,
-                            });
-                            replacements.insert(result_vid, reconstructed);
+                            new_instructions.push(instr);
                         }
                     }
 
-                    let block = fb.function.get_block_mut(*bid);
+                    let block = fb.function.get_block_mut(bid);
                     block.put_instructions(new_instructions);
-                }
-
-                for bid in &block_ids {
-                    let block = fb.function.get_block_mut(*bid);
-                    let old_instructions = block.take_instructions();
-                    let mut new_instructions = Vec::with_capacity(old_instructions.len());
-                    for mut instr in old_instructions {
-                        let is_prepare_call = matches!(
-                            &instr,
-                            OpCode::Call {
-                                function: CallTarget::Static(callee),
-                                ..
-                            } if prepare_fn_ids.contains(callee)
-                        );
-                        if !is_prepare_call {
-                            replacements.replace_inputs(&mut instr);
-                        }
-                        new_instructions.push(instr);
-                    }
-                    block.put_instructions(new_instructions);
-                    replacements.replace_terminator(block.get_terminator_mut());
                 }
             });
         }
