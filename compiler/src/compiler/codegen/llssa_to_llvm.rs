@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::Arc;
 
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -63,8 +64,7 @@ pub struct LLVMCodeGen<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     value_map: HashMap<ValueId, BasicValueEnum<'ctx>>,
-    constant_values: HashMap<ValueId, BasicValueEnum<'ctx>>,
-    constant_blobs: HashMap<ValueId, LLBlob>,
+    constants: HashMap<ValueId, Arc<Constant>>,
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
@@ -93,8 +93,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             module,
             builder,
             value_map: HashMap::new(),
-            constant_values: HashMap::new(),
-            constant_blobs: HashMap::new(),
+            constants: HashMap::new(),
             block_map: HashMap::new(),
             function_map: HashMap::new(),
             vm_ptr: None,
@@ -284,8 +283,29 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .into()
             }
             Constant::Blob(_) => {
-                panic!("Blob constants cannot be materialized as normal LLVM values")
+                panic!("Blob constants do not have an LLVM SSA value; use ConstDataPtr")
             }
+        }
+    }
+
+    fn seed_value_constants(&mut self) {
+        let values = self
+            .constants
+            .iter()
+            .filter_map(|(vid, constant)| match constant.as_ref() {
+                Constant::Blob(_) => None,
+                constant => Some((*vid, self.materialize_const(constant))),
+            })
+            .collect::<Vec<_>>();
+
+        self.value_map.extend(values);
+    }
+
+    fn blob_constant(&self, id: ValueId) -> LLBlob {
+        match self.constants.get(&id).map(|constant| constant.as_ref()) {
+            Some(Constant::Blob(blob)) => blob.clone(),
+            Some(other) => panic!("ConstDataPtr input v{} is not a blob: {:?}", id.0, other),
+            None => panic!("ConstDataPtr input v{} is not a constant", id.0),
         }
     }
 
@@ -492,21 +512,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.globals.push(global);
         }
 
-        // Materialise module-level LLSSA constants once, allowing each function to re-seed from
-        // this map.
-        self.constant_values.clear();
-        self.constant_blobs.clear();
-        for (vid, c) in llssa.const_snapshot() {
-            match c.as_ref() {
-                Constant::Blob(blob) => {
-                    self.constant_blobs.insert(vid, blob.clone());
-                }
-                _ => {
-                    let value = self.materialize_const(c.as_ref());
-                    self.constant_values.insert(vid, value);
-                }
-            }
-        }
+        self.constants = llssa.const_snapshot();
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -566,8 +572,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         main_id: FunctionId,
     ) {
         self.value_map.clear();
-        self.value_map
-            .extend(self.constant_values.iter().map(|(vid, val)| (*vid, *val)));
+        self.seed_value_constants();
         self.block_map.clear();
 
         let fn_value = self.function_map[&fn_id];
@@ -1171,11 +1176,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 elem_type,
                 blob,
             } => {
-                let blob_data = self
-                    .constant_blobs
-                    .get(blob)
-                    .unwrap_or_else(|| panic!("ConstDataPtr input v{} is not a blob", blob.0))
-                    .clone();
+                let blob_data = self.blob_constant(*blob);
                 let ptr = self.materialize_const_data(elem_type, &blob_data);
                 self.value_map.insert(*result, ptr.into());
             }

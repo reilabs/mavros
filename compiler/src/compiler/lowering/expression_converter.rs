@@ -66,8 +66,6 @@ pub struct ExpressionConverter<'a> {
     lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
     /// Current block being emitted into
     current_block: BlockId,
-    /// Prefer immediate scalar arrays over value-id arrays when a literal is fully constant.
-    emit_const_seq_literals: bool,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -78,7 +76,6 @@ impl<'a> ExpressionConverter<'a> {
         global_slots: &'a HashMap<GlobalId, usize>,
         lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
         entry_block: BlockId,
-        emit_const_seq_literals: bool,
     ) -> Self {
         Self {
             bindings: HashMap::new(),
@@ -91,7 +88,6 @@ impl<'a> ExpressionConverter<'a> {
             global_slots,
             lowlevel_replacements,
             current_block: entry_block,
-            emit_const_seq_literals,
         }
     }
 
@@ -968,22 +964,9 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Str(s) => {
                 // str<N>: array of u8 (UTF-8 bytes)
                 let elem_type = Type::u(8);
-                let len = s.len();
-                if self.emit_const_seq_literals {
-                    let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
-                    let blob = b.emit_const(Constant::Blob(Blob::new(elems)));
-                    let arr = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
-                    return Some(arr);
-                }
-                let elems: Vec<ValueId> = s
-                    .bytes()
-                    .map(|byte| b.emit_const(Constant::U(8, byte as u128)))
-                    .collect();
-                let arr = b.block(self.current_block).mk_seq(
-                    elems,
-                    SequenceTargetType::Array(len),
-                    elem_type,
-                );
+                let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
+                let blob = b.emit_const(Constant::Blob(Blob::new(elems)));
+                let arr = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -1002,21 +985,10 @@ impl<'a> ExpressionConverter<'a> {
                     }
                 }
                 let cp_len = codepoint_constants.len();
-                let cp_array = if self.emit_const_seq_literals {
-                    let blob = b.emit_const(Constant::Blob(Blob::new(codepoint_constants)));
-                    b.block(self.current_block)
-                        .mk_seq_of_blob(Type::u(32), blob)
-                } else {
-                    let codepoints = codepoint_constants
-                        .into_iter()
-                        .map(|c| b.emit_const(c))
-                        .collect();
-                    b.block(self.current_block).mk_seq(
-                        codepoints,
-                        SequenceTargetType::Array(cp_len),
-                        Type::u(32),
-                    )
-                };
+                let blob = b.emit_const(Constant::Blob(Blob::new(codepoint_constants)));
+                let cp_array = b
+                    .block(self.current_block)
+                    .mk_seq_of_blob(Type::u(32), blob);
 
                 // Convert captures (always a Tuple expression) and flatten
                 let mut tuple_elems = vec![cp_array];
@@ -1063,13 +1035,11 @@ impl<'a> ExpressionConverter<'a> {
         };
         let elem_type = self.type_converter.convert_type(elem_ast_type);
 
-        if self.emit_const_seq_literals {
-            if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
-                debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
-                let blob = b.emit_const(Constant::Blob(Blob::new(elements)));
-                let result = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
-                return Some(result);
-            }
+        if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
+            debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
+            let blob = b.emit_const(Constant::Blob(Blob::new(elements)));
+            let result = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
+            return Some(result);
         }
 
         let elements: Vec<ValueId> = array_lit

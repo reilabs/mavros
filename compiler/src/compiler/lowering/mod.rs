@@ -260,7 +260,6 @@ impl SSAConverter {
                 &self.global_slots,
                 &self.lowlevel_replacements,
                 entry,
-                true,
             );
 
             for gid in &ordered_ids {
@@ -327,7 +326,6 @@ impl SSAConverter {
             &self.global_slots,
             &self.lowlevel_replacements,
             entry_block,
-            false,
         );
 
         // Add function parameters as block parameters
