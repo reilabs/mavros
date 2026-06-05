@@ -899,15 +899,6 @@ fn lower_instruction(
             let ll_if_t = val_map[if_t];
             let ll_if_f = val_map[if_f];
             let ll_result = e.select(ll_cond, ll_if_t, ll_if_f);
-            if matches!(
-                fn_type_info.get_value_type(*result).expr,
-                HLTypeExpr::Slice(_)
-            ) && let (Some(t_len), Some(f_len)) =
-                (local_slice_lengths.get(if_t), local_slice_lengths.get(if_f))
-                && t_len == f_len
-            {
-                local_slice_lengths.insert(*result, *t_len);
-            }
             val_map.insert(*result, ll_result);
         }
 
@@ -1151,17 +1142,6 @@ fn lower_instruction(
                     val_map.insert(*result, ll_result);
                 }
                 CastTarget::Nop | CastTarget::ArrayToSlice => {
-                    match (&source_type.expr, &result_type.expr) {
-                        (HLTypeExpr::Array(_, len), HLTypeExpr::Slice(_)) => {
-                            local_slice_lengths.insert(*result, *len);
-                        }
-                        (HLTypeExpr::Slice(_), HLTypeExpr::Slice(_)) => {
-                            if let Some(len) = local_slice_lengths.get(value).copied() {
-                                local_slice_lengths.insert(*result, len);
-                            }
-                        }
-                        _ => {}
-                    }
                     val_map.insert(*result, ll_value);
                 }
             }

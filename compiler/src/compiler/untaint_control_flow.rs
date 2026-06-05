@@ -834,9 +834,7 @@ fn convert_if_needed(
 }
 
 /// Convert a value from source_type to target_type. Uses unrolled element-wise
-/// conversion for fixed arrays (no loop blocks needed), so this is safe inside
-/// guarded regions. Slice element conversion is deliberately not handled here:
-/// doing it correctly needs a later principled slice-lowering pass.
+/// conversion for arrays (no loop blocks needed), so this is safe inside guarded regions.
 fn emit_value_conversion(
     value: ValueId,
     source_type: &Type,
@@ -857,20 +855,7 @@ fn emit_value_conversion(
                 src_size, tgt_size,
                 "Array size mismatch in witness cast insertion"
             );
-            emit_unrolled_sequence_conversion(
-                value,
-                src_inner,
-                tgt_inner,
-                *src_size,
-                SequenceTargetType::Array(*src_size),
-                builder,
-            )
-        }
-        (TypeExpr::Slice(src_inner), TypeExpr::Slice(tgt_inner)) => {
-            panic!(
-                "witness cast insertion cannot convert slice elements before principled slice lowering: {:?} -> {:?}",
-                src_inner, tgt_inner
-            )
+            emit_unrolled_array_conversion(value, src_inner, tgt_inner, *src_size, builder)
         }
         // Tuple: decompose, per-field recursive, recompose
         (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
@@ -894,24 +879,27 @@ fn emit_value_conversion(
     }
 }
 
-/// Unrolled element-wise array/slice conversion. Avoids creating loop blocks,
+/// Unrolled element-wise array conversion. Avoids creating loop blocks,
 /// so it is safe to use inside guarded (tainted) regions.
-fn emit_unrolled_sequence_conversion(
-    source_seq: ValueId,
+fn emit_unrolled_array_conversion(
+    source_array: ValueId,
     src_elem_type: &Type,
     tgt_elem_type: &Type,
     size: usize,
-    seq_type: SequenceTargetType,
     builder: &mut HLInstrBuilder<'_>,
 ) -> ValueId {
     let mut elems = Vec::with_capacity(size);
     for i in 0..size {
         let idx = builder.u_const(32, i as u128);
-        let elem = builder.array_get(source_seq, idx);
+        let elem = builder.array_get(source_array, idx);
         let converted = emit_value_conversion(elem, src_elem_type, tgt_elem_type, builder);
         elems.push(converted);
     }
-    builder.mk_seq(elems, seq_type, tgt_elem_type.clone())
+    builder.mk_seq(
+        elems,
+        SequenceTargetType::Array(size),
+        tgt_elem_type.clone(),
+    )
 }
 
 /// Recursively strip WitnessOf from a value (for unconstrained call args).
