@@ -34,10 +34,6 @@ use mavros_wasm_layout::WASM_PTR_SIZE;
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
-struct InputFieldTapeEntry {
-    input_offset: u32,
-}
-
 #[derive(Clone, PartialEq, Eq)]
 enum PointerKey {
     Value(ValueId),
@@ -746,10 +742,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let mut i = 0;
         while i < instructions.len() {
             if let Some(next) =
-                self.try_compile_main_input_field_tape_run(&instructions, i, block.get_terminator())
-            {
-                i = next;
-            } else if let Some(next) =
                 self.try_compile_input_array_copy_run(&instructions, i, block.get_terminator())
             {
                 i = next;
@@ -766,167 +758,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         if let Some(terminator) = block.get_terminator() {
             self.compile_terminator(terminator);
         }
-    }
-
-    fn try_compile_main_input_field_tape_run(
-        &mut self,
-        instructions: &[&LLOp],
-        start: usize,
-        terminator: Option<&Terminator>,
-    ) -> Option<usize> {
-        const MIN_RUN_LEN: usize = 16;
-
-        let input_base = self.main_input_base?;
-        let field_type = Type::Struct(LLStruct::field_elem());
-        let field_size = ll_type_size_bytes(&field_type);
-
-        let first = self.match_main_input_field_tape_entry(instructions, start)?;
-        let mut entries = vec![first];
-        let mut cursor = start + 5;
-
-        while let Some(entry) = self.match_main_input_field_tape_entry(instructions, cursor) {
-            let expected = entries[0].input_offset + field_size * entries.len() as u32;
-            if entry.input_offset != expected {
-                break;
-            }
-            entries.push(entry);
-            cursor += 5;
-        }
-
-        if entries.len() < MIN_RUN_LEN {
-            return None;
-        }
-
-        if self.tape_entry_results_used_after(instructions, start, cursor, terminator) {
-            return None;
-        }
-
-        let vm_type = self
-            .convert_struct_type(&LLStruct::witgen_vm())
-            .into_struct_type();
-        let vm_ptr = self
-            .vm_ptr
-            .expect("main input tape writes require a VM pointer");
-        let cursor_slot = self
-            .builder
-            .build_struct_gep(
-                vm_type,
-                vm_ptr,
-                LLStruct::WITGEN_VM_WITNESS as u32,
-                "input_witness_cursor_slot",
-            )
-            .unwrap();
-        let cursor_ptr = self
-            .builder
-            .build_load(
-                self.context.ptr_type(AddressSpace::default()),
-                cursor_slot,
-                "input_witness_cursor",
-            )
-            .unwrap()
-            .into_pointer_value();
-
-        let i8_type = self.context.i8_type();
-        let i32_type = self.context.i32_type();
-        let src = unsafe {
-            self.builder
-                .build_gep(
-                    i8_type,
-                    input_base,
-                    &[i32_type.const_int(entries[0].input_offset as u64, false)],
-                    "input_fields_src",
-                )
-                .unwrap()
-        };
-        let bytes = i32_type.const_int((entries.len() as u32 * field_size) as u64, false);
-        self.builder
-            .build_memcpy(cursor_ptr, 1, src, 1, bytes)
-            .unwrap();
-
-        let field_llvm_type = self.convert_struct_type(&LLStruct::field_elem());
-        let next = unsafe {
-            self.builder
-                .build_gep(
-                    field_llvm_type,
-                    cursor_ptr,
-                    &[i32_type.const_int(entries.len() as u64, false)],
-                    "input_witness_cursor_next",
-                )
-                .unwrap()
-        };
-        self.builder.build_store(cursor_slot, next).unwrap();
-        self.invalidate_memory_provenance();
-
-        Some(cursor)
-    }
-
-    fn match_main_input_field_tape_entry(
-        &self,
-        instructions: &[&LLOp],
-        start: usize,
-    ) -> Option<InputFieldTapeEntry> {
-        let [slot, load, store_value, bump, store_next] = instructions.get(start..start + 5)?
-        else {
-            return None;
-        };
-
-        let value_id = match (*slot, *load, *store_value, *bump, *store_next) {
-            (
-                LLOp::StructFieldPtr {
-                    result: slot_id,
-                    struct_type,
-                    field,
-                    ..
-                },
-                LLOp::Load {
-                    result: cursor_id,
-                    ptr: load_ptr,
-                    ty,
-                },
-                LLOp::Store {
-                    ptr: store_ptr,
-                    value: value_id,
-                },
-                LLOp::ArrayElemPtr {
-                    result: next_id,
-                    ptr: bump_ptr,
-                    elem_type,
-                    index,
-                },
-                LLOp::Store {
-                    ptr: next_store_ptr,
-                    value: next_value,
-                },
-            ) if struct_type == &LLStruct::witgen_vm()
-                && *field == LLStruct::WITGEN_VM_WITNESS
-                && load_ptr == slot_id
-                && ty == &Type::Ptr
-                && store_ptr == cursor_id
-                && bump_ptr == cursor_id
-                && elem_type == &LLStruct::field_elem()
-                && self.is_one_const(*index)
-                && next_store_ptr == slot_id
-                && next_value == next_id =>
-            {
-                *value_id
-            }
-            _ => return None,
-        };
-
-        let (input_offset, input_type) = self.main_param_input_offsets.get(&value_id)?;
-        if input_type != &Type::Struct(LLStruct::field_elem()) {
-            return None;
-        }
-
-        Some(InputFieldTapeEntry {
-            input_offset: *input_offset,
-        })
-    }
-
-    fn is_one_const(&self, value: ValueId) -> bool {
-        self.constant_ints
-            .get(&value)
-            .is_some_and(|(_, constant)| *constant == 1)
     }
 
     fn try_compile_contiguous_array_copy_run(
