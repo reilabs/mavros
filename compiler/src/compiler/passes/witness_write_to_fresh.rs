@@ -2,6 +2,7 @@
 //! `WriteWitness` opcode into a `FreshWitness` opcode as the actual computed value cannot be known
 //! in this portion of the pipeline.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -90,12 +91,11 @@ impl WitnessWriteToFresh {
                         | OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
                         | OpCode::Todo { .. }
-                        | OpCode::TupleProj { .. }
-                        | OpCode::MkTuple { .. }
                         | OpCode::ValueOf { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. }
                         | OpCode::Guard { .. } => instruction.clone(),
+                        OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     };
                     *instruction = new_instruction;
                 }

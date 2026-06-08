@@ -1,6 +1,7 @@
 //! Lowers witness operations such that there are no more implicit mixed pure / witness operations
 //! and so that every value entering an R1CS cosntraint has been explicitly cast to `WitnessOf`.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use crate::compiler::{
@@ -431,28 +432,13 @@ impl WitnessLowering {
                         | OpCode::ReadGlobal { .. }
                         | OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
-                        | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. }
                         | OpCode::ValueOf { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);
                         }
-                        OpCode::MkTuple {
-                            result,
-                            elems,
-                            element_types,
-                        } => {
-                            let new_element_types = element_types
-                                .iter()
-                                .map(|tp| self.witness_lowering_in_type(tp))
-                                .collect();
-                            emitter.emit(OpCode::MkTuple {
-                                result,
-                                elems,
-                                element_types: new_element_types,
-                            });
-                        }
+                        OpCode::MkTuple { .. } | OpCode::TupleProj { .. } => ice_non_elided_tuple(),
                     };
                 }
 
@@ -516,20 +502,7 @@ impl WitnessLowering {
                     emitter,
                 )
             }
-            (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-                assert_eq!(
-                    src_fields.len(),
-                    tgt_fields.len(),
-                    "Tuple field count mismatch in witness_lowering conversion"
-                );
-                let mut converted_elems = vec![];
-                for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = emitter.tuple_proj(value, i);
-                    let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, emitter);
-                    converted_elems.push(converted);
-                }
-                emitter.mk_tuple(converted_elems, tgt_fields.clone())
-            }
+            (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
             (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => {
                 // Both source and target are WitnessOf — same runtime representation.
                 value
@@ -602,13 +575,7 @@ impl WitnessLowering {
                 b.cast_to_witness_of(dummy_field)
             }
             TypeExpr::Array(inner, size) => self.create_dummy_array(inner, *size, target_type, b),
-            TypeExpr::Tuple(fields) => {
-                let mut dummy_elems = vec![];
-                for field_type in fields.iter() {
-                    dummy_elems.push(self.create_dummy_value(field_type, b));
-                }
-                b.mk_tuple(dummy_elems, fields.clone())
-            }
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
                 b.field_const(ark_bn254::Fr::from(0u64))
             }
@@ -661,13 +628,7 @@ impl WitnessLowering {
             TypeExpr::Ref(inner) => self.witness_lowering_in_type(inner).ref_of(),
             TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),
-            TypeExpr::Tuple(elements) => {
-                let boxed_elements = elements
-                    .iter()
-                    .map(|elem| self.witness_lowering_in_type(elem))
-                    .collect();
-                Type::tuple_of(boxed_elements)
-            }
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
     }
 }
