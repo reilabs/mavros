@@ -67,9 +67,6 @@ pub struct LLVMCodeGen<'ctx> {
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
-    main_input_base: Option<PointerValue<'ctx>>,
-    main_input_entry_block: Option<inkwell::basic_block::BasicBlock<'ctx>>,
-    main_param_input_offsets: HashMap<ValueId, (u32, Type)>,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
@@ -98,9 +95,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             block_map: HashMap::new(),
             function_map: HashMap::new(),
             vm_ptr: None,
-            main_input_base: None,
-            main_input_entry_block: None,
-            main_param_input_offsets: HashMap::new(),
             field_mul_fn: None,
             field_add_fn: None,
             field_sub_fn: None,
@@ -341,10 +335,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // __field_mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        let field_mul = self
-            .module
-            .add_function("__field_mul", field_mul_type, None);
-        self.field_mul_fn = Some(field_mul);
+        self.field_mul_fn = Some(
+            self.module
+                .add_function("__field_mul", field_mul_type, None),
+        );
 
         // malloc(i32) -> ptr  (i32 size for wasm32)
         let malloc_type = ptr_type.fn_type(&[i32_type.into()], false);
@@ -363,29 +357,28 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // __field_add(FieldElem, FieldElem) -> FieldElem
         let field_add_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        let field_add = self
-            .module
-            .add_function("__field_add", field_add_type, None);
-        self.field_add_fn = Some(field_add);
+        self.field_add_fn = Some(
+            self.module
+                .add_function("__field_add", field_add_type, None),
+        );
 
         // __field_sub(FieldElem, FieldElem) -> FieldElem
         let field_sub_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        let field_sub = self
-            .module
-            .add_function("__field_sub", field_sub_type, None);
-        self.field_sub_fn = Some(field_sub);
+        self.field_sub_fn = Some(
+            self.module
+                .add_function("__field_sub", field_sub_type, None),
+        );
 
         // __field_div(FieldElem, FieldElem) -> FieldElem
         let field_div_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
-        let field_div = self
-            .module
-            .add_function("__field_div", field_div_type, None);
-        self.field_div_fn = Some(field_div);
+        self.field_div_fn = Some(
+            self.module
+                .add_function("__field_div", field_div_type, None),
+        );
 
         // __field_lt(FieldElem, FieldElem) -> bool
         let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
-        let field_lt = self.module.add_function("__field_lt", field_lt_type, None);
-        self.field_lt_fn = Some(field_lt);
+        self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
 
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
@@ -429,6 +422,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .into_iter()
             .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
             .collect();
+
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
             self.declare_function(*fn_id, function, main_id);
@@ -490,9 +484,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.value_map
             .extend(self.constant_values.iter().map(|(vid, val)| (*vid, *val)));
         self.block_map.clear();
-        self.main_input_base = None;
-        self.main_input_entry_block = None;
-        self.main_param_input_offsets.clear();
 
         let fn_value = self.function_map[&fn_id];
         let entry_block_id = function.get_entry_id();
@@ -519,7 +510,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         let entry = function.get_entry();
         if fn_id == main_id {
-            self.main_input_entry_block = Some(entry_bb);
             self.load_main_params_from_memory(entry.get_parameters());
         } else {
             for (i, (param_id, _)) in entry.get_parameters().enumerate() {
@@ -544,9 +534,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 match terminator {
                     Terminator::Jmp(target_id, args) => {
                         for (i, arg_id) in args.iter().enumerate() {
-                            if let Some(phi) = phi_nodes.get(&(*target_id, i)).copied() {
-                                let arg_val = self.value(*arg_id);
-                                phi.add_incoming(&[(&arg_val, current_bb)]);
+                            if let Some(phi) = phi_nodes.get(&(*target_id, i)) {
+                                if let Some(arg_val) = self.value_map.get(arg_id) {
+                                    phi.add_incoming(&[(arg_val, current_bb)]);
+                                }
                             }
                         }
                     }
@@ -564,6 +555,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .vm_ptr
             .expect("main parameters are loaded relative to the VM pointer");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
         let mut parameters = parameters;
         if let Some((vm_param, _)) = parameters.next() {
             self.value_map.insert(*vm_param, vm_ptr.into());
@@ -580,64 +573,32 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "inputs_slot",
             )
             .unwrap();
-        let input_ptr = self
+        let mut input_ptr = self
             .builder
             .build_load(ptr_type, input_slot, "inputs_ptr")
             .unwrap()
             .into_pointer_value();
-        self.main_input_base = Some(input_ptr);
-        let mut offset = 0u32;
+
         for (param_id, param_type) in parameters {
-            self.main_param_input_offsets
-                .insert(*param_id, (offset, param_type.clone()));
-            let param_size = ll_type_size_bytes(param_type);
-            offset += param_size;
-        }
-    }
+            let llvm_type = self.convert_type(param_type);
+            let value = self
+                .builder
+                .build_load(llvm_type, input_ptr, &format!("v{}", param_id.0))
+                .unwrap();
+            self.value_map.insert(*param_id, value);
 
-    fn value(&mut self, value: ValueId) -> BasicValueEnum<'ctx> {
-        if let Some(existing) = self.value_map.get(&value).copied() {
-            return existing;
+            let offset = ll_type_size_bytes(param_type);
+            input_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        i8_type,
+                        input_ptr,
+                        &[i32_type.const_int(offset as u64, false)],
+                        "next_input",
+                    )
+                    .unwrap()
+            };
         }
-
-        let (offset, ty) = self
-            .main_param_input_offsets
-            .get(&value)
-            .cloned()
-            .unwrap_or_else(|| panic!("Value v{} has not been lowered", value.0));
-        let input_base = self
-            .main_input_base
-            .expect("main input value requested outside main");
-        let entry_block = self
-            .main_input_entry_block
-            .expect("main input value requested without an entry block");
-        let restore_block = self.builder.get_insert_block();
-        if let Some(terminator) = entry_block.get_terminator() {
-            self.builder.position_before(&terminator);
-        } else {
-            self.builder.position_at_end(entry_block);
-        }
-        let i8_type = self.context.i8_type();
-        let i32_type = self.context.i32_type();
-        let input_ptr = unsafe {
-            self.builder
-                .build_gep(
-                    i8_type,
-                    input_base,
-                    &[i32_type.const_int(offset as u64, false)],
-                    "lazy_input",
-                )
-                .unwrap()
-        };
-        let loaded = self
-            .builder
-            .build_load(self.convert_type(&ty), input_ptr, &format!("v{}", value.0))
-            .unwrap();
-        self.value_map.insert(value, loaded);
-        if let Some(block) = restore_block {
-            self.builder.position_at_end(block);
-        }
-        loaded
     }
 
     fn compile_block(
@@ -680,8 +641,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn compile_instruction(&mut self, op: &LLOp) {
         match op {
             LLOp::IntArith { kind, result, a, b } => {
-                let lhs = self.value(*a).into_int_value();
-                let rhs = self.value(*b).into_int_value();
+                let lhs = self.value_map[a].into_int_value();
+                let rhs = self.value_map[b].into_int_value();
                 let name = &format!("v{}", result.0);
 
                 let val = match kind {
@@ -728,7 +689,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 bits,
                 result_bits,
             } => {
-                let input = self.value(*value).into_int_value();
+                let input = self.value_map[value].into_int_value();
                 let val =
                     self.compile_spread_bits(input, *bits, *result_bits, &format!("v{}", result.0));
                 self.value_map.insert(*result, val.into());
@@ -742,7 +703,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 odd_bits,
                 even_bits,
             } => {
-                let input = self.value(*value).into_int_value();
+                let input = self.value_map[value].into_int_value();
                 let active_input_bits = (*bits as u32) * 2;
                 let input = self
                     .builder
@@ -781,8 +742,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::IntCmp { kind, result, a, b } => {
-                let lhs = self.value(*a).into_int_value();
-                let rhs = self.value(*b).into_int_value();
+                let lhs = self.value_map[a].into_int_value();
+                let rhs = self.value_map[b].into_int_value();
                 let predicate = match kind {
                     IntCmpOp::Eq => IntPredicate::EQ,
                     IntCmpOp::ULt => IntPredicate::ULT,
@@ -796,7 +757,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::Not { result, value } => {
-                let val = self.value(*value).into_int_value();
+                let val = self.value_map[value].into_int_value();
                 let not_val = self
                     .builder
                     .build_not(val, &format!("v{}", result.0))
@@ -805,8 +766,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldArith { kind, result, a, b } => {
-                let lhs = self.value(*a);
-                let rhs = self.value(*b);
+                let lhs = self.value_map[a];
+                let rhs = self.value_map[b];
 
                 let val = match kind {
                     FieldArithOp::Mul => {
@@ -861,7 +822,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let llvm_type = self.convert_struct_type(struct_type).into_struct_type();
                 let mut agg = llvm_type.get_undef();
                 for (i, field_id) in fields.iter().enumerate() {
-                    let field_val = self.value(*field_id);
+                    let field_val = self.value_map[field_id];
                     agg = self
                         .builder
                         .build_insert_value(agg, field_val, i as u32, "mk")
@@ -877,7 +838,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type: _,
                 field,
             } => {
-                let agg = self.value(*value).into_struct_value();
+                let agg = self.value_map[value].into_struct_value();
                 let val = self
                     .builder
                     .build_extract_value(agg, *field as u32, &format!("v{}", result.0))
@@ -891,9 +852,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 if_t,
                 if_f,
             } => {
-                let c = self.value(*cond).into_int_value();
-                let t = self.value(*if_t);
-                let f = self.value(*if_f);
+                let c = self.value_map[cond].into_int_value();
+                let t = self.value_map[if_t];
+                let f = self.value_map[if_f];
                 let val = self
                     .builder
                     .build_select(c, t, f, &format!("v{}", result.0))
@@ -906,7 +867,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 value,
                 to_bits,
             } => {
-                let val = self.value(*value).into_int_value();
+                let val = self.value_map[value].into_int_value();
                 let target_type = self
                     .context
                     .custom_width_int_type(
@@ -925,7 +886,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 value,
                 to_bits,
             } => {
-                let val = self.value(*value).into_int_value();
+                let val = self.value_map[value].into_int_value();
                 let target_type = self
                     .context
                     .custom_width_int_type(
@@ -941,8 +902,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldEq { result, a, b } => {
                 // Field equality: compare all 4 limbs
-                let a_val = self.value(*a).into_struct_value();
-                let b_val = self.value(*b).into_struct_value();
+                let a_val = self.value_map[a].into_struct_value();
+                let b_val = self.value_map[b].into_struct_value();
                 let mut eq_acc = self.context.bool_type().const_int(1, false);
                 for i in 0..4u32 {
                     let a_limb = self
@@ -965,8 +926,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldLt { result, a, b } => {
-                let lhs = self.value(*a);
-                let rhs = self.value(*b);
+                let lhs = self.value_map[a];
+                let rhs = self.value_map[b];
                 let lt_fn = self.field_lt_fn.expect("__field_lt not declared");
                 let call_site = self
                     .builder
@@ -980,7 +941,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldFromLimbs { result, limbs } => {
                 // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
-                let limb_vals = self.value(*limbs);
+                let limb_vals = self.value_map[limbs];
                 let from_fn = self
                     .field_from_limbs_fn
                     .expect("__field_from_limbs not declared");
@@ -996,7 +957,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
             LLOp::FieldToLimbs { result, src } => {
                 // Convert Montgomery form to raw limbs via __field_to_limbs.
-                let field = self.value(*src);
+                let field = self.value_map[src];
                 let to_fn = self
                     .field_to_limbs_fn
                     .expect("__field_to_limbs not declared");
@@ -1035,13 +996,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::Free { ptr } => {
-                let p = self.value(*ptr).into_pointer_value();
+                let p = self.value_map[ptr].into_pointer_value();
                 let free_fn = self.free_fn.expect("free not declared");
                 self.builder.build_call(free_fn, &[p.into()], "").unwrap();
             }
 
             LLOp::Load { result, ptr, ty } => {
-                let p = self.value(*ptr).into_pointer_value();
+                let p = self.value_map[ptr].into_pointer_value();
                 let llvm_ty = self.convert_type(ty);
                 let val = self
                     .builder
@@ -1051,8 +1012,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::Store { ptr, value } => {
-                let p = self.value(*ptr).into_pointer_value();
-                let v = self.value(*value);
+                let p = self.value_map[ptr].into_pointer_value();
+                let v = self.value_map[value];
                 self.builder.build_store(p, v).unwrap();
             }
 
@@ -1062,7 +1023,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type,
                 field,
             } => {
-                let p = self.value(*ptr).into_pointer_value();
+                let p = self.value_map[ptr].into_pointer_value();
                 let llvm_struct_ty = self.convert_struct_type(struct_type).into_struct_type();
                 let gep = self
                     .builder
@@ -1077,8 +1038,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 elem_type,
                 index,
             } => {
-                let p = self.value(*ptr).into_pointer_value();
-                let idx = self.value(*index).into_int_value();
+                let p = self.value_map[ptr].into_pointer_value();
+                let idx = self.value_map[index].into_int_value();
                 let llvm_elem_ty = self.convert_struct_type(elem_type);
                 let gep = unsafe {
                     self.builder
@@ -1094,12 +1055,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 struct_type,
                 count,
             } => {
-                let dst_ptr = self.value(*dst).into_pointer_value();
-                let src_ptr = self.value(*src).into_pointer_value();
+                let dst_ptr = self.value_map[dst].into_pointer_value();
+                let src_ptr = self.value_map[src].into_pointer_value();
                 let elem_ty = self.convert_struct_type(struct_type);
                 let elem_size = elem_ty.size_of().unwrap();
                 let total_size = if let Some(count_val) = count {
-                    let cnt = self.value(*count_val).into_int_value();
+                    let cnt = self.value_map[count_val].into_int_value();
                     let cnt_ext = self
                         .builder
                         .build_int_z_extend_or_bit_cast(cnt, elem_size.get_type(), "cnt_ext")
@@ -1141,7 +1102,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
                 let mut call_args: Vec<BasicMetadataValueEnum> = vec![vm_ptr.into()];
                 for arg in args {
-                    call_args.push(self.value(*arg).into());
+                    call_args.push(self.value_map[arg].into());
                 }
 
                 let call_result = self
@@ -1190,7 +1151,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.builder.build_unconditional_branch(target_bb).unwrap();
             }
             Terminator::JmpIf(cond, true_target, false_target) => {
-                let cond_val = self.value(*cond).into_int_value();
+                let cond_val = self.value_map[cond].into_int_value();
                 let true_bb = self.block_map[true_target];
                 let false_bb = self.block_map[false_target];
                 self.builder
@@ -1201,11 +1162,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 if values.is_empty() {
                     self.builder.build_return(None).unwrap();
                 } else if values.len() == 1 {
-                    let ret_val = self.value(values[0]);
+                    let ret_val = self.value_map[&values[0]];
                     self.builder.build_return(Some(&ret_val)).unwrap();
                 } else {
                     let ret_values: Vec<BasicValueEnum> =
-                        values.iter().map(|v| self.value(*v)).collect();
+                        values.iter().map(|v| self.value_map[v]).collect();
                     let ret_types: Vec<BasicTypeEnum> =
                         ret_values.iter().map(|v| v.get_type()).collect();
                     let struct_type = self.context.struct_type(&ret_types, false);
