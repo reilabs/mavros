@@ -10,7 +10,6 @@ use std::path::Path;
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
-use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
@@ -394,12 +393,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     // ── Runtime functions ───────────────────────────────────────────────
 
-    fn mark_noinline(&self, function: FunctionValue<'ctx>) {
-        let noinline = Attribute::get_named_enum_kind_id("noinline");
-        let attr = self.context.create_enum_attribute(noinline, 0);
-        function.add_attribute(AttributeLoc::Function, attr);
-    }
-
     fn declare_runtime_functions(&mut self) {
         let field_type = self.field_llvm_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -413,7 +406,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_mul = self
             .module
             .add_function("__field_mul", field_mul_type, None);
-        self.mark_noinline(field_mul);
         self.field_mul_fn = Some(field_mul);
 
         // malloc(i32) -> ptr  (i32 size for wasm32)
@@ -436,7 +428,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_add = self
             .module
             .add_function("__field_add", field_add_type, None);
-        self.mark_noinline(field_add);
         self.field_add_fn = Some(field_add);
 
         // __field_sub(FieldElem, FieldElem) -> FieldElem
@@ -444,7 +435,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_sub = self
             .module
             .add_function("__field_sub", field_sub_type, None);
-        self.mark_noinline(field_sub);
         self.field_sub_fn = Some(field_sub);
 
         // __field_div(FieldElem, FieldElem) -> FieldElem
@@ -452,13 +442,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_div = self
             .module
             .add_function("__field_div", field_div_type, None);
-        self.mark_noinline(field_div);
         self.field_div_fn = Some(field_div);
 
         // __field_lt(FieldElem, FieldElem) -> bool
         let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
         let field_lt = self.module.add_function("__field_lt", field_lt_type, None);
-        self.mark_noinline(field_lt);
         self.field_lt_fn = Some(field_lt);
 
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
@@ -559,7 +547,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         };
 
         let fn_value = self.module.add_function(name, fn_type, None);
-        self.mark_noinline(fn_value);
         self.function_map.insert(fn_id, fn_value);
     }
 
