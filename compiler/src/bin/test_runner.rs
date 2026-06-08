@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     env, fs,
     io::{BufRead, BufReader, Write},
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -74,6 +75,13 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
     "noir/test_programs/execution_success/global_var_regression_entry_points",
 ];
 
+#[derive(Clone, Copy, Debug)]
+enum TestExpectation {
+    ExecutionSuccess,
+    ExecutionFailure,
+    CompileFailure,
+}
+
 fn parse_output_arg(args: &[String]) -> PathBuf {
     let mut i = 1;
     while i < args.len() {
@@ -107,6 +115,14 @@ fn emit(line: &str) {
     let mut out = stdout.lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
+}
+
+fn catch_stage_unwind<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(AssertUnwindSafe(f));
+    panic::set_hook(hook);
+    result
 }
 
 fn run_single(root: PathBuf) {
@@ -183,24 +199,28 @@ fn run_single(root: PathBuf) {
     let ordered_params = load_inputs(&root.join("Prover.toml"), &driver);
 
     // 5. Run witgen  (depends on WITGEN_COMPILE)
-    let had_witgen_binary = witgen_binary.is_some();
     let witgen_result = witgen_binary.and_then(|mut binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        let result = interpreter::run(
-            &mut binary,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-            params,
-        );
-        emit("END:WITGEN_RUN:ok");
-        Some(result)
+        match catch_stage_unwind(|| {
+            interpreter::run(
+                &mut binary,
+                r1cs.witness_layout,
+                r1cs.constraints_layout,
+                params,
+            )
+        }) {
+            Ok(result) => {
+                emit("END:WITGEN_RUN:ok");
+                Some(result)
+            }
+            Err(_) => {
+                emit("END:WITGEN_RUN:fail");
+                None
+            }
+        }
     });
-    if had_witgen_binary && witgen_result.is_none() {
-        emit("START:WITGEN_RUN");
-        emit("END:WITGEN_RUN:fail");
-    }
 
     // 6. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
@@ -238,14 +258,23 @@ fn run_single(root: PathBuf) {
         let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
-        let (ad_a, ad_b, ad_c, ad_instrumenter) = interpreter::run_ad(
-            &mut binary,
-            &ad_coeffs,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-        );
-        emit("END:AD_RUN:ok");
-        Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+        match catch_stage_unwind(|| {
+            interpreter::run_ad(
+                &mut binary,
+                &ad_coeffs,
+                r1cs.witness_layout,
+                r1cs.constraints_layout,
+            )
+        }) {
+            Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
+                emit("END:AD_RUN:ok");
+                Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+            }
+            Err(_) => {
+                emit("END:AD_RUN:fail");
+                None
+            }
+        }
     });
 
     // 9. Check AD correctness  (depends on AD_RUN)
@@ -275,12 +304,14 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
-            Ok(_) if wasm_path.exists() => {
+        match catch_stage_unwind(|| {
+            driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone()))
+        }) {
+            Ok(Ok(_)) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
             }
-            Ok(_) => {
+            Ok(Ok(_)) => {
                 eprintln!(
                     "WASM compile succeeded but output file not found at {:?}",
                     wasm_path
@@ -288,8 +319,13 @@ fn run_single(root: PathBuf) {
                 emit("END:WITGEN_WASM_COMPILE:fail");
                 None
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("WASM compile error: {:?}", e);
+                emit("END:WITGEN_WASM_COMPILE:fail");
+                None
+            }
+            Err(_) => {
+                eprintln!("WASM compile panicked");
                 emit("END:WITGEN_WASM_COMPILE:fail");
                 None
             }
@@ -301,13 +337,18 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match run_wasm(wasm_path, r1cs, params) {
-            Ok(result) => {
+        match catch_stage_unwind(|| run_wasm(wasm_path, r1cs, params)) {
+            Ok(Ok(result)) => {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("WASM run error: {:?}", e);
+                emit("END:WITGEN_WASM_RUN:fail");
+                None
+            }
+            Err(_) => {
+                eprintln!("WASM run panicked");
                 emit("END:WITGEN_WASM_RUN:fail");
                 None
             }
@@ -347,12 +388,12 @@ fn run_single(root: PathBuf) {
         emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("ad.wasm");
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs) {
-            Ok(_) if wasm_path.exists() => {
+        match catch_stage_unwind(|| driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs)) {
+            Ok(Ok(_)) if wasm_path.exists() => {
                 emit("END:AD_WASM_COMPILE:ok");
                 Some(wasm_path)
             }
-            Ok(_) => {
+            Ok(Ok(_)) => {
                 eprintln!(
                     "AD WASM compile succeeded but output file not found at {:?}",
                     wasm_path
@@ -360,8 +401,13 @@ fn run_single(root: PathBuf) {
                 emit("END:AD_WASM_COMPILE:fail");
                 None
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("AD WASM compile error: {:?}", e);
+                emit("END:AD_WASM_COMPILE:fail");
+                None
+            }
+            Err(_) => {
+                eprintln!("AD WASM compile panicked");
                 emit("END:AD_WASM_COMPILE:fail");
                 None
             }
@@ -376,13 +422,18 @@ fn run_single(root: PathBuf) {
         let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
-        match run_ad_wasm(wasm_path, r1cs, &ad_coeffs) {
-            Ok(result) => {
+        match catch_stage_unwind(|| run_ad_wasm(wasm_path, r1cs, &ad_coeffs)) {
+            Ok(Ok(result)) => {
                 emit("END:AD_WASM_RUN:ok");
                 Some((ad_coeffs, result))
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("AD WASM run error: {:?}", e);
+                emit("END:AD_WASM_RUN:fail");
+                None
+            }
+            Err(_) => {
+                eprintln!("AD WASM run panicked");
                 emit("END:AD_WASM_RUN:fail");
                 None
             }
@@ -1033,12 +1084,13 @@ struct TestResult {
 /// - `started && ended fail` → Fail
 /// - `started && no end` → Crash
 /// - `never started` → Skip
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Status {
     Pass,
     Fail,
     Crash,
     Skip,
+    NotApplicable,
 }
 
 impl Status {
@@ -1048,13 +1100,14 @@ impl Status {
             Status::Fail => "❌",
             Status::Crash => "💥",
             Status::Skip => "➖",
+            Status::NotApplicable => "N/A",
         }
     }
 }
 
 /// Use `cargo metadata` to find the root of the noir git dependency, then
-/// return the path to `test_programs/execution_success` inside it.
-fn find_noir_execution_success_dir() -> Option<PathBuf> {
+/// return the path to `test_programs` inside it.
+fn find_noir_test_programs_dir() -> Option<PathBuf> {
     let metadata = MetadataCommand::new().exec().ok()?;
     // Find any package from the noir git repo (e.g. "nargo").
     let noir_pkg = metadata.packages.iter().find(|p| {
@@ -1063,12 +1116,12 @@ fn find_noir_execution_success_dir() -> Option<PathBuf> {
             .is_some_and(|s| s.repr.contains("noir-lang/noir") || s.repr.contains("reilabs/noir"))
     })?;
     // Walk up from the package manifest to find the repo root containing
-    // `test_programs/execution_success`.
+    // `test_programs`.
     let mut dir: &Path = noir_pkg.manifest_path.as_std_path();
     loop {
         dir = dir.parent()?;
-        let candidate = dir.join("test_programs").join("execution_success");
-        if candidate.is_dir() {
+        let candidate = dir.join("test_programs");
+        if candidate.join("execution_success").is_dir() {
             return Some(candidate);
         }
     }
@@ -1078,9 +1131,10 @@ fn find_noir_execution_success_dir() -> Option<PathBuf> {
 struct TestEntry {
     path: PathBuf,
     display_name: String,
+    expectation: TestExpectation,
 }
 
-fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
+fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) -> Vec<TestEntry> {
     let Ok(entries) = fs::read_dir(base) else {
         return Vec::new();
     };
@@ -1093,6 +1147,7 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
             TestEntry {
                 path: p,
                 display_name: format!("{prefix}{test_name}"),
+                expectation,
             }
         })
         .collect();
@@ -1106,23 +1161,33 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
     // 1. Local noir_tests/ directory
     let local_tests = PathBuf::from("noir_tests");
     if local_tests.is_dir() {
-        entries.extend(collect_test_dirs(&local_tests, "noir_tests/"));
+        entries.extend(collect_test_dirs(
+            &local_tests,
+            "noir_tests/",
+            TestExpectation::ExecutionSuccess,
+        ));
     }
 
-    // 2. Noir repo test_programs/execution_success (discovered via cargo-metadata)
-    if let Some(exec_success) = find_noir_execution_success_dir() {
-        eprintln!(
-            "Found noir execution_success tests at: {}",
-            exec_success.display()
-        );
+    // 2. Noir repo test_programs/* (discovered via cargo-metadata)
+    if let Some(test_programs) = find_noir_test_programs_dir() {
+        eprintln!("Found noir test_programs at: {}", test_programs.display());
         entries.extend(collect_test_dirs(
-            &exec_success,
+            &test_programs.join("execution_success"),
             "noir/test_programs/execution_success/",
+            TestExpectation::ExecutionSuccess,
+        ));
+        entries.extend(collect_test_dirs(
+            &test_programs.join("execution_failure"),
+            "noir/test_programs/execution_failure/",
+            TestExpectation::ExecutionFailure,
+        ));
+        entries.extend(collect_test_dirs(
+            &test_programs.join("compile_failure"),
+            "noir/test_programs/compile_failure/",
+            TestExpectation::CompileFailure,
         ));
     } else {
-        eprintln!(
-            "Warning: could not locate noir test_programs/execution_success via cargo-metadata"
-        );
+        eprintln!("Warning: could not locate noir test_programs via cargo-metadata");
     }
 
     assert!(!entries.is_empty(), "No test directories found");
@@ -1172,7 +1237,7 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
                         .collect();
 
                     let _ = child.wait();
-                    let result = parse_child_output(&entry.display_name, &lines);
+                    let result = parse_child_output(&entry.display_name, entry.expectation, &lines);
 
                     let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
                     eprintln!("[{n}/{total}] {}", entry.display_name);
@@ -1220,7 +1285,7 @@ fn ignored_test_result(name: &str) -> TestResult {
     }
 }
 
-fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
+fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]) -> TestResult {
     let mut started = HashMap::<String, bool>::new();
     let mut ended = HashMap::<String, bool>::new();
     let mut rows = None;
@@ -1257,14 +1322,11 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
     let steps = STEP_KEYS
         .iter()
         .map(|&key| {
-            let status = if let Some(&ok) = ended.get(key) {
-                if ok { Status::Pass } else { Status::Fail }
-            } else if started.contains_key(key) {
-                Status::Crash
-            } else {
-                Status::Skip
-            };
-            (key.to_string(), status)
+            let raw_status = raw_step_status(key, &started, &ended);
+            (
+                key.to_string(),
+                expected_step_status(key, raw_status, expectation),
+            )
         })
         .collect();
 
@@ -1275,6 +1337,48 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
         cols,
         witgen_bytes,
         ad_bytes,
+    }
+}
+
+fn raw_step_status(
+    key: &str,
+    started: &HashMap<String, bool>,
+    ended: &HashMap<String, bool>,
+) -> Status {
+    if let Some(&ok) = ended.get(key) {
+        if ok { Status::Pass } else { Status::Fail }
+    } else if started.contains_key(key) {
+        Status::Crash
+    } else {
+        Status::Skip
+    }
+}
+
+fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
+    match expectation {
+        TestExpectation::ExecutionSuccess => raw_status,
+        TestExpectation::CompileFailure => {
+            if key == "COMPILED" {
+                match raw_status {
+                    Status::Fail | Status::Crash => Status::Pass,
+                    Status::Pass => Status::Fail,
+                    Status::Skip | Status::NotApplicable => raw_status,
+                }
+            } else {
+                Status::NotApplicable
+            }
+        }
+        TestExpectation::ExecutionFailure => match key {
+            "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
+                Status::Fail | Status::Crash => Status::Pass,
+                Status::Pass => Status::Fail,
+                Status::Skip | Status::NotApplicable => raw_status,
+            },
+            "WITGEN_CORRECT" | "WITGEN_NOLEAK" | "WITGEN_WASM_CORRECT" | "WITGEN_WASM_NOLEAK" => {
+                Status::NotApplicable
+            }
+            _ => raw_status,
+        },
     }
 }
 
@@ -1398,7 +1502,9 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     for cur in &current {
         // Count checkmarkable cells in current (all tests)
         for &(col, _) in REGRESSION_COLS {
-            total_current_cells += 1;
+            if cur.cells[col] != "N/A" {
+                total_current_cells += 1;
+            }
             if cur.cells[col] == "✅" {
                 total_current_checkmarks += 1;
             }
@@ -1410,7 +1516,9 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
         // For existing tests: count baseline/current checkmarks and new checkmarks
         for &(col, col_name) in REGRESSION_COLS {
-            existing_total += 1;
+            if base.cells[col] != "N/A" || cur.cells[col] != "N/A" {
+                existing_total += 1;
+            }
             let base_pass = base.cells[col] == "✅";
             let cur_pass = cur.cells[col] == "✅";
             if base_pass {
@@ -1641,4 +1749,76 @@ fn render_markdown(results: &[TestResult]) -> String {
     }
 
     md
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(input: &[&str]) -> Vec<String> {
+        input.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn execution_success_uses_raw_statuses() {
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&["START:COMPILED", "END:COMPILED:ok"]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["R1CS"], Status::Skip);
+    }
+
+    #[test]
+    fn compile_failure_passes_when_compile_fails() {
+        let result = parse_child_output(
+            "compile_fail",
+            TestExpectation::CompileFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:fail"]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["R1CS"], Status::NotApplicable);
+    }
+
+    #[test]
+    fn execution_failure_passes_when_witgen_runs_fail() {
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:WITGEN_RUN",
+                "END:WITGEN_RUN:fail",
+                "START:WITGEN_WASM_RUN",
+                "END:WITGEN_WASM_RUN:fail",
+            ]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_RUN"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_CORRECT"], Status::NotApplicable);
+        assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_WASM_CORRECT"], Status::NotApplicable);
+    }
+
+    #[test]
+    fn execution_failure_fails_when_witgen_runs_succeed() {
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:WITGEN_RUN",
+                "END:WITGEN_RUN:ok",
+                "START:WITGEN_WASM_RUN",
+                "END:WITGEN_WASM_RUN:ok",
+            ]),
+        );
+
+        assert_eq!(result.steps["WITGEN_RUN"], Status::Fail);
+        assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Fail);
+    }
 }
