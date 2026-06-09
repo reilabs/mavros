@@ -337,20 +337,8 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
-        let mut write = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-            b.block(this.current_block).store(ptr, value);
-        };
-        self.with_lvalue_ref(lvalue, b, &mut write);
-    }
-
-    fn with_lvalue_ref(
-        &mut self,
-        lvalue: &LValue,
-        b: &mut HLFunctionBuilder<'_>,
-        f: &mut dyn FnMut(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
-    ) {
         if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
-            f(self, ptr, b);
+            b.block(self.current_block).store(ptr, value);
             return;
         }
 
@@ -365,14 +353,14 @@ impl<'a> ExpressionConverter<'a> {
                 object,
                 field_index,
             } => {
-                let mut write_field =
-                    |this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
-                        let field_ref = b
-                            .block(this.current_block)
-                            .tuple_ref_proj(tuple_ref, *field_index);
-                        f(this, field_ref, b);
-                    };
-                self.with_lvalue_ref(object, b, &mut write_field);
+                let tuple_ref = self.materialize_lvalue_ref(object, b);
+                let field_ref = b
+                    .block(self.current_block)
+                    .tuple_ref_proj(tuple_ref, *field_index);
+                b.block(self.current_block).store(field_ref, value);
+
+                let tuple = b.block(self.current_block).load(tuple_ref);
+                self.write_lvalue(object, tuple, b);
             }
             LValue::Index {
                 array,
@@ -390,8 +378,7 @@ impl<'a> ExpressionConverter<'a> {
                     e.store(element_ref, element);
                     element_ref
                 };
-
-                f(self, element_ref, b);
+                b.block(self.current_block).store(element_ref, value);
 
                 let element = b.block(self.current_block).load(element_ref);
                 let updated = b
@@ -400,7 +387,45 @@ impl<'a> ExpressionConverter<'a> {
                 self.write_lvalue(array, updated, b);
             }
             LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
-            LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
+            LValue::Clone(inner) => self.write_lvalue(inner, value, b),
+        }
+    }
+
+    fn materialize_lvalue_ref(
+        &mut self,
+        lvalue: &LValue,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
+            return ptr;
+        }
+
+        let value = self.read_lvalue(lvalue, b);
+        let typ = self
+            .type_converter
+            .convert_type(&Self::type_of_lvalue(lvalue));
+        let mut e = b.block(self.current_block);
+        let ptr = e.alloc(typ);
+        e.store(ptr, value);
+        ptr
+    }
+
+    fn type_of_lvalue(lvalue: &LValue) -> AstType {
+        match lvalue {
+            LValue::Ident(ident) => ident.typ.clone(),
+            LValue::Index { element_type, .. } => element_type.clone(),
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                let object_type = Self::type_of_lvalue(object);
+                let AstType::Tuple(fields) = object_type else {
+                    unreachable!("Unexpected type for member access lvalue: {object_type}");
+                };
+                fields[*field_index].clone()
+            }
+            LValue::Dereference { element_type, .. } => element_type.clone(),
+            LValue::Clone(inner) => Self::type_of_lvalue(inner),
         }
     }
 
