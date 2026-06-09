@@ -373,36 +373,22 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
+        if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
+            b.block(self.current_block).store(ptr, value);
+            return;
+        }
+
         match lvalue {
             LValue::Ident(ident) => match &ident.definition {
-                Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
-                    let ptr = *self
-                        .bindings
-                        .get(local_id)
-                        .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
-                    b.block(self.current_block).store(ptr, value);
-                }
                 Definition::Local(_) => {
                     panic!("Cannot assign to immutable local variable: {}", ident.name)
                 }
                 _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
             },
-            LValue::Dereference { reference, .. } => {
-                let ptr = self.read_lvalue(reference, b);
-                b.block(self.current_block).store(ptr, value);
-            }
             LValue::MemberAccess {
                 object,
                 field_index,
             } => {
-                if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
-                    let field_ref = b
-                        .block(self.current_block)
-                        .tuple_ref_proj(tuple_ref, *field_index);
-                    b.block(self.current_block).store(field_ref, value);
-                    return;
-                }
-
                 let tuple = self.read_lvalue(object, b);
                 let tuple_type = self.lvalue_type(object);
                 let updated = self.synthesize_tuple_set(tuple, *field_index, value, &tuple_type, b);
@@ -416,6 +402,7 @@ impl<'a> ExpressionConverter<'a> {
                     .array_set(array_value, idx, value);
                 self.write_lvalue(array, updated, b);
             }
+            LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.write_lvalue(inner, value, b),
         }
     }
