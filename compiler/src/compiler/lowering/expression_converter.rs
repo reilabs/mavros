@@ -346,7 +346,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         lvalue: &LValue,
         b: &mut HLFunctionBuilder<'_>,
-        f: &impl Fn(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
+        f: &dyn Fn(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
     ) {
         if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
             f(self, ptr, b);
