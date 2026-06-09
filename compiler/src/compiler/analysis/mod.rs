@@ -6,4 +6,4 @@ pub mod types;
 pub mod value_definitions;
 pub mod value_range_analysis;
 pub mod witness_info;
-pub mod witness_type_inference;
+pub mod witness_taint_inference;

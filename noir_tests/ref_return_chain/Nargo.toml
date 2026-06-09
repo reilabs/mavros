@@ -1,0 +1,6 @@
+[package]
+name = "ref_return_chain"
+type = "bin"
+authors = [""]
+
+[dependencies]

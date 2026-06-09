@@ -6,6 +6,8 @@ use crate::{
     compiler::ssa::{BlockId, FunctionId, Instruction, SSA, SSAType, Terminator},
 };
 
+use itertools::Itertools;
+
 use petgraph::{
     Direction,
     algo::dominators::{self, Dominators},
@@ -572,6 +574,14 @@ impl CallGraph {
         DfsPostOrder::new(&self.call_graph, self.func_to_node[&main_fn_id])
             .iter(&self.call_graph)
             .filter_map(|node| self.node_to_func.get(&node).cloned())
+    }
+
+    /// The functions that call `callee`, each yielded once.
+    pub fn get_callers(&self, callee: FunctionId) -> impl Iterator<Item = FunctionId> + '_ {
+        self.call_graph
+            .neighbors_directed(self.func_to_node[&callee], Direction::Incoming)
+            .map(|node| self.node_to_func[&node])
+            .unique()
     }
 }
 

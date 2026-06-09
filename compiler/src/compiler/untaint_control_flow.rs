@@ -9,7 +9,7 @@ use crate::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, Types},
             witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
-            witness_type_inference::WitnessTypeInference,
+            witness_taint_inference::WitnessTaintInference,
         },
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
@@ -65,7 +65,7 @@ impl UntaintControlFlow {
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all, name = "UntaintControlFlow::apply_types")]
-    fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
+    fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
         result_ssa.set_global_types(old_global_types);
 
@@ -220,7 +220,7 @@ impl UntaintControlFlow {
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
-    pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
+    pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         // Step 1: bake WitnessOf into SSA types
         let mut ssa = self.apply_types(ssa, witness_inference);
 
@@ -1288,6 +1288,8 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
+        // A WitnessOf wrapper on the container means the handle/length is witness-dependent;
+        // a wrapper on the element means the elements are. Both are applied faithfully.
         (TypeExpr::Array(inner, size), WitnessShape::Array(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
             if top.is_witness() {
@@ -1313,15 +1315,113 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
             }
         }
         (TypeExpr::Tuple(_), _) => ice_non_elided_tuple(),
-        (TypeExpr::Blob(elem, n), wt @ WitnessShape::Array(..)) => {
+        (TypeExpr::Blob(elem, n), wt @ WitnessShape::Scalar(info)) => {
             // Blobs hold raw constant/input data; they can never carry witness
-            // values at any level.
+            // values at any level. The taint inference models them as opaque
+            // scalar leaves.
             assert!(
-                !wt.contains_witness(),
+                !info.is_witness(),
                 "ICE: Blob type inferred as witness-bearing: {wt}"
             );
             Type::blob(*elem, n)
         }
         (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar(w: WitnessType) -> WitnessShape {
+        WitnessShape::Scalar(w)
+    }
+    fn array(top: WitnessType, inner: WitnessShape) -> WitnessShape {
+        WitnessShape::Array(top, Box::new(inner))
+    }
+    fn reference(top: WitnessType, inner: WitnessShape) -> WitnessShape {
+        WitnessShape::Ref(top, Box::new(inner))
+    }
+    use WitnessType::{Pure, Witness};
+
+    /// A fully-witness array (container *and* element witness) materializes faithfully as
+    /// `WitnessOf(Array(WitnessOf(Field), N))`: the container wrapper records the witnessed
+    /// handle, the element wrapper the witnessed elements.
+    #[test]
+    fn fully_witness_array_wraps_container_and_leaves() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Witness, scalar(Witness));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(
+            got,
+            Type::witness_of(Type::witness_of(Type::field()).array_of(3))
+        );
+        // Peeling the element of the witnessed container must not double-wrap (regression).
+        assert_eq!(got.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    /// Nested fully-witness array `[[Field; 2]; 3]`: every witness level of the shape lands on
+    /// the corresponding type level.
+    #[test]
+    fn nested_fully_witness_array_wraps_every_witness_level() {
+        let ty = Type::field().array_of(2).array_of(3);
+        let shape = array(Witness, array(Witness, scalar(Witness)));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(
+            got,
+            Type::witness_of(
+                Type::witness_of(Type::witness_of(Type::field()).array_of(2)).array_of(3)
+            )
+        );
+        // An already-witnessed element is returned as-is, not wrapped again.
+        assert_eq!(
+            got.get_array_element(),
+            Type::witness_of(Type::witness_of(Type::field()).array_of(2))
+        );
+    }
+
+    /// Array of refs `[&Field; 2]` with a witness container: the wrapper lands on the array
+    /// container, not the ref elements.
+    #[test]
+    fn witness_array_of_refs_wraps_container() {
+        let ty = Type::field().ref_of().array_of(2);
+        let shape = array(Witness, reference(Pure, scalar(Pure)));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(got, Type::witness_of(Type::field().ref_of().array_of(2)));
+        // Element peel is well-formed: the element of a witnessed container is witnessed.
+        assert_eq!(
+            got.get_array_element(),
+            Type::witness_of(Type::field().ref_of())
+        );
+    }
+
+    /// Container-only witness (`Array(Witness, Scalar(Pure))`): the handle/length is witnessed
+    /// but the pure elements stay pure — the witness must not be folded into the leaves.
+    #[test]
+    fn container_only_witness_array_keeps_pure_leaves() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Witness, scalar(Pure));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(got, Type::witness_of(Type::field().array_of(3)));
+        assert_eq!(got.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    /// Leaf-only witness (`Array(Pure, Scalar(Witness))`) was already valid and must be preserved.
+    #[test]
+    fn leaf_only_witness_array_is_preserved() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Pure, scalar(Witness));
+        assert_eq!(
+            apply_witness_type(ty, &shape),
+            Type::witness_of(Type::field()).array_of(3)
+        );
+    }
+
+    /// A fully-pure array stays pure.
+    #[test]
+    fn pure_array_is_unchanged() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Pure, scalar(Pure));
+        assert_eq!(apply_witness_type(ty, &shape), Type::field().array_of(3));
     }
 }

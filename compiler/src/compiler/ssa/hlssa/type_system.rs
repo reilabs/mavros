@@ -206,6 +206,9 @@ impl Type {
 
     // --- Accessors ---
 
+    /// Element type of an array/slice/blob. An element read out of a witnessed
+    /// container is itself witnessed; an already-witnessed element is never
+    /// wrapped twice (witness-of-witness collapses to witness).
     pub fn get_array_element(&self) -> Self {
         match &self.expr {
             TypeExpr::Array(inner, _) => *inner.clone(),
@@ -213,7 +216,11 @@ impl Type {
             TypeExpr::Blob(inner, _) => *inner.clone(),
             TypeExpr::WitnessOf(inner) => {
                 let elem = inner.get_array_element();
-                Type::witness_of(elem)
+                if elem.is_witness_of() {
+                    elem
+                } else {
+                    Type::witness_of(elem)
+                }
             }
             _ => panic!("Type is not an array: {}", self),
         }
@@ -226,24 +233,38 @@ impl Type {
         }
     }
 
+    /// Member type of a tuple. A member of a witnessed tuple is itself
+    /// witnessed; an already-witnessed member is never wrapped twice.
     pub fn get_tuple_element(&self, index: usize) -> Self {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements[index].clone(),
             TypeExpr::WitnessOf(inner) => {
                 let elem = inner.get_tuple_element(index);
-                Type::witness_of(elem)
+                if elem.is_witness_of() {
+                    elem
+                } else {
+                    Type::witness_of(elem)
+                }
             }
             _ => panic!("Type is not a tuple: {}", self),
         }
     }
 
+    /// All member types of a tuple, witnessed if the tuple itself is (see
+    /// [`Self::get_tuple_element`]).
     pub fn get_tuple_elements(&self) -> Vec<Self> {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements.clone(),
             TypeExpr::WitnessOf(inner) => inner
                 .get_tuple_elements()
                 .into_iter()
-                .map(Type::witness_of)
+                .map(|elem| {
+                    if elem.is_witness_of() {
+                        elem
+                    } else {
+                        Type::witness_of(elem)
+                    }
+                })
                 .collect(),
             _ => panic!("Type is not a tuple: {}", self),
         }
@@ -667,6 +688,37 @@ mod tests {
     fn witness_of_double_wrap_panics() {
         let wf = Type::witness_of(Type::field());
         let _wwf = Type::witness_of(wf);
+    }
+
+    // --- element access through a witnessed container ---
+
+    #[test]
+    fn get_array_element_of_witnessed_container_wraps_once() {
+        let t = Type::witness_of(Type::field().array_of(3));
+        assert_eq!(t.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    #[test]
+    fn get_array_element_of_witnessed_container_with_witness_elems_no_double_wrap() {
+        let t = Type::witness_of(Type::witness_of(Type::field()).array_of(3));
+        assert_eq!(t.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    #[test]
+    fn get_tuple_element_of_witnessed_tuple_wraps_once() {
+        let t = Type::witness_of(Type::tuple_of(vec![
+            Type::witness_of(Type::field()),
+            Type::field(),
+        ]));
+        assert_eq!(t.get_tuple_element(0), Type::witness_of(Type::field()));
+        assert_eq!(t.get_tuple_element(1), Type::witness_of(Type::field()));
+        assert_eq!(
+            t.get_tuple_elements(),
+            vec![
+                Type::witness_of(Type::field()),
+                Type::witness_of(Type::field())
+            ]
+        );
     }
 
     // --- join properties ---

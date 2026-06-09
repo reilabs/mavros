@@ -113,28 +113,6 @@ impl WitnessShape {
             WitnessShape::Scalar(_) => None,
         }
     }
-
-    pub fn with_toplevel_info(&self, toplevel: WitnessInfo) -> WitnessShape {
-        match self {
-            WitnessShape::Scalar(_) => WitnessShape::Scalar(toplevel),
-            WitnessShape::Array(_, inner) => WitnessShape::Array(toplevel, inner.clone()),
-            WitnessShape::Ref(_, inner) => WitnessShape::Ref(toplevel, inner.clone()),
-        }
-    }
-
-    /// Push witness info into the leaves of composites (arrays) instead of
-    /// wrapping at the top level. For scalars and refs this is equivalent to
-    /// `with_toplevel_info`. For arrays, the info is pushed recursively into
-    /// children, keeping the top-level info unchanged.
-    pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessShape {
-        match self {
-            WitnessShape::Scalar(existing) => WitnessShape::Scalar(existing.join(info)),
-            WitnessShape::Array(top, inner) => {
-                WitnessShape::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
-            }
-            WitnessShape::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
