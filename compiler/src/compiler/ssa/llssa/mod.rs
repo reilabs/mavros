@@ -43,6 +43,26 @@ const _: () = assert!(
 // CONSTANT STORAGE
 // ================================================================================================
 
+/// A compile-time-only sequence of constants used for long constant data.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Blob {
+    pub elements: Vec<Constant>,
+}
+
+impl Blob {
+    pub fn new(elements: Vec<Constant>) -> Self {
+        Self { elements }
+    }
+
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+}
+
 /// The value type stored in the low-level SSA's constants table.
 ///
 /// Most LLSSA constants are scalar leaves: integers of a given bit width and the null pointer.
@@ -58,6 +78,9 @@ pub enum Constant {
 
     /// An aggregate (used for tuples and other aggregates).
     Struct { layout: LLStruct, values: Vec<Constant> },
+
+    /// Long constant data. This is not a normal SSA value and is consumed only by data-pointer ops.
+    Blob(Blob),
 }
 
 impl Constant {
@@ -65,7 +88,7 @@ impl Constant {
     ///
     /// `InlineArray`/`FlexArray` fields are memory-only and have no constant form,
     /// so they never match; any other mismatched pairing is rejected too.
-    fn matches_field(&self, field: &LLFieldType) -> bool {
+    pub fn matches_field(&self, field: &LLFieldType) -> bool {
         match (self, field) {
             (Constant::Int { bits, .. }, LLFieldType::Int(w)) => bits == w,
             (Constant::NullPtr, LLFieldType::Ptr) => true,
@@ -209,6 +232,11 @@ pub enum LLOp {
         struct_type: LLStruct,
         count: Option<ValueId>,
     },
+    ConstDataPtr {
+        result: ValueId,
+        elem_type: LLStruct,
+        blob: ValueId,
+    },
 
     // ── Selection ───────────────────────────────────────────────────────
     Select {
@@ -240,6 +268,7 @@ impl Instruction for LLOp {
         match self {
             // No inputs (globals / traps / etc.)
             LLOp::GlobalAddr { .. } | LLOp::Trap => vec![].into_iter(),
+            LLOp::ConstDataPtr { blob, .. } => vec![blob].into_iter(),
 
             // Unary
             LLOp::Not { value, .. }
@@ -310,6 +339,7 @@ impl Instruction for LLOp {
             | LLOp::Load { result, .. }
             | LLOp::StructFieldPtr { result, .. }
             | LLOp::ArrayElemPtr { result, .. }
+            | LLOp::ConstDataPtr { result, .. }
             | LLOp::Select { result, .. }
             | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
 
@@ -348,6 +378,7 @@ impl Instruction for LLOp {
             | LLOp::Load { result, .. }
             | LLOp::StructFieldPtr { result, .. }
             | LLOp::ArrayElemPtr { result, .. }
+            | LLOp::ConstDataPtr { result, .. }
             | LLOp::Select { result, .. }
             | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
             LLOp::Call { results, .. } => results.iter_mut().collect::<Vec<_>>().into_iter(),
@@ -366,6 +397,7 @@ impl Instruction for LLOp {
         match self {
             // No inputs
             LLOp::GlobalAddr { .. } | LLOp::Trap => vec![].into_iter(),
+            LLOp::ConstDataPtr { blob, .. } => vec![blob].into_iter(),
 
             // Unary
             LLOp::Not { value, .. }
@@ -420,6 +452,7 @@ impl Instruction for LLOp {
     fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            LLOp::ConstDataPtr { result, blob, .. } => vec![result, blob].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
 
@@ -674,6 +707,13 @@ impl Instruction for LLOp {
                     struct_type,
                     count_str
                 )
+            }
+            LLOp::ConstDataPtr {
+                result,
+                elem_type,
+                blob,
+            } => {
+                format!("{} = const_data {}, {}", v(*result), elem_type, vr(*blob))
             }
             LLOp::Select {
                 result,

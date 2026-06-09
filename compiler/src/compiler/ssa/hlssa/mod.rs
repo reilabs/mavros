@@ -78,6 +78,11 @@ pub enum OpCode {
         seq_type: SequenceTargetType,
         elem_type: Type,
     },
+    MkSeqOfBlob {
+        result: ValueId,
+        element_type: Type,
+        blob: ValueId,
+    },
     MkRepeated {
         result: ValueId,
         element: ValueId,
@@ -527,6 +532,19 @@ impl Instruction for OpCode {
                     typ
                 )
             }
+            OpCode::MkSeqOfBlob {
+                result,
+                element_type: typ,
+                blob,
+            } => {
+                format!(
+                    "v{}{} = mk_seq_of_blob(v{}) of {}",
+                    result.0,
+                    annotate_value(*result),
+                    blob.0,
+                    typ
+                )
+            }
             OpCode::MkRepeated {
                 result,
                 element,
@@ -863,6 +881,7 @@ impl Instruction for OpCode {
                 seq_type: _,
                 elem_type: _,
             } => inputs.iter().collect::<Vec<_>>().into_iter(),
+            Self::MkSeqOfBlob { blob, .. } => vec![blob].into_iter(),
             Self::MkRepeated {
                 result: _,
                 element,
@@ -969,6 +988,7 @@ impl Instruction for OpCode {
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
+            | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
@@ -1025,6 +1045,7 @@ impl Instruction for OpCode {
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
+            | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
@@ -1188,6 +1209,7 @@ impl Instruction for OpCode {
                 seq_type: _,
                 elem_type: _,
             } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::MkSeqOfBlob { blob, .. } => vec![blob].into_iter(),
             Self::MkRepeated {
                 result: _,
                 element,
@@ -1416,6 +1438,9 @@ impl Instruction for OpCode {
                 ret_vec.extend(inputs);
                 ret_vec.into_iter()
             }
+            Self::MkSeqOfBlob {
+                result: r, blob, ..
+            } => vec![r, blob].into_iter(),
             Self::MkRepeated {
                 result: r,
                 element,
@@ -1638,6 +1663,26 @@ pub enum SliceOpDir {
 // CONSTANTS
 // ================================================================================================
 
+/// A compile-time-only sequence of constants used for long constant data.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Blob {
+    pub elements: Vec<Constant>,
+}
+
+impl Blob {
+    pub fn new(elements: Vec<Constant>) -> Self {
+        Self { elements }
+    }
+
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+}
+
 /// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
@@ -1645,6 +1690,7 @@ pub enum Constant {
     I(usize, u128),
     Field(ark_bn254::Fr),
     FnPtr(FunctionId),
+    Blob(Blob),
 }
 
 // REFERENCE COUNTING OPS
