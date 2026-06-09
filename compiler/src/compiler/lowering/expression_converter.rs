@@ -837,8 +837,6 @@ impl<'a> ExpressionConverter<'a> {
                         }
                     }
                     self.convert_expression(unary.rhs.as_ref(), b)
-                } else if Self::reference_pointee_type(&unary.result_type).is_some() {
-                    self.convert_expression(expr, b)
                 } else {
                     None
                 }
@@ -892,12 +890,6 @@ impl<'a> ExpressionConverter<'a> {
 
     fn expression_type(expr: &Expression) -> Option<AstType> {
         match expr {
-            Expression::Ident(ident) => Some(ident.typ.clone()),
-            Expression::Unary(unary) => Some(unary.result_type.clone()),
-            Expression::Index(index) => Some(index.element_type.clone()),
-            Expression::Cast(cast) => Some(cast.r#type.clone()),
-            Expression::If(if_expr) => Some(if_expr.typ.clone()),
-            Expression::Call(call) => Some(call.return_type.clone()),
             Expression::Clone(inner) => Self::expression_type(inner.as_ref()),
             Expression::Block(exprs) => exprs.last().and_then(Self::expression_type),
             Expression::Tuple(exprs) => exprs
@@ -922,13 +914,11 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
-        if let Some(typ) = index.collection.return_type() {
-            if matches!(
-                typ.as_ref(),
-                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
-            ) {
-                collection = b.block(self.current_block).load(collection);
-            }
+        if matches!(
+            Self::expression_type(&index.collection),
+            Some(noirc_frontend::monomorphization::ast::Type::Reference(_, _))
+        ) {
+            collection = b.block(self.current_block).load(collection);
         }
         let idx = self.convert_expression(&index.index, b).unwrap();
         let result = b.block(self.current_block).array_get(collection, idx);
