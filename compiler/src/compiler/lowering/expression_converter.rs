@@ -332,10 +332,13 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
-        let mut write = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-            b.block(this.current_block).store(ptr, new_value);
-        };
-        self.with_lvalue_ref(&assign.lvalue, b, &mut write);
+        self.with_lvalue_ref(
+            &assign.lvalue,
+            b,
+            &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+                b.block(this.current_block).store(ptr, new_value);
+            },
+        );
         None
     }
 
@@ -343,7 +346,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         lvalue: &LValue,
         b: &mut HLFunctionBuilder<'_>,
-        f: &mut dyn FnMut(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
+        f: &impl Fn(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
     ) {
         if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
             f(self, ptr, b);
@@ -356,14 +359,16 @@ impl<'a> ExpressionConverter<'a> {
                 object,
                 field_index,
             } => {
-                let mut write_field =
-                    |this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
+                self.with_lvalue_ref(
+                    object,
+                    b,
+                    &|this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
                         let field_ref = b
                             .block(this.current_block)
                             .tuple_ref_proj(tuple_ref, *field_index);
                         f(this, field_ref, b);
-                    };
-                self.with_lvalue_ref(object, b, &mut write_field);
+                    },
+                );
             }
             LValue::Index {
                 array,
@@ -388,10 +393,13 @@ impl<'a> ExpressionConverter<'a> {
                 let updated = b
                     .block(self.current_block)
                     .array_set(array_value, idx, element);
-                let mut write_array = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                    b.block(this.current_block).store(ptr, updated);
-                };
-                self.with_lvalue_ref(array, b, &mut write_array);
+                self.with_lvalue_ref(
+                    array,
+                    b,
+                    &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+                        b.block(this.current_block).store(ptr, updated);
+                    },
+                );
             }
             LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
@@ -879,13 +887,16 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        if let Some(tuple_ref) = self.try_tuple_expression_ref(tuple_expr, b) {
+        let value = self.convert_expression(tuple_expr, b).unwrap();
+        if matches!(
+            Self::expression_type(tuple_expr),
+            Some(AstType::Reference(inner, _)) if matches!(inner.as_ref(), AstType::Tuple(_))
+        ) {
             let mut e = b.block(self.current_block);
-            let field_ref = e.tuple_ref_proj(tuple_ref, idx);
+            let field_ref = e.tuple_ref_proj(value, idx);
             let result = e.load(field_ref);
             return Some(result);
         }
-        let value = self.convert_expression(tuple_expr, b).unwrap();
         let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)
     }
