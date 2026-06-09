@@ -332,15 +332,11 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
-        self.write_lvalue(&assign.lvalue, new_value, b);
-        None
-    }
-
-    fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
         let mut write = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-            b.block(this.current_block).store(ptr, value);
+            b.block(this.current_block).store(ptr, new_value);
         };
-        self.with_lvalue_ref(lvalue, b, &mut write);
+        self.with_lvalue_ref(&assign.lvalue, b, &mut write);
+        None
     }
 
     fn with_lvalue_ref(
@@ -355,12 +351,7 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         match lvalue {
-            LValue::Ident(ident) => match &ident.definition {
-                Definition::Local(_) => {
-                    panic!("Cannot assign to immutable local variable: {}", ident.name)
-                }
-                _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
-            },
+            LValue::Ident(_) => panic!("Cannot assign to non-addressable lvalue: {:?}", lvalue),
             LValue::MemberAccess {
                 object,
                 field_index,
@@ -397,7 +388,10 @@ impl<'a> ExpressionConverter<'a> {
                 let updated = b
                     .block(self.current_block)
                     .array_set(array_value, idx, element);
-                self.write_lvalue(array, updated, b);
+                let mut write_array = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+                    b.block(this.current_block).store(ptr, updated);
+                };
+                self.with_lvalue_ref(array, b, &mut write_array);
             }
             LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
