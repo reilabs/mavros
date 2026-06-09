@@ -342,6 +342,37 @@ impl<'a> ExpressionConverter<'a> {
             return;
         }
 
+        let mut field_path = Vec::new();
+        if let Some((array, index, element_type)) =
+            Self::indexed_lvalue_base(lvalue, &mut field_path)
+        {
+            let array_value = self.read_lvalue(array, b);
+            let idx = self.convert_expression(index, b).unwrap();
+            let element = b.block(self.current_block).array_get(array_value, idx);
+            let element_type = self.type_converter.convert_type(element_type);
+            let element_ref = {
+                let mut e = b.block(self.current_block);
+                let element_ref = e.alloc(element_type);
+                e.store(element_ref, element);
+                element_ref
+            };
+
+            let mut target_ref = element_ref;
+            for field_index in field_path {
+                target_ref = b
+                    .block(self.current_block)
+                    .tuple_ref_proj(target_ref, field_index);
+            }
+            b.block(self.current_block).store(target_ref, value);
+
+            let element = b.block(self.current_block).load(element_ref);
+            let updated = b
+                .block(self.current_block)
+                .array_set(array_value, idx, element);
+            self.write_lvalue(array, updated, b);
+            return;
+        }
+
         match lvalue {
             LValue::Ident(ident) => match &ident.definition {
                 Definition::Local(_) => {
@@ -349,83 +380,39 @@ impl<'a> ExpressionConverter<'a> {
                 }
                 _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
             },
-            LValue::MemberAccess {
-                object,
-                field_index,
-            } => {
-                let tuple_ref = self.materialize_lvalue_ref(object, b);
-                let field_ref = b
-                    .block(self.current_block)
-                    .tuple_ref_proj(tuple_ref, *field_index);
-                b.block(self.current_block).store(field_ref, value);
-
-                let tuple = b.block(self.current_block).load(tuple_ref);
-                self.write_lvalue(object, tuple, b);
+            LValue::MemberAccess { .. } => {
+                panic!(
+                    "Cannot assign to non-addressable member access: {:?}",
+                    lvalue
+                )
             }
-            LValue::Index {
-                array,
-                index,
-                element_type,
-                ..
-            } => {
-                let array_value = self.read_lvalue(array, b);
-                let idx = self.convert_expression(index, b).unwrap();
-                let element = b.block(self.current_block).array_get(array_value, idx);
-                let element_type = self.type_converter.convert_type(element_type);
-                let element_ref = {
-                    let mut e = b.block(self.current_block);
-                    let element_ref = e.alloc(element_type);
-                    e.store(element_ref, element);
-                    element_ref
-                };
-                b.block(self.current_block).store(element_ref, value);
-
-                let element = b.block(self.current_block).load(element_ref);
-                let updated = b
-                    .block(self.current_block)
-                    .array_set(array_value, idx, element);
-                self.write_lvalue(array, updated, b);
-            }
+            LValue::Index { .. } => unreachable!("index lvalues are handled before this match"),
             LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.write_lvalue(inner, value, b),
         }
     }
 
-    fn materialize_lvalue_ref(
-        &mut self,
-        lvalue: &LValue,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
-        if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
-            return ptr;
-        }
-
-        let value = self.read_lvalue(lvalue, b);
-        let typ = self
-            .type_converter
-            .convert_type(&Self::type_of_lvalue(lvalue));
-        let mut e = b.block(self.current_block);
-        let ptr = e.alloc(typ);
-        e.store(ptr, value);
-        ptr
-    }
-
-    fn type_of_lvalue(lvalue: &LValue) -> AstType {
+    fn indexed_lvalue_base<'b>(
+        lvalue: &'b LValue,
+        field_path: &mut Vec<usize>,
+    ) -> Option<(&'b LValue, &'b Expression, &'b AstType)> {
         match lvalue {
-            LValue::Ident(ident) => ident.typ.clone(),
-            LValue::Index { element_type, .. } => element_type.clone(),
+            LValue::Index {
+                array,
+                index,
+                element_type,
+                ..
+            } => Some((array, index, element_type)),
             LValue::MemberAccess {
                 object,
                 field_index,
             } => {
-                let object_type = Self::type_of_lvalue(object);
-                let AstType::Tuple(fields) = object_type else {
-                    unreachable!("Unexpected type for member access lvalue: {object_type}");
-                };
-                fields[*field_index].clone()
+                let base = Self::indexed_lvalue_base(object, field_path)?;
+                field_path.push(*field_index);
+                Some(base)
             }
-            LValue::Dereference { element_type, .. } => element_type.clone(),
-            LValue::Clone(inner) => Self::type_of_lvalue(inner),
+            LValue::Clone(inner) => Self::indexed_lvalue_base(inner, field_path),
+            _ => None,
         }
     }
 
