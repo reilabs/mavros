@@ -337,39 +337,20 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
+        let mut write = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+            b.block(this.current_block).store(ptr, value);
+        };
+        self.with_lvalue_ref(lvalue, b, &mut write);
+    }
+
+    fn with_lvalue_ref(
+        &mut self,
+        lvalue: &LValue,
+        b: &mut HLFunctionBuilder<'_>,
+        f: &mut dyn FnMut(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
+    ) {
         if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
-            b.block(self.current_block).store(ptr, value);
-            return;
-        }
-
-        let mut field_path = Vec::new();
-        if let Some((array, index, element_type)) =
-            Self::indexed_lvalue_base(lvalue, &mut field_path)
-        {
-            let array_value = self.read_lvalue(array, b);
-            let idx = self.convert_expression(index, b).unwrap();
-            let element = b.block(self.current_block).array_get(array_value, idx);
-            let element_type = self.type_converter.convert_type(element_type);
-            let element_ref = {
-                let mut e = b.block(self.current_block);
-                let element_ref = e.alloc(element_type);
-                e.store(element_ref, element);
-                element_ref
-            };
-
-            let mut target_ref = element_ref;
-            for field_index in field_path {
-                target_ref = b
-                    .block(self.current_block)
-                    .tuple_ref_proj(target_ref, field_index);
-            }
-            b.block(self.current_block).store(target_ref, value);
-
-            let element = b.block(self.current_block).load(element_ref);
-            let updated = b
-                .block(self.current_block)
-                .array_set(array_value, idx, element);
-            self.write_lvalue(array, updated, b);
+            f(self, ptr, b);
             return;
         }
 
@@ -380,39 +361,46 @@ impl<'a> ExpressionConverter<'a> {
                 }
                 _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
             },
-            LValue::MemberAccess { .. } => {
-                panic!(
-                    "Cannot assign to non-addressable member access: {:?}",
-                    lvalue
-                )
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                let mut write_field =
+                    |this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
+                        let field_ref = b
+                            .block(this.current_block)
+                            .tuple_ref_proj(tuple_ref, *field_index);
+                        f(this, field_ref, b);
+                    };
+                self.with_lvalue_ref(object, b, &mut write_field);
             }
-            LValue::Index { .. } => unreachable!("index lvalues are handled before this match"),
-            LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
-            LValue::Clone(inner) => self.write_lvalue(inner, value, b),
-        }
-    }
-
-    fn indexed_lvalue_base<'b>(
-        lvalue: &'b LValue,
-        field_path: &mut Vec<usize>,
-    ) -> Option<(&'b LValue, &'b Expression, &'b AstType)> {
-        match lvalue {
             LValue::Index {
                 array,
                 index,
                 element_type,
                 ..
-            } => Some((array, index, element_type)),
-            LValue::MemberAccess {
-                object,
-                field_index,
             } => {
-                let base = Self::indexed_lvalue_base(object, field_path)?;
-                field_path.push(*field_index);
-                Some(base)
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                let element = b.block(self.current_block).array_get(array_value, idx);
+                let element_type = self.type_converter.convert_type(element_type);
+                let element_ref = {
+                    let mut e = b.block(self.current_block);
+                    let element_ref = e.alloc(element_type);
+                    e.store(element_ref, element);
+                    element_ref
+                };
+
+                f(self, element_ref, b);
+
+                let element = b.block(self.current_block).load(element_ref);
+                let updated = b
+                    .block(self.current_block)
+                    .array_set(array_value, idx, element);
+                self.write_lvalue(array, updated, b);
             }
-            LValue::Clone(inner) => Self::indexed_lvalue_base(inner, field_path),
-            _ => None,
+            LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
+            LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
         }
     }
 
