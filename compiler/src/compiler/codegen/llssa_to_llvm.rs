@@ -4,8 +4,11 @@
 //! Operates on LLSSA + Type — types are explicit in the LLSSA ops, no TypeInfo needed.
 
 use std::collections::HashMap;
+use std::fs;
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -1391,40 +1394,87 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         std::fs::remove_file(&obj_path).ok();
     }
 
-    fn build_wasm_runtime() -> std::path::PathBuf {
+    fn build_wasm_runtime() -> PathBuf {
         use std::process::Command;
 
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .exec()
-            .expect("Failed to get cargo metadata");
+        static WASM_RUNTIME_LIB: OnceLock<PathBuf> = OnceLock::new();
 
-        let workspace_root = metadata.workspace_root.as_std_path();
-        let wasm_runtime_dir = workspace_root.join("wasm-runtime");
+        WASM_RUNTIME_LIB
+            .get_or_init(|| {
+                let metadata = cargo_metadata::MetadataCommand::new()
+                    .exec()
+                    .expect("Failed to get cargo metadata");
 
-        let output = Command::new("cargo")
-            .current_dir(&wasm_runtime_dir)
-            .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
-            .output()
-            .expect("Failed to run cargo build for wasm-runtime");
+                let workspace_root = metadata.workspace_root.as_std_path();
+                let wasm_runtime_dir = workspace_root.join("wasm-runtime");
+                let lib_path = workspace_root
+                    .join("target")
+                    .join("wasm32-unknown-unknown")
+                    .join("release")
+                    .join("libmavros_wasm_runtime.a");
 
-        if !output.status.success() {
-            eprintln!(
-                "wasm-runtime build stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            panic!("Failed to build wasm-runtime for wasm32");
+                if !Self::wasm_runtime_lib_is_fresh(&lib_path, workspace_root, &wasm_runtime_dir) {
+                    let output = Command::new("cargo")
+                        .current_dir(&wasm_runtime_dir)
+                        .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
+                        .output()
+                        .expect("Failed to run cargo build for wasm-runtime");
+
+                    if !output.status.success() {
+                        eprintln!(
+                            "wasm-runtime build stderr: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        panic!("Failed to build wasm-runtime for wasm32");
+                    }
+                }
+
+                if !lib_path.exists() {
+                    panic!("wasm-runtime library not found at {:?}", lib_path);
+                }
+
+                lib_path
+            })
+            .clone()
+    }
+
+    fn wasm_runtime_lib_is_fresh(
+        lib_path: &Path,
+        workspace_root: &Path,
+        wasm_runtime_dir: &Path,
+    ) -> bool {
+        let Ok(lib_mtime) = lib_path.metadata().and_then(|m| m.modified()) else {
+            return false;
+        };
+
+        let inputs = [
+            workspace_root.join("Cargo.lock"),
+            wasm_runtime_dir.join("Cargo.toml"),
+            wasm_runtime_dir.join("src"),
+        ];
+
+        inputs
+            .iter()
+            .filter_map(|path| Self::newest_mtime(path))
+            .all(|mtime| mtime <= lib_mtime)
+    }
+
+    fn newest_mtime(path: &Path) -> Option<SystemTime> {
+        let metadata = fs::metadata(path).ok()?;
+        if metadata.is_file() {
+            return metadata.modified().ok();
         }
 
-        let lib_path = workspace_root
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join("release")
-            .join("libmavros_wasm_runtime.a");
-
-        if !lib_path.exists() {
-            panic!("wasm-runtime library not found at {:?}", lib_path);
+        let mut newest = metadata.modified().ok();
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).ok()?.flatten() {
+                let Some(mtime) = Self::newest_mtime(&entry.path()) else {
+                    continue;
+                };
+                newest = Some(newest.map_or(mtime, |current| current.max(mtime)));
+            }
         }
 
-        lib_path
+        newest
     }
 }
