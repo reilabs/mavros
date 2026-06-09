@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use noirc_frontend::ast::BinaryOpKind;
 use noirc_frontend::monomorphization::ast::{
     Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If, Index,
-    LValue, Let, LocalId, While,
+    LValue, Let, LocalId, Type as AstType, While,
 };
 
 use crate::compiler::ssa::{
@@ -23,15 +23,6 @@ use super::type_converter::TypeConverter;
 pub enum LowLevelReplacement {
     Single(AstFuncId),
     ByArraySize(HashMap<u32, AstFuncId>),
-}
-
-/// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
-#[derive(Debug)]
-enum AccessStep {
-    /// Array index: `arr[idx]`
-    Index(ValueId),
-    /// Tuple/struct field: `obj.field_N`
-    Field(usize),
 }
 
 /// Loop context for break/continue support.
@@ -340,175 +331,136 @@ impl<'a> ExpressionConverter<'a> {
         assign: &Assign,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
-
-        // Flatten the lvalue into a root pointer + access path
-        let (root_ptr, root_type, steps) = self.flatten_lvalue(&assign.lvalue, b);
-
-        if steps.is_empty() {
-            // Simple variable assignment — store directly
-            b.block(self.current_block).store(root_ptr, new_value);
-            return None;
-        }
-
-        // Phase 1: Descend — load root, then extract at each level
-        let mut values = Vec::with_capacity(steps.len() + 1);
-        let mut types = Vec::with_capacity(steps.len() + 1);
-
-        {
-            let mut e = b.block(self.current_block);
-            values.push(e.load(root_ptr));
-            types.push(root_type);
-
-            for step in &steps {
-                let parent = *values.last().unwrap();
-                let child = match step {
-                    AccessStep::Index(idx) => e.array_get(parent, *idx),
-                    AccessStep::Field(field_idx) => e.tuple_proj(parent, *field_idx),
-                };
-                let child_type = match (step, types.last().unwrap()) {
-                    (AccessStep::Index(_), AstType::Array(_, elem))
-                    | (AccessStep::Index(_), AstType::Vector(elem)) => elem.as_ref().clone(),
-                    (AccessStep::Field(idx), AstType::Tuple(fields)) => fields[*idx].clone(),
-                    (step, ty) => {
-                        panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty)
-                    }
-                };
-                values.push(child);
-                types.push(child_type);
-            }
-        }
-
-        // Phase 2: Replace leaf
-        *values.last_mut().unwrap() = new_value;
-
-        // Phase 3: Ascend — reconstruct from leaf to root
-        for k in (0..steps.len()).rev() {
-            let modified_child = values[k + 1];
-            let parent = values[k];
-            values[k] = match &steps[k] {
-                AccessStep::Index(idx) => {
-                    b.block(self.current_block)
-                        .array_set(parent, *idx, modified_child)
-                }
-                AccessStep::Field(field_idx) => {
-                    self.synthesize_tuple_set(parent, *field_idx, modified_child, &types[k], b)
-                }
-            };
-        }
-
-        // Phase 4: Store reconstructed root
-        b.block(self.current_block).store(root_ptr, values[0]);
+        self.with_lvalue_ref(
+            &assign.lvalue,
+            b,
+            &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+                b.block(this.current_block).store(ptr, new_value);
+            },
+        );
         None
     }
 
-    /// Synthesize a tuple "set" by projecting all fields, replacing one, and rebuilding.
-    fn synthesize_tuple_set(
-        &mut self,
-        tuple: ValueId,
-        target_field: usize,
-        new_value: ValueId,
-        noir_type: &noirc_frontend::monomorphization::ast::Type,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
-        let fields = match noir_type {
-            AstType::Tuple(fields) => fields,
-            _ => panic!(
-                "synthesize_tuple_set called on non-tuple type: {:?}",
-                noir_type
-            ),
-        };
-
-        let mut elements = Vec::with_capacity(fields.len());
-        let mut element_types = Vec::with_capacity(fields.len());
-
-        let mut e = b.block(self.current_block);
-        for (i, field_type) in fields.iter().enumerate() {
-            let elem = if i == target_field {
-                new_value
-            } else {
-                e.tuple_proj(tuple, i)
-            };
-            elements.push(elem);
-            element_types.push(self.type_converter.convert_type(field_type));
-        }
-
-        e.mk_tuple(elements, element_types)
-    }
-
-    /// Read an LValue as a value (for Dereference: get the pointer that the lvalue holds).
-    fn convert_lvalue_to_value(
+    fn with_lvalue_ref(
         &mut self,
         lvalue: &LValue,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
+        f: &dyn Fn(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
+    ) {
+        if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
+            f(self, ptr, b);
+            return;
+        }
+
+        match lvalue {
+            LValue::Ident(_) => panic!("Cannot assign to non-addressable lvalue: {:?}", lvalue),
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                self.with_lvalue_ref(
+                    object,
+                    b,
+                    &|this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
+                        let field_ref = b
+                            .block(this.current_block)
+                            .tuple_ref_proj(tuple_ref, *field_index);
+                        f(this, field_ref, b);
+                    },
+                );
+            }
+            LValue::Index {
+                array,
+                index,
+                element_type,
+                ..
+            } => {
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                let element = b.block(self.current_block).array_get(array_value, idx);
+                let element_type = self.type_converter.convert_type(element_type);
+                let element_ref = {
+                    let mut e = b.block(self.current_block);
+                    let element_ref = e.alloc(element_type);
+                    e.store(element_ref, element);
+                    element_ref
+                };
+
+                f(self, element_ref, b);
+
+                let element = b.block(self.current_block).load(element_ref);
+                let updated = b
+                    .block(self.current_block)
+                    .array_set(array_value, idx, element);
+                self.with_lvalue_ref(
+                    array,
+                    b,
+                    &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+                        b.block(this.current_block).store(ptr, updated);
+                    },
+                );
+            }
+            LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
+            LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
+        }
+    }
+
+    fn read_lvalue(&mut self, lvalue: &LValue, b: &mut HLFunctionBuilder<'_>) -> ValueId {
         match lvalue {
             LValue::Ident(ident) => self.convert_ident(ident, b).unwrap(),
             LValue::Dereference { reference, .. } => {
-                let ptr = self.convert_lvalue_to_value(reference, b);
+                let ptr = self.read_lvalue(reference, b);
                 b.block(self.current_block).load(ptr)
-            }
-            _ => panic!(
-                "Unsupported lvalue in dereference position: {:?}",
-                std::mem::discriminant(lvalue)
-            ),
-        }
-    }
-
-    /// Flatten an LValue into (root_pointer, root_noir_type, access_steps).
-    /// Walks the LValue tree to the root Ident and collects steps in root-to-leaf order.
-    fn flatten_lvalue(
-        &mut self,
-        lvalue: &LValue,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> (
-        ValueId,
-        noirc_frontend::monomorphization::ast::Type,
-        Vec<AccessStep>,
-    ) {
-        match lvalue {
-            LValue::Ident(ident) => match &ident.definition {
-                Definition::Local(local_id) => {
-                    if self.mutable_locals.contains(local_id) {
-                        let ptr = *self
-                            .bindings
-                            .get(local_id)
-                            .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
-                        (ptr, ident.typ.clone(), vec![])
-                    } else {
-                        panic!("Cannot assign to immutable local variable: {}", ident.name)
-                    }
-                }
-                _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
-            },
-            LValue::Index { array, index, .. } => {
-                let (root_ptr, root_type, mut steps) = self.flatten_lvalue(array, b);
-                let idx_value = self.convert_expression(index, b).unwrap();
-                steps.push(AccessStep::Index(idx_value));
-                (root_ptr, root_type, steps)
             }
             LValue::MemberAccess {
                 object,
                 field_index,
             } => {
-                let (root_ptr, root_type, mut steps) = self.flatten_lvalue(object, b);
-                steps.push(AccessStep::Field(*field_index));
-                (root_ptr, root_type, steps)
+                if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
+                    let field_ref = b
+                        .block(self.current_block)
+                        .tuple_ref_proj(tuple_ref, *field_index);
+                    return b.block(self.current_block).load(field_ref);
+                }
+
+                let tuple = self.read_lvalue(object, b);
+                b.block(self.current_block).tuple_proj(tuple, *field_index)
             }
-            LValue::Dereference {
-                reference,
-                element_type,
+            LValue::Index { array, index, .. } => {
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                b.block(self.current_block).array_get(array_value, idx)
+            }
+            LValue::Clone(inner) => self.read_lvalue(inner, b),
+        }
+    }
+
+    fn try_lvalue_ref(
+        &mut self,
+        lvalue: &LValue,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match lvalue {
+            LValue::Ident(ident) => match &ident.definition {
+                Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
+                    Some(*self.bindings.get(local_id).unwrap())
+                }
+                _ => None,
+            },
+            LValue::Dereference { reference, .. } => Some(self.read_lvalue(reference, b)),
+            LValue::MemberAccess {
+                object,
+                field_index,
             } => {
-                // *b where b holds a pointer — evaluate the inner lvalue as an
-                // expression to get the pointer value, then use it as root
-                let ptr = self.convert_lvalue_to_value(reference, b);
-                (ptr, element_type.clone(), vec![])
+                let tuple_ref = self.try_lvalue_ref(object, b)?;
+                Some(
+                    b.block(self.current_block)
+                        .tuple_ref_proj(tuple_ref, *field_index),
+                )
             }
-            LValue::Clone(inner) => self.flatten_lvalue(inner, b),
+            LValue::Index { .. } => None,
+            LValue::Clone(inner) => self.try_lvalue_ref(inner, b),
         }
     }
 
@@ -761,29 +713,20 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         if unary.skip {
+            if matches!(
+                unary.operator,
+                noirc_frontend::ast::UnaryOp::Reference { .. }
+            ) {
+                if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
+                    return Some(ptr);
+                }
+            }
             return self.convert_expression(&unary.rhs, b);
         }
         match unary.operator {
             noirc_frontend::ast::UnaryOp::Reference { .. } => {
-                // &mut x on a let-mut local: return the ptr directly (no load)
-                if let Expression::Ident(ident) = unary.rhs.as_ref() {
-                    if let Definition::Local(local_id) = &ident.definition {
-                        if self.mutable_locals.contains(local_id) {
-                            let ptr = *self.bindings.get(local_id).unwrap();
-                            return Some(ptr);
-                        }
-                    }
-                }
-                // &mut expr.field — would require splicing a pointer into an
-                // existing allocation (aliasing). Not yet supported.
-                if let Expression::ExtractTupleField(inner, _) = unary.rhs.as_ref() {
-                    let is_deref = matches!(inner.as_ref(), Expression::Unary(u) if matches!(u.operator, noirc_frontend::ast::UnaryOp::Dereference { .. }));
-                    if !is_deref {
-                        todo!(
-                            "&mut on tuple field requiring pointer splicing not yet supported: {:?}",
-                            unary.rhs
-                        );
-                    }
+                if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
+                    return Some(ptr);
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
@@ -799,12 +742,14 @@ impl<'a> ExpressionConverter<'a> {
                 e.store(ptr, value);
                 Some(ptr)
             }
+            noirc_frontend::ast::UnaryOp::Dereference { .. } => {
+                let value = self.convert_expression(&unary.rhs, b).unwrap();
+                Some(b.block(self.current_block).load(value))
+            }
             _ => {
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
                 let result = match unary.operator {
-                    noirc_frontend::ast::UnaryOp::Dereference { .. } => {
-                        b.block(self.current_block).load(value)
-                    }
+                    noirc_frontend::ast::UnaryOp::Dereference { .. } => unreachable!(),
                     noirc_frontend::ast::UnaryOp::Not => b.block(self.current_block).not(value),
                     noirc_frontend::ast::UnaryOp::Minus => {
                         use noirc_frontend::monomorphization::ast::Type as AstType;
@@ -829,16 +774,104 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    fn try_expression_ref(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match expr {
+            Expression::Ident(ident) => match &ident.definition {
+                Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
+                    Some(*self.bindings.get(local_id).unwrap())
+                }
+                Definition::Local(local_id)
+                    if Self::reference_pointee_type(&ident.typ).is_some() =>
+                {
+                    Some(*self.bindings.get(local_id).unwrap())
+                }
+                _ => None,
+            },
+            Expression::Unary(unary) => {
+                if unary.skip {
+                    self.try_expression_ref(unary.rhs.as_ref(), b)
+                } else if matches!(
+                    unary.operator,
+                    noirc_frontend::ast::UnaryOp::Dereference { .. }
+                ) {
+                    Some(self.convert_expression(unary.rhs.as_ref(), b).unwrap())
+                } else {
+                    None
+                }
+            }
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                let tuple_ref = self.try_tuple_expression_ref(tuple_expr.as_ref(), b)?;
+                Some(b.block(self.current_block).tuple_ref_proj(tuple_ref, *idx))
+            }
+            Expression::Clone(inner) => self.try_expression_ref(inner.as_ref(), b),
+            _ => {
+                if Self::reference_pointee_type(&Self::expression_type(expr)?).is_some() {
+                    self.convert_expression(expr, b)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn try_tuple_expression_ref(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match Self::expression_type(expr)? {
+            AstType::Reference(inner, _) if matches!(inner.as_ref(), AstType::Tuple(_)) => {
+                self.convert_expression(expr, b)
+            }
+            AstType::Tuple(_) => self.try_expression_ref(expr, b),
+            _ => None,
+        }
+    }
+
+    fn reference_pointee_type(typ: &AstType) -> Option<AstType> {
+        match typ {
+            AstType::Reference(inner, _) => Some(*inner.clone()),
+            _ => None,
+        }
+    }
+
+    fn expression_type(expr: &Expression) -> Option<AstType> {
+        match expr {
+            Expression::Clone(inner) => Self::expression_type(inner.as_ref()),
+            Expression::Block(exprs) => exprs.last().and_then(Self::expression_type),
+            Expression::Tuple(exprs) => exprs
+                .iter()
+                .map(Self::expression_type)
+                .collect::<Option<Vec<_>>>()
+                .map(AstType::Tuple),
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                match Self::expression_type(tuple_expr.as_ref())? {
+                    AstType::Reference(inner, mutable) => match inner.as_ref() {
+                        AstType::Tuple(fields) => {
+                            Some(AstType::Reference(Box::new(fields[*idx].clone()), mutable))
+                        }
+                        _ => None,
+                    },
+                    AstType::Tuple(fields) => Some(fields[*idx].clone()),
+                    _ => None,
+                }
+            }
+            _ => expr.return_type().map(|typ| typ.into_owned()),
+        }
+    }
+
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
-        if let Some(typ) = index.collection.return_type() {
-            if matches!(
-                typ.as_ref(),
-                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
-            ) {
-                collection = b.block(self.current_block).load(collection);
-            }
+        if matches!(
+            Self::expression_type(&index.collection),
+            Some(noirc_frontend::monomorphization::ast::Type::Reference(_, _))
+        ) {
+            collection = b.block(self.current_block).load(collection);
         }
         let idx = self.convert_expression(&index.index, b).unwrap();
         let result = b.block(self.current_block).array_get(collection, idx);
@@ -851,15 +884,12 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let mut value = self.convert_expression(tuple_expr, b).unwrap();
-        // If the expression is a reference (e.g. &mut self), load through it first
-        if let Some(typ) = tuple_expr.return_type() {
-            if matches!(
-                typ.as_ref(),
-                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
-            ) {
-                value = b.block(self.current_block).load(value);
-            }
+        let value = self.convert_expression(tuple_expr, b).unwrap();
+        if matches!(
+            Self::expression_type(tuple_expr),
+            Some(AstType::Reference(inner, _)) if matches!(inner.as_ref(), AstType::Tuple(_))
+        ) {
+            return Some(b.block(self.current_block).tuple_ref_proj(value, idx));
         }
         let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)

@@ -993,7 +993,9 @@ impl CodeGen {
                             .type_size(&type_info.get_value_type(*arr).get_array_element()),
                     });
                 }
-                hlssa::OpCode::TupleProj { .. } => ice_non_elided_tuple(),
+                hlssa::OpCode::TupleProj { .. } | hlssa::OpCode::TupleRefProj { .. } => {
+                    ice_non_elided_tuple()
+                }
                 hlssa::OpCode::ArraySet {
                     result: r,
                     array: arr,

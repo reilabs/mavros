@@ -220,6 +220,11 @@ pub enum OpCode {
         tuple: ValueId,
         idx: usize,
     },
+    TupleRefProj {
+        result: ValueId,
+        tuple_ref: ValueId,
+        idx: usize,
+    },
     MkTuple {
         result: ValueId,
         elems: Vec<ValueId>,
@@ -700,6 +705,19 @@ impl Instruction for OpCode {
                     idx
                 )
             }
+            OpCode::TupleRefProj {
+                result,
+                tuple_ref,
+                idx,
+            } => {
+                format!(
+                    "v{}{} = ref_proj(v{}, {})",
+                    result.0,
+                    annotate_value(*result),
+                    tuple_ref.0,
+                    idx
+                )
+            }
             OpCode::MkTuple {
                 result,
                 elems,
@@ -956,6 +974,11 @@ impl Instruction for OpCode {
                 result: _,
                 tuple,
                 idx: _,
+            }
+            | Self::TupleRefProj {
+                result: _,
+                tuple_ref: tuple,
+                idx: _,
             } => vec![tuple].into_iter(),
             OpCode::MkTuple {
                 result: _,
@@ -997,6 +1020,7 @@ impl Instruction for OpCode {
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
+            | Self::TupleRefProj { result: r, .. }
             | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
             Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
@@ -1054,6 +1078,7 @@ impl Instruction for OpCode {
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
+            | Self::TupleRefProj { result: r, .. }
             | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
             Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter_mut().collect::<Vec<_>>();
@@ -1289,6 +1314,11 @@ impl Instruction for OpCode {
                 result: _,
                 tuple,
                 idx: _,
+            }
+            | Self::TupleRefProj {
+                result: _,
+                tuple_ref: tuple,
+                idx: _,
             } => vec![tuple].into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
             Self::InitGlobal {
@@ -1507,6 +1537,11 @@ impl Instruction for OpCode {
             Self::TupleProj {
                 result: r,
                 tuple: t,
+                idx: _,
+            }
+            | Self::TupleRefProj {
+                result: r,
+                tuple_ref: t,
                 idx: _,
             } => vec![r, t].into_iter(),
             OpCode::MkTuple {

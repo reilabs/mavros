@@ -582,7 +582,9 @@ impl SymbolicExecutor {
                         let flag_value = scope[flag].clone();
                         ctx.dlookup(target, args, flag_value);
                     }
-                    OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::TupleProj { .. }
+                    | OpCode::TupleRefProj { .. }
+                    | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     OpCode::Todo {
                         payload,
                         results,

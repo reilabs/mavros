@@ -174,7 +174,9 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
                     }
-                    OpCode::TupleProj { .. } => ice_non_elided_tuple(),
+                    OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
+                        ice_non_elided_tuple()
+                    }
                     OpCode::Cast {
                         result: r,
                         value: v,

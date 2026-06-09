@@ -1225,7 +1225,9 @@ fn lower_instruction(
             val_map.insert(*result_even, ll_even);
         }
 
-        OpCode::MkTuple { .. } | OpCode::TupleProj { .. } => ice_non_elided_tuple(),
+        OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
+            ice_non_elided_tuple()
+        }
 
         OpCode::Alloc { result, elem_type } => {
             lower_alloc(e, val_map, *result, elem_type);
