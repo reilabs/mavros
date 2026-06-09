@@ -2,6 +2,7 @@
 
 pub mod layout;
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use crate::{
@@ -130,7 +131,7 @@ impl CodeGen {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
-        let mut struct_interner = StructLayoutInterner::new();
+        let struct_interner = StructLayoutInterner::new();
         let constants = ssa.const_snapshot();
 
         let function = ssa.get_main();
@@ -139,7 +140,6 @@ impl CodeGen {
             cfg.get_function_cfg(ssa.get_main_id()),
             type_info.get_function(ssa.get_main_id()),
             &global_layouter,
-            &mut struct_interner,
             &constants,
         );
 
@@ -159,7 +159,6 @@ impl CodeGen {
                 cfg.get_function_cfg(*function_id),
                 type_info.get_function(*function_id),
                 &global_layouter,
-                &mut struct_interner,
                 &constants,
             );
             function_ids.insert(*function_id, cur_fn_begin);
@@ -200,7 +199,6 @@ impl CodeGen {
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
-        struct_interner: &mut StructLayoutInterner,
         constants: &HLSSAConstantsSnapshot,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
@@ -225,7 +223,6 @@ impl CodeGen {
             &mut layouter,
             &mut emitter,
             global_layouter,
-            struct_interner,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -245,7 +242,6 @@ impl CodeGen {
                 &mut layouter,
                 &mut emitter,
                 global_layouter,
-                struct_interner,
             );
         }
 
@@ -348,7 +344,6 @@ impl CodeGen {
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
-        struct_interner: &mut StructLayoutInterner,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -962,25 +957,7 @@ impl CodeGen {
                             .type_size(&type_info.get_value_type(*arr).get_array_element()),
                     });
                 }
-                hlssa::OpCode::TupleProj {
-                    result: r,
-                    tuple: t,
-                    idx,
-                } => {
-                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    let tuple_elems = type_info.get_value_type(*t).get_tuple_elements();
-                    let field_offset: usize = tuple_elems[..*idx]
-                        .iter()
-                        .map(|elem_type| layouter.type_size(elem_type))
-                        .sum();
-                    let field_size = layouter.type_size(&tuple_elems[*idx]);
-                    emitter.push_op(bytecode::OpCode::TupleProj {
-                        res,
-                        tuple: layouter.get_value(*t),
-                        field_offset,
-                        field_size,
-                    });
-                }
+                hlssa::OpCode::TupleProj { .. } => ice_non_elided_tuple(),
                 hlssa::OpCode::ArraySet {
                     result: r,
                     array: arr,
@@ -1058,32 +1035,7 @@ impl CodeGen {
                         item,
                     });
                 }
-                hlssa::OpCode::MkTuple {
-                    result,
-                    elems,
-                    element_types,
-                } => {
-                    let res = layouter.alloc_value(*result, &type_info.get_value_type(*result));
-                    let fields = elems
-                        .iter()
-                        .map(|a| layouter.get_value(*a))
-                        .collect::<Vec<_>>();
-                    let field_layout: Vec<(u32, bool)> = element_types
-                        .iter()
-                        .map(|elem_type| {
-                            (
-                                layouter.type_size(elem_type) as u32,
-                                elem_type.is_heap_allocated(),
-                            )
-                        })
-                        .collect();
-                    let idx = struct_interner.intern(field_layout);
-                    emitter.push_op(bytecode::OpCode::TupleAlloc {
-                        res,
-                        meta: vm::array::BoxedLayout::new_struct(idx),
-                        fields,
-                    });
-                }
+                hlssa::OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                 hlssa::OpCode::Call {
                     results: r,
                     function: hlssa::CallTarget::Static(fnid),

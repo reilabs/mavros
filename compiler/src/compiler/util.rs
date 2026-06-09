@@ -2,6 +2,16 @@
 
 use crate::compiler::ssa::hlssa::MAX_SUPPORTED_UNSIGNED_BITS;
 
+/// Panic with the canonical ICE for a tuple surviving past the `ElideTuples` pass.
+///
+/// Everything downstream of `ElideTuples` operates on tuple-free IR; reaching a tuple opcode or
+/// tuple type there is a compiler bug. Call this from the (unreachable) tuple arms of downstream
+/// passes, analyses, and codegen.
+#[track_caller]
+pub fn ice_non_elided_tuple() -> ! {
+    panic!("ICE: Tuple encountered after ElideTuples pass")
+}
+
 pub fn spread_bits(v: u128, bits: usize) -> u128 {
     assert!(
         bits <= 64,

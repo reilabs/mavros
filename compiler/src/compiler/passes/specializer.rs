@@ -50,7 +50,6 @@ enum ConstVal {
     I(usize, u128),
     Field(Field),
     Array(Vec<ValueId>),
-    Tuple(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
@@ -346,17 +345,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn tuple_get(&self, index: usize, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
-        let a_const = ctx.const_vals.get(&self.0);
-        match a_const {
-            Some(ConstVal::Tuple(a)) => {
-                let res = a[index];
-                Self(res)
-            }
-            _ => panic!("Not yet implemented {:?}", a_const),
-        }
-    }
-
     fn array_set(
         &self,
         _index: &Self,
@@ -539,13 +527,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
         let val = ctx.mk_seq(a.clone(), seq_type, elem_type.clone());
         ctx.const_vals.insert(val, ConstVal::Array(a));
-        Self(val)
-    }
-
-    fn mk_tuple(elems: Vec<Self>, ctx: &mut SpecializationState, elem_types: &[Type]) -> Self {
-        let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.mk_tuple(a.clone(), elem_types.to_vec());
-        ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
 
@@ -909,10 +890,6 @@ impl Specializer {
                     call_params.push(Val(val));
                     const_vals.insert(val, ConstVal::I(*bits_size, *value));
                 }
-                ValueSignature::Tuple(_) => {
-                    info!("TODO: Aborting specialization on a tuple value");
-                    return;
-                }
             }
         }
 
@@ -1029,9 +1006,6 @@ impl Specializer {
                         let cst = entry.i_const(*bits_size, *value);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
-                    }
-                    ValueSignature::Tuple(_) => {
-                        todo!();
                     }
                 }
             }

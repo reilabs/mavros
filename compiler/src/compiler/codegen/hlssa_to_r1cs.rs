@@ -38,16 +38,10 @@ pub struct ArrayData {
 }
 
 #[derive(Clone, Debug)]
-pub struct TupleData {
-    data: Vec<Value>,
-}
-
-#[derive(Clone, Debug)]
 pub enum Value {
     Const(ark_bn254::Fr),
     LC(LC),
     Array(Rc<RefCell<ArrayData>>),
-    Tuple(Rc<RefCell<TupleData>>),
     Ptr(Rc<RefCell<Value>>),
     Invalid,
 }
@@ -257,13 +251,6 @@ impl Value {
         }
     }
 
-    pub fn expect_tuple(&self) -> Rc<RefCell<TupleData>> {
-        match self {
-            Value::Tuple(fields) => fields.clone(),
-            _ => panic!("expected tuple"),
-        }
-    }
-
     pub fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
         match self {
             Value::Const(c) => vec![(0, *c)],
@@ -287,10 +274,6 @@ impl Value {
             table_id: None,
             data,
         })))
-    }
-
-    pub fn mk_tuple(fields: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(RefCell::new(TupleData { data: fields })))
     }
 }
 
@@ -638,10 +621,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
         self.expect_array().borrow().data[index as usize].clone()
     }
 
-    fn tuple_get(&self, index: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        self.expect_tuple().borrow().data[index].clone()
-    }
-
     fn array_set(&self, index: &Self, value: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let array = self.expect_array();
         let index = index.expect_u32();
@@ -761,10 +740,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
         _elem_type: &Type,
     ) -> Self {
         Value::mk_array(a)
-    }
-
-    fn mk_tuple(elems: Vec<Self>, _ctx: &mut R1CGen, _elem_types: &[Type]) -> Self {
-        Value::mk_tuple(elems)
     }
 
     fn alloc(_elem_type: &Type, _ctx: &mut R1CGen) -> Self {
