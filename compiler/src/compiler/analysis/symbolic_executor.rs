@@ -2,6 +2,7 @@
 //! into by providing their own `Value` and `Context` implementations that specialize it for their
 //! use-case.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use tracing::{Level, instrument};
@@ -36,7 +37,6 @@ where
     fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, ctx: &mut Context);
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
-    fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
@@ -67,7 +67,6 @@ where
         seq_type: SequenceTargetType,
         elem_type: &Type,
     ) -> Self;
-    fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type]) -> Self;
     fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
@@ -567,22 +566,8 @@ impl SymbolicExecutor {
                         let flag_value = scope[flag].clone();
                         ctx.dlookup(target, args, flag_value);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::TupleProj {
-                        result: r,
-                        tuple: a,
-                        idx,
-                    } => {
-                        let a = &scope[a];
-                        scope.insert(*r, a.tuple_get(*idx, &fn_type_info.get_value_type(*r), ctx));
-                    }
-                    crate::compiler::ssa::hlssa::OpCode::MkTuple {
-                        result,
-                        elems,
-                        element_types,
-                    } => {
-                        let elems = elems.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
-                        scope.insert(*result, V::mk_tuple(elems, ctx, element_types));
-                    }
+                    crate::compiler::ssa::hlssa::OpCode::TupleProj { .. }
+                    | crate::compiler::ssa::hlssa::OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     crate::compiler::ssa::hlssa::OpCode::Todo {
                         payload,
                         results,

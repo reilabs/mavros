@@ -3,6 +3,7 @@
 //! Array types lower to heap-allocated RC'd structs behind `Ptr`. MkSeq, ArrayGet, ArraySet, and
 //! MemOp (Bump/Drop) are lowered to explicit memory operations.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     marker::PhantomData,
@@ -50,7 +51,7 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
-        HLTypeExpr::Tuple(_) => LLType::Ptr,
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
@@ -70,7 +71,7 @@ fn elem_struct(ty: &HLType) -> LLStruct {
             LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
         }
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLStruct::new(vec![LLFieldType::Ptr]),
-        HLTypeExpr::Tuple(_) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         _ => panic!("Unsupported element type: {}", ty),
@@ -87,7 +88,7 @@ fn rc_slice_struct(elem_type: &HLType) -> LLStruct {
     LLStruct::rc_slice(elem_struct(elem_type))
 }
 
-/// Convert an HLSSA element type to an LLFieldType for use in tuple struct layouts.
+/// Convert an HLSSA element type to an LLFieldType for use in RC'd cell struct layouts.
 fn tuple_field_type(ty: &HLType) -> LLFieldType {
     match &ty.expr {
         HLTypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
@@ -100,7 +101,7 @@ fn tuple_field_type(ty: &HLType) -> LLFieldType {
             LLFieldType::Int(*bits as u32)
         }
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLFieldType::Ptr,
-        HLTypeExpr::Tuple(_) => LLFieldType::Ptr,
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
         HLTypeExpr::Ref(_) => LLFieldType::Ptr,
         _ => panic!("Unsupported tuple element type: {}", ty),
@@ -113,16 +114,6 @@ fn rc_ref_cell_struct(inner_type: &HLType) -> LLStruct {
         LLFieldType::Inline(LLStruct::rc_header()),
         tuple_field_type(inner_type),
     ])
-}
-
-/// Build the LLStruct layout for a heap-allocated RC'd tuple.
-/// Layout: { Inline(RcHeader), field0, field1, ... }
-fn rc_tuple_struct(element_types: &[HLType]) -> LLStruct {
-    let mut fields = vec![LLFieldType::Inline(LLStruct::rc_header())];
-    for elem_ty in element_types {
-        fields.push(tuple_field_type(elem_ty));
-    }
-    LLStruct::new(fields)
 }
 
 /// Extract (element_type, count) from an HLSSA array type.
@@ -229,13 +220,7 @@ fn get_or_create_drop_fn(
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
             }
         }
-        HLTypeExpr::Tuple(elements) => {
-            for elem in elements {
-                if needs_drop(&elem.expr) {
-                    get_or_create_drop_fn(elem, llssa, drop_fns, ad_fns);
-                }
-            }
-        }
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(inner) => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
@@ -250,7 +235,7 @@ fn get_or_create_drop_fn(
         HLTypeExpr::Array(_inner, _) | HLTypeExpr::Slice(_inner) => {
             llssa.add_function(format!("drop_{}", ty))
         }
-        HLTypeExpr::Tuple(_) => llssa.add_function(format!("drop_{}", ty)),
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
         _ => panic!("{} is not supported yet", ty),
     };
@@ -1229,17 +1214,7 @@ fn lower_instruction(
             val_map.insert(*result_even, ll_even);
         }
 
-        OpCode::MkTuple {
-            result,
-            elems,
-            element_types,
-        } => {
-            lower_mk_tuple(e, val_map, *result, elems, element_types);
-        }
-
-        OpCode::TupleProj { result, tuple, idx } => {
-            lower_tuple_proj(e, val_map, fn_type_info, *result, *tuple, *idx);
-        }
+        OpCode::MkTuple { .. } | OpCode::TupleProj { .. } => ice_non_elided_tuple(),
 
         OpCode::Alloc { result, elem_type } => {
             lower_alloc(e, val_map, *result, elem_type);
@@ -1728,7 +1703,7 @@ fn rc_struct_for_droppable_type(ty: &HLType) -> LLStruct {
     match &ty.expr {
         HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
         HLTypeExpr::Slice(inner) => rc_slice_struct(inner),
-        HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
         _ => panic!("Unsupported RC type: {}", ty),
@@ -1863,60 +1838,6 @@ fn lower_to_bytes(
     }
 
     val_map.insert(result, arr);
-}
-
-/// Lower MkTuple to heap allocation + RC init + field stores.
-fn lower_mk_tuple(
-    e: &mut LLBlockEmitter<'_>,
-    val_map: &mut HashMap<ValueId, ValueId>,
-    result: ValueId,
-    elems: &[ValueId],
-    element_types: &[HLType],
-) {
-    let rc_struct = rc_tuple_struct(element_types);
-
-    // Allocate
-    let tuple_ptr = e.heap_alloc(rc_struct.clone(), None);
-
-    // Init RC to 1
-    let rc_hdr = e.struct_field_ptr(tuple_ptr, rc_struct.clone(), 0);
-    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let one = e.emit_int_const(64, 1);
-    e.ll_store(rc_word, one);
-
-    // Store each element into its field (fields are at index 1, 2, 3, ...)
-    for (i, elem) in elems.iter().enumerate() {
-        let field_ptr = e.struct_field_ptr(tuple_ptr, rc_struct.clone(), i + 1);
-        let ll_elem = val_map[elem];
-        e.ll_store(field_ptr, ll_elem);
-    }
-
-    val_map.insert(result, tuple_ptr);
-}
-
-/// Lower TupleProj(Static) to StructFieldPtr + Load.
-fn lower_tuple_proj(
-    e: &mut LLBlockEmitter<'_>,
-    val_map: &mut HashMap<ValueId, ValueId>,
-    fn_type_info: &FunctionTypeInfo,
-    result: ValueId,
-    tuple: ValueId,
-    field_idx: usize,
-) {
-    let tuple_type = fn_type_info.get_value_type(tuple);
-    let element_types = tuple_type.get_tuple_elements();
-    let rc_struct = rc_tuple_struct(&element_types);
-
-    let ll_tuple = val_map[&tuple];
-
-    // Field is at index field_idx + 1 (field 0 is RC header)
-    let field_ptr = e.struct_field_ptr(ll_tuple, rc_struct, field_idx + 1);
-
-    // Load the field value
-    let field_ll_type = lower_type(&element_types[field_idx]);
-    let val = e.ll_load(field_ptr, field_ll_type);
-
-    val_map.insert(result, val);
 }
 
 /// Lower `Alloc { result, elem_type }` to heap_alloc of an RC'd ref cell.
@@ -2184,7 +2105,7 @@ fn lower_rc_bump(
 
     let rc_struct = match &val_type.expr {
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => sequence_rc_struct(val_type),
-        HLTypeExpr::Tuple(elements) => rc_tuple_struct(elements),
+        HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
         _ => panic!("lower_rc_bump: unexpected type {}", val_type),
     };
@@ -2677,9 +2598,7 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
             HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => {
                 generate_drop_function_for_array(llssa, &entry.ty, drop_fns)
             }
-            HLTypeExpr::Tuple(elements) => {
-                generate_drop_function_for_tuple(llssa, elements, &entry.ty, drop_fns)
-            }
+            HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
             HLTypeExpr::Ref(inner) => {
                 generate_drop_function_for_ref(llssa, inner, &entry.ty, drop_fns)
             }
@@ -2696,7 +2615,6 @@ fn needs_drop(expr: &HLTypeExpr) -> bool {
         expr,
         HLTypeExpr::Array(..)
             | HLTypeExpr::Slice(..)
-            | HLTypeExpr::Tuple(..)
             | HLTypeExpr::WitnessOf(..)
             | HLTypeExpr::Ref(..)
     )
@@ -2756,69 +2674,6 @@ fn generate_drop_function_for_array(
                     e.call(inner_drop_fn, vec![elem_val], 0);
                     vec![]
                 });
-            }
-            e.free(ptr);
-            vec![]
-        },
-        |_| vec![],
-    );
-
-    e.terminate_return(vec![]);
-    // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.
-    drop(e);
-
-    func
-}
-
-/// Generate a drop function for an RC'd tuple.
-///
-/// Pseudocode:
-///   fn drop(ptr):
-///     rc = --ptr.header.rc
-///     if rc == 0:
-///       for each heap-allocated field i:
-///         drop_FieldType(ptr.field[i+1])
-///       free(ptr)
-///     return
-fn generate_drop_function_for_tuple(
-    llssa: &mut LLSSA,
-    element_types: &[HLType],
-    ty: &HLType,
-    drop_fns: &[DropFnEntry],
-) -> LLFunction {
-    let rc_struct = rc_tuple_struct(element_types);
-
-    let mut func = new_ll_function(llssa, format!("drop_{}", ty));
-    let entry = func.get_entry_id();
-
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
-    let ptr = e.add_parameter(LLType::Ptr);
-
-    // Decrement RC
-    let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
-    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    let new_rc = modify_rc(&mut e, rc_ptr, -1);
-
-    // If RC hit zero, drop inner heap-allocated elements and free
-    let zero = e.emit_int_const(64, 0);
-    let dead = e.int_eq(new_rc, zero);
-    e.build_if_else(
-        dead,
-        vec![],
-        |e| {
-            for (i, elem_ty) in element_types.iter().enumerate() {
-                if needs_drop(&elem_ty.expr) {
-                    let inner_drop_fn = drop_fns
-                        .iter()
-                        .find(|entry| entry.ty == *elem_ty)
-                        .expect("inner drop fn should exist for tuple element")
-                        .fn_id;
-
-                    // Field is at index i + 1 (field 0 is RC header)
-                    let field_ptr = e.struct_field_ptr(ptr, rc_struct.clone(), i + 1);
-                    let field_val = e.ll_load(field_ptr, LLType::Ptr);
-                    e.call(inner_drop_fn, vec![field_val], 0);
-                }
             }
             e.free(ptr);
             vec![]

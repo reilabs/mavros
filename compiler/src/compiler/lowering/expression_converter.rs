@@ -45,25 +45,35 @@ struct LoopContext {
 /// Converts expressions within a single function.
 pub struct ExpressionConverter<'a> {
     /// Maps LocalId to ValueId for variable bindings.
-    /// For mutable variables, this stores the pointer to the value.
-    /// For immutable variables, this stores the value directly.
+    ///
+    /// For mutable variables, this stores the pointer to the value. For immutable variables, this
+    /// stores the value directly.
     bindings: HashMap<LocalId, ValueId>,
+
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
+
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+
     /// Set of AST function IDs that are natively unconstrained
     natively_unconstrained: &'a HashSet<AstFuncId>,
+
     /// Type converter
     type_converter: TypeConverter,
+
     /// Stack of enclosing loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
+
     /// Whether the current function is unconstrained
     in_unconstrained: bool,
+
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
+
     /// Maps LowLevel function name to its replacement
     lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
+
     /// Current block being emitted into
     current_block: BlockId,
 }
