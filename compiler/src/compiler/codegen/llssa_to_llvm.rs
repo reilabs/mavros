@@ -57,6 +57,13 @@ fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
     }
 }
 
+fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {
+    s.fields.iter().find_map(|field| match field {
+        LLFieldType::FlexArray(elem) => Some(elem),
+        _ => None,
+    })
+}
+
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
@@ -307,8 +314,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let elem = self.convert_struct_type(s);
                 elem.array_type(*n as u32).into()
             }
-            LLFieldType::FlexArray(_) => {
-                panic!("FlexArray is not supported in LLVM codegen")
+            LLFieldType::FlexArray(s) => {
+                let elem = self.convert_struct_type(s);
+                elem.array_type(0).into()
             }
         }
     }
@@ -975,15 +983,41 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLOp::HeapAlloc {
                 result,
                 struct_type,
-                flex_count: _,
+                flex_count,
             } => {
                 let struct_ty = self.convert_struct_type(struct_type);
                 let size = struct_ty.size_of().unwrap();
                 let i32_type = self.context.i32_type();
-                let size_i32 = self
+                let mut size_i32 = self
                     .builder
                     .build_int_truncate_or_bit_cast(size, i32_type, "size")
                     .unwrap();
+                if let Some(count) = flex_count {
+                    let flex_elem = ll_struct_flex_elem(struct_type)
+                        .expect("flex_count provided for struct with no FlexArray field");
+                    let elem_ty = self.convert_struct_type(flex_elem);
+                    let elem_size = elem_ty.size_of().unwrap();
+                    let elem_size_i32 = self
+                        .builder
+                        .build_int_truncate_or_bit_cast(elem_size, i32_type, "flex_elem_size")
+                        .unwrap();
+                    let count_i32 = self
+                        .builder
+                        .build_int_truncate_or_bit_cast(
+                            self.value_map[count].into_int_value(),
+                            i32_type,
+                            "flex_count",
+                        )
+                        .unwrap();
+                    let flex_size = self
+                        .builder
+                        .build_int_mul(elem_size_i32, count_i32, "flex_size")
+                        .unwrap();
+                    size_i32 = self
+                        .builder
+                        .build_int_add(size_i32, flex_size, "alloc_size")
+                        .unwrap();
+                }
                 let malloc_fn = self.malloc_fn.expect("malloc not declared");
                 let call_site = self
                     .builder

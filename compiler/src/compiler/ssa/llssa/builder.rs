@@ -463,6 +463,37 @@ impl LLEmitter for LLBlockEmitter<'_> {
 }
 
 impl LLBlockEmitter<'_> {
+    /// Build a counted loop with a runtime i64 upper bound:
+    /// `for i in 0..count { body(i, accumulators) -> updated_accumulators }`.
+    pub fn build_counted_loop_dyn(
+        &mut self,
+        count: ValueId,
+        accumulators: Vec<(ValueId, Type)>,
+        body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
+    ) -> Vec<ValueId> {
+        let const_0 = self.emit_int_const(64, 0);
+        let const_1 = self.emit_int_const(64, 1);
+
+        let mut params = vec![(const_0, Type::i64())];
+        params.extend(accumulators);
+
+        let results = self.build_loop(
+            params,
+            |b, loop_params| b.int_ult(loop_params[0], count),
+            |emitter, loop_params| {
+                let i_val = loop_params[0];
+                let acc_params = &loop_params[1..];
+                let updated_accs = body(emitter, i_val, acc_params);
+                let next_i = emitter.int_add(i_val, const_1);
+                let mut result = vec![next_i];
+                result.extend(updated_accs);
+                result
+            },
+        );
+
+        results[1..].to_vec()
+    }
+
     /// Build a counted loop: `for i in 0..count { body(i, accumulators) -> updated_accumulators }`
     ///
     /// LL variant: uses i64 index with int_ult/int_add.

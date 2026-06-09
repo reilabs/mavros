@@ -768,6 +768,16 @@ impl LLStruct {
         ])
     }
 
+    /// RC'd slice: { Inline(RcHeader), Int(64) table_id, Int(64) len, FlexArray(elem_struct) }
+    pub fn rc_slice(elem: LLStruct) -> Self {
+        Self::new(vec![
+            LLFieldType::Inline(Self::rc_header()),
+            LLFieldType::Int(64),
+            LLFieldType::Int(64),
+            LLFieldType::FlexArray(elem),
+        ])
+    }
+
     // ── AD node structs ────────────────────────────────────────────────
     // All AD nodes share a common prefix: { Inline(RcHeader), Int(32) }
     // so the tag can be read from any node pointer using ad_node_base().
