@@ -25,23 +25,6 @@ pub enum LowLevelReplacement {
     ByArraySize(HashMap<u32, AstFuncId>),
 }
 
-/// A step in a nested lvalue access path (e.g., `arr[i].field[j]`).
-#[derive(Debug)]
-enum AccessStep {
-    /// Array index: `arr[idx]`
-    Index(ValueId),
-    /// Tuple/struct field: `obj.field_N`
-    Field(usize),
-}
-
-#[derive(Debug)]
-struct Place {
-    /// Reference to the current addressable value.
-    ptr: ValueId,
-    /// Type of the value pointed to by `ptr`.
-    typ: AstType,
-}
-
 /// Loop context for break/continue support.
 struct LoopContext {
     loop_header: BlockId,
@@ -349,61 +332,7 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
-        let (place, steps) = self.resolve_lvalue_place(&assign.lvalue, b);
-
-        if steps.is_empty() {
-            b.block(self.current_block).store(place.ptr, new_value);
-            return None;
-        }
-
-        // Phase 1: Descend — load root, then extract at each level
-        let mut values = Vec::with_capacity(steps.len() + 1);
-        let mut types = Vec::with_capacity(steps.len() + 1);
-
-        {
-            let mut e = b.block(self.current_block);
-            values.push(e.load(place.ptr));
-            types.push(place.typ);
-
-            for step in &steps {
-                let parent = *values.last().unwrap();
-                let child = match step {
-                    AccessStep::Index(idx) => e.array_get(parent, *idx),
-                    AccessStep::Field(field_idx) => e.tuple_proj(parent, *field_idx),
-                };
-                let child_type = match (step, types.last().unwrap()) {
-                    (AccessStep::Index(_), AstType::Array(_, elem))
-                    | (AccessStep::Index(_), AstType::Vector(elem)) => elem.as_ref().clone(),
-                    (AccessStep::Field(idx), AstType::Tuple(fields)) => fields[*idx].clone(),
-                    (step, ty) => {
-                        panic!("Type mismatch in lvalue: step {:?} on type {:?}", step, ty)
-                    }
-                };
-                values.push(child);
-                types.push(child_type);
-            }
-        }
-
-        // Phase 2: Replace leaf
-        *values.last_mut().unwrap() = new_value;
-
-        // Phase 3: Ascend — reconstruct from leaf to root
-        for k in (0..steps.len()).rev() {
-            let modified_child = values[k + 1];
-            let parent = values[k];
-            values[k] = match &steps[k] {
-                AccessStep::Index(idx) => {
-                    b.block(self.current_block)
-                        .array_set(parent, *idx, modified_child)
-                }
-                AccessStep::Field(field_idx) => {
-                    self.synthesize_tuple_set(parent, *field_idx, modified_child, &types[k], b)
-                }
-            };
-        }
-
-        // Phase 4: Store reconstructed root
-        b.block(self.current_block).store(place.ptr, values[0]);
+        self.write_lvalue(&assign.lvalue, new_value, b);
         None
     }
 
@@ -443,123 +372,122 @@ impl<'a> ExpressionConverter<'a> {
         e.mk_tuple(elements, element_types)
     }
 
-    /// Resolve an lvalue into a real reference plus any suffix that must still be rebuilt as values.
-    ///
-    /// Tuple fields are projected as references while the prefix remains directly addressable.
-    /// Array elements are not directly addressable in HLSSA, so the first index and everything
-    /// after it is handled by the load/modify/rebuild/store path in `convert_assign`.
-    fn resolve_lvalue_place(
-        &mut self,
-        lvalue: &LValue,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> (Place, Vec<AccessStep>) {
+    fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
         match lvalue {
             LValue::Ident(ident) => match &ident.definition {
-                Definition::Local(local_id) => {
-                    if self.mutable_locals.contains(local_id) {
-                        let ptr = *self
-                            .bindings
-                            .get(local_id)
-                            .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
-                        (
-                            Place {
-                                ptr,
-                                typ: ident.typ.clone(),
-                            },
-                            vec![],
-                        )
-                    } else {
-                        panic!("Cannot assign to immutable local variable: {}", ident.name)
-                    }
+                Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
+                    let ptr = *self
+                        .bindings
+                        .get(local_id)
+                        .unwrap_or_else(|| panic!("Undefined mutable local: {:?}", local_id));
+                    b.block(self.current_block).store(ptr, value);
+                }
+                Definition::Local(_) => {
+                    panic!("Cannot assign to immutable local variable: {}", ident.name)
                 }
                 _ => panic!("Cannot assign to non-local: {:?}", ident.definition),
             },
-            LValue::Index { array, index, .. } => {
-                let (place, mut steps) = self.resolve_lvalue_place(array, b);
-                let idx_value = self.convert_expression(index, b).unwrap();
-                steps.push(AccessStep::Index(idx_value));
-                (place, steps)
+            LValue::Dereference { reference, .. } => {
+                let ptr = self.read_lvalue(reference, b);
+                b.block(self.current_block).store(ptr, value);
             }
             LValue::MemberAccess {
                 object,
                 field_index,
             } => {
-                let (mut place, mut steps) = self.resolve_lvalue_place(object, b);
-                if steps.is_empty() {
-                    place = self.project_tuple_place(place, *field_index, b);
-                } else {
-                    steps.push(AccessStep::Field(*field_index));
+                if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
+                    let field_ref = b
+                        .block(self.current_block)
+                        .tuple_ref_proj(tuple_ref, *field_index);
+                    b.block(self.current_block).store(field_ref, value);
+                    return;
                 }
-                (place, steps)
+
+                let tuple = self.read_lvalue(object, b);
+                let tuple_type = self.lvalue_type(object);
+                let updated = self.synthesize_tuple_set(tuple, *field_index, value, &tuple_type, b);
+                self.write_lvalue(object, updated, b);
             }
-            LValue::Dereference {
-                reference,
-                element_type,
-            } => {
-                let ptr = self.read_lvalue_value(reference, b);
-                (
-                    Place {
-                        ptr,
-                        typ: element_type.clone(),
-                    },
-                    vec![],
-                )
+            LValue::Index { array, index, .. } => {
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                let updated = b
+                    .block(self.current_block)
+                    .array_set(array_value, idx, value);
+                self.write_lvalue(array, updated, b);
             }
-            LValue::Clone(inner) => self.resolve_lvalue_place(inner, b),
+            LValue::Clone(inner) => self.write_lvalue(inner, value, b),
         }
     }
 
-    fn read_lvalue_value(&mut self, lvalue: &LValue, b: &mut HLFunctionBuilder<'_>) -> ValueId {
+    fn read_lvalue(&mut self, lvalue: &LValue, b: &mut HLFunctionBuilder<'_>) -> ValueId {
         match lvalue {
             LValue::Ident(ident) => self.convert_ident(ident, b).unwrap(),
             LValue::Dereference { reference, .. } => {
-                let ptr = self.read_lvalue_value(reference, b);
+                let ptr = self.read_lvalue(reference, b);
                 b.block(self.current_block).load(ptr)
             }
-            LValue::Clone(inner) => self.read_lvalue_value(inner, b),
-            LValue::Index { .. } | LValue::MemberAccess { .. } => {
-                let (place, steps) = self.resolve_lvalue_place(lvalue, b);
-                self.read_place_value(place, &steps, b)
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
+                    let field_ref = b
+                        .block(self.current_block)
+                        .tuple_ref_proj(tuple_ref, *field_index);
+                    return b.block(self.current_block).load(field_ref);
+                }
+
+                let tuple = self.read_lvalue(object, b);
+                b.block(self.current_block).tuple_proj(tuple, *field_index)
             }
+            LValue::Index { array, index, .. } => {
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                b.block(self.current_block).array_get(array_value, idx)
+            }
+            LValue::Clone(inner) => self.read_lvalue(inner, b),
         }
     }
 
-    fn read_place_value(
+    fn try_lvalue_ref(
         &mut self,
-        place: Place,
-        steps: &[AccessStep],
+        lvalue: &LValue,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
-        let mut e = b.block(self.current_block);
-        let mut value = e.load(place.ptr);
-        for step in steps {
-            value = match step {
-                AccessStep::Index(idx) => e.array_get(value, *idx),
-                AccessStep::Field(field_idx) => e.tuple_proj(value, *field_idx),
-            };
+    ) -> Option<ValueId> {
+        match lvalue {
+            LValue::Ident(ident) => match &ident.definition {
+                Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
+                    Some(*self.bindings.get(local_id).unwrap())
+                }
+                _ => None,
+            },
+            LValue::Dereference { reference, .. } => Some(self.read_lvalue(reference, b)),
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                let tuple_ref = self.try_lvalue_ref(object, b)?;
+                Some(
+                    b.block(self.current_block)
+                        .tuple_ref_proj(tuple_ref, *field_index),
+                )
+            }
+            LValue::Index { .. } => None,
+            LValue::Clone(inner) => self.try_lvalue_ref(inner, b),
         }
-        value
     }
 
-    fn project_tuple_place(
-        &mut self,
-        place: Place,
-        field_idx: usize,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> Place {
-        let fields = match place.typ {
-            AstType::Tuple(fields) => fields,
-            ty => panic!(
-                "Type mismatch in lvalue: field step {} on type {:?}",
-                field_idx, ty
-            ),
-        };
-        let ptr = b
-            .block(self.current_block)
-            .tuple_ref_proj(place.ptr, field_idx);
-        Place {
-            ptr,
-            typ: fields[field_idx].clone(),
+    fn lvalue_type(&self, lvalue: &LValue) -> AstType {
+        match lvalue {
+            LValue::Ident(ident) => ident.typ.clone(),
+            LValue::Dereference { element_type, .. } => element_type.clone(),
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => Self::tuple_field_type(&self.lvalue_type(object), *field_index),
+            LValue::Index { element_type, .. } => element_type.clone(),
+            LValue::Clone(inner) => self.lvalue_type(inner),
         }
     }
 
@@ -816,21 +744,20 @@ impl<'a> ExpressionConverter<'a> {
                 unary.operator,
                 noirc_frontend::ast::UnaryOp::Reference { .. }
             ) {
-                if let Some(place) = self.try_expression_place(unary.rhs.as_ref(), b) {
-                    return Some(place.ptr);
+                if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
+                    return Some(ptr);
                 }
             }
             return self.convert_expression(&unary.rhs, b);
         }
         match unary.operator {
-            noirc_frontend::ast::UnaryOp::Reference { .. } => {
-                if let Some(place) = self.try_expression_place(unary.rhs.as_ref(), b) {
-                    return Some(place.ptr);
+            noirc_frontend::ast::UnaryOp::Reference { mutable } => {
+                if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
+                    return Some(ptr);
                 }
-
-                if matches!(unary.rhs.as_ref(), Expression::ExtractTupleField(_, _)) {
+                if mutable {
                     todo!(
-                        "&mut on non-addressable tuple field not yet supported: {:?}",
+                        "&mut on non-addressable expression not supported: {:?}",
                         unary.rhs
                     );
                 }
@@ -878,97 +805,88 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn try_expression_place(
+    fn try_expression_ref(
         &mut self,
         expr: &Expression,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> Option<Place> {
+    ) -> Option<ValueId> {
         match expr {
             Expression::Ident(ident) => match &ident.definition {
                 Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
-                    Some(Place {
-                        ptr: *self.bindings.get(local_id).unwrap(),
-                        typ: ident.typ.clone(),
-                    })
+                    Some(*self.bindings.get(local_id).unwrap())
                 }
-                Definition::Local(local_id) if Self::is_reference_type(&ident.typ) => {
-                    let ptr = *self.bindings.get(local_id).unwrap();
-                    Some(Place {
-                        ptr,
-                        typ: Self::reference_pointee_type(&ident.typ).unwrap(),
-                    })
+                Definition::Local(local_id)
+                    if Self::reference_pointee_type(&ident.typ).is_some() =>
+                {
+                    Some(*self.bindings.get(local_id).unwrap())
                 }
                 _ => None,
             },
             Expression::Unary(unary) => {
                 if unary.skip {
-                    self.try_expression_place(unary.rhs.as_ref(), b)
+                    self.try_expression_ref(unary.rhs.as_ref(), b)
                 } else if matches!(
                     unary.operator,
                     noirc_frontend::ast::UnaryOp::Dereference { .. }
                 ) {
-                    if let Some(place) = self.try_expression_place(unary.rhs.as_ref(), b) {
-                        if place.typ == unary.result_type {
-                            return Some(place);
+                    if Self::expression_type(unary.rhs.as_ref())
+                        .is_some_and(|typ| typ == unary.result_type)
+                    {
+                        if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
+                            return Some(ptr);
                         }
                     }
-                    Some(Place {
-                        ptr: self.convert_expression(unary.rhs.as_ref(), b)?,
-                        typ: unary.result_type.clone(),
-                    })
-                } else if let Some(pointee_type) = Self::reference_pointee_type(&unary.result_type)
-                {
-                    Some(Place {
-                        ptr: self.convert_expression(expr, b)?,
-                        typ: pointee_type,
-                    })
+                    self.convert_expression(unary.rhs.as_ref(), b)
+                } else if Self::reference_pointee_type(&unary.result_type).is_some() {
+                    self.convert_expression(expr, b)
                 } else {
                     None
                 }
             }
             Expression::ExtractTupleField(tuple_expr, idx) => {
-                let base = self.try_tuple_place(tuple_expr.as_ref(), b)?;
-                Some(self.project_tuple_place(base, *idx, b))
+                let tuple_ref = self.try_tuple_expression_ref(tuple_expr.as_ref(), b)?;
+                Some(b.block(self.current_block).tuple_ref_proj(tuple_ref, *idx))
             }
-            Expression::Clone(inner) => self.try_expression_place(inner.as_ref(), b),
-            _ => Self::reference_pointee_type(&Self::expression_type(expr)?).and_then(|typ| {
-                self.convert_expression(expr, b)
-                    .map(|ptr| Place { ptr, typ })
-            }),
+            Expression::Clone(inner) => self.try_expression_ref(inner.as_ref(), b),
+            _ => {
+                if Self::reference_pointee_type(&Self::expression_type(expr)?).is_some() {
+                    self.convert_expression(expr, b)
+                } else {
+                    None
+                }
+            }
         }
     }
 
-    fn try_tuple_place(
+    fn try_tuple_expression_ref(
         &mut self,
         expr: &Expression,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> Option<Place> {
-        let place = self.try_expression_place(expr, b)?;
-        if matches!(place.typ, AstType::Tuple(_)) {
-            Some(place)
-        } else if let Some(tuple_type) = Self::reference_pointee_type(&place.typ) {
-            if matches!(tuple_type, AstType::Tuple(_)) {
-                let ptr = b.block(self.current_block).load(place.ptr);
-                Some(Place {
-                    ptr,
-                    typ: tuple_type,
-                })
-            } else {
-                None
+    ) -> Option<ValueId> {
+        match Self::expression_type(expr)? {
+            AstType::Reference(inner, _) if matches!(inner.as_ref(), AstType::Tuple(_)) => {
+                self.convert_expression(expr, b)
             }
-        } else {
-            None
+            AstType::Tuple(_) => self.try_expression_ref(expr, b),
+            _ => None,
         }
-    }
-
-    fn is_reference_type(typ: &AstType) -> bool {
-        matches!(typ, AstType::Reference(_, _))
     }
 
     fn reference_pointee_type(typ: &AstType) -> Option<AstType> {
         match typ {
             AstType::Reference(inner, _) => Some(*inner.clone()),
             _ => None,
+        }
+    }
+
+    fn tuple_field_type(typ: &AstType, idx: usize) -> AstType {
+        match typ {
+            AstType::Tuple(fields) => fields[idx].clone(),
+            AstType::Reference(inner, _) => Self::tuple_field_type(inner, idx),
+            _ => panic!(
+                "Type mismatch in tuple field access: field {} on {:?}",
+                idx, typ
+            ),
         }
     }
 
@@ -1023,9 +941,9 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        if let Some(tuple_place) = self.try_tuple_place(tuple_expr, b) {
+        if let Some(tuple_ref) = self.try_tuple_expression_ref(tuple_expr, b) {
             let mut e = b.block(self.current_block);
-            let field_ref = e.tuple_ref_proj(tuple_place.ptr, idx);
+            let field_ref = e.tuple_ref_proj(tuple_ref, idx);
             let result = e.load(field_ref);
             return Some(result);
         }
