@@ -742,22 +742,46 @@ impl UntaintControlFlow {
                 let ti = type_info.unwrap();
                 let ptr_type = ti.get_value_type(ptr);
                 let target_type = ptr_type.get_pointed();
-                let mut cast_instrs = Vec::new();
-                let converted = {
-                    let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    convert_if_needed(value, &target_type, ti, &mut builder)
-                };
-                for instr in cast_instrs {
-                    maybe_guard(new_instructions, block_taint, instr);
+                match block_taint {
+                    None => {
+                        let mut cast_instrs = Vec::new();
+                        let converted = {
+                            let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
+                            convert_if_needed(value, &target_type, ti, &mut builder)
+                        };
+                        for instr in cast_instrs {
+                            new_instructions.push(instr);
+                        }
+
+                        new_instructions.push(OpCode::Store {
+                            ptr,
+                            value: converted,
+                        });
+                    }
+                    // Per-leaf select lowering with casting
+                    Some(taint) => {
+                        let value_type: Type = ti.get_value_type(value).clone();
+                        let mut instrs = Vec::new();
+                        let merged = {
+                            let mut builder = HLInstrBuilder::new(function, ssa, &mut instrs);
+                            let current = builder.load(ptr);
+                            emit_merge_select(
+                                &mut builder,
+                                taint,
+                                value,
+                                current,
+                                None,
+                                &target_type,
+                                &value_type,
+                                &target_type,
+                            )
+                        };
+                        for instr in instrs {
+                            new_instructions.push(instr);
+                        }
+                        new_instructions.push(OpCode::Store { ptr, value: merged });
+                    }
                 }
-                maybe_guard(
-                    new_instructions,
-                    block_taint,
-                    OpCode::Store {
-                        ptr,
-                        value: converted,
-                    },
-                );
             }
             // -- Cast insertion for Select --
             OpCode::Select {
