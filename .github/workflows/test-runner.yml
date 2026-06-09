@@ -108,7 +108,7 @@ jobs:
         run: make build-test-runner
 
       - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 2
+        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 4
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
