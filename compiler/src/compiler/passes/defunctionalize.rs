@@ -465,7 +465,12 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
                             }
                         }
-                        OpCode::TupleProj { result, tuple, .. } => {
+                        OpCode::TupleProj { result, tuple, .. }
+                        | OpCode::TupleRefProj {
+                            result,
+                            tuple_ref: tuple,
+                            ..
+                        } => {
                             changed |= propagate(&mut reaching, (fid, *tuple), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *result)) {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *tuple));

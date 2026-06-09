@@ -150,7 +150,9 @@ impl UntaintControlFlow {
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
-                    OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::MkTuple { .. }
+                    | OpCode::TupleProj { .. }
+                    | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
                     OpCode::ReadGlobal {
                         result: r,
                         offset: l,

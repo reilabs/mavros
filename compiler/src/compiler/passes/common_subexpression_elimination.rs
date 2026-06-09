@@ -1040,7 +1040,9 @@ impl CSE {
                             result_expr,
                         );
                     }
-                    OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::TupleProj { .. }
+                    | OpCode::TupleRefProj { .. }
+                    | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }

@@ -10,10 +10,10 @@
 //!
 //! The net effect is that every value whose type *contains* a tuple expands into a fixed, ordered
 //! list of tuple-free "leaf" values, so a single `ValueId` is represented by a `Vec<ValueId>`.
-//! After this pass runs, no [`TypeExpr::Tuple`], `MkTuple` or `TupleProj` reaches any subsequent
-//! pass: the IR is tuple-free from here through the rest of HLSSA. Several downstream passes still
-//! *contain* tuple-handling arms (`untaint_control_flow`, `witness_lowering`, `rc_insertion`,
-//! codegen); those are now dead and can be removed as follow-up.
+//! After this pass runs, no [`TypeExpr::Tuple`], `MkTuple`, `TupleProj` or `TupleRefProj` reaches
+//! any subsequent pass: the IR is tuple-free from here through the rest of HLSSA. Several downstream
+//! passes still *contain* tuple-handling arms (`untaint_control_flow`, `witness_lowering`,
+//! `rc_insertion`, codegen); those are now dead and can be removed as follow-up.
 //!
 //! This pass is intended to run directly after `PrepareEntryPoint` (which itself synthesizes tuples
 //! while reconstructing the entry-point ABI).
@@ -26,8 +26,8 @@
 //!
 //! 1. **Plan:** build a `value_map: ValueId -> Vec<ValueId>` mapping every original value to its
 //!    component leaves. Tuple-free values map to themselves (no churn); tuple-bearing values get
-//!    freshly minted component ids. `MkTuple`/`TupleProj` results are *aliased* to slices of their
-//!    operands' components rather than allocated (they emit no instruction).
+//!    freshly minted component ids. `MkTuple`/`TupleProj`/`TupleRefProj` results are *aliased* to
+//!    slices of their operands' components rather than allocated (they emit no instruction).
 //! 2. **Rewrite (mutating):** flatten function returns, block parameters, instructions and
 //!    terminators using the `value_map`. Unreachable blocks (which the type snapshot never typed)
 //!    are dropped.
@@ -123,8 +123,9 @@ impl ElideTuples {
             }
         }
 
-        // Sweep B: instructions in dominator pre-order, so an aliasing op (`MkTuple`/`TupleProj`)
-        // always sees its operands' components already resolved.
+        // Sweep B: instructions in dominator pre-order, so an aliasing op
+        // (`MkTuple`/`TupleProj`/`TupleRefProj`) always sees its operands' components already
+        // resolved.
         for bid in reachable {
             for instr in func.get_block(*bid).get_instructions() {
                 Self::plan_instruction(ssa, instr, fti, &mut value_map);
@@ -177,6 +178,20 @@ impl ElideTuples {
                 let width = slot_count(&elements[*idx]);
                 let tuple_comps = components(value_map, *tuple);
                 value_map.insert(*result, tuple_comps[offset..offset + width].to_vec());
+            }
+            // `TupleRefProj` selects the slice of reference components belonging to the projected
+            // field of the pointed tuple.
+            OpCode::TupleRefProj {
+                result,
+                tuple_ref,
+                idx,
+            } => {
+                let tuple_type = fti.get_value_type(*tuple_ref).get_pointed();
+                let elements = tuple_type.get_tuple_elements();
+                let offset: usize = elements[..*idx].iter().map(slot_count).sum();
+                let width = slot_count(&elements[*idx]);
+                let tuple_ref_comps = components(value_map, *tuple_ref);
+                value_map.insert(*result, tuple_ref_comps[offset..offset + width].to_vec());
             }
             OpCode::Guard { .. } => panic!("ICE: Guard encountered during tuple elision"),
             // Every genuine result gets freshly-allocated components (or maps to itself when its
@@ -274,7 +289,7 @@ fn lower_instruction(
     out: &mut Vec<OpCode>,
 ) {
     match op {
-        OpCode::MkTuple { .. } | OpCode::TupleProj { .. } => {}
+        OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {}
 
         // Global opcodes carry an absolute slot index that the renumbering in `run` shifts, so they
         // need explicit handling: remap the slot through `global_offsets` and fan out per-leaf.
@@ -731,6 +746,10 @@ fn verify_op_tuple_free(op: &OpCode, fid: FunctionId, bid: BlockId) {
         ),
         OpCode::TupleProj { .. } => panic!(
             "elide_tuples verification: fn {:?} block_{} still contains a TupleProj",
+            fid, bid.0
+        ),
+        OpCode::TupleRefProj { .. } => panic!(
+            "elide_tuples verification: fn {:?} block_{} still contains a TupleRefProj",
             fid, bid.0
         ),
         OpCode::Alloc { elem_type, .. } => assert_free(elem_type, "alloc element type"),

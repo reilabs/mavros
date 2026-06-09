@@ -95,7 +95,9 @@ impl WitnessWriteToFresh {
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. }
                         | OpCode::Guard { .. } => instruction.clone(),
-                        OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                        OpCode::TupleProj { .. }
+                        | OpCode::TupleRefProj { .. }
+                        | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     };
                     *instruction = new_instruction;
                 }

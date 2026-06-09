@@ -126,7 +126,9 @@ impl DCE {
             | OpCode::ValueOf { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => false,
-            OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+            OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
+                ice_non_elided_tuple()
+            }
             OpCode::Guard { inner, .. } => self.is_initially_live(inner.as_ref()),
         }
     }

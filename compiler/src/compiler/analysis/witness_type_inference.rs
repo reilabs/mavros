@@ -812,7 +812,9 @@ impl WitnessTypeInference {
                         WitnessShape::Array(WitnessType::Pure, Box::new(val_wt)),
                     );
                 }
-                OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
+                    ice_non_elided_tuple()
+                }
                 OpCode::WriteWitness { result, .. } => {
                     // WriteWitness records a value on the witness tape.
                     // Its output is always Witness-typed.

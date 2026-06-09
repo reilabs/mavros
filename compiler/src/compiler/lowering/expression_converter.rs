@@ -345,7 +345,8 @@ impl<'a> ExpressionConverter<'a> {
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
 
         // Flatten the lvalue into a root pointer + access path
-        let (root_ptr, root_type, steps) = self.flatten_lvalue(&assign.lvalue, b);
+        let (mut root_ptr, mut root_type, mut steps) = self.flatten_lvalue(&assign.lvalue, b);
+        self.project_leading_tuple_field_refs(&mut root_ptr, &mut root_type, &mut steps, b);
 
         if steps.is_empty() {
             // Simple variable assignment — store directly
@@ -509,6 +510,37 @@ impl<'a> ExpressionConverter<'a> {
                 (ptr, element_type.clone(), vec![])
             }
             LValue::Clone(inner) => self.flatten_lvalue(inner, b),
+        }
+    }
+
+    /// Turn leading tuple field accesses in an lvalue into pointer projections.
+    ///
+    /// Field accesses after an array index still use the value-level rebuild path because HLSSA does
+    /// not have an array element reference projection.
+    fn project_leading_tuple_field_refs(
+        &mut self,
+        root_ptr: &mut ValueId,
+        root_type: &mut noirc_frontend::monomorphization::ast::Type,
+        steps: &mut Vec<AccessStep>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+
+        while let Some(AccessStep::Field(field_idx)) = steps.first() {
+            let field_idx = *field_idx;
+            let field_type = match root_type {
+                AstType::Tuple(fields) => fields[field_idx].clone(),
+                ty => panic!(
+                    "Type mismatch in lvalue: field step {} on type {:?}",
+                    field_idx, ty
+                ),
+            };
+
+            *root_ptr = b
+                .block(self.current_block)
+                .tuple_ref_proj(*root_ptr, field_idx);
+            *root_type = field_type;
+            steps.remove(0);
         }
     }
 
@@ -761,29 +793,27 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         if unary.skip {
+            if matches!(
+                unary.operator,
+                noirc_frontend::ast::UnaryOp::Reference { .. }
+            ) {
+                if let Some(ptr) = self.try_convert_addressable_ref(unary.rhs.as_ref(), b) {
+                    return Some(ptr);
+                }
+            }
             return self.convert_expression(&unary.rhs, b);
         }
         match unary.operator {
             noirc_frontend::ast::UnaryOp::Reference { .. } => {
-                // &mut x on a let-mut local: return the ptr directly (no load)
-                if let Expression::Ident(ident) = unary.rhs.as_ref() {
-                    if let Definition::Local(local_id) = &ident.definition {
-                        if self.mutable_locals.contains(local_id) {
-                            let ptr = *self.bindings.get(local_id).unwrap();
-                            return Some(ptr);
-                        }
-                    }
+                if let Some(ptr) = self.try_convert_addressable_ref(unary.rhs.as_ref(), b) {
+                    return Some(ptr);
                 }
-                // &mut expr.field — would require splicing a pointer into an
-                // existing allocation (aliasing). Not yet supported.
-                if let Expression::ExtractTupleField(inner, _) = unary.rhs.as_ref() {
-                    let is_deref = matches!(inner.as_ref(), Expression::Unary(u) if matches!(u.operator, noirc_frontend::ast::UnaryOp::Dereference { .. }));
-                    if !is_deref {
-                        todo!(
-                            "&mut on tuple field requiring pointer splicing not yet supported: {:?}",
-                            unary.rhs
-                        );
-                    }
+
+                if matches!(unary.rhs.as_ref(), Expression::ExtractTupleField(_, _)) {
+                    todo!(
+                        "&mut on non-addressable tuple field not yet supported: {:?}",
+                        unary.rhs
+                    );
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
@@ -829,6 +859,52 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    fn try_convert_addressable_ref(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match expr {
+            Expression::Ident(ident) => match &ident.definition {
+                Definition::Local(local_id) if self.mutable_locals.contains(local_id) => {
+                    Some(*self.bindings.get(local_id).unwrap())
+                }
+                _ => None,
+            },
+            Expression::Unary(unary) => {
+                if unary.skip {
+                    self.try_convert_addressable_ref(unary.rhs.as_ref(), b)
+                } else if matches!(
+                    unary.operator,
+                    noirc_frontend::ast::UnaryOp::Dereference { .. }
+                ) {
+                    self.convert_expression(unary.rhs.as_ref(), b)
+                } else {
+                    None
+                }
+            }
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                let tuple_ref = if Self::is_reference_expression(tuple_expr.as_ref()) {
+                    self.convert_expression(tuple_expr.as_ref(), b)?
+                } else {
+                    self.try_convert_addressable_ref(tuple_expr.as_ref(), b)?
+                };
+                Some(b.block(self.current_block).tuple_ref_proj(tuple_ref, *idx))
+            }
+            Expression::Clone(inner) => self.try_convert_addressable_ref(inner.as_ref(), b),
+            _ => None,
+        }
+    }
+
+    fn is_reference_expression(expr: &Expression) -> bool {
+        expr.return_type().is_some_and(|typ| {
+            matches!(
+                typ.as_ref(),
+                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
+            )
+        })
+    }
+
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
@@ -851,15 +927,12 @@ impl<'a> ExpressionConverter<'a> {
         idx: usize,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let mut value = self.convert_expression(tuple_expr, b).unwrap();
-        // If the expression is a reference (e.g. &mut self), load through it first
-        if let Some(typ) = tuple_expr.return_type() {
-            if matches!(
-                typ.as_ref(),
-                noirc_frontend::monomorphization::ast::Type::Reference(_, _)
-            ) {
-                value = b.block(self.current_block).load(value);
-            }
+        let value = self.convert_expression(tuple_expr, b).unwrap();
+        if Self::is_reference_expression(tuple_expr) {
+            let mut e = b.block(self.current_block);
+            let field_ref = e.tuple_ref_proj(value, idx);
+            let result = e.load(field_ref);
+            return Some(result);
         }
         let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)

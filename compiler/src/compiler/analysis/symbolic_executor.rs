@@ -567,6 +567,7 @@ impl SymbolicExecutor {
                         ctx.dlookup(target, args, flag_value);
                     }
                     crate::compiler::ssa::hlssa::OpCode::TupleProj { .. }
+                    | crate::compiler::ssa::hlssa::OpCode::TupleRefProj { .. }
                     | crate::compiler::ssa::hlssa::OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     crate::compiler::ssa::hlssa::OpCode::Todo {
                         payload,

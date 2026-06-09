@@ -662,6 +662,21 @@ impl Types {
                 function_info.values.insert(*result, element_type);
                 Ok(())
             }
+            OpCode::TupleRefProj {
+                result,
+                tuple_ref,
+                idx,
+            } => {
+                let tuple_ref_type = function_info.values.get(tuple_ref).ok_or_else(|| {
+                    format!(
+                        "Tuple reference value {:?} not found in type assignments",
+                        tuple_ref
+                    )
+                })?;
+                let element_type = tuple_ref_type.get_pointed().get_tuple_element(*idx);
+                function_info.values.insert(*result, element_type.ref_of());
+                Ok(())
+            }
             OpCode::MkTuple {
                 result,
                 elems: _,
