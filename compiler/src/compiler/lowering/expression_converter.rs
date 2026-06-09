@@ -742,12 +742,14 @@ impl<'a> ExpressionConverter<'a> {
                 e.store(ptr, value);
                 Some(ptr)
             }
+            noirc_frontend::ast::UnaryOp::Dereference { .. } => {
+                let value = self.convert_expression(&unary.rhs, b).unwrap();
+                Some(b.block(self.current_block).load(value))
+            }
             _ => {
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
                 let result = match unary.operator {
-                    noirc_frontend::ast::UnaryOp::Dereference { .. } => {
-                        b.block(self.current_block).load(value)
-                    }
+                    noirc_frontend::ast::UnaryOp::Dereference { .. } => unreachable!(),
                     noirc_frontend::ast::UnaryOp::Not => b.block(self.current_block).not(value),
                     noirc_frontend::ast::UnaryOp::Minus => {
                         use noirc_frontend::monomorphization::ast::Type as AstType;
@@ -796,14 +798,7 @@ impl<'a> ExpressionConverter<'a> {
                     unary.operator,
                     noirc_frontend::ast::UnaryOp::Dereference { .. }
                 ) {
-                    if Self::expression_type(unary.rhs.as_ref())
-                        .is_some_and(|typ| typ == unary.result_type)
-                    {
-                        if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
-                            return Some(ptr);
-                        }
-                    }
-                    self.convert_expression(unary.rhs.as_ref(), b)
+                    Some(self.convert_expression(unary.rhs.as_ref(), b).unwrap())
                 } else {
                     None
                 }
@@ -854,11 +849,13 @@ impl<'a> ExpressionConverter<'a> {
                 .collect::<Option<Vec<_>>>()
                 .map(AstType::Tuple),
             Expression::ExtractTupleField(tuple_expr, idx) => {
-                let tuple_type = match Self::expression_type(tuple_expr.as_ref())? {
-                    AstType::Reference(inner, _) => *inner,
-                    typ => typ,
-                };
-                match tuple_type {
+                match Self::expression_type(tuple_expr.as_ref())? {
+                    AstType::Reference(inner, mutable) => match inner.as_ref() {
+                        AstType::Tuple(fields) => {
+                            Some(AstType::Reference(Box::new(fields[*idx].clone()), mutable))
+                        }
+                        _ => None,
+                    },
                     AstType::Tuple(fields) => Some(fields[*idx].clone()),
                     _ => None,
                 }
@@ -892,10 +889,7 @@ impl<'a> ExpressionConverter<'a> {
             Self::expression_type(tuple_expr),
             Some(AstType::Reference(inner, _)) if matches!(inner.as_ref(), AstType::Tuple(_))
         ) {
-            let mut e = b.block(self.current_block);
-            let field_ref = e.tuple_ref_proj(value, idx);
-            let result = e.load(field_ref);
-            return Some(result);
+            return Some(b.block(self.current_block).tuple_ref_proj(value, idx));
         }
         let result = b.block(self.current_block).tuple_proj(value, idx);
         Some(result)
