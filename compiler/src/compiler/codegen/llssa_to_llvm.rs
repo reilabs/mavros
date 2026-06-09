@@ -342,7 +342,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         global.set_constant(true);
         global.set_linkage(Linkage::Private);
         global.set_unnamed_addr(true);
-        global.set_section(Some(".rodata"));
 
         let zero = self.context.i32_type().const_zero();
         unsafe {

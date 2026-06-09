@@ -1663,7 +1663,7 @@ pub enum SliceOpDir {
 // CONSTANTS
 // ================================================================================================
 
-/// The value type stored in the high-level SSA's constants side-table.
+/// A compile-time-only sequence of constants used for long constant data.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Blob {
     pub elements: Vec<Constant>,
@@ -1683,6 +1683,7 @@ impl Blob {
     }
 }
 
+/// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
     U(usize, u128),

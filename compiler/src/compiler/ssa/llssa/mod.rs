@@ -88,7 +88,7 @@ impl Constant {
     ///
     /// `InlineArray`/`FlexArray` fields are memory-only and have no constant form,
     /// so they never match; any other mismatched pairing is rejected too.
-    pub(crate) fn matches_field(&self, field: &LLFieldType) -> bool {
+    pub fn matches_field(&self, field: &LLFieldType) -> bool {
         match (self, field) {
             (Constant::Int { bits, .. }, LLFieldType::Int(w)) => bits == w,
             (Constant::NullPtr, LLFieldType::Ptr) => true,

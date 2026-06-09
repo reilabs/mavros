@@ -464,7 +464,7 @@ impl Types {
                     Some(Type {
                         expr: TypeExpr::Blob(len),
                     }) => *len,
-                    other => panic!("MkSeqOfBlob expected Blob input, got {:?}", other),
+                    other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
                 };
                 function_info
                     .values
