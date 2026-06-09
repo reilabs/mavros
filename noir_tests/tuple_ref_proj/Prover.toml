@@ -1,3 +1,7 @@
 x = "10"
 expected_sum = "23"
 expected_second = "12"
+expected_deep_inner = "31"
+expected_deep_total = "121"
+expected_mixed_tail = "35"
+expected_mixed_total = "80"
