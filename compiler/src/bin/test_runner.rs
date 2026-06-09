@@ -63,10 +63,27 @@ fn main() {
         return;
     }
 
+    // Merge mode: --merge <output> <input1> [<input2> ...]
+    // Combines partial STATUS files (produced by sharded test jobs) into one.
+    if args.len() >= 4 && args[1] == "--merge" {
+        let output = PathBuf::from(&args[2]);
+        let inputs: Vec<PathBuf> = args[3..].iter().map(PathBuf::from).collect();
+        merge_status(&output, &inputs);
+        return;
+    }
+
     // Parent mode
     let output_path = parse_output_arg(&args);
     let jobs = parse_jobs_arg(&args);
-    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
+    let filters = parse_multi_arg(&args, "--filter");
+    let excludes = parse_multi_arg(&args, "--exclude");
+    run_parent(
+        &output_path,
+        jobs,
+        DEFAULT_IGNORED_TESTS,
+        &filters,
+        &excludes,
+    );
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[];
@@ -95,6 +112,23 @@ fn parse_jobs_arg(args: &[String]) -> usize {
         i += 1;
     }
     1
+}
+
+/// Collect every value of a repeatable `--flag <value>` argument. Used by
+/// `--filter`/`--exclude` so a job can shard the test set by display-name
+/// substring (e.g. `--filter passport` or `--exclude passport`).
+fn parse_multi_arg(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == flag && i + 1 < args.len() {
+            values.push(args[i + 1].clone());
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    values
 }
 
 // ── Child: run a single test ──────────────────────────────────────────
@@ -1097,7 +1131,13 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
     dirs
 }
 
-fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
+fn run_parent(
+    output_path: &Path,
+    jobs: usize,
+    ignored_tests: &[&str],
+    filters: &[String],
+    excludes: &[String],
+) {
     let mut entries: Vec<TestEntry> = Vec::new();
 
     // 1. Local noir_tests/ directory
@@ -1123,6 +1163,20 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
     }
 
     assert!(!entries.is_empty(), "No test directories found");
+
+    // Shard the test set by display-name substring. `--filter` keeps only
+    // matching tests; `--exclude` drops matching tests. Used to run the heavy
+    // passport circuits on a separate CI runner from everything else.
+    if !filters.is_empty() {
+        entries.retain(|e| filters.iter().any(|f| e.display_name.contains(f.as_str())));
+    }
+    if !excludes.is_empty() {
+        entries.retain(|e| !excludes.iter().any(|x| e.display_name.contains(x.as_str())));
+    }
+    assert!(
+        !entries.is_empty(),
+        "No test directories matched the given --filter/--exclude"
+    );
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
     let total = entries.len();
@@ -1598,10 +1652,61 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     println!("\n</details>");
 }
 
+/// Header row of the STATUS table (trailing newline included).
+const TABLE_HEADER: &str = "| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n";
+/// Markdown separator row that follows the header (trailing newline included).
+const TABLE_SEPARATOR: &str = "|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n";
+
+/// Combine partial STATUS files into one, preserving the canonical row order
+/// (local `noir_tests/` first, then `noir/` tests, each alphabetical) so the
+/// committed baseline stays stable regardless of how tests were sharded.
+fn merge_status(output_path: &Path, inputs: &[PathBuf]) {
+    let mut rows: Vec<String> = Vec::new();
+    for path in inputs {
+        let content = fs::read_to_string(path)
+            .unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
+        // Skip the header + separator lines; keep the data rows.
+        for line in content.lines().skip(2) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            rows.push(line.to_string());
+        }
+    }
+    rows.sort_by(|a, b| merge_sort_key(a).cmp(&merge_sort_key(b)));
+
+    let mut md = String::new();
+    md.push_str(TABLE_HEADER);
+    md.push_str(TABLE_SEPARATOR);
+    for row in &rows {
+        md.push_str(row);
+        md.push('\n');
+    }
+    fs::write(output_path, &md).expect("Cannot write merged output file");
+    eprintln!(
+        "Merged {} file(s) into {}",
+        inputs.len(),
+        output_path.display()
+    );
+}
+
+/// Sort key reproducing the order `run_parent` emits: local `noir_tests/`
+/// rows (group 0) before `noir/` rows (group 1), each alphabetical by name.
+fn merge_sort_key(row: &str) -> (u8, String) {
+    let name = row
+        .split('|')
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+    let group = if name.starts_with("noir_tests/") { 0 } else { 1 };
+    (group, name)
+}
+
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n");
+    md.push_str(TABLE_HEADER);
+    md.push_str(TABLE_SEPARATOR);
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();

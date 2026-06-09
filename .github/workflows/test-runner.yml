@@ -68,8 +68,62 @@ jobs:
         uses: bnjbvr/cargo-machete@main
 
   test:
-    name: Run Tests
+    # Shard the suite so the heavy passport circuits run on their own runner,
+    # in parallel with everything else. Each shard writes a partial STATUS file
+    # that the `merge` job stitches back together.
+    name: Run Tests (${{ matrix.shard.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: main
+            select: --exclude passport
+          - name: passport
+            select: --filter passport
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Download Nix Dependencies
+        run: nix develop
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build Test Runner
+        run: make build-test-runner
+
+      - name: Run Tests
+        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS-${{ matrix.shard.name }}.md --jobs 4 ${{ matrix.shard.select }}
+
+      - name: Upload Partial STATUS
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-${{ matrix.shard.name }}
+          path: STATUS-${{ matrix.shard.name }}.md
+          retention-days: 1
+
+  merge:
+    name: Merge Results
+    runs-on: ubuntu-latest
+    needs: test
     steps:
       - name: Generate MavrosBot token
         id: app-token
@@ -107,8 +161,15 @@ jobs:
       - name: Build Test Runner
         run: make build-test-runner
 
-      - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 4
+      - name: Download Partial STATUS Files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: status-*
+          merge-multiple: true
+          path: .
+
+      - name: Merge STATUS files
+        run: nix develop --command cargo run --release --bin test-runner -- --merge STATUS.md STATUS-main.md STATUS-passport.md
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
