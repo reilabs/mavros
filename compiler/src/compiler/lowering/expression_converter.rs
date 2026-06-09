@@ -738,15 +738,9 @@ impl<'a> ExpressionConverter<'a> {
             return self.convert_expression(&unary.rhs, b);
         }
         match unary.operator {
-            noirc_frontend::ast::UnaryOp::Reference { mutable } => {
+            noirc_frontend::ast::UnaryOp::Reference { .. } => {
                 if let Some(ptr) = self.try_expression_ref(unary.rhs.as_ref(), b) {
                     return Some(ptr);
-                }
-                if mutable {
-                    todo!(
-                        "&mut on non-addressable expression not supported: {:?}",
-                        unary.rhs
-                    );
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
