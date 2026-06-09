@@ -178,13 +178,13 @@ impl ElideTuples {
                 let tuple_comps = components(value_map, *tuple);
                 value_map.insert(*result, tuple_comps[offset..offset + width].to_vec());
             }
-            OpCode::Guard { inner, .. } => Self::plan_instruction(ssa, inner, fti, value_map),
+            OpCode::Guard { .. } => panic!("ICE: Guard encountered during tuple elision"),
             // Every genuine result gets freshly-allocated components (or maps to itself when its
             // type is already tuple-free).
             other => {
                 for result in other.get_results() {
                     if value_map.contains_key(result) {
-                        continue;
+                        panic!("ICE: Value encountered before visiting its definition");
                     }
                     let ty = fti.get_value_type(*result);
                     let comps = alloc_components(ssa, *result, ty);
