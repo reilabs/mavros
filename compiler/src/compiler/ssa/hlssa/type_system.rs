@@ -16,6 +16,7 @@ pub enum TypeExpr {
     Ref(Box<Type>),
     Tuple(Vec<Type>),
     Function,
+    Blob(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,7 @@ impl Display for Type {
                     .join(", ")
             ),
             TypeExpr::Function => write!(f, "Function"),
+            TypeExpr::Blob(len) => write!(f, "Blob<{}>", len),
         }
     }
 }
@@ -79,6 +81,12 @@ impl Type {
     pub fn function() -> Self {
         Type {
             expr: TypeExpr::Function,
+        }
+    }
+
+    pub fn blob(len: usize) -> Self {
+        Type {
+            expr: TypeExpr::Blob(len),
         }
     }
 
@@ -178,6 +186,10 @@ impl Type {
 
     pub fn is_function(&self) -> bool {
         matches!(self.expr, TypeExpr::Function)
+    }
+
+    pub fn is_blob(&self) -> bool {
+        matches!(self.expr, TypeExpr::Blob(_))
     }
 
     pub fn has_eq(&self) -> bool {
@@ -329,6 +341,7 @@ impl Type {
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => x == y, // invariant
             (TypeExpr::Function, TypeExpr::Function) => true,
+            (TypeExpr::Blob(n), TypeExpr::Blob(m)) => n == m,
             _ => false,
         }
     }
@@ -388,6 +401,10 @@ impl Type {
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => Type::join(x, y).ref_of(),
             (TypeExpr::Function, TypeExpr::Function) => Type::function(),
+            (TypeExpr::Blob(n), TypeExpr::Blob(m)) => {
+                assert_eq!(n, m, "Cannot join Blob({}) and Blob({})", n, m);
+                Type::blob(*n)
+            }
             _ => panic!("Cannot join types {} and {}", a, b),
         }
     }
@@ -435,6 +452,7 @@ impl Type {
             TypeExpr::U(_) => false,
             TypeExpr::I(_) => false,
             TypeExpr::Function => false,
+            TypeExpr::Blob(_) => false,
             TypeExpr::Tuple(elements) => elements.iter().any(|e| e.contains_ptrs()),
         }
     }
@@ -447,6 +465,7 @@ impl Type {
                 inner_types.iter().map(|t| t.calculate_type_size()).sum()
             }
             TypeExpr::Function => 1,
+            TypeExpr::Blob(_) => 1,
             TypeExpr::U(_) => 1,
             TypeExpr::I(_) => 1,
             TypeExpr::WitnessOf(_) => 1, // pointer-sized (witness tape reference)

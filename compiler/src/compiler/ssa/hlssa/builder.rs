@@ -345,6 +345,16 @@ pub trait HLEmitter {
         r
     }
 
+    fn mk_seq_of_blob(&mut self, element_type: Type, blob: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::MkSeqOfBlob {
+            result: r,
+            element_type,
+            blob,
+        });
+        r
+    }
+
     fn mk_repeated(
         &mut self,
         element: ValueId,
@@ -671,7 +681,7 @@ impl HLBlockEmitter<'_> {
                     .collect();
                 self.mk_tuple(elems, element_types.clone())
             }
-            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
+            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(_) => {
                 panic!("cannot build a default value for type {}", typ)
             }
         }

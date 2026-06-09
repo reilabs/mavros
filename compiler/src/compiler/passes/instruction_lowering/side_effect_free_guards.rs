@@ -68,6 +68,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::BitRange { .. }
             | OpCode::Not { .. }
             | OpCode::MkSeq { .. }
+            | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
             | OpCode::Alloc { .. }
             | OpCode::Load { .. }

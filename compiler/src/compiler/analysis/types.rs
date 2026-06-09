@@ -23,6 +23,7 @@ pub fn const_value_type(value: &Constant) -> Type {
         Constant::I(size, _) => Type::i(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
+        Constant::Blob(blob) => Type::blob(blob.len()),
     }
 }
 
@@ -35,6 +36,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
         TypeExpr::Tuple(fields) => {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
+        TypeExpr::Blob(_) => t,
         TypeExpr::Ref(_) | TypeExpr::Function => Type::witness_of(t),
     }
 }
@@ -451,6 +453,22 @@ impl Types {
                 elem_type: t,
             } => {
                 function_info.values.insert(*r, top_tp.of(t.clone()));
+                Ok(())
+            }
+            OpCode::MkSeqOfBlob {
+                result: r,
+                element_type,
+                blob,
+            } => {
+                let len = match function_info.values.get(blob) {
+                    Some(Type {
+                        expr: TypeExpr::Blob(len),
+                    }) => *len,
+                    other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
+                };
+                function_info
+                    .values
+                    .insert(*r, element_type.clone().array_of(len));
                 Ok(())
             }
             OpCode::MkRepeated {

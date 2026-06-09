@@ -340,6 +340,22 @@ impl RCInsertion {
                         }
                         currently_live.extend(inputs);
                     }
+                    OpCode::MkSeqOfBlob {
+                        result,
+                        element_type,
+                        blob: _,
+                    } => {
+                        new_instructions.push(instruction.clone());
+                        assert!(
+                            !self.type_needs_rc(element_type),
+                            "MkSeqOfBlob only supports scalar element types"
+                        );
+                        if !currently_live.contains(result) {
+                            panic!(
+                                "ICE: Result of MkSeqOfBlob is immediately dropped. This is a bug."
+                            )
+                        }
+                    }
                     OpCode::MkRepeated {
                         result,
                         element,
@@ -789,6 +805,7 @@ impl RCInsertion {
             TypeExpr::WitnessOf(_) => true,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => false,
+            TypeExpr::Blob(_) => false,
         }
     }
 }

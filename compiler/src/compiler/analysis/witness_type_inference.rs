@@ -303,6 +303,10 @@ impl WitnessTypeInference {
                 Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
                     WitnessShape::Scalar(WitnessType::Pure)
                 }
+                Constant::Blob(_) => WitnessShape::Array(
+                    WitnessType::Pure,
+                    Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+                ),
             };
             value_wt.insert(*vid, shape);
         });
@@ -770,6 +774,17 @@ impl WitnessTypeInference {
                         WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
                     );
                 }
+                OpCode::MkSeqOfBlob {
+                    result,
+                    element_type: tp,
+                    blob: _,
+                } => {
+                    let result_wt = Self::construct_pure_witness_for_type(tp);
+                    value_wt.insert(
+                        *result,
+                        WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
+                    );
+                }
                 OpCode::MkRepeated {
                     result,
                     element,
@@ -914,6 +929,10 @@ impl WitnessTypeInference {
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => WitnessShape::Scalar(WitnessType::Pure),
+            TypeExpr::Blob(_) => WitnessShape::Array(
+                WitnessType::Pure,
+                Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+            ),
         }
     }
 }
