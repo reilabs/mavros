@@ -134,6 +134,18 @@ impl WitnessLowering {
                                 elem_type: new_elem_type,
                             });
                         }
+                        OpCode::MkSeqOfBlob {
+                            result: r,
+                            element_type: tp,
+                            blob,
+                        } => {
+                            let new_elem_type = self.witness_lowering_in_type(&tp);
+                            emitter.emit(OpCode::MkSeqOfBlob {
+                                result: r,
+                                element_type: new_elem_type,
+                                blob,
+                            });
+                        }
                         OpCode::MkRepeated {
                             result: r,
                             element,
@@ -628,6 +640,7 @@ impl WitnessLowering {
             TypeExpr::Ref(inner) => self.witness_lowering_in_type(inner).ref_of(),
             TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),
+            TypeExpr::Blob(_) => tp.clone(),
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
     }

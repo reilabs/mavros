@@ -624,7 +624,11 @@ pub fn contains_tuple(ty: &Type) -> bool {
         | TypeExpr::Slice(inner)
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => contains_tuple(inner),
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Function => false,
+        TypeExpr::Field
+        | TypeExpr::U(_)
+        | TypeExpr::I(_)
+        | TypeExpr::Function
+        | TypeExpr::Blob(_) => false,
     }
 }
 
@@ -636,7 +640,11 @@ fn slot_count(ty: &Type) -> usize {
         | TypeExpr::Slice(inner)
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => slot_count(inner),
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Function => 1,
+        TypeExpr::Field
+        | TypeExpr::U(_)
+        | TypeExpr::I(_)
+        | TypeExpr::Function
+        | TypeExpr::Blob(_) => 1,
     }
 }
 
@@ -653,7 +661,11 @@ fn witness_of_leaf(leaf: Type) -> Type {
 /// upward through `Array`/`Slice`/`Ref`/`WitnessOf`.
 fn leaf_types(ty: &Type) -> Vec<Type> {
     match &ty.expr {
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Function => vec![ty.clone()],
+        TypeExpr::Field
+        | TypeExpr::U(_)
+        | TypeExpr::I(_)
+        | TypeExpr::Function
+        | TypeExpr::Blob(_) => vec![ty.clone()],
         TypeExpr::Tuple(elements) => elements.iter().flat_map(leaf_types).collect(),
         TypeExpr::Array(inner, n) => leaf_types(inner)
             .into_iter()

@@ -11,7 +11,9 @@ use crate::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, TypeInfo},
         },
-        codegen::bytecode::layout::{FrameLayouter, GlobalFrameLayouter, StructLayoutInterner},
+        codegen::bytecode::layout::{
+            FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+        },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
@@ -68,53 +70,87 @@ fn materialize_constants(
     referenced.sort_by_key(|v| v.0);
 
     for vid in referenced {
-        match constants.get(&vid).expect("vid is in constants").as_ref() {
-            hlssa::Constant::U(size, val) => {
-                let res = layouter.alloc_int(vid, *size);
-                match size {
-                    bits if *bits <= 64 => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res,
-                            val: *val as u64,
-                        });
-                    }
-                    128 => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res,
-                            val: *val as u64,
-                        });
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res: res.offset(1),
-                            val: (*val >> 64) as u64,
-                        });
-                    }
-                    bits => panic!("unsupported unsigned integer width: {bits}"),
-                }
+        let constant = constants.get(&vid).expect("vid is in constants").as_ref();
+        let res = match constant {
+            hlssa::Constant::U(size, _) => layouter.alloc_int(vid, *size),
+            hlssa::Constant::I(size, _) => layouter.alloc_int(vid, *size),
+            hlssa::Constant::Field(_) => layouter.alloc_field(vid),
+            hlssa::Constant::Blob(_) => {
+                layouter.alloc_long_data(vid, constant_cell_count(constant))
             }
-            hlssa::Constant::I(size, val) => {
-                assert!(
-                    *size <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                let res = layouter.alloc_int(vid, *size);
+            hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+        };
+        spill_constant_to_frame(constant, res, emitter);
+    }
+}
+
+fn constant_cell_count(value: &hlssa::Constant) -> usize {
+    match value {
+        hlssa::Constant::U(bits, _) => int_cell_count(*bits),
+        hlssa::Constant::I(bits, _) => {
+            assert!(
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            1
+        }
+        hlssa::Constant::Field(_) => bytecode::FELT_LIMBS,
+        hlssa::Constant::Blob(blob) => blob.elements.iter().map(constant_cell_count).sum(),
+        hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+    }
+}
+
+fn spill_constant_to_frame(
+    value: &hlssa::Constant,
+    res: bytecode::FramePosition,
+    emitter: &mut EmitterState,
+) {
+    match value {
+        hlssa::Constant::U(size, val) => match size {
+            bits if *bits <= 64 => {
                 emitter.push_op(bytecode::OpCode::MovConst {
                     res,
                     val: *val as u64,
                 });
             }
-            hlssa::Constant::Field(val) => {
-                let start = layouter.alloc_field(vid);
-                for i in 0..bytecode::FELT_LIMBS {
-                    emitter.push_op(bytecode::OpCode::MovConst {
-                        res: start.offset(i as isize),
-                        val: val.0.0[i],
-                    });
-                }
+            128 => {
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res,
+                    val: *val as u64,
+                });
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res: res.offset(1),
+                    val: (*val >> 64) as u64,
+                });
             }
-            hlssa::Constant::FnPtr(_) => {
-                panic!("FnPtr constants not supported in codegen");
+            bits => panic!("unsupported unsigned integer width: {bits}"),
+        },
+        hlssa::Constant::I(size, val) => {
+            assert!(
+                *size <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            emitter.push_op(bytecode::OpCode::MovConst {
+                res,
+                val: *val as u64,
+            });
+        }
+        hlssa::Constant::Field(val) => {
+            for i in 0..bytecode::FELT_LIMBS {
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res: res.offset(i as isize),
+                    val: val.0.0[i],
+                });
             }
         }
+        hlssa::Constant::Blob(blob) => {
+            let mut offset = 0usize;
+            for element in &blob.elements {
+                spill_constant_to_frame(element, res.offset(offset as isize), emitter);
+                offset += constant_cell_count(element);
+            }
+        }
+        hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
     }
 }
 
@@ -1014,6 +1050,30 @@ impl CodeGen {
                         stride: layouter.type_size(eltype),
                         meta: vm::array::BoxedLayout::array(args.len() * stride, is_ptr),
                         items: args,
+                    });
+                }
+                hlssa::OpCode::MkSeqOfBlob {
+                    result: r,
+                    element_type: eltype,
+                    blob,
+                } => {
+                    assert!(
+                        !eltype.is_heap_allocated(),
+                        "MkSeqOfBlob only supports scalar element types"
+                    );
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let stride = layouter.type_size(eltype);
+                    let len = match &type_info.get_value_type(*r).expr {
+                        TypeExpr::Array(_, len) => *len,
+                        other => panic!("MkSeqOfBlob result must be an array, got {:?}", other),
+                    };
+                    let blob_start = layouter.get_value(*blob);
+                    emitter.push_op(bytecode::OpCode::ArrayAllocFromFrame {
+                        res,
+                        stride,
+                        meta: vm::array::BoxedLayout::array(len * stride, false),
+                        count: len,
+                        source: blob_start,
                     });
                 }
                 hlssa::OpCode::MkRepeated {

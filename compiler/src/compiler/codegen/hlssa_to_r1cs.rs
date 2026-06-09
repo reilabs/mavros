@@ -42,6 +42,7 @@ pub enum Value {
     Const(ark_bn254::Fr),
     LC(LC),
     Array(Rc<RefCell<ArrayData>>),
+    Blob(Vec<Value>),
     Ptr(Rc<RefCell<Value>>),
     Invalid,
 }
@@ -251,6 +252,12 @@ impl Value {
         }
     }
 
+    pub fn expect_blob(&self) -> Vec<Value> {
+        match self {
+            Value::Blob(elements) => elements.clone(),
+            _ => panic!("expected blob"),
+        }
+    }
     pub fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
         match self {
             Value::Const(c) => vec![(0, *c)],
@@ -731,6 +738,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
         Value::Const(ark_bn254::Fr::from(f))
+    }
+
+    fn of_blob(elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
+        Value::Blob(elements)
+    }
+
+    fn expect_blob(&self, _ctx: &mut R1CGen) -> Vec<Self> {
+        self.expect_blob()
     }
 
     fn mk_array(

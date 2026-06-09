@@ -11,8 +11,8 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::ssa::{
     BlockId, FunctionId, ValueId,
     hlssa::{
-        CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix, SequenceTargetType,
-        Type,
+        Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
+        SequenceTargetType, Type, TypeExpr,
         builder::{HLEmitter, HLFunctionBuilder},
     },
 };
@@ -936,43 +936,8 @@ impl<'a> ExpressionConverter<'a> {
         use noirc_frontend::monomorphization::ast::Literal;
 
         match lit {
-            Literal::Bool(bv) => {
-                let value = if *bv { 1 } else { 0 };
-                Some(b.emit_const(Constant::U(1, value)))
-            }
-            Literal::Integer(signed_field, typ, _location) => {
-                use noirc_frontend::monomorphization::ast::Type as AstType;
-
-                match typ {
-                    AstType::Field => {
-                        // Convert SignedField to ark_bn254::Fr directly (both backed by same type)
-                        let field_element = signed_field.to_field_element();
-                        let field_val = field_element.into_repr();
-                        Some(b.emit_const(Constant::Field(field_val)))
-                    }
-                    AstType::Integer(signedness, bit_size) => {
-                        use noirc_frontend::shared::Signedness;
-                        let bits: usize = bit_size.bit_size() as usize;
-                        if *signedness == Signedness::Signed {
-                            assert!(
-                                bits <= MAX_SUPPORTED_SIGNED_BITS,
-                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                            );
-                            let signed_val = signed_field.to_i128();
-                            let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
-                            Some(b.emit_const(Constant::I(bits, twos_complement)))
-                        } else {
-                            // Get the value as u128
-                            let value = signed_field.to_u128();
-                            Some(b.emit_const(Constant::U(bits, value)))
-                        }
-                    }
-                    AstType::Bool => {
-                        let value = signed_field.to_u128();
-                        Some(b.emit_const(Constant::U(1, value)))
-                    }
-                    _ => panic!("Unexpected type for integer literal: {:?}", typ),
-                }
+            Literal::Bool(_) | Literal::Integer(_, _, _) => {
+                Some(b.emit_const(Self::scalar_literal_to_constant(lit).unwrap()))
             }
             Literal::Unit => None,
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
@@ -1009,16 +974,9 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Str(s) => {
                 // str<N>: array of u8 (UTF-8 bytes)
                 let elem_type = Type::u(8);
-                let len = s.len();
-                let elems: Vec<ValueId> = s
-                    .bytes()
-                    .map(|byte| b.emit_const(Constant::U(8, byte as u128)))
-                    .collect();
-                let arr = b.block(self.current_block).mk_seq(
-                    elems,
-                    SequenceTargetType::Array(len),
-                    elem_type,
-                );
+                let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
+                let blob = b.emit_const(Constant::Blob(Blob::new(elems)));
+                let arr = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -1026,22 +984,21 @@ impl<'a> ExpressionConverter<'a> {
                 use noirc_frontend::token::FmtStrFragment;
 
                 // Build the codepoint array from fragments
-                let mut codepoints = Vec::new();
+                let mut codepoint_constants = Vec::new();
                 for fragment in fragments {
                     let text = match fragment {
                         FmtStrFragment::String(s) => s.clone(),
                         FmtStrFragment::Interpolation(name, _) => format!("{{{name}}}"),
                     };
                     for c in text.chars() {
-                        codepoints.push(b.emit_const(Constant::U(32, c as u128)));
+                        codepoint_constants.push(Constant::U(32, c as u128));
                     }
                 }
-                let cp_len = codepoints.len();
-                let cp_array = b.block(self.current_block).mk_seq(
-                    codepoints,
-                    SequenceTargetType::Array(cp_len),
-                    Type::u(32),
-                );
+                let cp_len = codepoint_constants.len();
+                let blob = b.emit_const(Constant::Blob(Blob::new(codepoint_constants)));
+                let cp_array = b
+                    .block(self.current_block)
+                    .mk_seq_of_blob(Type::u(32), blob);
 
                 // Convert captures (always a Tuple expression) and flatten
                 let mut tuple_elems = vec![cp_array];
@@ -1082,22 +1039,117 @@ impl<'a> ExpressionConverter<'a> {
             ),
         };
 
-        let elements: Vec<ValueId> = array_lit
-            .contents
-            .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
-            .collect();
-
         let seq_type = match arr_len {
             Some(len) => SequenceTargetType::Array(len as usize),
             None => SequenceTargetType::Slice,
         };
         let elem_type = self.type_converter.convert_type(elem_ast_type);
 
+        if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
+            debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
+            let blob = b.emit_const(Constant::Blob(Blob::new(elements)));
+            let result = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
+            return Some(result);
+        }
+
+        let elements: Vec<ValueId> = array_lit
+            .contents
+            .iter()
+            .map(|e| self.convert_expression(e, b).unwrap())
+            .collect();
+
         let result = b
             .block(self.current_block)
             .mk_seq(elements, seq_type, elem_type);
         Some(result)
+    }
+
+    fn const_scalar_array_elements(
+        &self,
+        array_lit: &noirc_frontend::monomorphization::ast::ArrayLiteral,
+        elem_type: &Type,
+    ) -> Option<Vec<Constant>> {
+        if !Self::is_const_seq_scalar_type(elem_type) {
+            return None;
+        }
+        if !matches!(
+            &array_lit.typ,
+            noirc_frontend::monomorphization::ast::Type::Array(_, _)
+        ) {
+            return None;
+        }
+
+        let mut constants = Vec::with_capacity(array_lit.contents.len());
+        for expr in &array_lit.contents {
+            let constant = Self::scalar_expr_to_constant(expr)?;
+            if !Self::constant_matches_type(&constant, elem_type) {
+                return None;
+            }
+            constants.push(constant);
+        }
+        Some(constants)
+    }
+
+    fn scalar_expr_to_constant(expr: &Expression) -> Option<Constant> {
+        match expr {
+            Expression::Literal(lit) => Self::scalar_literal_to_constant(lit),
+            _ => None,
+        }
+    }
+
+    fn scalar_literal_to_constant(
+        lit: &noirc_frontend::monomorphization::ast::Literal,
+    ) -> Option<Constant> {
+        use noirc_frontend::monomorphization::ast::{Literal, Type as AstType};
+
+        match lit {
+            Literal::Bool(bv) => {
+                let value = if *bv { 1 } else { 0 };
+                Some(Constant::U(1, value))
+            }
+            Literal::Integer(signed_field, typ, _location) => match typ {
+                AstType::Field => {
+                    let field_element = signed_field.to_field_element();
+                    let field_val = field_element.into_repr();
+                    Some(Constant::Field(field_val))
+                }
+                AstType::Integer(signedness, bit_size) => {
+                    use noirc_frontend::shared::Signedness;
+                    let bits: usize = bit_size.bit_size() as usize;
+                    if *signedness == Signedness::Signed {
+                        assert!(
+                            bits <= MAX_SUPPORTED_SIGNED_BITS,
+                            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                        );
+                        let signed_val = signed_field.to_i128();
+                        let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
+                        Some(Constant::I(bits, twos_complement))
+                    } else {
+                        let value = signed_field.to_u128();
+                        Some(Constant::U(bits, value))
+                    }
+                }
+                AstType::Bool => {
+                    let value = signed_field.to_u128();
+                    Some(Constant::U(1, value))
+                }
+                _ => panic!("Unexpected type for integer literal: {:?}", typ),
+            },
+            _ => None,
+        }
+    }
+
+    fn is_const_seq_scalar_type(typ: &Type) -> bool {
+        matches!(typ.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
+    }
+
+    fn constant_matches_type(constant: &Constant, typ: &Type) -> bool {
+        match (constant, &typ.expr) {
+            (Constant::Field(_), TypeExpr::Field) => true,
+            (Constant::U(bits, _), TypeExpr::U(type_bits)) => bits == type_bits,
+            (Constant::I(bits, _), TypeExpr::I(type_bits)) => bits == type_bits,
+            _ => false,
+        }
     }
 
     fn convert_tuple(

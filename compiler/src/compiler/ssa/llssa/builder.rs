@@ -272,6 +272,16 @@ pub trait LLEmitter {
         });
     }
 
+    fn const_data_ptr(&mut self, elem_type: LLStruct, blob: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ConstDataPtr {
+            result: r,
+            elem_type,
+            blob,
+        });
+        r
+    }
+
     // -- Selection --
 
     fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {

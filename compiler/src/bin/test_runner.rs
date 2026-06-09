@@ -69,10 +69,7 @@ fn main() {
     run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
 }
 
-const DEFAULT_IGNORED_TESTS: &[&str] = &[
-    // TODO(#195): Re-enable once the upstream global var regression performance issue is fixed.
-    "noir/test_programs/execution_success/global_var_regression_entry_points",
-];
+const DEFAULT_IGNORED_TESTS: &[&str] = &[];
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
     let mut i = 1;

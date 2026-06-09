@@ -131,6 +131,21 @@ impl UntaintControlFlow {
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
+                    OpCode::MkSeqOfBlob {
+                        result: r,
+                        element_type: tp,
+                        blob,
+                    } => {
+                        let r_wt = function_wt
+                            .get_value_witness_type(r)
+                            .child_witness_type()
+                            .unwrap();
+                        OpCode::MkSeqOfBlob {
+                            result: r,
+                            element_type: apply_witness_type(tp, &r_wt),
+                            blob,
+                        }
+                    }
                     OpCode::MkRepeated {
                         result: r,
                         element,
@@ -998,6 +1013,7 @@ fn emit_merge_select(
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
         TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
+        TypeExpr::Blob(_) => panic!("Witness select on Blob type not supported"),
     }
 }
 
