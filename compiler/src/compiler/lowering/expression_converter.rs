@@ -336,45 +336,21 @@ impl<'a> ExpressionConverter<'a> {
         None
     }
 
-    /// Synthesize a tuple "set" by projecting all fields, replacing one, and rebuilding.
-    fn synthesize_tuple_set(
-        &mut self,
-        tuple: ValueId,
-        target_field: usize,
-        new_value: ValueId,
-        noir_type: &noirc_frontend::monomorphization::ast::Type,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
-        let fields = match noir_type {
-            AstType::Tuple(fields) => fields,
-            _ => panic!(
-                "synthesize_tuple_set called on non-tuple type: {:?}",
-                noir_type
-            ),
+    fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
+        let mut write = |this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
+            b.block(this.current_block).store(ptr, value);
         };
-
-        let mut elements = Vec::with_capacity(fields.len());
-        let mut element_types = Vec::with_capacity(fields.len());
-
-        let mut e = b.block(self.current_block);
-        for (i, field_type) in fields.iter().enumerate() {
-            let elem = if i == target_field {
-                new_value
-            } else {
-                e.tuple_proj(tuple, i)
-            };
-            elements.push(elem);
-            element_types.push(self.type_converter.convert_type(field_type));
-        }
-
-        e.mk_tuple(elements, element_types)
+        self.with_lvalue_ref(lvalue, b, &mut write);
     }
 
-    fn write_lvalue(&mut self, lvalue: &LValue, value: ValueId, b: &mut HLFunctionBuilder<'_>) {
+    fn with_lvalue_ref(
+        &mut self,
+        lvalue: &LValue,
+        b: &mut HLFunctionBuilder<'_>,
+        f: &mut dyn FnMut(&mut Self, ValueId, &mut HLFunctionBuilder<'_>),
+    ) {
         if let Some(ptr) = self.try_lvalue_ref(lvalue, b) {
-            b.block(self.current_block).store(ptr, value);
+            f(self, ptr, b);
             return;
         }
 
@@ -389,21 +365,42 @@ impl<'a> ExpressionConverter<'a> {
                 object,
                 field_index,
             } => {
-                let tuple = self.read_lvalue(object, b);
-                let tuple_type = self.lvalue_type(object);
-                let updated = self.synthesize_tuple_set(tuple, *field_index, value, &tuple_type, b);
-                self.write_lvalue(object, updated, b);
+                let mut write_field =
+                    |this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
+                        let field_ref = b
+                            .block(this.current_block)
+                            .tuple_ref_proj(tuple_ref, *field_index);
+                        f(this, field_ref, b);
+                    };
+                self.with_lvalue_ref(object, b, &mut write_field);
             }
-            LValue::Index { array, index, .. } => {
+            LValue::Index {
+                array,
+                index,
+                element_type,
+                ..
+            } => {
                 let array_value = self.read_lvalue(array, b);
                 let idx = self.convert_expression(index, b).unwrap();
+                let element = b.block(self.current_block).array_get(array_value, idx);
+                let element_type = self.type_converter.convert_type(element_type);
+                let element_ref = {
+                    let mut e = b.block(self.current_block);
+                    let element_ref = e.alloc(element_type);
+                    e.store(element_ref, element);
+                    element_ref
+                };
+
+                f(self, element_ref, b);
+
+                let element = b.block(self.current_block).load(element_ref);
                 let updated = b
                     .block(self.current_block)
-                    .array_set(array_value, idx, value);
+                    .array_set(array_value, idx, element);
                 self.write_lvalue(array, updated, b);
             }
             LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
-            LValue::Clone(inner) => self.write_lvalue(inner, value, b),
+            LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
         }
     }
 
@@ -462,19 +459,6 @@ impl<'a> ExpressionConverter<'a> {
             }
             LValue::Index { .. } => None,
             LValue::Clone(inner) => self.try_lvalue_ref(inner, b),
-        }
-    }
-
-    fn lvalue_type(&self, lvalue: &LValue) -> AstType {
-        match lvalue {
-            LValue::Ident(ident) => ident.typ.clone(),
-            LValue::Dereference { element_type, .. } => element_type.clone(),
-            LValue::MemberAccess {
-                object,
-                field_index,
-            } => Self::tuple_field_type(&self.lvalue_type(object), *field_index),
-            LValue::Index { element_type, .. } => element_type.clone(),
-            LValue::Clone(inner) => self.lvalue_type(inner),
         }
     }
 
@@ -855,17 +839,6 @@ impl<'a> ExpressionConverter<'a> {
         match typ {
             AstType::Reference(inner, _) => Some(*inner.clone()),
             _ => None,
-        }
-    }
-
-    fn tuple_field_type(typ: &AstType, idx: usize) -> AstType {
-        match typ {
-            AstType::Tuple(fields) => fields[idx].clone(),
-            AstType::Reference(inner, _) => Self::tuple_field_type(inner, idx),
-            _ => panic!(
-                "Type mismatch in tuple field access: field {} on {:?}",
-                idx, typ
-            ),
         }
     }
 
