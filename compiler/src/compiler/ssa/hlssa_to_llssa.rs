@@ -124,13 +124,6 @@ fn array_info(ty: &HLType) -> (&HLType, usize) {
     }
 }
 
-fn slice_info(ty: &HLType) -> &HLType {
-    match &ty.expr {
-        HLTypeExpr::Slice(inner) => inner.as_ref(),
-        _ => panic!("Expected slice type, got: {}", ty),
-    }
-}
-
 fn sequence_elem_type(ty: &HLType) -> &HLType {
     match &ty.expr {
         HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => inner.as_ref(),
@@ -990,11 +983,8 @@ fn lower_instruction(
 
         OpCode::SliceLen { result, slice } => {
             let slice_type = fn_type_info.get_value_type(*slice);
-            let elem_type = slice_info(slice_type);
-            let rc_struct = rc_slice_struct(elem_type);
             let ll_slice = val_map[slice];
-            let len_ptr = e.struct_field_ptr(ll_slice, rc_struct, 2);
-            let len64 = e.ll_load(len_ptr, LLType::i64());
+            let len64 = sequence_len_value(e, ll_slice, slice_type);
             let ll_len = e.truncate(len64, 32);
             val_map.insert(*result, ll_len);
         }
@@ -1661,7 +1651,8 @@ fn lower_mk_repeated_array(
     let data = e.struct_field_ptr(arr, rc_struct, 2);
     let ll_element = val_map[&element];
 
-    e.build_counted_loop(count, vec![], |emitter, i, _accs| {
+    let len = e.emit_int_const(64, count as u64);
+    e.build_counted_loop(len, vec![], |emitter, i, _accs| {
         let elem_ptr = emitter.array_elem_ptr(data, es.clone(), i);
         emitter.ll_store(elem_ptr, ll_element);
         vec![]
@@ -1690,7 +1681,7 @@ fn lower_mk_repeated_slice(
     let data = e.struct_field_ptr(slice, rc_struct, 3);
     let ll_element = val_map[&element];
 
-    e.build_counted_loop(count, vec![], |emitter, i, _accs| {
+    e.build_counted_loop(len, vec![], |emitter, i, _accs| {
         let elem_ptr = emitter.array_elem_ptr(data, es.clone(), i);
         emitter.ll_store(elem_ptr, ll_element);
         vec![]
@@ -1727,7 +1718,7 @@ fn bump_copied_sequence_elements(
         return;
     }
     let es = elem_struct(elem_type);
-    e.build_counted_loop_dyn(len, vec![], |e, i_val, _| {
+    e.build_counted_loop(len, vec![], |e, i_val, _| {
         let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
         let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
         bump_rc_value(e, elem_val, elem_type, 1);
@@ -2037,7 +2028,7 @@ fn lower_array_set(
 
             // Bump RC of all copied elements except the one we're overwriting
             if inner_drop_fn.is_some() {
-                ce.build_counted_loop_dyn(len, vec![], |ce, i_val, _| {
+                ce.build_counted_loop(len, vec![], |ce, i_val, _| {
                     let elem_ptr = ce.array_elem_ptr(new_data, es.clone(), i_val);
                     let elem_val = ce.ll_load(elem_ptr, LLType::Ptr);
                     let is_replaced = ce.int_eq(i_val, idx64);
@@ -2668,7 +2659,7 @@ fn generate_drop_function_for_array(
 
                 let len = sequence_len_value(e, ptr, ty);
                 let data = sequence_data_ptr(e, ptr, ty);
-                e.build_counted_loop_dyn(len, vec![], |e, i_val, _| {
+                e.build_counted_loop(len, vec![], |e, i_val, _| {
                     let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
                     let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
                     e.call(inner_drop_fn, vec![elem_val], 0);
@@ -3336,6 +3327,7 @@ fn emit_lookup_leaf_loop(
     let rc_struct = rc_array_struct(elem_type, count);
     let data = e.struct_field_ptr(array, rc_struct, 2);
 
+    let count = e.emit_int_const(64, count as u64);
     let results = e.build_counted_loop(
         count,
         vec![(start_index, LLType::i64())],
@@ -3501,6 +3493,7 @@ fn generate_spread_lookup_function(
             let a_base = e.ll_load(a_base_slot, LLType::Ptr);
             let input_ty = HLType::u(bits as usize);
             let result_ty = HLType::u(bits as usize * 2);
+            let length = e.emit_int_const(64, length as u64);
             e.build_counted_loop(length, vec![], |e, i_i64, _| {
                 let i_key = e.truncate(i_i64, bits as u32);
                 let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
@@ -3684,7 +3677,8 @@ fn emit_key_value_ad_table_init_body(
     let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
     let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
 
-    e.build_counted_loop(lookup.length, vec![], |e, i_i64, _| {
+    let length = e.emit_int_const(64, lookup.length as u64);
+    e.build_counted_loop(length, vec![], |e, i_i64, _| {
         emit_key_value_ad_table_row(
             e,
             inv_cnst_off,
@@ -3825,7 +3819,8 @@ fn emit_rngchk_8_ad_init_body(
 
     let logup_challenge_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
 
-    e.build_counted_loop(256, vec![], |e, i_i64, _| {
+    let length = e.emit_int_const(64, 256);
+    e.build_counted_loop(length, vec![], |e, i_i64, _| {
         let i_i32 = e.truncate(i_i64, 32);
         // coeff = ad_coeffs[inv_cnst_off + i] — random access, does NOT
         // advance the main AdCoeffs cursor (reserved for algebraic
