@@ -6,6 +6,7 @@
 //!
 //! TODO Refactor to use the existing liveness analysis (#157).
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
@@ -112,7 +113,6 @@ impl DCE {
             | OpCode::Select { .. }
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
-            | OpCode::TupleProj { .. }
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
             | OpCode::MkSeq { .. }
@@ -124,10 +124,10 @@ impl DCE {
             | OpCode::Not { .. }
             | OpCode::MulConst { .. }
             | OpCode::ReadGlobal { .. }
-            | OpCode::MkTuple { .. }
             | OpCode::ValueOf { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => false,
+            OpCode::TupleProj { .. } | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
             OpCode::Guard { inner, .. } => self.is_initially_live(inner.as_ref()),
         }
     }

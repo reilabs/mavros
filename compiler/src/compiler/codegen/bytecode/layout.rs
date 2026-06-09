@@ -1,5 +1,6 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use crate::{
@@ -93,7 +94,7 @@ impl FrameLayouter {
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
             TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Tuple(_) => constants::POINTER_SIZE_CELLS,
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
             _ => todo!(),
         }

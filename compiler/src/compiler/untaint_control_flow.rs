@@ -1,5 +1,6 @@
 //! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use tracing::{Level, instrument};
@@ -164,27 +165,7 @@ impl UntaintControlFlow {
                             elem_type: apply_witness_type(tp, &r_wt),
                         }
                     }
-                    OpCode::MkTuple {
-                        result: r,
-                        elems: l,
-                        element_types: tps,
-                    } => {
-                        let r_wt = function_wt.get_value_witness_type(r);
-                        let child_wts = if let WitnessShape::Tuple(_, children) = r_wt {
-                            children
-                        } else {
-                            panic!("MkTuple result should have Tuple witness type")
-                        };
-                        OpCode::MkTuple {
-                            result: r,
-                            elems: l,
-                            element_types: tps
-                                .iter()
-                                .zip(child_wts.iter())
-                                .map(|(tp, wt)| apply_witness_type(tp.clone(), wt))
-                                .collect(),
-                        }
-                    }
+                    OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     OpCode::ReadGlobal {
                         result: r,
                         offset: l,
@@ -872,21 +853,7 @@ fn emit_value_conversion(
             );
             emit_unrolled_array_conversion(value, src_inner, tgt_inner, *src_size, builder)
         }
-        // Tuple: decompose, per-field recursive, recompose
-        (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-            assert_eq!(
-                src_fields.len(),
-                tgt_fields.len(),
-                "Tuple field count mismatch in witness cast insertion"
-            );
-            let mut converted_elems = vec![];
-            for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                let proj = builder.tuple_proj(value, i);
-                let converted = emit_value_conversion(proj, src_ft, tgt_ft, builder);
-                converted_elems.push(converted);
-            }
-            builder.mk_tuple(converted_elems, tgt_fields.clone())
-        }
+        (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
         _ => panic!(
             "witness cast insertion: unsupported conversion {:?} -> {:?}",
             source_type, target_type
@@ -948,17 +915,7 @@ fn emit_strip_witness(
                 *tgt_inner.clone(),
             )
         }
-        // Tuple: decompose, per-field recursive, recompose
-        (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-            assert_eq!(src_fields.len(), tgt_fields.len());
-            let mut converted_elems = vec![];
-            for (i, (sf, tf)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                let proj = builder.tuple_proj(value, i);
-                let converted = emit_strip_witness(proj, sf, tf, builder);
-                converted_elems.push(converted);
-            }
-            builder.mk_tuple(converted_elems, tgt_fields.clone())
-        }
+        (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
         _ => panic!(
             "emit_strip_witness: unsupported conversion {:?} -> {:?}",
             source_type, target_type
@@ -1021,42 +978,7 @@ fn emit_merge_select(
             });
             result
         }
-        TypeExpr::Tuple(result_fields) => {
-            let lhs_fields = match &lhs_type.expr {
-                TypeExpr::Tuple(f) => f,
-                _ => panic!(
-                    "emit_merge_select: expected tuple for lhs, got {:?}",
-                    lhs_type
-                ),
-            };
-            let rhs_fields = match &rhs_type.expr {
-                TypeExpr::Tuple(f) => f,
-                _ => panic!(
-                    "emit_merge_select: expected tuple for rhs, got {:?}",
-                    rhs_type
-                ),
-            };
-            let mut elems = Vec::with_capacity(result_fields.len());
-            for (i, ((rf, lf), rhsf)) in result_fields
-                .iter()
-                .zip(lhs_fields.iter())
-                .zip(rhs_fields.iter())
-                .enumerate()
-            {
-                let lhs_field = builder.tuple_proj(lhs, i);
-                let rhs_field = builder.tuple_proj(rhs, i);
-                let selected =
-                    emit_merge_select(builder, cond, lhs_field, rhs_field, None, rf, lf, rhsf);
-                elems.push(selected);
-            }
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.push(OpCode::MkTuple {
-                result,
-                elems,
-                element_types: result_fields.clone(),
-            });
-            result
-        }
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         TypeExpr::WitnessOf(_) => {
             // Cast operands to WitnessOf if they aren't already
             let lhs = if !lhs_type.is_witness_of() {
@@ -1149,20 +1071,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
-        (TypeExpr::Tuple(child_types), WitnessShape::Tuple(top, child_wts)) => {
-            let base = Type::tuple_of(
-                child_types
-                    .iter()
-                    .zip(child_wts.iter())
-                    .map(|(child_type, child_wt)| apply_witness_type(child_type.clone(), child_wt))
-                    .collect(),
-            );
-            if top.is_witness() {
-                Type::witness_of(base)
-            } else {
-                base
-            }
-        }
+        (TypeExpr::Tuple(_), _) => ice_non_elided_tuple(),
         (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
     }
 }
