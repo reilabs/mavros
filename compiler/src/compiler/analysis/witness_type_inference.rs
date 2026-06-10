@@ -1,6 +1,7 @@
 //! Performs whole program analysis to determine which values are potentially witness tainted, which
 //! are _only_ witnesses, and which are only non-witness values.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::witness_info::{FunctionWitnessType, WitnessShape, WitnessType};
@@ -302,6 +303,10 @@ impl WitnessTypeInference {
                 Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
                     WitnessShape::Scalar(WitnessType::Pure)
                 }
+                Constant::Blob(_) => WitnessShape::Array(
+                    WitnessType::Pure,
+                    Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+                ),
             };
             value_wt.insert(*vid, shape);
         });
@@ -769,6 +774,17 @@ impl WitnessTypeInference {
                         WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
                     );
                 }
+                OpCode::MkSeqOfBlob {
+                    result,
+                    element_type: tp,
+                    blob: _,
+                } => {
+                    let result_wt = Self::construct_pure_witness_for_type(tp);
+                    value_wt.insert(
+                        *result,
+                        WitnessShape::Array(WitnessType::Pure, Box::new(result_wt)),
+                    );
+                }
                 OpCode::MkRepeated {
                     result,
                     element,
@@ -811,26 +827,8 @@ impl WitnessTypeInference {
                         WitnessShape::Array(WitnessType::Pure, Box::new(val_wt)),
                     );
                 }
-                OpCode::TupleProj { result, tuple, idx } => {
-                    let tuple_wt = value_wt.get(tuple).unwrap();
-                    match tuple_wt {
-                        WitnessShape::Tuple(top, children) => {
-                            let elem_wt = &children[*idx];
-                            let result_wt =
-                                elem_wt.with_toplevel_info((*top).join(elem_wt.toplevel_info()));
-                            value_wt.insert(*result, result_wt);
-                        }
-                        _ => {
-                            panic!("TupleProj on non-tuple witness type: {:?}", tuple_wt);
-                        }
-                    }
-                }
-                OpCode::MkTuple { result, elems, .. } => {
-                    let children: Vec<WitnessShape> = elems
-                        .iter()
-                        .map(|v| value_wt.get(v).unwrap().clone())
-                        .collect();
-                    value_wt.insert(*result, WitnessShape::Tuple(WitnessType::Pure, children));
+                OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
+                    ice_non_elided_tuple()
                 }
                 OpCode::WriteWitness { result, .. } => {
                     // WriteWitness records a value on the witness tape.
@@ -929,14 +927,12 @@ impl WitnessTypeInference {
             TypeExpr::WitnessOf(_) => {
                 panic!("ICE: WitnessOf should not be present at this stage");
             }
-            TypeExpr::Tuple(elements) => WitnessShape::Tuple(
-                WitnessType::Pure,
-                elements
-                    .iter()
-                    .map(Self::construct_pure_witness_for_type)
-                    .collect(),
-            ),
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => WitnessShape::Scalar(WitnessType::Pure),
+            TypeExpr::Blob(_) => WitnessShape::Array(
+                WitnessType::Pure,
+                Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+            ),
         }
     }
 }

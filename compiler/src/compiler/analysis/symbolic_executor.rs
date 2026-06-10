@@ -2,6 +2,7 @@
 //! into by providing their own `Value` and `Context` implementations that specialize it for their
 //! use-case.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use tracing::{Level, instrument};
@@ -12,8 +13,9 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, Instruction, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLSSA, LookupTarget,
-            OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, HLSSA,
+            HLSSAConstantsSnapshot, LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
+            SliceOpDir, Type, TypeExpr,
         },
     },
 };
@@ -36,7 +38,6 @@ where
     fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, ctx: &mut Context);
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
-    fn tuple_get(&self, index: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
@@ -61,13 +62,14 @@ where
     fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_i(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_field(f: Field, ctx: &mut Context) -> Self;
+    fn of_blob(elements: Vec<Self>, ctx: &mut Context) -> Self;
+    fn expect_blob(&self, ctx: &mut Context) -> Vec<Self>;
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut Context,
         seq_type: SequenceTargetType,
         elem_type: &Type,
     ) -> Self;
-    fn mk_tuple(elems: Vec<Self>, ctx: &mut Context, elem_types: &[Type]) -> Self;
     fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
@@ -157,7 +159,8 @@ impl SymbolicExecutor {
         // Materialize the SSA constants into `V`s once, up front. Constant ids are global and stable
         // across functions, so we build this map a single time and share it by reference with every
         // `run_fn` instead of rebuilding it (via the emitting `of_*` path) on every function entry.
-        let consts = materialize_constants(ssa, context);
+        let constants = ssa.const_snapshot();
+        let consts = materialize_constants(&constants, context);
 
         self.run_fn(
             ssa,
@@ -212,7 +215,7 @@ impl SymbolicExecutor {
         while let Some(block) = current {
             for instr in block.get_instructions() {
                 match instr {
-                    crate::compiler::ssa::hlssa::OpCode::Cmp {
+                    OpCode::Cmp {
                         kind: cmp_kind,
                         result: r,
                         lhs: a,
@@ -233,7 +236,7 @@ impl SymbolicExecutor {
                             },
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::BinaryArithOp {
+                    OpCode::BinaryArithOp {
                         kind: binary_arith_op_kind,
                         result: r,
                         lhs: a,
@@ -251,7 +254,7 @@ impl SymbolicExecutor {
                             ),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Cast {
+                    OpCode::Cast {
                         result: r,
                         value: a,
                         target: cast_target,
@@ -262,7 +265,7 @@ impl SymbolicExecutor {
                             a.cast(cast_target, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::SExt {
+                    OpCode::SExt {
                         result: r,
                         value: a,
                         from_bits: from,
@@ -274,7 +277,7 @@ impl SymbolicExecutor {
                             a.sext(*from, *to, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::BitRange {
+                    OpCode::BitRange {
                         result: r,
                         value: a,
                         offset,
@@ -286,14 +289,14 @@ impl SymbolicExecutor {
                             a.bit_range(*offset, *width, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Not {
+                    OpCode::Not {
                         result: r,
                         value: a,
                     } => {
                         let a = &scope[a];
                         scope.insert(*r, a.not(&fn_type_info.get_value_type(*r), ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::MkSeq {
+                    OpCode::MkSeq {
                         result: r,
                         elems: a,
                         seq_type,
@@ -302,7 +305,19 @@ impl SymbolicExecutor {
                         let a = a.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::MkRepeated {
+                    OpCode::MkSeqOfBlob {
+                        result: r,
+                        element_type,
+                        blob,
+                    } => {
+                        let a = scope[blob].expect_blob(ctx);
+                        let len = a.len();
+                        scope.insert(
+                            *r,
+                            V::mk_array(a, ctx, SequenceTargetType::Array(len), element_type),
+                        );
+                    }
+                    OpCode::MkRepeated {
                         result: r,
                         element,
                         seq_type,
@@ -313,30 +328,30 @@ impl SymbolicExecutor {
                         let a = vec![elem; *count];
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Alloc {
+                    OpCode::Alloc {
                         result: r,
                         elem_type,
                     } => {
                         scope.insert(*r, V::alloc(elem_type, ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Store { ptr, value: val } => {
+                    OpCode::Store { ptr, value: val } => {
                         let ptr = &scope[ptr];
                         let val = &scope[val];
                         ptr.ptr_write(val, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Load { result: r, ptr } => {
+                    OpCode::Load { result: r, ptr } => {
                         let ptr = &scope[ptr];
                         scope.insert(*r, ptr.ptr_read(&fn_type_info.get_value_type(*r), ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::AssertR1C { a, b, c } => {
+                    OpCode::AssertR1C { a, b, c } => {
                         let a = &scope[a];
                         let b = &scope[b];
                         let c = &scope[c];
                         V::assert_r1c(a, b, c, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Call {
+                    OpCode::Call {
                         results: returns,
-                        function: crate::compiler::ssa::hlssa::CallTarget::Static(function_id),
+                        function: CallTarget::Static(function_id),
                         args: arguments,
                         unconstrained,
                     } => {
@@ -366,13 +381,13 @@ impl SymbolicExecutor {
                             scope.insert(*val, outputs[i].clone());
                         }
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Call {
-                        function: crate::compiler::ssa::hlssa::CallTarget::Dynamic(_),
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
                         ..
                     } => {
                         panic!("Dynamic call targets are not supported in symbolic execution")
                     }
-                    crate::compiler::ssa::hlssa::OpCode::ArrayGet {
+                    OpCode::ArrayGet {
                         result: r,
                         array: a,
                         index: i,
@@ -381,7 +396,7 @@ impl SymbolicExecutor {
                         let i = &scope[i];
                         scope.insert(*r, a.array_get(i, &fn_type_info.get_value_type(*r), ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::ArraySet {
+                    OpCode::ArraySet {
                         result: r,
                         array: arr,
                         index: i,
@@ -392,7 +407,7 @@ impl SymbolicExecutor {
                         let v = &scope[v];
                         scope.insert(*r, a.array_set(i, v, &fn_type_info.get_value_type(*r), ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::SlicePush {
+                    OpCode::SlicePush {
                         result,
                         slice,
                         values,
@@ -402,14 +417,14 @@ impl SymbolicExecutor {
                         let vals: Vec<_> = values.iter().map(|v| scope[v].clone()).collect();
                         scope.insert(*result, ctx.slice_push(sl, &vals, *dir));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::SliceLen {
+                    OpCode::SliceLen {
                         result: r,
                         slice: sl,
                     } => {
                         let sl = &scope[sl];
                         scope.insert(*r, ctx.slice_len(sl));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Select {
+                    OpCode::Select {
                         result: r,
                         cond,
                         if_t,
@@ -423,7 +438,7 @@ impl SymbolicExecutor {
                             cond.select(if_t, if_f, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::ToBits {
+                    OpCode::ToBits {
                         result: r,
                         value: a,
                         endianness,
@@ -435,7 +450,7 @@ impl SymbolicExecutor {
                             a.to_bits(*endianness, *size, &fn_type_info.get_value_type(*r), ctx),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::ToRadix {
+                    OpCode::ToRadix {
                         result: r,
                         value: a,
                         radix,
@@ -458,7 +473,7 @@ impl SymbolicExecutor {
                             ),
                         );
                     }
-                    crate::compiler::ssa::hlssa::OpCode::WriteWitness {
+                    OpCode::WriteWitness {
                         result: r,
                         value: a,
                         ..
@@ -473,23 +488,23 @@ impl SymbolicExecutor {
                             a.write_witness(None, ctx);
                         }
                     }
-                    crate::compiler::ssa::hlssa::OpCode::FreshWitness {
+                    OpCode::FreshWitness {
                         result: r,
                         result_type,
                     } => {
                         scope.insert(*r, V::fresh_witness(result_type, ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Constrain { a, b, c } => {
+                    OpCode::Constrain { a, b, c } => {
                         let a = &scope[a];
                         let b = &scope[b];
                         let c = &scope[c];
                         V::constrain(a, b, c, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Assert { value } => {
+                    OpCode::Assert { value } => {
                         let v = &scope[value];
                         V::assert_bool(v, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::AssertCmp {
+                    OpCode::AssertCmp {
                         kind,
                         lhs: a,
                         rhs: b,
@@ -499,32 +514,32 @@ impl SymbolicExecutor {
                         let b = &scope[b];
                         V::assert_cmp(*kind, a, b, lhs_type, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::MemOp { kind, value } => {
+                    OpCode::MemOp { kind, value } => {
                         let value = &scope[value];
                         value.mem_op(*kind, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::NextDCoeff { result: _a } => {
+                    OpCode::NextDCoeff { result: _a } => {
                         todo!()
                     }
-                    crate::compiler::ssa::hlssa::OpCode::BumpD {
+                    OpCode::BumpD {
                         matrix: _matrix,
                         variable: _a,
                         sensitivity: _b,
                     } => {
                         todo!()
                     }
-                    crate::compiler::ssa::hlssa::OpCode::MulConst {
+                    OpCode::MulConst {
                         result: _,
                         const_val: _,
                         var: _,
                     } => {
                         todo!()
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Rangecheck { value: v, max_bits } => {
+                    OpCode::Rangecheck { value: v, max_bits } => {
                         let v = &scope[v];
                         v.rangecheck(*max_bits, ctx);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::ReadGlobal {
+                    OpCode::ReadGlobal {
                         result,
                         offset,
                         result_type: _,
@@ -535,13 +550,13 @@ impl SymbolicExecutor {
                             .clone();
                         scope.insert(*result, r);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::InitGlobal { global, value } => {
+                    OpCode::InitGlobal { global, value } => {
                         globals[*global] = Some(scope[value].clone());
                     }
-                    crate::compiler::ssa::hlssa::OpCode::DropGlobal { global } => {
+                    OpCode::DropGlobal { global } => {
                         globals[*global] = None;
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Lookup { target, args, flag } => {
+                    OpCode::Lookup { target, args, flag } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
@@ -554,7 +569,7 @@ impl SymbolicExecutor {
                         let flag_value = scope[flag].clone();
                         ctx.lookup(target, args, flag_value);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::DLookup { target, args, flag } => {
+                    OpCode::DLookup { target, args, flag } => {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
@@ -567,23 +582,10 @@ impl SymbolicExecutor {
                         let flag_value = scope[flag].clone();
                         ctx.dlookup(target, args, flag_value);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::TupleProj {
-                        result: r,
-                        tuple: a,
-                        idx,
-                    } => {
-                        let a = &scope[a];
-                        scope.insert(*r, a.tuple_get(*idx, &fn_type_info.get_value_type(*r), ctx));
-                    }
-                    crate::compiler::ssa::hlssa::OpCode::MkTuple {
-                        result,
-                        elems,
-                        element_types,
-                    } => {
-                        let elems = elems.iter().map(|id| scope[id].clone()).collect::<Vec<_>>();
-                        scope.insert(*result, V::mk_tuple(elems, ctx, element_types));
-                    }
-                    crate::compiler::ssa::hlssa::OpCode::Todo {
+                    OpCode::TupleProj { .. }
+                    | OpCode::TupleRefProj { .. }
+                    | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::Todo {
                         payload,
                         results,
                         result_types,
@@ -601,7 +603,7 @@ impl SymbolicExecutor {
                             scope.insert(*result_id, result_value.clone());
                         }
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Spread {
+                    OpCode::Spread {
                         result,
                         value,
                         bits,
@@ -609,7 +611,7 @@ impl SymbolicExecutor {
                         let val = &scope[value];
                         scope.insert(*result, val.spread(*bits, ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Unspread {
+                    OpCode::Unspread {
                         result_odd,
                         result_even,
                         value,
@@ -620,11 +622,11 @@ impl SymbolicExecutor {
                         scope.insert(*result_odd, odd_val);
                         scope.insert(*result_even, even_val);
                     }
-                    crate::compiler::ssa::hlssa::OpCode::ValueOf { result, value } => {
+                    OpCode::ValueOf { result, value } => {
                         let val = scope[value].clone();
                         scope.insert(*result, val.value_of(ctx));
                     }
-                    crate::compiler::ssa::hlssa::OpCode::Guard { condition, inner } => {
+                    OpCode::Guard { condition, inner } => {
                         let condition_val = &scope[condition];
                         let inputs: Vec<&V> = inner.get_inputs().map(|id| &scope[id]).collect();
                         let result_ids: Vec<_> = inner.get_results().cloned().collect();
@@ -723,21 +725,39 @@ impl<V> std::ops::Index<&ValueId> for Scope<'_, V> {
 /// rather than [`HLSSA::for_each_const`], which holds the read lock across the walk. The `of_*`
 /// calls below may intern constants via `add_const` (which takes the constants write lock), so
 /// running them while the read lock is held would deadlock.
-fn materialize_constants<V, Ctx>(ssa: &HLSSA, ctx: &mut Ctx) -> HashMap<ValueId, V>
+fn materialize_constants<V, Ctx>(
+    constants: &HLSSAConstantsSnapshot,
+    ctx: &mut Ctx,
+) -> HashMap<ValueId, V>
 where
     V: Value<Ctx>,
 {
     let mut consts = HashMap::new();
-    for (vid, cv) in ssa.const_snapshot() {
-        let v = match cv.as_ref() {
-            Constant::U(size, val) => V::of_u(*size, *val, ctx),
-            Constant::I(size, val) => V::of_i(*size, *val, ctx),
-            Constant::Field(val) => V::of_field(*val, ctx),
-            Constant::FnPtr(_) => {
-                todo!("FnPtrConst in symbolic executor");
-            }
-        };
-        consts.insert(vid, v);
+    for (vid, cv) in constants {
+        let v = materialize_constant_value(cv.as_ref(), ctx);
+        consts.insert(*vid, v);
     }
     consts
+}
+
+fn materialize_constant_value<V, Ctx>(constant: &Constant, ctx: &mut Ctx) -> V
+where
+    V: Value<Ctx>,
+{
+    match constant {
+        Constant::U(size, val) => V::of_u(*size, *val, ctx),
+        Constant::I(size, val) => V::of_i(*size, *val, ctx),
+        Constant::Field(val) => V::of_field(*val, ctx),
+        Constant::FnPtr(_) => {
+            todo!("FnPtrConst in symbolic executor");
+        }
+        Constant::Blob(blob) => {
+            let elements = blob
+                .elements
+                .iter()
+                .map(|element| materialize_constant_value(element, ctx))
+                .collect();
+            V::of_blob(elements, ctx)
+        }
+    }
 }

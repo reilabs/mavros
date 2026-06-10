@@ -31,6 +31,7 @@ use crate::{
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
+            elide_tuples::ElideTuples,
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
@@ -43,6 +44,7 @@ use crate::{
             simplify_asserts::SimplifyAsserts,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
+            trivial_phi_elimination::TrivialPhiElimination,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -191,6 +193,9 @@ impl Driver {
             vec![
                 Box::new(Defunctionalize::new()),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
+                // Eliminate all tuple types immediately after the entry point is prepared, so every
+                // subsequent pass operates on tuple-free IR.
+                Box::new(ElideTuples::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
@@ -217,6 +222,10 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Mem2Reg::new()),
+                // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
+                // an aggregate threaded through control flow that is mostly trivial phis (the same
+                // value from every predecessor); collapse them before they reach WTI and codegen.
+                Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
             ],
         )

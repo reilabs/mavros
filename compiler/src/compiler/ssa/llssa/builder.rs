@@ -272,6 +272,16 @@ pub trait LLEmitter {
         });
     }
 
+    fn const_data_ptr(&mut self, elem_type: LLStruct, blob: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::ConstDataPtr {
+            result: r,
+            elem_type,
+            blob,
+        });
+        r
+    }
+
     // -- Selection --
 
     fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {
@@ -463,25 +473,23 @@ impl LLEmitter for LLBlockEmitter<'_> {
 }
 
 impl LLBlockEmitter<'_> {
-    /// Build a counted loop: `for i in 0..count { body(i, accumulators) -> updated_accumulators }`
-    ///
-    /// LL variant: uses i64 index with int_ult/int_add.
+    /// Build a counted loop with an i64 upper bound:
+    /// `for i in 0..count { body(i, accumulators) -> updated_accumulators }`.
     pub fn build_counted_loop(
         &mut self,
-        count: usize,
+        count: ValueId,
         accumulators: Vec<(ValueId, Type)>,
         body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         let const_0 = self.emit_int_const(64, 0);
         let const_1 = self.emit_int_const(64, 1);
-        let const_len = self.emit_int_const(64, count as u64);
 
         let mut params = vec![(const_0, Type::i64())];
         params.extend(accumulators);
 
         let results = self.build_loop(
             params,
-            |b, loop_params| b.int_ult(loop_params[0], const_len),
+            |b, loop_params| b.int_ult(loop_params[0], count),
             |emitter, loop_params| {
                 let i_val = loop_params[0];
                 let acc_params = &loop_params[1..];

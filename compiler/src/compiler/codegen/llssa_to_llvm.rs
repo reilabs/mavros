@@ -18,16 +18,16 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
 };
 
 use crate::compiler::analysis::flow_analysis;
 use crate::compiler::analysis::flow_analysis::FlowAnalysis;
 use crate::compiler::ssa::llssa::{
-    Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp, LLSSA, LLStruct,
-    Type,
+    Blob as LLBlob, Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
+    LLSSA, LLStruct, Type,
 };
-use crate::compiler::ssa::{BlockId, FunctionId, Terminator, ValueId};
+use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId};
 
 use mavros_wasm_layout::WASM_PTR_SIZE;
 
@@ -57,13 +57,20 @@ fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
     }
 }
 
+fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {
+    s.fields.iter().find_map(|field| match field {
+        LLFieldType::FlexArray(elem) => Some(elem),
+        _ => None,
+    })
+}
+
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     value_map: HashMap<ValueId, BasicValueEnum<'ctx>>,
-    constant_values: HashMap<ValueId, BasicValueEnum<'ctx>>,
+    constants: SSAConstantsSnapshot<Constant>,
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
@@ -79,6 +86,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
     // Globals
     globals: Vec<inkwell::values::GlobalValue<'ctx>>,
+    const_data_counter: usize,
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -91,7 +99,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             module,
             builder,
             value_map: HashMap::new(),
-            constant_values: HashMap::new(),
+            constants: HashMap::new(),
             block_map: HashMap::new(),
             function_map: HashMap::new(),
             vm_ptr: None,
@@ -105,6 +113,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
             globals: Vec::new(),
+            const_data_counter: 0,
         };
 
         codegen.declare_runtime_functions();
@@ -279,6 +288,78 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .const_named_struct(&fields)
                     .into()
             }
+            Constant::Blob(_) => {
+                panic!("Blob constants cannot be materialized as normal LLVM values")
+            }
+        }
+    }
+
+    fn materialize_const_data_element(
+        &self,
+        elem_type: &LLStruct,
+        value: &Constant,
+    ) -> StructValue<'ctx> {
+        if let Constant::Struct { layout, .. } = value {
+            if layout == elem_type {
+                return self.materialize_const(value).into_struct_value();
+            }
+        }
+
+        assert_eq!(
+            elem_type.fields.len(),
+            1,
+            "scalar const data must target a single-field element struct"
+        );
+        assert!(
+            value.matches_field(&elem_type.fields[0]),
+            "const data element {:?} does not match {}",
+            value,
+            elem_type
+        );
+        let field = self.materialize_const(value);
+        self.convert_struct_type(elem_type)
+            .into_struct_type()
+            .const_named_struct(&[field])
+    }
+
+    fn materialize_const_data(
+        &mut self,
+        elem_type: &LLStruct,
+        blob: &LLBlob,
+    ) -> PointerValue<'ctx> {
+        assert!(
+            !blob.is_empty(),
+            "ConstDataPtr should not be emitted for empty data"
+        );
+        let elem_ty = self.convert_struct_type(elem_type).into_struct_type();
+        let values: Vec<StructValue<'ctx>> = blob
+            .elements
+            .iter()
+            .map(|value| self.materialize_const_data_element(elem_type, value))
+            .collect();
+        let array_ty = elem_ty.array_type(values.len() as u32);
+        let array_value = elem_ty.const_array(&values);
+        let name = format!("__mavros_const_data_{}", self.const_data_counter);
+        self.const_data_counter += 1;
+
+        let global = self
+            .module
+            .add_global(array_ty, Some(AddressSpace::default()), &name);
+        global.set_initializer(&array_value);
+        global.set_constant(true);
+        global.set_linkage(Linkage::Private);
+        global.set_unnamed_addr(true);
+
+        let zero = self.context.i32_type().const_zero();
+        unsafe {
+            self.builder
+                .build_gep(
+                    array_ty,
+                    global.as_pointer_value(),
+                    &[zero, zero],
+                    "const_data",
+                )
+                .unwrap()
         }
     }
 
@@ -307,8 +388,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let elem = self.convert_struct_type(s);
                 elem.array_type(*n as u32).into()
             }
-            LLFieldType::FlexArray(_) => {
-                panic!("FlexArray is not supported in LLVM codegen")
+            LLFieldType::FlexArray(s) => {
+                let elem = self.convert_struct_type(s);
+                elem.array_type(0).into()
             }
         }
     }
@@ -415,13 +497,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             self.globals.push(global);
         }
 
-        // Materialise module-level LLSSA constants once, allowing each function to re-seed from
-        // this map.
-        self.constant_values = llssa
-            .const_snapshot()
-            .into_iter()
-            .map(|(vid, c)| (vid, self.materialize_const(c.as_ref())))
-            .collect();
+        self.constants = llssa.const_snapshot();
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -481,8 +557,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         main_id: FunctionId,
     ) {
         self.value_map.clear();
-        self.value_map
-            .extend(self.constant_values.iter().map(|(vid, val)| (*vid, *val)));
+        for (vid, constant) in &self.constants {
+            if !matches!(constant.as_ref(), Constant::Blob(_)) {
+                self.value_map
+                    .insert(*vid, self.materialize_const(constant.as_ref()));
+            }
+        }
         self.block_map.clear();
 
         let fn_value = self.function_map[&fn_id];
@@ -975,15 +1055,41 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLOp::HeapAlloc {
                 result,
                 struct_type,
-                flex_count: _,
+                flex_count,
             } => {
                 let struct_ty = self.convert_struct_type(struct_type);
                 let size = struct_ty.size_of().unwrap();
                 let i32_type = self.context.i32_type();
-                let size_i32 = self
+                let mut size_i32 = self
                     .builder
                     .build_int_truncate_or_bit_cast(size, i32_type, "size")
                     .unwrap();
+                if let Some(count) = flex_count {
+                    let flex_elem = ll_struct_flex_elem(struct_type)
+                        .expect("flex_count provided for struct with no FlexArray field");
+                    let elem_ty = self.convert_struct_type(flex_elem);
+                    let elem_size = elem_ty.size_of().unwrap();
+                    let elem_size_i32 = self
+                        .builder
+                        .build_int_truncate_or_bit_cast(elem_size, i32_type, "flex_elem_size")
+                        .unwrap();
+                    let count_i32 = self
+                        .builder
+                        .build_int_truncate_or_bit_cast(
+                            self.value_map[count].into_int_value(),
+                            i32_type,
+                            "flex_count",
+                        )
+                        .unwrap();
+                    let flex_size = self
+                        .builder
+                        .build_int_mul(elem_size_i32, count_i32, "flex_size")
+                        .unwrap();
+                    size_i32 = self
+                        .builder
+                        .build_int_add(size_i32, flex_size, "alloc_size")
+                        .unwrap();
+                }
                 let malloc_fn = self.malloc_fn.expect("malloc not declared");
                 let call_site = self
                     .builder
@@ -1079,6 +1185,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 self.builder
                     .build_memcpy(dst_ptr, 1, src_ptr, 1, total_i32)
                     .unwrap();
+            }
+
+            LLOp::ConstDataPtr {
+                result,
+                elem_type,
+                blob,
+            } => {
+                let blob_data = match self.constants.get(blob).map(|constant| constant.as_ref()) {
+                    Some(Constant::Blob(blob)) => blob.clone(),
+                    _ => panic!("ConstDataPtr input v{} is not a blob", blob.0),
+                };
+                let ptr = self.materialize_const_data(elem_type, &blob_data);
+                self.value_map.insert(*result, ptr.into());
             }
 
             LLOp::Trap => {

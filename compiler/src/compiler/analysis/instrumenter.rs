@@ -5,6 +5,7 @@
 //! execution combined with an instrumenter for the circuit cost, and gives the compiler an idea of
 //! how much a function could be shrunk through specialization on concrete inputs.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field as _, PrimeField};
@@ -53,11 +54,11 @@ pub enum ValueSignature {
     I { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
+    Blob(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
     Unknown(ScalarKind),
     UnknownSlice,
     WitnessOf(Box<ValueSignature>),
-    Tuple(Vec<ValueSignature>),
 }
 
 impl ValueSignature {
@@ -69,13 +70,11 @@ impl ValueSignature {
             ValueSignature::Array(vals) => {
                 Value::array(vals.iter().map(|v| v.to_value()).collect())
             }
+            ValueSignature::Blob(vals) => Value::Blob(vals.iter().map(|v| v.to_value()).collect()),
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
             ValueSignature::Unknown(kind) => Value::Unknown(*kind),
             ValueSignature::UnknownSlice => Value::UnknownSlice,
             ValueSignature::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.to_value())),
-            ValueSignature::Tuple(elements) => {
-                Value::Tuple(elements.iter().map(|e| e.to_value()).collect())
-            }
         }
     }
 
@@ -93,18 +92,18 @@ impl ValueSignature {
                     format!("[...]")
                 }
             }
+            ValueSignature::Blob(items) => {
+                if full {
+                    let items = items.iter().map(|v| v.pretty_print(full)).join(", ");
+                    format!("blob[{items}]")
+                } else {
+                    "blob[...]".to_string()
+                }
+            }
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
             ValueSignature::Unknown(_) => "?".to_string(),
             ValueSignature::UnknownSlice => "?slice".to_string(),
             ValueSignature::WitnessOf(inner) => format!("W({})", inner.pretty_print(full)),
-            ValueSignature::Tuple(elements) => {
-                if full {
-                    let elements = elements.iter().map(|e| e.pretty_print(full)).join(", ");
-                    format!("({})", elements)
-                } else {
-                    format!("(...)")
-                }
-            }
         }
     }
 }
@@ -120,11 +119,11 @@ pub enum Value {
     I(usize, u128),
     Field(Field),
     Array(Rc<RefCell<ArrayData>>),
+    Blob(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
     UnknownSlice,
     WitnessOf(Box<Value>),
-    Tuple(Vec<Value>),
 }
 
 impl Value {
@@ -218,13 +217,12 @@ impl Value {
                 Value::array(vec![elem_unknown; *n])
             }
             TypeExpr::Slice(_) => Value::UnknownSlice,
-            TypeExpr::Tuple(elems) => {
-                Value::Tuple(elems.iter().map(Value::unknown_from_type).collect())
-            }
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(inner) => {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
             TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
+            TypeExpr::Blob(_) => panic!("Cannot create unknown value for Blob type"),
         }
     }
 
@@ -553,13 +551,13 @@ impl Value {
                     val.blind();
                 }
             }
-            Value::Pointer(val) => {
-                val.borrow_mut().blind();
-            }
-            Value::Tuple(vals) => {
+            Value::Blob(vals) => {
                 for val in vals {
                     val.blind();
                 }
+            }
+            Value::Pointer(val) => {
+                val.borrow_mut().blind();
             }
         }
     }
@@ -578,13 +576,13 @@ impl Value {
                     val.forget_concrete();
                 }
             }
-            Value::Pointer(val) => {
-                val.borrow_mut().forget_concrete();
-            }
-            Value::Tuple(vals) => {
+            Value::Blob(vals) => {
                 for val in vals {
                     val.forget_concrete();
                 }
+            }
+            Value::Pointer(val) => {
+                val.borrow_mut().forget_concrete();
             }
         }
     }
@@ -612,11 +610,11 @@ impl Value {
                     .map(|v| v.make_unspecialized_sig())
                     .collect(),
             ),
+            Value::Blob(vals) => {
+                ValueSignature::Blob(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
+            }
             Value::Pointer(val) => {
                 ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig()))
-            }
-            Value::Tuple(vals) => {
-                ValueSignature::Tuple(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
             }
         }
     }
@@ -648,6 +646,7 @@ impl Value {
     fn is_witness(&self) -> bool {
         match self {
             Value::Unknown(_) => false,
+            Value::Blob(_) => false,
             Value::WitnessOf(_) => true,
             _ => false,
         }
@@ -678,18 +677,6 @@ impl Value {
             (Value::Unknown(_) | Value::UnknownSlice, _) => Value::unknown_from_type(tp),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
-                self, index
-            ),
-        }
-    }
-
-    fn tuple_get(&self, index: usize) -> Value {
-        match self {
-            Value::Unknown(_) => Value::Unknown(ScalarKind::Field),
-            Value::WitnessOf(inner) => inner.tuple_get(index),
-            Value::Tuple(vals) => vals[index].clone(),
-            _ => panic!(
-                "Cannot get tuple element from {:?} with index {:?}",
                 self, index
             ),
         }
@@ -1279,21 +1266,6 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn mk_tuple(
-        values: Vec<SpecSplitValue>,
-        _ctx: &mut CostAnalysis,
-        _elem_types: &[Type],
-    ) -> SpecSplitValue {
-        let (uns, spec) = values
-            .into_iter()
-            .map(|v| (v.unspecialized, v.specialized))
-            .unzip();
-        SpecSplitValue {
-            unspecialized: Value::Tuple(uns),
-            specialized: Value::Tuple(spec),
-        }
-    }
-
     fn assert_r1c(
         a: &SpecSplitValue,
         b: &SpecSplitValue,
@@ -1331,18 +1303,6 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 tp,
                 instrumenter.get_specialized(),
             ),
-        }
-    }
-
-    fn tuple_get(
-        &self,
-        index: usize,
-        _tp: &Type,
-        _instrumenter: &mut CostAnalysis,
-    ) -> SpecSplitValue {
-        SpecSplitValue {
-            unspecialized: self.unspecialized.tuple_get(index),
-            specialized: self.specialized.tuple_get(index),
         }
     }
 
@@ -1528,6 +1488,38 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         Self {
             unspecialized: Value::Field(f),
             specialized: Value::Field(f),
+        }
+    }
+
+    fn of_blob(values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
+        let (unspecialized, specialized) = values
+            .into_iter()
+            .map(|v| (v.unspecialized, v.specialized))
+            .unzip();
+        Self {
+            unspecialized: Value::Blob(unspecialized),
+            specialized: Value::Blob(specialized),
+        }
+    }
+
+    fn expect_blob(&self, _ctx: &mut CostAnalysis) -> Vec<Self> {
+        match (&self.unspecialized, &self.specialized) {
+            (Value::Blob(unspecialized), Value::Blob(specialized)) => {
+                assert_eq!(unspecialized.len(), specialized.len());
+                unspecialized
+                    .iter()
+                    .cloned()
+                    .zip(specialized.iter().cloned())
+                    .map(|(unspecialized, specialized)| Self {
+                        unspecialized,
+                        specialized,
+                    })
+                    .collect()
+            }
+            _ => panic!(
+                "Expected blob, got unspecialized={:?}, specialized={:?}",
+                self.unspecialized, self.specialized
+            ),
         }
     }
 
@@ -1945,9 +1937,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                     TypeExpr::Array(elem, size) => {
                         Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                     }
-                    TypeExpr::Tuple(elems) => {
-                        Value::Tuple(elems.iter().map(unknown_value).collect())
-                    }
+                    TypeExpr::Tuple(_) => ice_non_elided_tuple(),
                     TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
                     TypeExpr::Ref(inner) => {
                         Value::Pointer(Rc::new(RefCell::new(unknown_value(inner))))
@@ -2132,7 +2122,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 TypeExpr::Array(elem, size) => {
                     Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                 }
-                TypeExpr::Tuple(elems) => Value::Tuple(elems.iter().map(unknown_value).collect()),
+                TypeExpr::Tuple(_) => ice_non_elided_tuple(),
                 TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
                 TypeExpr::Ref(inner) => Value::Pointer(Rc::new(RefCell::new(unknown_value(inner)))),
                 _ => panic!("Unsupported type for unknown value: {:?}", ty),
@@ -2433,9 +2423,7 @@ impl CostEstimator {
                 let elem_sig = self.type_to_unknown_sig(elem);
                 ValueSignature::Array(vec![elem_sig; 0])
             }
-            TypeExpr::Tuple(elems) => {
-                ValueSignature::Tuple(elems.iter().map(|e| self.type_to_unknown_sig(e)).collect())
-            }
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(inner) => {
                 ValueSignature::PointerTo(Box::new(self.type_to_unknown_sig(inner)))
             }

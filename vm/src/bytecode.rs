@@ -1070,6 +1070,23 @@ mod def {
     }
 
     #[opcode]
+    fn array_alloc_from_frame(
+        #[out] res: *mut BoxedValue,
+        stride: usize,
+        meta: BoxedLayout,
+        count: usize,
+        source: FramePosition,
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let array = BoxedValue::alloc(meta, vm);
+        unsafe {
+            frame.write_to(array.data(), source.0 as isize, count * stride);
+            *res = array;
+        }
+    }
+
+    #[opcode]
     fn array_alloc_repeated(
         #[out] res: *mut BoxedValue,
         stride: usize,

@@ -382,7 +382,7 @@ fn compute_constant_bounds(ssa: &HLSSA) -> HashMap<ValueId, IntInterval> {
                     IntInterval::singleton(signed_const_to_bigint(*bits, *encoded))
                 }
                 Constant::Field(f) => IntInterval::singleton(field_to_bigint(f)),
-                Constant::FnPtr(_) => IntInterval::top(),
+                Constant::FnPtr(_) | Constant::Blob(_) => IntInterval::top(),
             };
             (*vid, r)
         })

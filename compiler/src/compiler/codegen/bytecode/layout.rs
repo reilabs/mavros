@@ -1,5 +1,6 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::HashMap;
 
 use crate::{
@@ -55,6 +56,13 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
+    pub fn alloc_long_data(&mut self, value: ValueId, cells: usize) -> bytecode::FramePosition {
+        self.variables.insert(value, self.next_free);
+        let r = self.next_free;
+        self.next_free += cells;
+        bytecode::FramePosition(r)
+    }
+
     pub fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
         let r = self.next_free;
         self.next_free += bytecode::FELT_LIMBS;
@@ -86,7 +94,7 @@ impl FrameLayouter {
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
             TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Tuple(_) => constants::POINTER_SIZE_CELLS,
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
             _ => todo!(),
         }

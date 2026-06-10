@@ -1,0 +1,9 @@
+[package]
+name = "passport_08_complete_age_check"
+type = "bin"
+authors = [""]
+
+[dependencies]
+compare_age = { path = "vendor/utils/compare/age" }
+data_check_expiry = { path = "vendor/utils/data-check/expiry" }
+passport_validity_check = { path = "vendor/utils/passport_validity_check" }

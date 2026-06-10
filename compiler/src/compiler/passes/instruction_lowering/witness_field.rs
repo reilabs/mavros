@@ -395,11 +395,21 @@ impl LowerWitnessFieldOps {
         value: ValueId,
         max_bits: usize,
     ) {
-        assert!(max_bits >= 1, "rangecheck width must be at least 1 bit");
+        let value_field = b.ensure_field(value, context.types().get_value_type(value));
+        if max_bits == 0 {
+            let flag = guard
+                .map(|condition| {
+                    b.ensure_field(condition, context.types().get_value_type(condition))
+                })
+                .unwrap_or_else(|| b.field_const(Field::ONE));
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(flag, value_field, zero);
+            return;
+        }
+
         let max_bits: u8 = max_bits
             .try_into()
             .expect("rangecheck width must fit in LookupTarget::Rangecheck");
-        let value_field = b.ensure_field(value, context.types().get_value_type(value));
         let flag = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)))
             .unwrap_or_else(|| b.field_const(Field::ONE));

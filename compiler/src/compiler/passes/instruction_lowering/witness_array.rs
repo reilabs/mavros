@@ -3,6 +3,7 @@
 //! This pass deliberately emits ordinary arithmetic/comparison/rangecheck operations and leaves
 //! their constraint-level lowering to the later spilling passes.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use ark_ff::Field as _;
 
 use crate::compiler::{
@@ -295,7 +296,8 @@ impl LowerWitnessArrayOps {
             TypeExpr::Slice(_) => {
                 panic!("multidimensional witness array read: slice element types not supported")
             }
-            TypeExpr::Tuple(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+            TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(_) => {
                 panic!(
                     "multidimensional witness array read: unsupported element type {}",
                     target_type
@@ -331,7 +333,8 @@ fn leaf_scalar_count(t: &Type) -> usize {
         TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
         TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Tuple(_) | TypeExpr::Function => {
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(_) => {
             panic!("leaf_scalar_count: unsupported type {}", t)
         }
     }
