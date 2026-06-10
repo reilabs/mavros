@@ -604,11 +604,20 @@ fn lower_constants_llssa(
         let constant = constants.get(&vid).expect("vid is in constants");
         let ll_constant = lower_constant_to_ll_constant(constant.as_ref());
         let ll_val = e.ssa.add_const(ll_constant);
-        if let Constant::Blob(blob) = constant.as_ref() {
-            let data_ptr = e.const_data_ptr(elem_struct(&blob.elem_type), ll_val);
-            val_map.insert(vid, data_ptr);
-        } else {
-            val_map.insert(vid, ll_val);
+        match constant.as_ref() {
+            // An empty blob has no backing data; its (never dereferenced)
+            // data pointer is null.
+            Constant::Blob(blob) if blob.is_empty() => {
+                let null_ptr = e.ssa.add_const(LLConstant::NullPtr);
+                val_map.insert(vid, null_ptr);
+            }
+            Constant::Blob(blob) => {
+                let data_ptr = e.const_data_ptr(elem_struct(&blob.elem_type), ll_val);
+                val_map.insert(vid, data_ptr);
+            }
+            _ => {
+                val_map.insert(vid, ll_val);
+            }
         }
     }
 }
