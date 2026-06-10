@@ -822,17 +822,28 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::IntCmp { kind, result, a, b } => {
-                let lhs = self.value_map[a].into_int_value();
-                let rhs = self.value_map[b].into_int_value();
                 let predicate = match kind {
                     IntCmpOp::Eq => IntPredicate::EQ,
                     IntCmpOp::ULt => IntPredicate::ULT,
                     IntCmpOp::SLt => IntPredicate::SLT,
                 };
-                let val = self
-                    .builder
-                    .build_int_compare(predicate, lhs, rhs, &format!("v{}", result.0))
-                    .unwrap();
+                // icmp accepts pointer operands directly; this happens for
+                // null checks on RC'd cell slots.
+                let val = match (self.value_map[a], self.value_map[b]) {
+                    (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => self
+                        .builder
+                        .build_int_compare(predicate, lhs, rhs, &format!("v{}", result.0))
+                        .unwrap(),
+                    (lhs, rhs) => self
+                        .builder
+                        .build_int_compare(
+                            predicate,
+                            lhs.into_int_value(),
+                            rhs.into_int_value(),
+                            &format!("v{}", result.0),
+                        )
+                        .unwrap(),
+                };
                 self.value_map.insert(*result, val.into());
             }
 
