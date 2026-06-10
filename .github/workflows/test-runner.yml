@@ -73,6 +73,7 @@ jobs:
     steps:
       - name: Generate MavrosBot token
         id: app-token
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.STATUS_UPDATE_APP_ID }}
@@ -83,7 +84,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
