@@ -31,6 +31,37 @@ use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
+/// How to optimize when compiling a module to WASM.
+#[derive(Clone, Copy, Debug)]
+pub struct WasmCompileOpts {
+    /// LLVM mid-end pass pipeline to run before codegen (e.g. `"default<O1>"`).
+    pub midend_pipeline: Option<&'static str>,
+    /// Codegen (instruction selection) optimization level.
+    pub codegen_level: OptimizationLevel,
+}
+
+impl WasmCompileOpts {
+    /// Fast compilation at the cost of output quality. A cheap mid-end
+    /// pipeline keeps the module small, then codegen runs at `None`
+    /// (FastISel). On large programs this compiles several times faster
+    /// than `release()` while producing correct output — the right choice
+    /// for tests and CI.
+    pub fn fast() -> Self {
+        Self {
+            midend_pipeline: Some("default<O1>"),
+            codegen_level: OptimizationLevel::None,
+        }
+    }
+
+    /// Optimized output for production artifacts.
+    pub fn release() -> Self {
+        Self {
+            midend_pipeline: None,
+            codegen_level: OptimizationLevel::Aggressive,
+        }
+    }
+}
+
 fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {
     s.fields.iter().find_map(|field| match field {
         LLFieldType::FlexArray(elem) => Some(elem),
@@ -1282,7 +1313,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.module.print_to_file(path).unwrap();
     }
 
-    pub fn compile_to_wasm(&self, path: &Path, optimization: OptimizationLevel) {
+    pub fn compile_to_wasm(&self, path: &Path, opts: WasmCompileOpts) {
         use std::process::Command;
 
         Target::initialize_webassembly(&InitializationConfig::default());
@@ -1290,16 +1321,35 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let target_triple = TargetTriple::create("wasm32-unknown-unknown");
         let target = Target::from_triple(&target_triple).unwrap();
 
+        // The module must carry the wasm32 triple + datalayout before any
+        // mid-end passes run: without a datalayout the optimizer folds
+        // struct GEPs using host (8-byte-pointer) field offsets, which
+        // miscompiles every VM-struct access on wasm32.
+        self.module.set_triple(&target_triple);
+
         let target_machine = target
             .create_target_machine(
                 &target_triple,
                 "generic",
                 "",
-                optimization,
+                opts.codegen_level,
                 RelocMode::Default,
                 CodeModel::Default,
             )
             .unwrap();
+
+        self.module
+            .set_data_layout(&target_machine.get_target_data().get_data_layout());
+
+        if let Some(pipeline) = opts.midend_pipeline {
+            self.module
+                .run_passes(
+                    pipeline,
+                    &target_machine,
+                    inkwell::passes::PassBuilderOptions::create(),
+                )
+                .unwrap();
+        }
 
         let obj_path = path.with_extension("o");
         target_machine

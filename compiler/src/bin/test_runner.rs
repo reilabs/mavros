@@ -16,7 +16,7 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::codegen::hlssa_to_r1cs::R1CS,
+    compiler::codegen::{hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::Driver,
     vm::{bytecode::TableInfo, interpreter},
 };
@@ -272,7 +272,12 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
+        match driver.compile_llvm_targets(
+            false,
+            r1cs,
+            Some(wasm_path.clone()),
+            WasmCompileOpts::fast(),
+        ) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -344,7 +349,7 @@ fn run_single(root: PathBuf) {
         emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("ad.wasm");
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs) {
+        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, WasmCompileOpts::fast()) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:AD_WASM_COMPILE:ok");
                 Some(wasm_path)

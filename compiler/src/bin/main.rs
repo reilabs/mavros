@@ -5,6 +5,7 @@ use mavros_compiler::Project;
 use mavros_compiler::api;
 use mavros_compiler::compiler::Field;
 use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
+use mavros_compiler::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
 use mavros_compiler::driver::Driver;
 use mavros_compiler::plotting;
 
@@ -181,7 +182,12 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
 
         driver
-            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config)
+            .compile_llvm_targets(
+                args.emit_llvm,
+                &r1cs,
+                wasm_config,
+                WasmCompileOpts::release(),
+            )
             .unwrap();
     }
 
