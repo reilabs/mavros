@@ -106,7 +106,7 @@ impl PrepareEntryPoint {
             // become unused (e.g. when inter-procedural DCE prunes call args to
             // original_main).
             let witness_inputs = (total_fields > 0).then(|| {
-                let initial_array = Self::emit_default_array(&mut e, &Type::field(), total_fields);
+                let initial_array = Self::emit_default_witness_array(&mut e, &Type::field(), total_fields);
                 let copied = e.build_counted_loop(
                     total_fields,
                     vec![(initial_array, Type::field().array_of(total_fields))],
@@ -412,7 +412,7 @@ impl PrepareEntryPoint {
                     .first()
                     .copied()
                     .expect("array prepare function should have child function");
-                let initial_array = Self::emit_default_array(e, inner, *size);
+                let initial_array = Self::emit_default_witness_array(e, inner, *size);
                 let prepared_array = e.build_counted_loop(
                     *size,
                     vec![(initial_array, typ.clone())],
@@ -530,7 +530,7 @@ impl PrepareEntryPoint {
             TypeExpr::Array(inner, size) => {
                 let child_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
                 let child_width = Self::flattened_field_count(inner);
-                let initial_array = Self::emit_default_array(e, inner, *size);
+                let initial_array = Self::emit_default_witness_array(e, inner, *size);
                 let reconstructed_array = e.build_counted_loop(
                     *size,
                     vec![(initial_array, typ.clone())],
@@ -576,32 +576,44 @@ impl PrepareEntryPoint {
         }
     }
 
-    fn emit_default_value(e: &mut HLBlockEmitter<'_>, typ: &Type) -> ValueId {
+    /// Build a placeholder value that is witness-typed at the leaves. These
+    /// seed the fill-loop accumulators of this pass, whose every slot is
+    /// overwritten with a witness-leaved value before use. Making the
+    /// placeholders witness-typed up front keeps the accumulator's inferred
+    /// type stable across the loop, so untaint does not have to emit an
+    /// (unrolled) pure→witness array conversion at the loop boundary.
+    fn emit_default_witness_value(e: &mut HLBlockEmitter<'_>, typ: &Type) -> ValueId {
         match &typ.expr {
-            TypeExpr::Field => e.field_const(ark_bn254::Fr::from(0)),
-            TypeExpr::U(size) => e.u_const(*size, 0),
-            TypeExpr::I(size) => e.i_const(*size, 0),
-            TypeExpr::Array(inner, size) => Self::emit_default_array(e, inner, *size),
-            TypeExpr::WitnessOf(_) => {
-                let field = e.field_const(ark_bn254::Fr::from(0));
-                e.cast_to_witness_of(field)
+            TypeExpr::Field => {
+                let zero = e.field_const(ark_bn254::Fr::from(0));
+                e.cast_to_witness_of(zero)
             }
+            TypeExpr::U(size) => {
+                let zero = e.u_const(*size, 0);
+                e.cast_to_witness_of(zero)
+            }
+            TypeExpr::I(size) => {
+                let zero = e.i_const(*size, 0);
+                e.cast_to_witness_of(zero)
+            }
+            TypeExpr::Array(inner, size) => Self::emit_default_witness_array(e, inner, *size),
+            TypeExpr::WitnessOf(inner) => Self::emit_default_witness_value(e, inner),
             TypeExpr::Tuple(element_types) => {
-                let elems = element_types
-                    .iter()
-                    .map(|elem_type| Self::emit_default_value(e, elem_type))
-                    .collect();
+                let mut elems = Vec::with_capacity(element_types.len());
+                for elem_type in element_types {
+                    elems.push(Self::emit_default_witness_value(e, elem_type));
+                }
                 e.mk_tuple(elems, element_types.clone())
             }
             _ => todo!("Not implemented yet"),
         }
     }
 
-    fn emit_default_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
+    fn emit_default_witness_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
         if size == 0 {
             return e.mk_seq(Vec::new(), SequenceTargetType::Array(0), inner.clone());
         }
-        let default_elem = Self::emit_default_value(e, inner);
+        let default_elem = Self::emit_default_witness_value(e, inner);
         e.mk_repeated(
             default_elem,
             SequenceTargetType::Array(size),
@@ -653,7 +665,7 @@ impl PrepareEntryPoint {
             return e.mk_seq(fields, SequenceTargetType::Array(width), Type::field());
         }
 
-        let initial_array = Self::emit_default_array(e, &Type::field(), width);
+        let initial_array = Self::emit_default_witness_array(e, &Type::field(), width);
         let copied = e.build_counted_loop(
             width,
             vec![(initial_array, Type::field().array_of(width))],
@@ -666,4 +678,5 @@ impl PrepareEntryPoint {
         );
         copied[0]
     }
+
 }
