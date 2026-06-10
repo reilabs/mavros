@@ -9,7 +9,9 @@ use crate::compiler::{
     analysis::flow_analysis::{self, FlowAnalysis},
     ssa::{
         BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
-        hlssa::{CallTarget, CastTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+        hlssa::{
+            CallTarget, CastTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+        },
     },
 };
 

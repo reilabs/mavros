@@ -29,7 +29,6 @@ use crate::compiler::ssa::llssa::{
 };
 use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId};
 
-
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
 fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {

@@ -106,7 +106,8 @@ impl PrepareEntryPoint {
             // become unused (e.g. when inter-procedural DCE prunes call args to
             // original_main).
             let witness_inputs = (total_fields > 0).then(|| {
-                let initial_array = Self::emit_default_witness_array(&mut e, &Type::field(), total_fields);
+                let initial_array =
+                    Self::emit_default_witness_array(&mut e, &Type::field(), total_fields);
                 let copied = e.build_counted_loop(
                     total_fields,
                     vec![(initial_array, Type::field().array_of(total_fields))],
@@ -131,7 +132,10 @@ impl PrepareEntryPoint {
                         let index = e.u_const(32, offset as u128);
                         e.array_get(witness_inputs, index)
                     }
-                    TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
+                    TypeExpr::U(_)
+                    | TypeExpr::I(_)
+                    | TypeExpr::Array(_, _)
+                    | TypeExpr::Tuple(_) => {
                         let child = Self::emit_reconstruct_child_input_array(
                             e,
                             witness_inputs,
@@ -609,7 +613,11 @@ impl PrepareEntryPoint {
         }
     }
 
-    fn emit_default_witness_array(e: &mut HLBlockEmitter<'_>, inner: &Type, size: usize) -> ValueId {
+    fn emit_default_witness_array(
+        e: &mut HLBlockEmitter<'_>,
+        inner: &Type,
+        size: usize,
+    ) -> ValueId {
         if size == 0 {
             return e.mk_seq(Vec::new(), SequenceTargetType::Array(0), inner.clone());
         }
@@ -678,5 +686,4 @@ impl PrepareEntryPoint {
         );
         copied[0]
     }
-
 }
