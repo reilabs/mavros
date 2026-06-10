@@ -67,10 +67,11 @@ jobs:
       - name: machete
         uses: bnjbvr/cargo-machete@main
 
-  # Build the test runner once and populate the shared cargo cache. The two
-  # test shards and the merge job all restore this same cache (keyed on
-  # Cargo.lock, so identical for every job on this commit), so the ~3-minute
-  # build only happens here instead of in each test job.
+  # Build the test runner once and publish the compiled binary as an artifact.
+  # The two test shards and the merge job download that binary and run it
+  # directly, so the ~3-minute compile happens exactly once here instead of
+  # being repeated (a `cargo run`/`make` in each job re-checks and rebuilds the
+  # whole workspace even from a warm cache, which was the bottleneck).
   build-test-runner:
     name: Build Test Runner
     runs-on: ubuntu-latest
@@ -96,6 +97,7 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
+            ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
@@ -103,10 +105,17 @@ jobs:
       - name: Build Test Runner
         run: make build-test-runner
 
+      - name: Upload test-runner binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runner-binary
+          path: target/release/test-runner
+          retention-days: 1
+
   # Run one half of the test suite. The matrix fans this single job definition
-  # out into test (shard 0) and test (shard 1); each restores the cache the
-  # build job populated and runs its interleaved half of the tests, uploading
-  # its partial STATUS.md as an artifact for the merge job.
+  # out into test (shard 0) and test (shard 1); each downloads the prebuilt
+  # test-runner binary, runs its interleaved half of the tests, and uploads its
+  # partial STATUS.md as an artifact for the merge job. No compilation here.
   test:
     name: Run Tests (shard ${{ matrix.shard }})
     needs: build-test-runner
@@ -132,20 +141,29 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
+      # The runner shells out to `cargo metadata` to locate the noir test
+      # programs, which needs the resolved registry/git dependency caches.
+      # Restore-only (no build), so this is the cheap ~25s restore, not a
+      # rebuild.
       - name: Restore Cargo dependencies
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
-            target
+            ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Test Runner
-        run: make build-test-runner
+      - name: Download test-runner binary
+        uses: actions/download-artifact@v4
+        with:
+          name: test-runner-binary
+          path: target/release
 
       - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.part.md --jobs 4 --shard ${{ matrix.shard }} --shards 2
+        run: |
+          chmod +x target/release/test-runner
+          nix develop --command target/release/test-runner --output STATUS.part.md --jobs 4 --shard ${{ matrix.shard }} --shards 2
 
       - name: Upload partial STATUS.md
         uses: actions/upload-artifact@v4
@@ -187,17 +205,14 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
-      - name: Restore Cargo dependencies
-        uses: actions/cache@v4
+      # The merge / regression / growth modes only read STATUS.md files — they
+      # never invoke cargo or touch the workspace — so the prebuilt binary is
+      # all that's needed here, no cargo cache or rebuild.
+      - name: Download test-runner binary
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build Test Runner
-        run: make build-test-runner
+          name: test-runner-binary
+          path: target/release
 
       - name: Download shard 0 results
         uses: actions/download-artifact@v4
@@ -212,7 +227,9 @@ jobs:
           path: shard-1
 
       - name: Merge STATUS.md
-        run: nix develop --command cargo run --release --bin test-runner -- --merge shard-0/STATUS.part.md shard-1/STATUS.part.md --output STATUS.md
+        run: |
+          chmod +x target/release/test-runner
+          nix develop --command target/release/test-runner --merge shard-0/STATUS.part.md shard-1/STATUS.part.md --output STATUS.md
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -236,12 +253,12 @@ jobs:
 
       - name: Check for Regressions
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
-        run: nix develop --command cargo run --release --bin test-runner -- --check-regression baseline-STATUS.md STATUS.md
+        run: nix develop --command target/release/test-runner --check-regression baseline-STATUS.md STATUS.md
 
       - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
-          COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
+          COMMENT=$(nix develop --command target/release/test-runner --check-growth baseline-STATUS.md STATUS.md)
           echo "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
           # GITHUB_TOKEN is read-only on fork PRs, so commenting would fail there;
           # the report is still visible in the job summary above.
