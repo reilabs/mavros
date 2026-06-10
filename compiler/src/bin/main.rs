@@ -182,7 +182,12 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
 
         driver
-            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config, WasmCompileOpts::release())
+            .compile_llvm_targets(
+                args.emit_llvm,
+                &r1cs,
+                wasm_config,
+                WasmCompileOpts::release(),
+            )
             .unwrap();
     }
 
