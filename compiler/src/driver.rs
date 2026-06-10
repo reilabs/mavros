@@ -198,6 +198,11 @@ impl Driver {
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
+                // Fold constants and prune statically-decided branches (e.g. monomorphized
+                // generic dispatch) BEFORE pruning functions: calls in never-taken branches must
+                // not keep their callees alive into witness type inference and untaint CF, which
+                // can ICE on semantically-dead code they would otherwise have to type.
+                Box::new(SCCP::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
