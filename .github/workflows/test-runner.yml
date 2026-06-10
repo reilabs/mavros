@@ -195,25 +195,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           token: ${{ steps.app-token.outputs.token || github.token }}
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@v27
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Download Nix Dependencies
-        run: nix develop
-
-      # The merge / regression / growth modes only read STATUS.md files — they
-      # never invoke cargo or touch the workspace — so the prebuilt binary is
-      # all that's needed here, no cargo cache or rebuild.
-      - name: Download test-runner binary
-        uses: actions/download-artifact@v4
-        with:
-          name: test-runner-binary
-          path: target/release
-
+      # The merge / regression / growth steps are pure STATUS.md text
+      # processing (Python scripts under .github/scripts), so this job needs
+      # neither the Nix/LLVM toolchain nor the compiled test-runner binary.
       - name: Download shard 0 results
         uses: actions/download-artifact@v4
         with:
@@ -227,9 +211,7 @@ jobs:
           path: shard-1
 
       - name: Merge STATUS.md
-        run: |
-          chmod +x target/release/test-runner
-          nix develop --command target/release/test-runner --merge shard-0/STATUS.part.md shard-1/STATUS.part.md --output STATUS.md
+        run: python3 .github/scripts/merge_status.py --output STATUS.md shard-0/STATUS.part.md shard-1/STATUS.part.md
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -253,12 +235,12 @@ jobs:
 
       - name: Check for Regressions
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
-        run: nix develop --command target/release/test-runner --check-regression baseline-STATUS.md STATUS.md
+        run: python3 .github/scripts/check_regression.py baseline-STATUS.md STATUS.md
 
       - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
-          COMMENT=$(nix develop --command target/release/test-runner --check-growth baseline-STATUS.md STATUS.md)
+          COMMENT=$(python3 .github/scripts/check_growth.py baseline-STATUS.md STATUS.md)
           echo "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
           # GITHUB_TOKEN is read-only on fork PRs, so commenting would fail there;
           # the report is still visible in the job summary above.
