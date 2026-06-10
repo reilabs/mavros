@@ -111,6 +111,16 @@ impl ValueSignature {
 #[derive(Debug, Clone)]
 pub struct ArrayData {
     values: Vec<Value>,
+    table_ids: Vec<ArrayTableAssignment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InstrumenterId(usize);
+
+#[derive(Debug, Clone, Copy)]
+struct ArrayTableAssignment {
+    instrumenter_id: InstrumenterId,
+    table_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -128,11 +138,10 @@ pub enum Value {
 
 impl Value {
     fn array(values: Vec<Value>) -> Self {
-        Value::Array(Rc::new(RefCell::new(ArrayData { values })))
-    }
-
-    fn array_key(array: &Rc<RefCell<ArrayData>>) -> usize {
-        Rc::as_ptr(array) as usize
+        Value::Array(Rc::new(RefCell::new(ArrayData {
+            values,
+            table_ids: Vec::new(),
+        })))
     }
 
     fn flattened_table_len(&self) -> usize {
@@ -1627,6 +1636,7 @@ trait FunctionInstrumenter {
 
 #[derive(Debug, Clone)]
 struct Instrumenter {
+    id: InstrumenterId,
     constrains: usize,
     high_degree_muls: usize,
 
@@ -1645,13 +1655,14 @@ struct Instrumenter {
     final_spread_lookups: HashMap<u8, usize>,
     total_table_lookups: usize,
 
-    /// Array tables are allocated per array value identity.
-    allocated_array_tables: HashMap<usize, usize>,
+    /// Array table lengths indexed by IDs stored on `ArrayData` for this instrumenter.
+    allocated_array_tables: Vec<usize>,
 }
 
 impl Instrumenter {
-    fn new() -> Self {
+    fn new(id: InstrumenterId) -> Self {
         Self {
+            id,
             constrains: 0,
             high_degree_muls: 0,
             rangecheck_lookups: HashMap::new(),
@@ -1662,7 +1673,7 @@ impl Instrumenter {
             final_rangecheck8_lookups: 0,
             final_spread_lookups: HashMap::new(),
             total_table_lookups: 0,
-            allocated_array_tables: HashMap::new(),
+            allocated_array_tables: Vec::new(),
         }
     }
 
@@ -1720,9 +1731,23 @@ impl Instrumenter {
         };
         self.array_lookups += 1;
         self.total_table_lookups += 1;
+        let existing_table_id = array
+            .borrow()
+            .table_ids
+            .iter()
+            .find(|table| table.instrumenter_id == self.id)
+            .map(|table| table.table_id);
+        if existing_table_id.is_some() {
+            return;
+        }
+
+        let table_id = self.allocated_array_tables.len();
         self.allocated_array_tables
-            .entry(Value::array_key(array))
-            .or_insert_with(|| Value::Array(array.clone()).flattened_table_len());
+            .push(Value::Array(array.clone()).flattened_table_len());
+        array.borrow_mut().table_ids.push(ArrayTableAssignment {
+            instrumenter_id: self.id,
+            table_id,
+        });
     }
 
     fn table_allocation_constraints(&self) -> usize {
@@ -1739,7 +1764,7 @@ impl Instrumenter {
             .sum::<usize>();
         let array_constraints = self
             .allocated_array_tables
-            .values()
+            .iter()
             .map(|len| 2 * len + 1)
             .sum::<usize>();
         range_constraints + spread_constraints + array_constraints
@@ -1747,7 +1772,7 @@ impl Instrumenter {
 
     fn array_table_allocation_constraints(&self) -> usize {
         self.allocated_array_tables
-            .values()
+            .iter()
             .map(|len| 2 * len + 1)
             .sum()
     }
@@ -1790,7 +1815,7 @@ impl Instrumenter {
             .filter(|bits| **bits >= 2)
             .map(|bits| 1usize << *bits as usize)
             .sum::<usize>();
-        let array_rows = self.allocated_array_tables.values().sum::<usize>();
+        let array_rows = self.allocated_array_tables.iter().sum::<usize>();
         range_rows + spread_rows + array_rows
     }
 
@@ -1917,6 +1942,7 @@ pub struct CostAnalysis {
     functions: HashMap<FunctionSignature, FunctionCost>,
     cache: HashMap<FunctionSignature, Vec<ValueSignature>>,
     stack: Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
+    next_instrumenter_id: usize,
 }
 
 impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
@@ -2249,6 +2275,12 @@ impl Summary {
 }
 
 impl CostAnalysis {
+    fn fresh_instrumenter_id(&mut self) -> InstrumenterId {
+        let id = InstrumenterId(self.next_instrumenter_id);
+        self.next_instrumenter_id += 1;
+        id
+    }
+
     fn register_cached_call(&mut self, sig: FunctionSignature) {
         if !self.stack.is_empty() {
             let (_, cost) = self.stack.last_mut().unwrap();
@@ -2267,10 +2299,12 @@ impl CostAnalysis {
         if self.functions.contains_key(&sig) {
             self.stack.push((sig, Box::new(DummyInstrumenter {})));
         } else {
+            let raw_id = self.fresh_instrumenter_id();
+            let specialized_id = self.fresh_instrumenter_id();
             let instrumenter = FunctionCost {
                 calls: HashMap::new(),
-                raw: Instrumenter::new(),
-                specialized: Instrumenter::new(),
+                raw: Instrumenter::new(raw_id),
+                specialized: Instrumenter::new(specialized_id),
             };
             self.stack.push((sig, Box::new(instrumenter)));
         }
@@ -2381,6 +2415,7 @@ impl CostEstimator {
             stack: vec![],
             entry_point: Some(main_sig.clone()),
             cache: HashMap::new(),
+            next_instrumenter_id: 0,
         };
 
         self.run_fn_from_signature(ssa, type_info, main_sig, &mut costs);
