@@ -43,6 +43,7 @@ use crate::{
             remove_unreachable_functions::RemoveUnreachableFunctions,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
+            sparse_conditional_constant_propagation::SCCP,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
@@ -275,6 +276,9 @@ impl Driver {
                 Box::new(InstructionLowering::pure_guards()),
                 Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
+                // Fold pure constants and prune constant-condition branches before the cleanup
+                // rounds, so Simplifier/CSE/DCE work on the reduced CFG.
+                Box::new(SCCP::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
                 // matches. Each Simplifier internally iterates to fixed point
@@ -293,6 +297,9 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Specializer::new(5.0)),
+                // Specialization exposes fresh constants (folded call arguments and branch
+                // conditions); propagate them before the post-specialization cleanup.
+                Box::new(SCCP::new()),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),

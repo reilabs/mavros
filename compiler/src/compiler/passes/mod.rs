@@ -15,6 +15,7 @@ pub mod remove_unreachable_blocks;
 pub mod remove_unreachable_functions;
 pub mod simplifier;
 pub mod simplify_asserts;
+pub mod sparse_conditional_constant_propagation;
 pub mod specializer;
 pub mod strip_witness_of;
 pub mod trivial_phi_elimination;
