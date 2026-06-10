@@ -3399,7 +3399,7 @@ fn emit_array_lookup_const_rows(
 }
 
 fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLFunction {
-    let (elem_type, count) = array_info(array_type);
+    let (elem_type, _) = array_info(array_type);
     let lookup = LookupTableSpec::array(lookup_array_len(array_type));
     let rc_struct = rc_seq_struct(elem_type);
     let mut func = new_ll_function(llssa, format!("__array_lookup_{}", array_type));
@@ -3909,7 +3909,7 @@ fn emit_array_ad_init_body(
     bump_db_fn: FunctionId,
     witness_layout: WitnessLayout,
 ) -> ValueId {
-    let (elem_type, count) = array_info(array_type);
+    let (elem_type, _) = array_info(array_type);
     let lookup = LookupTableSpec::array(lookup_array_len(array_type));
     let rc_struct = rc_seq_struct(elem_type);
 
@@ -3964,7 +3964,7 @@ fn generate_darray_ad_call(
     bump_db_fn: FunctionId,
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
-    let (elem_type, count) = array_info(array_type);
+    let (elem_type, _) = array_info(array_type);
     let lookup = LookupTableSpec::array(lookup_array_len(array_type));
     let rc_struct = rc_seq_struct(elem_type);
     let mut func = new_ll_function(llssa, format!("__darray_lookup_{}_ad_call", array_type));
