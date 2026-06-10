@@ -22,6 +22,7 @@ use crate::{
         codegen::{
             bytecode::CodeGen,
             hlssa_to_r1cs::{R1CGen, R1CS},
+            llssa_to_llvm::WasmCompileOpts,
         },
         lowering::LowLevelReplacement,
         pass_manager::PassManager,
@@ -471,10 +472,10 @@ impl Driver {
         emit_llvm: bool,
         r1cs: &R1CS,
         wasm_config: Option<std::path::PathBuf>,
+        wasm_opts: WasmCompileOpts,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         self.prepare_base_witgen_ssa();
@@ -524,7 +525,7 @@ impl Driver {
 
         if let Some(wasm_path) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
-            codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+            codegen.compile_to_wasm(&wasm_path, wasm_opts);
             info!(message = %"WASM object generated", path = %wasm_path.display());
             self.write_wasm_metadata(&wasm_path, r1cs)?;
         }
@@ -537,10 +538,10 @@ impl Driver {
         &mut self,
         wasm_path: std::path::PathBuf,
         r1cs: &R1CS,
+        wasm_opts: WasmCompileOpts,
     ) -> Result<(), Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         // Prepare AD SSA: same pass pipeline as compile_ad()
@@ -594,7 +595,7 @@ impl Driver {
         codegen.compile(&llssa, &ll_flow_analysis);
 
         codegen.write_ir(&wasm_path.with_extension("ll"));
-        codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+        codegen.compile_to_wasm(&wasm_path, wasm_opts);
         info!(message = %"AD WASM object generated", path = %wasm_path.display());
         self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
 
