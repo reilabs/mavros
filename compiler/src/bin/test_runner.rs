@@ -63,10 +63,29 @@ fn main() {
         return;
     }
 
+    // Merge mode: --merge <part1> <part2> [...] --output <out>
+    // Concatenates the rows of several partial STATUS.md files into one,
+    // re-sorted by test name. Used to recombine sharded CI runs.
+    if args.iter().any(|a| a == "--merge") {
+        let output_path = parse_output_arg(&args);
+        let parts = parse_merge_args(&args);
+        merge_status_files(&parts, &output_path);
+        return;
+    }
+
     // Parent mode
     let output_path = parse_output_arg(&args);
     let jobs = parse_jobs_arg(&args);
-    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
+    let shard = parse_shard_arg(&args);
+    run_parent(&output_path, jobs, shard, DEFAULT_IGNORED_TESTS);
+}
+
+/// How to split the discovered test list across parallel CI jobs.
+/// `index` is the 0-based shard this process runs; `total` is the shard count.
+#[derive(Clone, Copy)]
+struct Shard {
+    index: usize,
+    total: usize,
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[];
@@ -95,6 +114,44 @@ fn parse_jobs_arg(args: &[String]) -> usize {
         i += 1;
     }
     1
+}
+
+/// Parse `--shard <index> --shards <total>`. Both must be present together or
+/// both absent; absent means run every test (a single shard). The index is
+/// 0-based and must be `< total`.
+fn parse_shard_arg(args: &[String]) -> Option<Shard> {
+    let find = |flag: &str| -> Option<usize> {
+        args.windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].parse().unwrap_or_else(|_| panic!("{flag} requires an integer")))
+    };
+    match (find("--shard"), find("--shards")) {
+        (None, None) => None,
+        (Some(index), Some(total)) => {
+            assert!(total >= 1, "--shards must be >= 1");
+            assert!(index < total, "--shard ({index}) must be < --shards ({total})");
+            Some(Shard { index, total })
+        }
+        _ => panic!("--shard and --shards must be supplied together"),
+    }
+}
+
+/// Parse the `--merge <part1> <part2> ...` list. Every positional argument
+/// after `--merge` up to the next flag (a token starting with `--`) is treated
+/// as an input STATUS.md path.
+fn parse_merge_args(args: &[String]) -> Vec<PathBuf> {
+    let start = args
+        .iter()
+        .position(|a| a == "--merge")
+        .expect("parse_merge_args called without --merge")
+        + 1;
+    let parts: Vec<PathBuf> = args[start..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .map(PathBuf::from)
+        .collect();
+    assert!(!parts.is_empty(), "--merge requires at least one input file");
+    parts
 }
 
 // ── Child: run a single test ──────────────────────────────────────────
@@ -1102,7 +1159,7 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
     dirs
 }
 
-fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
+fn run_parent(output_path: &Path, jobs: usize, shard: Option<Shard>, ignored_tests: &[&str]) {
     let mut entries: Vec<TestEntry> = Vec::new();
 
     // 1. Local noir_tests/ directory
@@ -1128,6 +1185,28 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
     }
 
     assert!(!entries.is_empty(), "No test directories found");
+
+    // Sort the combined list so shard membership is a deterministic function of
+    // the test name alone, independent of discovery order across sources.
+    entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+
+    // Keep only this shard's tests (interleaved by index so slow and fast tests
+    // are spread evenly across shards). Absent shard = keep everything.
+    if let Some(shard) = shard {
+        let discovered = entries.len();
+        entries = entries
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % shard.total == shard.index)
+            .map(|(_, e)| e)
+            .collect();
+        eprintln!(
+            "Shard {}/{}: running {} of {discovered} discovered test(s)",
+            shard.index + 1,
+            shard.total,
+            entries.len()
+        );
+    }
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
     let total = entries.len();
@@ -1643,4 +1722,57 @@ fn render_markdown(results: &[TestResult]) -> String {
     }
 
     md
+}
+
+/// Recombine several partial STATUS.md files (one per CI shard) into a single
+/// table. The two-line markdown header is taken from the first input; every
+/// subsequent data row from every input is collected and re-sorted by test
+/// name (the first table cell) so the merged output matches the ordering an
+/// unsharded run would produce.
+fn merge_status_files(parts: &[PathBuf], output_path: &Path) {
+    let mut header: Option<(String, String)> = None;
+    let mut rows: Vec<String> = Vec::new();
+
+    for part in parts {
+        let content = fs::read_to_string(part)
+            .unwrap_or_else(|_| panic!("Cannot read shard output {}", part.display()));
+        let mut lines = content.lines();
+        let h0 = lines.next().unwrap_or_else(|| panic!("{} is empty", part.display()));
+        let h1 = lines
+            .next()
+            .unwrap_or_else(|| panic!("{} is missing its separator row", part.display()));
+        if header.is_none() {
+            header = Some((h0.to_string(), h1.to_string()));
+        }
+        rows.extend(lines.filter(|l| !l.trim().is_empty()).map(str::to_string));
+    }
+
+    // Sort by the first cell (test name) to match an unsharded run's ordering.
+    let name_of = |row: &str| {
+        row.split('|')
+            .nth(1)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    rows.sort_by(|a, b| name_of(a).cmp(&name_of(b)));
+
+    let (h0, h1) = header.expect("--merge produced no header");
+    let mut md = String::new();
+    md.push_str(&h0);
+    md.push('\n');
+    md.push_str(&h1);
+    md.push('\n');
+    for row in &rows {
+        md.push_str(row);
+        md.push('\n');
+    }
+
+    fs::write(output_path, &md).expect("Cannot write merged output file");
+    eprintln!(
+        "Merged {} shard file(s) into {} ({} test rows)",
+        parts.len(),
+        output_path.display(),
+        rows.len()
+    );
+    print!("{md}");
 }

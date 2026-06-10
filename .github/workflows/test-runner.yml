@@ -67,8 +67,99 @@ jobs:
       - name: machete
         uses: bnjbvr/cargo-machete@main
 
+  # Build the test runner once and populate the shared cargo cache. The two
+  # test shards and the merge job all restore this same cache (keyed on
+  # Cargo.lock, so identical for every job on this commit), so the ~3-minute
+  # build only happens here instead of in each test job.
+  build-test-runner:
+    name: Build Test Runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Download Nix Dependencies
+        run: nix develop
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build Test Runner
+        run: make build-test-runner
+
+  # Run one half of the test suite. The matrix fans this single job definition
+  # out into test (shard 0) and test (shard 1); each restores the cache the
+  # build job populated and runs its interleaved half of the tests, uploading
+  # its partial STATUS.md as an artifact for the merge job.
   test:
-    name: Run Tests
+    name: Run Tests (shard ${{ matrix.shard }})
+    needs: build-test-runner
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Download Nix Dependencies
+        run: nix develop
+
+      - name: Restore Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build Test Runner
+        run: make build-test-runner
+
+      - name: Run Tests
+        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.part.md --jobs 4 --shard ${{ matrix.shard }} --shards 2
+
+      - name: Upload partial STATUS.md
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-shard-${{ matrix.shard }}
+          path: STATUS.part.md
+          retention-days: 1
+
+  # Merge the two shards' partial results into the final STATUS.md, then run the
+  # commit / regression / growth-comment steps that previously lived in the
+  # single test job.
+  merge-results:
+    name: Merge Test Results
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Generate MavrosBot token
@@ -96,7 +187,7 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
-      - name: Cache Cargo dependencies
+      - name: Restore Cargo dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -108,8 +199,20 @@ jobs:
       - name: Build Test Runner
         run: make build-test-runner
 
-      - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 4
+      - name: Download shard 0 results
+        uses: actions/download-artifact@v4
+        with:
+          name: status-shard-0
+          path: shard-0
+
+      - name: Download shard 1 results
+        uses: actions/download-artifact@v4
+        with:
+          name: status-shard-1
+          path: shard-1
+
+      - name: Merge STATUS.md
+        run: nix develop --command cargo run --release --bin test-runner -- --merge shard-0/STATUS.part.md shard-1/STATUS.part.md --output STATUS.md
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
