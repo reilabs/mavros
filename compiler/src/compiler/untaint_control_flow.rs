@@ -1074,12 +1074,12 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
             }
         }
         (TypeExpr::Tuple(_), _) => ice_non_elided_tuple(),
-        (TypeExpr::Blob(elem, n), WitnessShape::Array(top, inner_wt)) => {
+        (TypeExpr::Blob(elem, n), wt @ WitnessShape::Array(..)) => {
             // Blobs hold raw constant/input data; they can never carry witness
             // values at any level.
             assert!(
-                !top.is_witness() && !inner_wt.toplevel_info().is_witness(),
-                "ICE: Blob type inferred as witness-bearing"
+                !wt.contains_witness(),
+                "ICE: Blob type inferred as witness-bearing: {wt}"
             );
             Type::blob(*elem, n)
         }

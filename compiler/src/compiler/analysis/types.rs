@@ -23,17 +23,8 @@ pub fn const_value_type(value: &Constant) -> Type {
         Constant::I(size, _) => Type::i(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
-        Constant::Blob(blob) => Type::blob(blob_element_type(blob), blob.len()),
+        Constant::Blob(blob) => Type::blob(blob.elem_type.clone(), blob.len()),
     }
-}
-
-/// The element type of a constant blob. Blobs are homogeneous; an empty blob
-/// defaults to `Field`.
-pub fn blob_element_type(blob: &crate::compiler::ssa::hlssa::Blob) -> Type {
-    blob.elements
-        .first()
-        .map(const_value_type)
-        .unwrap_or_else(Type::field)
 }
 
 fn push_witness_of_to_leaves(t: Type) -> Type {

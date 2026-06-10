@@ -163,6 +163,10 @@ fn sequence_len_value(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> 
 }
 
 fn sequence_data_ptr(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> ValueId {
+    // Blob values are already raw pointers to their packed element data.
+    if ty.is_blob() {
+        return ptr;
+    }
     let rc_struct = sequence_rc_struct(ty);
     e.struct_field_ptr(ptr, rc_struct, sequence_data_field(ty))
 }
@@ -551,9 +555,14 @@ fn lower_inner(
 /// All HLSSA constants are interned into LLSSA's module-level constants table. Scalar `U`/`I`
 /// constants become `LLConstant::Int`; field constants become an aggregate `LLConstant::Struct`
 /// holding the four-limb `field_elem()` layout with one `Int` value per limb.
+///
+/// Blob constants additionally get a `ConstDataPtr` emitted in the entry block, and the HLSSA
+/// value maps to that pointer. This keeps the runtime representation of blob values uniform:
+/// a blob value in LLSSA is always a raw pointer to its packed element data.
 fn lower_constants_llssa(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
+    ll_func: &mut LLFunction,
     llssa: &mut LLSSA,
     val_map: &mut HashMap<ValueId, ValueId>,
 ) {
@@ -591,12 +600,18 @@ fn lower_constants_llssa(
     let mut referenced: Vec<ValueId> = referenced.into_iter().collect();
     referenced.sort_by_key(|v| v.0);
 
+    let entry_id = ll_func.get_entry_id();
+    let mut e = LLBlockEmitter::new(ll_func, llssa, entry_id);
     for vid in referenced {
-        let ll_constant = lower_constant_to_ll_constant(
-            constants.get(&vid).expect("vid is in constants").as_ref(),
-        );
-        let ll_val = llssa.add_const(ll_constant);
-        val_map.insert(vid, ll_val);
+        let constant = constants.get(&vid).expect("vid is in constants");
+        let ll_constant = lower_constant_to_ll_constant(constant.as_ref());
+        let ll_val = e.ssa.add_const(ll_constant);
+        if let Constant::Blob(blob) = constant.as_ref() {
+            let data_ptr = e.const_data_ptr(elem_struct(&blob.elem_type), ll_val);
+            val_map.insert(vid, data_ptr);
+        } else {
+            val_map.insert(vid, ll_val);
+        }
     }
 }
 
@@ -691,7 +706,7 @@ fn lower_function(
         }
     }
 
-    lower_constants_llssa(function, constants, llssa, &mut val_map);
+    lower_constants_llssa(function, constants, &mut ll_func, llssa, &mut val_map);
 
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
@@ -1668,10 +1683,9 @@ fn lower_mk_blob_array(
 
     if count > 0 {
         let data = e.struct_field_ptr(arr, rc_struct, 2);
-        let ll_blob = val_map[&blob];
-        let rodata = e.const_data_ptr(es.clone(), ll_blob);
+        let blob_data = val_map[&blob];
         let count_val = e.emit_int_const(64, count as u64);
-        e.memcpy(data, rodata, es, Some(count_val));
+        e.memcpy(data, blob_data, es, Some(count_val));
     }
 
     val_map.insert(result, arr);
@@ -1966,10 +1980,6 @@ fn lower_ref_load(
 }
 
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
-///
-/// For Blob operands the value is already a raw pointer to the packed
-/// element data, so the element is loaded directly without the RC-struct
-/// header indirection.
 fn lower_array_get(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
@@ -1989,16 +1999,7 @@ fn lower_array_get(
     // ZExt index from u32 to i64 for pointer arithmetic
     let idx64 = e.zext(ll_idx, 64);
 
-    let data = if arr_type.is_blob() {
-        if e.ssa.is_const(ll_arr) {
-            // Constant blob: take a pointer into the module's constant data.
-            e.const_data_ptr(es.clone(), ll_arr)
-        } else {
-            ll_arr
-        }
-    } else {
-        sequence_data_ptr(e, ll_arr, arr_type)
-    };
+    let data = sequence_data_ptr(e, ll_arr, arr_type);
     let elem_ptr = e.array_elem_ptr(data, es, idx64);
     let val = e.ll_load(elem_ptr, ll_elem_type);
 
@@ -4310,8 +4311,9 @@ mod tests {
         let function = hlssa.get_main();
 
         let mut llssa = LLSSA::with_main("felt_test".to_string());
+        let mut ll_func = LLFunction::empty("felt_test".to_string());
         let mut val_map = HashMap::new();
-        lower_constants_llssa(function, &constants, &mut llssa, &mut val_map);
+        lower_constants_llssa(function, &constants, &mut ll_func, &mut llssa, &mut val_map);
 
         let dump = llssa.to_string(&DefaultSSAAnnotator);
         // The felt is a module-level aggregate constant...
@@ -4350,11 +4352,14 @@ mod tests {
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(vec![
-                HLConstant::U(8, 1),
-                HLConstant::U(8, 2),
-                HLConstant::U(8, 3),
-            ])));
+            let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(
+                HLType::u(8),
+                vec![
+                    HLConstant::U(8, 1),
+                    HLConstant::U(8, 2),
+                    HLConstant::U(8, 3),
+                ],
+            )));
             let arr = e.mk_seq_of_blob(HLType::u(8), blob);
             e.terminate_return(vec![arr]);
         });

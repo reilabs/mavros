@@ -1005,7 +1005,7 @@ impl<'a> ExpressionConverter<'a> {
                 // str<N>: array of u8 (UTF-8 bytes)
                 let elem_type = Type::u(8);
                 let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
-                let blob = b.emit_const(Constant::Blob(Blob::new(elems)));
+                let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
                 let arr = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
                 Some(arr)
             }
@@ -1025,7 +1025,8 @@ impl<'a> ExpressionConverter<'a> {
                     }
                 }
                 let cp_len = codepoint_constants.len();
-                let blob = b.emit_const(Constant::Blob(Blob::new(codepoint_constants)));
+                let blob =
+                    b.emit_const(Constant::Blob(Blob::new(Type::u(32), codepoint_constants)));
                 let cp_array = b
                     .block(self.current_block)
                     .mk_seq_of_blob(Type::u(32), blob);
@@ -1077,7 +1078,7 @@ impl<'a> ExpressionConverter<'a> {
 
         if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
             debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
-            let blob = b.emit_const(Constant::Blob(Blob::new(elements)));
+            let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elements)));
             let result = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
             return Some(result);
         }

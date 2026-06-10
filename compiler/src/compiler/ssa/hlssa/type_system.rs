@@ -5,7 +5,7 @@ use crate::compiler::ssa::SSAType;
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Field,
     U(usize),
@@ -16,13 +16,10 @@ pub enum TypeExpr {
     Ref(Box<Type>),
     Tuple(Vec<Type>),
     Function,
-    /// A non-heap-allocated sequence of `len` elements of a scalar type, laid
-    /// out contiguously (in the frame or in constant data). Readable via
-    /// `ArrayGet`, but never written to and carries no RC header.
     Blob(Box<Type>, usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     pub expr: TypeExpr,
 }

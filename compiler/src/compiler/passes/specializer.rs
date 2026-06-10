@@ -519,8 +519,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
-    fn of_blob(elements: Vec<Self>, ctx: &mut SpecializationState) -> Self {
-        fn constant_for(ctx: &SpecializationState<'_>, value: ValueId) -> Constant {
+    fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut SpecializationState) -> Self {
+        fn constant_for(ctx: &SpecializationState<'_>, value: ValueId, typ: &Type) -> Constant {
             match ctx
                 .const_vals
                 .get(&value)
@@ -529,12 +529,16 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 ConstVal::U(bits, value) => Constant::U(*bits, *value),
                 ConstVal::I(bits, value) => Constant::I(*bits, *value),
                 ConstVal::Field(value) => Constant::Field(*value),
-                ConstVal::Blob(elements) => Constant::Blob(Blob::new(
-                    elements
-                        .iter()
-                        .map(|element| constant_for(ctx, *element))
-                        .collect(),
-                )),
+                ConstVal::Blob(elements) => {
+                    let inner = typ.get_array_element();
+                    Constant::Blob(Blob::new(
+                        inner.clone(),
+                        elements
+                            .iter()
+                            .map(|element| constant_for(ctx, *element, &inner))
+                            .collect(),
+                    ))
+                }
                 other => panic!(
                     "Blob element v{} is not a scalar/blob constant: {:?}",
                     value.0, other
@@ -545,9 +549,9 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let element_ids = elements.iter().map(|v| v.0).collect::<Vec<_>>();
         let constants = element_ids
             .iter()
-            .map(|element| constant_for(ctx, *element))
+            .map(|element| constant_for(ctx, *element, &elem_type))
             .collect();
-        let val = ctx.emit_constant(Constant::Blob(Blob::new(constants)));
+        let val = ctx.emit_constant(Constant::Blob(Blob::new(elem_type, constants)));
         ctx.const_vals.insert(val, ConstVal::Blob(element_ids));
         Self(val)
     }

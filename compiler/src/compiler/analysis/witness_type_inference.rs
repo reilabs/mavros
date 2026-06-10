@@ -305,9 +305,9 @@ impl WitnessTypeInference {
                 Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
                     WitnessShape::Scalar(WitnessType::Pure)
                 }
-                Constant::Blob(_) => WitnessShape::Array(
+                Constant::Blob(blob) => WitnessShape::Array(
                     WitnessType::Pure,
-                    Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+                    Box::new(Self::construct_pure_witness_for_type(&blob.elem_type)),
                 ),
             };
             value_wt.insert(*vid, shape);

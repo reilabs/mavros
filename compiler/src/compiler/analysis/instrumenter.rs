@@ -1440,7 +1440,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn of_blob(values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
+    fn of_blob(_elem_type: Type, values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
         let (unspecialized, specialized) = values
             .into_iter()
             .map(|v| (v.unspecialized, v.specialized))
