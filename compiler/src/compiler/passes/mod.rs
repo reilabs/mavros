@@ -5,6 +5,7 @@ pub mod deduplicate_phis;
 pub mod defunctionalize;
 pub mod elide_tuples;
 pub mod fix_double_jumps;
+pub mod fold_constant_branches;
 pub mod instruction_lowering;
 pub mod lower_guards;
 mod lowering_pass;

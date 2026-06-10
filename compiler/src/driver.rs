@@ -1,7 +1,7 @@
 //! The driver API for the compilation pipeline.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -24,7 +24,6 @@ use crate::{
             hlssa_to_r1cs::{R1CGen, R1CS},
             llssa_to_llvm::WasmCompileOpts,
         },
-        lowering::LowLevelReplacement,
         pass_manager::PassManager,
         passes::{
             common_subexpression_elimination::CSE,
@@ -34,6 +33,7 @@ use crate::{
             defunctionalize::Defunctionalize,
             elide_tuples::ElideTuples,
             fix_double_jumps::FixDoubleJumps,
+            fold_constant_branches::FoldConstantBranches,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
             mem2reg::Mem2Reg,
@@ -52,9 +52,6 @@ use crate::{
         },
         ssa::{DefaultSSAAnnotator, hlssa::HLSSA},
         untaint_control_flow::UntaintControlFlow,
-    },
-    lowlevel_replacement::{
-        REPLACEMENT_CRATES, add_lowlevel_replacements, prepare_replacement_crate,
     },
 };
 
@@ -127,38 +124,16 @@ impl Driver {
         )
         .map_err(Error::NoirCompilerError)?;
 
-        let mut prepared_replacements = Vec::new();
-        for replacement in REPLACEMENT_CRATES {
-            let functions = prepare_replacement_crate(&mut context, crate_id, replacement)?;
-            prepared_replacements.push((replacement, functions));
-        }
-
+        // Replaced foreign functions (blake3, poseidon2_permutation, ...) have already been
+        // rewritten at parse time to call their pure-Noir implementations in
+        // `std::mavros::replacements` (see `project.rs`), so monomorphization needs no special
+        // handling for them.
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer =
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
-
-        // Queue blackbox replacements RIGHT AFTER `compile_main`, before
-        // draining the queue. At this point `in_unconstrained_function` is
-        // whatever `compile_main` set for `main` (false for `fn main`), which
-        // is what we need: each `pub fn` substitute gets monomorphized as
-        // constrained even when the user code only reaches the blackbox
-        // through an unconstrained path (e.g. `if is_unconstrained()`).
-        // mavros' SSA gen then produces both SSA variants for each one and the
-        // active `function_mapper` dispatches per call site. Unused
-        // replacements get DCE'd later.
-        let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
-        for (replacement, functions) in &prepared_replacements {
-            add_lowlevel_replacements(
-                replacement,
-                functions,
-                &mut monomorphizer,
-                &mut lowlevel_replacements,
-            );
-        }
-
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
 
@@ -170,7 +145,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program, lowlevel_replacements);
+        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program);
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 
@@ -197,8 +172,12 @@ impl Driver {
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
-                Box::new(RemoveUnreachableFunctions::new()),
+                // Fold statically-known branches (e.g. monomorphized generic dispatch in the
+                // stdlib replacements), then drop the unreachable blocks BEFORE pruning
+                // functions, so calls in never-taken branches don't keep their callees alive.
+                Box::new(FoldConstantBranches::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
                 // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),

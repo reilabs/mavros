@@ -14,3 +14,5 @@ fn unspread_inner(value: u64, bits: u32) -> (u32, u32) {}
 pub fn unspread<let N: u32>(value: u64) -> (u32, u32) {
     unspread_inner(value, N)
 }
+
+pub mod replacements;
