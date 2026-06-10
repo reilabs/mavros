@@ -1699,14 +1699,19 @@ pub enum SliceOpDir {
 // ================================================================================================
 
 /// A compile-time-only sequence of constants used for long constant data.
+/// Blobs are homogeneous: every element has type `elem_type`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Blob {
+    pub elem_type: Type,
     pub elements: Vec<Constant>,
 }
 
 impl Blob {
-    pub fn new(elements: Vec<Constant>) -> Self {
-        Self { elements }
+    pub fn new(elem_type: Type, elements: Vec<Constant>) -> Self {
+        Self {
+            elem_type,
+            elements,
+        }
     }
 
     pub fn len(&self) -> usize {

@@ -29,33 +29,7 @@ use crate::compiler::ssa::llssa::{
 };
 use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId};
 
-use mavros_wasm_layout::WASM_PTR_SIZE;
-
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
-
-fn ll_type_size_bytes(ty: &Type) -> u32 {
-    match ty {
-        Type::Int(bits) => bits.div_ceil(8),
-        Type::Ptr => WASM_PTR_SIZE,
-        Type::Struct(s) => ll_struct_size_bytes(s),
-    }
-}
-
-fn ll_struct_size_bytes(s: &LLStruct) -> u32 {
-    s.fields.iter().map(ll_field_type_size_bytes).sum()
-}
-
-fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
-    match ft {
-        LLFieldType::Int(bits) => bits.div_ceil(8),
-        LLFieldType::Ptr => WASM_PTR_SIZE,
-        LLFieldType::Inline(s) => ll_struct_size_bytes(s),
-        LLFieldType::InlineArray(s, n) => ll_struct_size_bytes(s) * *n as u32,
-        LLFieldType::FlexArray(_) => {
-            panic!("FlexArray is not supported for WASM input parameters")
-        }
-    }
-}
 
 fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {
     s.fields.iter().find_map(|field| match field {
@@ -635,12 +609,27 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .vm_ptr
             .expect("main parameters are loaded relative to the VM pointer");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
-        let i32_type = self.context.i32_type();
         let mut parameters = parameters;
         if let Some((vm_param, _)) = parameters.next() {
             self.value_map.insert(*vm_param, vm_ptr.into());
         }
+
+        // Main's only remaining parameter is the input blob, which is bound
+        // directly to the host-provided inputs buffer; its elements are loaded
+        // lazily at each ArrayGet site.
+        let Some((blob_param, blob_type)) = parameters.next() else {
+            return;
+        };
+        assert!(
+            matches!(blob_type, Type::Ptr),
+            "main parameter must be the input blob pointer, got {:?}",
+            blob_type
+        );
+        assert!(
+            parameters.next().is_none(),
+            "main must have at most one parameter besides the VM pointer"
+        );
+
         let vm_type = self
             .convert_struct_type(&LLStruct::witgen_vm())
             .into_struct_type();
@@ -653,32 +642,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "inputs_slot",
             )
             .unwrap();
-        let mut input_ptr = self
+        let input_ptr = self
             .builder
             .build_load(ptr_type, input_slot, "inputs_ptr")
             .unwrap()
             .into_pointer_value();
-
-        for (param_id, param_type) in parameters {
-            let llvm_type = self.convert_type(param_type);
-            let value = self
-                .builder
-                .build_load(llvm_type, input_ptr, &format!("v{}", param_id.0))
-                .unwrap();
-            self.value_map.insert(*param_id, value);
-
-            let offset = ll_type_size_bytes(param_type);
-            input_ptr = unsafe {
-                self.builder
-                    .build_gep(
-                        i8_type,
-                        input_ptr,
-                        &[i32_type.const_int(offset as u64, false)],
-                        "next_input",
-                    )
-                    .unwrap()
-            };
-        }
+        self.value_map.insert(*blob_param, input_ptr.into());
     }
 
     fn compile_block(

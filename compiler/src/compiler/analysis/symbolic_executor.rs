@@ -62,7 +62,7 @@ where
     fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_i(s: usize, v: u128, ctx: &mut Context) -> Self;
     fn of_field(f: Field, ctx: &mut Context) -> Self;
-    fn of_blob(elements: Vec<Self>, ctx: &mut Context) -> Self;
+    fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut Context) -> Self;
     fn expect_blob(&self, ctx: &mut Context) -> Vec<Self>;
     fn mk_array(
         a: Vec<Self>,
@@ -757,7 +757,7 @@ where
                 .iter()
                 .map(|element| materialize_constant_value(element, ctx))
                 .collect();
-            V::of_blob(elements, ctx)
+            V::of_blob(blob.elem_type.clone(), elements, ctx)
         }
     }
 }

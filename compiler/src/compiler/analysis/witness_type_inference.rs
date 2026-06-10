@@ -9,7 +9,9 @@ use crate::compiler::{
     analysis::flow_analysis::{self, FlowAnalysis},
     ssa::{
         BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
-        hlssa::{CallTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+        hlssa::{
+            CallTarget, CastTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+        },
     },
 };
 
@@ -303,9 +305,9 @@ impl WitnessTypeInference {
                 Constant::U(_, _) | Constant::I(_, _) | Constant::Field(_) | Constant::FnPtr(_) => {
                     WitnessShape::Scalar(WitnessType::Pure)
                 }
-                Constant::Blob(_) => WitnessShape::Array(
+                Constant::Blob(blob) => WitnessShape::Array(
                     WitnessType::Pure,
-                    Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+                    Box::new(Self::construct_pure_witness_for_type(&blob.elem_type)),
                 ),
             };
             value_wt.insert(*vid, shape);
@@ -813,6 +815,17 @@ impl WitnessTypeInference {
                     value_wt.insert(*result_odd, val_wt.clone());
                     value_wt.insert(*result_even, val_wt);
                 }
+                OpCode::Cast {
+                    result,
+                    value,
+                    target: CastTarget::WitnessOf,
+                } => {
+                    // WitnessOf casts emitted before inference (e.g. witness-typed
+                    // default values for arrays that will hold witness elements)
+                    // produce witness-typed results.
+                    let val_wt = value_wt.get(value).unwrap().clone();
+                    value_wt.insert(*result, val_wt.with_toplevel_info(WitnessType::Witness));
+                }
                 OpCode::Cast { result, value, .. }
                 | OpCode::SExt { result, value, .. }
                 | OpCode::BitRange { result, value, .. }
@@ -929,9 +942,9 @@ impl WitnessTypeInference {
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => WitnessShape::Scalar(WitnessType::Pure),
-            TypeExpr::Blob(_) => WitnessShape::Array(
+            TypeExpr::Blob(elem, _) => WitnessShape::Array(
                 WitnessType::Pure,
-                Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+                Box::new(Self::construct_pure_witness_for_type(elem)),
             ),
         }
     }

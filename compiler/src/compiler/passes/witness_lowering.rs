@@ -642,7 +642,7 @@ impl WitnessLowering {
             TypeExpr::Ref(inner) => self.witness_lowering_in_type(inner).ref_of(),
             TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),
-            TypeExpr::Blob(_) => tp.clone(),
+            TypeExpr::Blob(..) => tp.clone(),
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
     }

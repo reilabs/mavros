@@ -259,7 +259,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
             | TypeExpr::U(_)
             | TypeExpr::I(_)
             | TypeExpr::WitnessOf(_)
-            | TypeExpr::Blob(_) => false,
+            | TypeExpr::Blob(..) => false,
         }
     }
 
@@ -646,7 +646,7 @@ fn replace_function_type(typ: &mut Type) {
         | TypeExpr::U(_)
         | TypeExpr::I(_)
         | TypeExpr::WitnessOf(_)
-        | TypeExpr::Blob(_) => {}
+        | TypeExpr::Blob(..) => {}
     }
 }
 
