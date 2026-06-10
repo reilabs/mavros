@@ -53,8 +53,6 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => LLType::Ptr,
-        // A blob value is a raw pointer to its packed element data (no RC
-        // header) — constant data or the host-provided inputs buffer.
         HLTypeExpr::Blob(..) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
