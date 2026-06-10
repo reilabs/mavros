@@ -139,6 +139,11 @@ jobs:
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
           COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
-          gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
+          echo "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
+          # GITHUB_TOKEN is read-only on fork PRs, so commenting would fail there;
+          # the report is still visible in the job summary above.
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
