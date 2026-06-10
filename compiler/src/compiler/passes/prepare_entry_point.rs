@@ -7,16 +7,19 @@
 //!    arguments, and params for each of its return values, performs global initialization, invokes
 //!    the original `main` and then uses a deep assert to constrain the return value against the
 //!    declared counterpart in the witness. It then deinitializes the globals.
-//! 2. **Flattens the Synthetic Parameters:** Parameters to the synthetic `main` are flattened into
-//!    `Field`s which are then used to rebuild the original aggregate values.
-//! 3. **Pinned Witness Writes:** Witness values are written for every parameter, pinned, so that
-//!    DCE cannot remove them downstream.
+//! 2. **Collapses the Synthetic Parameters into a Blob:** The synthetic `main` takes a single
+//!    `Blob<Field; N>` parameter holding every flattened input field. Individual fields are read
+//!    out of the blob with `ArrayGet` and used to rebuild the original aggregate values. This
+//!    keeps the entry point's parameter list (and the resulting locals pressure in the generated
+//!    code) constant regardless of input size.
+//! 3. **Pinned Witness Writes:** Witness values are written for every blob element, pinned, so
+//!    that DCE cannot remove them downstream.
 //! 4. **Handling of Unconstrained Calls:** Any calls that are unconstrained are modified to write
 //!    the unconstrained result to the witness. It also handles range-checking of integers, and
 //!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
 //!    results into the constraint system.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
@@ -51,8 +54,8 @@ impl Pass for PrepareEntryPoint {
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
         Self::wrap_main(ssa, self.main_is_unconstrained);
-        self.rebuild_main_params(ssa);
-        Self::insert_witness_writes(ssa);
+        let extracted = self.rebuild_main_params(ssa);
+        Self::insert_witness_writes(ssa, &extracted);
         Self::process_unconstrained_calls(ssa);
     }
 }
@@ -149,57 +152,51 @@ impl PrepareEntryPoint {
     }
 
     /// Insert pinned WriteWitness instructions in wrapper_main entry.
-    /// The first write emits constant one for witness[0], then writes each entry param.
-    fn insert_witness_writes(ssa: &mut HLSSA) {
+    /// The first write emits constant one for witness[0]; then each input field
+    /// extracted from the input blob is written right after the ArrayGet that
+    /// reads it, in blob order.
+    fn insert_witness_writes(ssa: &mut HLSSA, extracted: &[ValueId]) {
         let main_id = ssa.get_main_id();
         let mut sb = HLSSABuilder::new(ssa);
         sb.modify_function(main_id, |fb| {
             let entry_id = fb.function.get_entry_id();
 
-            // Collect entry params
-            let params: Vec<(ValueId, Type)> = fb
-                .function
-                .get_entry()
-                .get_parameters()
-                .map(|(id, typ)| (*id, typ.clone()))
-                .collect();
+            let extracted_set: HashSet<ValueId> = extracted.iter().copied().collect();
 
             // witness[0] must be constant one, emitted by the program.
             let witness_one_value = fb.ssa.fresh_value();
             let one_const_value = fb.ssa.add_const(Constant::Field(ark_bn254::Fr::from(1u64)));
-            let mut write_witness_instructions = vec![OpCode::WriteWitness {
+            let mut new_instructions = vec![OpCode::WriteWitness {
                 result: Some(witness_one_value),
                 value: one_const_value,
                 pinned: true,
             }];
 
-            // Create pinned WriteWitness for each param and build replacements.
-            // These must be pinned so they survive DCE even when their results become unused
-            // (e.g. when inter-procedural DCE prunes call args to original_main).
+            // Create a pinned WriteWitness for each extracted input field and use the
+            // witness value everywhere downstream. These must be pinned so they survive
+            // DCE even when their results become unused (e.g. when inter-procedural DCE
+            // prunes call args to original_main).
             let mut replacements = ValueReplacements::new();
-            for (param_id, param_type) in &params {
-                if param_type.is_witness_of() {
-                    panic!(
-                        "ICE: wrapper_main entry parameter v{} still has WitnessOf type after main parameter reconstruction: {:?}",
-                        param_id.0, param_type
-                    );
-                }
-                let witness_val = fb.ssa.fresh_value();
-                write_witness_instructions.push(OpCode::WriteWitness {
-                    result: Some(witness_val),
-                    value: *param_id,
-                    pinned: true,
-                });
-                replacements.insert(*param_id, witness_val);
-            }
-
-            // Prepend WriteWitness instructions and apply replacements to existing instructions
             let entry_block = fb.function.get_block_mut(entry_id);
             let old_instructions = entry_block.take_instructions();
-            let mut new_instructions = write_witness_instructions;
             for mut instruction in old_instructions {
-                replacements.replace_instruction(&mut instruction);
+                replacements.replace_inputs(&mut instruction);
+                let extracted_result = match &instruction {
+                    OpCode::ArrayGet { result, .. } if extracted_set.contains(result) => {
+                        Some(*result)
+                    }
+                    _ => None,
+                };
                 new_instructions.push(instruction);
+                if let Some(value) = extracted_result {
+                    let witness_val = fb.ssa.fresh_value();
+                    new_instructions.push(OpCode::WriteWitness {
+                        result: Some(witness_val),
+                        value,
+                        pinned: true,
+                    });
+                    replacements.insert(value, witness_val);
+                }
             }
             entry_block.put_instructions(new_instructions);
             replacements.replace_terminator(entry_block.get_terminator_mut());
@@ -432,7 +429,12 @@ impl PrepareEntryPoint {
         }
     }
 
-    fn rebuild_main_params(&self, ssa: &mut HLSSA) {
+    /// Replace wrapper_main's aggregate parameters with a single `Blob<Field; N>`
+    /// parameter holding every flattened input field, and rebuild the original
+    /// values by indexing into the blob.
+    ///
+    /// Returns the extracted per-field `ArrayGet` results in blob (witness) order.
+    fn rebuild_main_params(&self, ssa: &mut HLSSA) -> Vec<ValueId> {
         let params: Vec<_> = ssa
             .get_main()
             .get_entry()
@@ -444,26 +446,74 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
 
+        let total_fields: usize = params
+            .iter()
+            .map(|(_, typ)| Self::flattened_field_count(typ))
+            .sum();
+
         let main_id = ssa.get_main_id();
+        let mut extracted = Vec::with_capacity(total_fields);
         let mut sb = HLSSABuilder::new(ssa);
         sb.modify_function(main_id, |fb| {
+            let blob_param = fb.ssa.fresh_value();
             let mut new_instructions = Vec::new();
-            let mut new_parameters = Vec::new();
+            let mut next_blob_index = 0usize;
+
+            let mut extract_field =
+                |ssa: &mut HLSSA, new_instructions: &mut Vec<OpCode>, result: ValueId| {
+                    let index_const = ssa.add_const(Constant::U(32, next_blob_index as u128));
+                    next_blob_index += 1;
+                    new_instructions.push(OpCode::ArrayGet {
+                        result,
+                        array: blob_param,
+                        index: index_const,
+                    });
+                    extracted.push(result);
+                };
 
             for (value_id, typ) in params.iter() {
-                let (_, child_parameters, child_instructions) =
-                    Self::reconstruct_param(Some(*value_id), typ, fb.ssa, &reconstruct_fns);
-                new_parameters.extend(child_parameters);
-                new_instructions.extend(child_instructions);
+                match &typ.expr {
+                    TypeExpr::Field => {
+                        extract_field(fb.ssa, &mut new_instructions, *value_id);
+                    }
+                    TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
+                        let input_len = Self::flattened_field_count(typ);
+                        let mut fields = Vec::with_capacity(input_len);
+                        for _ in 0..input_len {
+                            let field_id = fb.ssa.fresh_value();
+                            extract_field(fb.ssa, &mut new_instructions, field_id);
+                            fields.push(field_id);
+                        }
+
+                        let input_array = fb.ssa.fresh_value();
+                        new_instructions.push(OpCode::MkSeq {
+                            result: input_array,
+                            elems: fields,
+                            seq_type: SequenceTargetType::Array(input_len),
+                            elem_type: Type::field(),
+                        });
+                        let fn_id = Self::find_reconstruct_fn(typ, &reconstruct_fns);
+                        new_instructions.push(OpCode::Call {
+                            results: vec![*value_id],
+                            function: CallTarget::Static(fn_id),
+                            args: vec![input_array],
+                            unconstrained: false,
+                        });
+                    }
+                    _ => todo!("Not implemented yet"),
+                }
             }
 
             let entry_id = fb.function.get_entry_id();
             let entry_block = fb.function.get_block_mut(entry_id);
             new_instructions.extend(entry_block.take_instructions());
 
-            entry_block.put_parameters(new_parameters);
+            entry_block
+                .put_parameters(vec![(blob_param, Type::blob(Type::field(), total_fields))]);
             entry_block.put_instructions(new_instructions);
         });
+
+        extracted
     }
 
     fn find_reconstruct_fn(typ: &Type, reconstruct_fns: &[ReconstructFnEntry]) -> FunctionId {
@@ -678,46 +728,4 @@ impl PrepareEntryPoint {
         e.mk_seq(fields, SequenceTargetType::Array(width), Type::field())
     }
 
-    fn reconstruct_param(
-        value_id: Option<ValueId>,
-        typ: &Type,
-        ssa: &mut HLSSA,
-        reconstruct_fns: &[ReconstructFnEntry],
-    ) -> (ValueId, Vec<(ValueId, Type)>, Vec<OpCode>) {
-        let mut new_instructions = Vec::new();
-        let mut new_parameters = Vec::new();
-
-        let value_id = value_id.unwrap_or_else(|| ssa.fresh_value());
-
-        match &typ.expr {
-            TypeExpr::Field => new_parameters.push((value_id, typ.clone())),
-            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
-                let input_len = Self::flattened_field_count(typ);
-                let mut fields = Vec::with_capacity(input_len);
-                for _ in 0..input_len {
-                    let field_id = ssa.fresh_value();
-                    new_parameters.push((field_id, Type::field()));
-                    fields.push(field_id);
-                }
-
-                let input_array = ssa.fresh_value();
-                new_instructions.push(OpCode::MkSeq {
-                    result: input_array,
-                    elems: fields,
-                    seq_type: SequenceTargetType::Array(input_len),
-                    elem_type: Type::field(),
-                });
-                let fn_id = Self::find_reconstruct_fn(typ, reconstruct_fns);
-                new_instructions.push(OpCode::Call {
-                    results: vec![value_id],
-                    function: CallTarget::Static(fn_id),
-                    args: vec![input_array],
-                    unconstrained: false,
-                });
-            }
-            _ => todo!("Not implemented yet"),
-        }
-
-        (value_id, new_parameters, new_instructions)
-    }
 }

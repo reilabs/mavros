@@ -53,6 +53,9 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => LLType::Ptr,
+        // A blob value is a raw pointer to its packed element data (no RC
+        // header) — constant data or the host-provided inputs buffer.
+        HLTypeExpr::Blob(..) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
@@ -1963,6 +1966,10 @@ fn lower_ref_load(
 }
 
 /// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
+///
+/// For Blob operands the value is already a raw pointer to the packed
+/// element data, so the element is loaded directly without the RC-struct
+/// header indirection.
 fn lower_array_get(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
@@ -1972,9 +1979,9 @@ fn lower_array_get(
     index: ValueId,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let et = sequence_elem_type(arr_type);
-    let es = elem_struct(et);
-    let ll_elem_type = lower_type(et);
+    let et = arr_type.get_array_element();
+    let es = elem_struct(&et);
+    let ll_elem_type = lower_type(&et);
 
     let ll_arr = val_map[&array];
     let ll_idx = val_map[&index];
@@ -1982,7 +1989,16 @@ fn lower_array_get(
     // ZExt index from u32 to i64 for pointer arithmetic
     let idx64 = e.zext(ll_idx, 64);
 
-    let data = sequence_data_ptr(e, ll_arr, arr_type);
+    let data = if arr_type.is_blob() {
+        if e.ssa.is_const(ll_arr) {
+            // Constant blob: take a pointer into the module's constant data.
+            e.const_data_ptr(es.clone(), ll_arr)
+        } else {
+            ll_arr
+        }
+    } else {
+        sequence_data_ptr(e, ll_arr, arr_type)
+    };
     let elem_ptr = e.array_elem_ptr(data, es, idx64);
     let val = e.ll_load(elem_ptr, ll_elem_type);
 

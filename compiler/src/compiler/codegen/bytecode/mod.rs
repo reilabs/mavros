@@ -985,13 +985,28 @@ impl CodeGen {
                     index: idx,
                 } => {
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    emitter.push_op(bytecode::OpCode::ArrayGet {
-                        res,
-                        array: layouter.get_value(*arr),
-                        index: layouter.get_value(*idx),
-                        stride: layouter
-                            .type_size(&type_info.get_value_type(*arr).get_array_element()),
-                    });
+                    let arr_type = type_info.get_value_type(*arr);
+                    match &arr_type.expr {
+                        // Blobs live inline in the frame, not behind a boxed
+                        // pointer, so element reads are frame-relative.
+                        TypeExpr::Blob(elem, len) => {
+                            emitter.push_op(bytecode::OpCode::BlobGet {
+                                res,
+                                source: layouter.get_value(*arr),
+                                index: layouter.get_value(*idx),
+                                stride: layouter.type_size(elem),
+                                len: *len,
+                            });
+                        }
+                        _ => {
+                            emitter.push_op(bytecode::OpCode::ArrayGet {
+                                res,
+                                array: layouter.get_value(*arr),
+                                index: layouter.get_value(*idx),
+                                stride: layouter.type_size(&arr_type.get_array_element()),
+                            });
+                        }
+                    }
                 }
                 hlssa::OpCode::TupleProj { .. } | hlssa::OpCode::TupleRefProj { .. } => {
                     ice_non_elided_tuple()

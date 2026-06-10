@@ -929,9 +929,9 @@ impl WitnessTypeInference {
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => WitnessShape::Scalar(WitnessType::Pure),
-            TypeExpr::Blob(_) => WitnessShape::Array(
+            TypeExpr::Blob(elem, _) => WitnessShape::Array(
                 WitnessType::Pure,
-                Box::new(WitnessShape::Scalar(WitnessType::Pure)),
+                Box::new(Self::construct_pure_witness_for_type(elem)),
             ),
         }
     }

@@ -643,7 +643,7 @@ pub fn contains_tuple(ty: &Type) -> bool {
         | TypeExpr::U(_)
         | TypeExpr::I(_)
         | TypeExpr::Function
-        | TypeExpr::Blob(_) => false,
+        | TypeExpr::Blob(..) => false,
     }
 }
 
@@ -659,7 +659,7 @@ fn slot_count(ty: &Type) -> usize {
         | TypeExpr::U(_)
         | TypeExpr::I(_)
         | TypeExpr::Function
-        | TypeExpr::Blob(_) => 1,
+        | TypeExpr::Blob(..) => 1,
     }
 }
 
@@ -680,7 +680,7 @@ fn leaf_types(ty: &Type) -> Vec<Type> {
         | TypeExpr::U(_)
         | TypeExpr::I(_)
         | TypeExpr::Function
-        | TypeExpr::Blob(_) => vec![ty.clone()],
+        | TypeExpr::Blob(..) => vec![ty.clone()],
         TypeExpr::Tuple(elements) => elements.iter().flat_map(leaf_types).collect(),
         TypeExpr::Array(inner, n) => leaf_types(inner)
             .into_iter()

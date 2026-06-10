@@ -317,7 +317,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let index_const = ctx.const_vals.get(&index.0).cloned();
         match (a_const, index_const) {
-            (Some(ConstVal::Array(a)), Some(ConstVal::U(_, index))) => {
+            (Some(ConstVal::Array(a) | ConstVal::Blob(a)), Some(ConstVal::U(_, index))) => {
                 let res = a[index as usize];
                 Self(res)
             }

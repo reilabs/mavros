@@ -491,8 +491,9 @@ impl RCInsertion {
                         array,
                         index: _,
                     } => {
-                        if !currently_live.contains(array) {
+                        if !currently_live.contains(array) && self.needs_rc(type_info, array) {
                             // The array dies here, so we drop it _after_ the read.
+                            // Blobs are not RC'd and need no drop.
                             new_instructions.push(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *array,
@@ -805,7 +806,7 @@ impl RCInsertion {
             TypeExpr::WitnessOf(_) => true,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => false,
-            TypeExpr::Blob(_) => false,
+            TypeExpr::Blob(..) => false,
         }
     }
 }

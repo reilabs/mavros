@@ -178,7 +178,10 @@ impl Value {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
             TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
-            TypeExpr::Blob(_) => panic!("Cannot create unknown value for Blob type"),
+            TypeExpr::Blob(elem, n) => {
+                let elem_unknown = Value::unknown_from_type(elem);
+                Value::Blob(vec![elem_unknown; *n])
+            }
         }
     }
 
@@ -612,15 +615,19 @@ impl Value {
         let arr = self.unwrap_witness();
 
         match (arr, index) {
-            (Value::Array(vals), Value::U(_, index)) => vals[*index as usize].clone(),
-            (Value::Array(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
-                Value::U(_, index) => vals[*index as usize].clone(),
-                _ => {
-                    instrumenter.record_lookups(vals.len(), 1, 1);
-                    Value::unknown_from_type(tp)
+            (Value::Array(vals) | Value::Blob(vals), Value::U(_, index)) => {
+                vals[*index as usize].clone()
+            }
+            (Value::Array(vals) | Value::Blob(vals), Value::WitnessOf(inner)) => {
+                match inner.as_ref() {
+                    Value::U(_, index) => vals[*index as usize].clone(),
+                    _ => {
+                        instrumenter.record_lookups(vals.len(), 1, 1);
+                        Value::unknown_from_type(tp)
+                    }
                 }
-            },
-            (Value::Array(vals), Value::Unknown(_)) => {
+            }
+            (Value::Array(vals) | Value::Blob(vals), Value::Unknown(_)) => {
                 instrumenter.record_lookups(vals.len(), 1, 1);
                 Value::unknown_from_type(tp)
             }

@@ -23,8 +23,17 @@ pub fn const_value_type(value: &Constant) -> Type {
         Constant::I(size, _) => Type::i(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
-        Constant::Blob(blob) => Type::blob(blob.len()),
+        Constant::Blob(blob) => Type::blob(blob_element_type(blob), blob.len()),
     }
+}
+
+/// The element type of a constant blob. Blobs are homogeneous; an empty blob
+/// defaults to `Field`.
+pub fn blob_element_type(blob: &crate::compiler::ssa::hlssa::Blob) -> Type {
+    blob.elements
+        .first()
+        .map(const_value_type)
+        .unwrap_or_else(Type::field)
 }
 
 fn push_witness_of_to_leaves(t: Type) -> Type {
@@ -36,7 +45,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
         TypeExpr::Tuple(fields) => {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
-        TypeExpr::Blob(_) => t,
+        TypeExpr::Blob(..) => t,
         TypeExpr::Ref(_) | TypeExpr::Function => Type::witness_of(t),
     }
 }
@@ -462,7 +471,7 @@ impl Types {
             } => {
                 let len = match function_info.values.get(blob) {
                     Some(Type {
-                        expr: TypeExpr::Blob(len),
+                        expr: TypeExpr::Blob(_, len),
                     }) => *len,
                     other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
                 };
