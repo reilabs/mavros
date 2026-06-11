@@ -33,7 +33,6 @@ use crate::{
             defunctionalize::Defunctionalize,
             elide_tuples::ElideTuples,
             fix_double_jumps::FixDoubleJumps,
-            fold_constant_branches::FoldConstantBranches,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
             mem2reg::Mem2Reg,
@@ -172,12 +171,8 @@ impl Driver {
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
-                // Fold statically-known branches (e.g. monomorphized generic dispatch in the
-                // stdlib replacements), then drop the unreachable blocks BEFORE pruning
-                // functions, so calls in never-taken branches don't keep their callees alive.
-                Box::new(FoldConstantBranches::new()),
-                Box::new(RemoveUnreachableBlocks::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
+                Box::new(RemoveUnreachableBlocks::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
                 // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
