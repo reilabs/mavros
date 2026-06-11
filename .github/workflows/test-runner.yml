@@ -108,7 +108,7 @@ jobs:
         run: make build-test-runner
 
       - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 2
+        run: nix develop --command cargo run --release --bin test-runner --features check-constraints -- --output STATUS.md --jobs 2
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -132,12 +132,12 @@ jobs:
 
       - name: Check for Regressions
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
-        run: nix develop --command cargo run --release --bin test-runner -- --check-regression baseline-STATUS.md STATUS.md
+        run: nix develop --command cargo run --release --bin test-runner --features check-constraints -- --check-regression baseline-STATUS.md STATUS.md
 
       - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
-          COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
+          COMMENT=$(nix develop --command cargo run --release --bin test-runner --features check-constraints -- --check-growth baseline-STATUS.md STATUS.md)
           gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

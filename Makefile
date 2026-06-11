@@ -20,7 +20,7 @@ build: ## Build Mavros for testing
 
 .PHONY: build-test-runner
 build-test-runner: ## Builds the test runner in release mode
-	$(SHELL_WRAPPER) cargo build --release --bin test-runner
+	$(SHELL_WRAPPER) cargo build --release --bin test-runner --features check-constraints
 
 .PHONY: release
 release: ## Build Mavros in release mode
@@ -34,7 +34,7 @@ unit-test: ## Run the unit tests
 
 .PHONY: func-test
 func-test: ## Run the functional test harness
-	$(SHELL_WRAPPER) cargo run --release --bin test-runner -- --output STATUS.md
+	$(SHELL_WRAPPER) cargo run --release --bin test-runner --features check-constraints -- --output STATUS.md
 
 .PHONY: test
 test: unit-test func-test ## Run all the tests

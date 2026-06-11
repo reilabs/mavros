@@ -359,6 +359,10 @@ pub struct VM {
     pub spread_tables: [Option<usize>; 17],
     pub globals: *mut u64,
     pub struct_layouts: Vec<StructDescriptor>,
+    /// Set when the program executes a trap (e.g. a failed assertion). The
+    /// interpreter checks this after dispatch returns to distinguish a clean
+    /// halt from a trapped one.
+    pub trapped: bool,
 }
 
 impl VM {
@@ -398,6 +402,7 @@ impl VM {
             spread_tables: [None; 17],
             globals,
             struct_layouts,
+            trapped: false,
         }
     }
 
@@ -435,6 +440,7 @@ impl VM {
             spread_tables: [None; 17],
             globals,
             struct_layouts,
+            trapped: false,
         }
     }
 
@@ -643,6 +649,15 @@ mod def {
         (ret_address, new_frame)
     }
 
+    /// Halts execution and marks the VM as trapped. The interpreter analogue
+    /// of the WASM target's `unreachable`: the assert-family opcodes delegate
+    /// here when their check fails.
+    #[raw_opcode]
+    fn trap(_pc: *const u64, frame: Frame, vm: &mut VM) -> (*const u64, Frame) {
+        vm.trapped = true;
+        (std::ptr::null(), frame)
+    }
+
     #[raw_opcode]
     fn r1c(
         pc: *const u64,
@@ -652,6 +667,11 @@ mod def {
         #[frame] b: Field,
         #[frame] c: Field,
     ) -> (*const u64, Frame) {
+        #[cfg(feature = "check-constraints")]
+        if a * b != c {
+            return trap(pc, frame, vm);
+        }
+
         unsafe {
             *vm.data.as_forward.out_a = a;
             *vm.data.as_forward.out_b = b;
@@ -1352,33 +1372,79 @@ mod def {
         }
     }
 
-    #[opcode]
-    fn assert_eq_u64(#[frame] a: u64, #[frame] b: u64) {
-        assert_eq!(a, b);
+    #[raw_opcode]
+    fn assert_eq_u64(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] a: u64,
+        #[frame] b: u64,
+    ) -> (*const u64, Frame) {
+        if a != b {
+            return trap(pc, frame, vm);
+        }
+        (unsafe { pc.offset(3) }, frame)
     }
 
-    #[opcode]
-    fn assert_eq_u128(#[frame] a: U128, #[frame] b: U128) {
-        assert_eq!(a, b);
+    #[raw_opcode]
+    fn assert_eq_u128(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] a: U128,
+        #[frame] b: U128,
+    ) -> (*const u64, Frame) {
+        if a != b {
+            return trap(pc, frame, vm);
+        }
+        (unsafe { pc.offset(3) }, frame)
     }
 
-    #[opcode]
-    fn assert_eq_field(#[frame] a: Field, #[frame] b: Field) {
-        assert_eq!(a, b);
+    #[raw_opcode]
+    fn assert_eq_field(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] a: Field,
+        #[frame] b: Field,
+    ) -> (*const u64, Frame) {
+        if a != b {
+            return trap(pc, frame, vm);
+        }
+        (unsafe { pc.offset(3) }, frame)
     }
 
-    #[opcode]
-    fn assert_r1c(#[frame] a: Field, #[frame] b: Field, #[frame] c: Field) {
-        assert_eq!(a * b, c);
+    #[raw_opcode]
+    fn assert_r1c(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] a: Field,
+        #[frame] b: Field,
+        #[frame] c: Field,
+    ) -> (*const u64, Frame) {
+        if a * b != c {
+            return trap(pc, frame, vm);
+        }
+        (unsafe { pc.offset(4) }, frame)
     }
 
-    #[opcode]
+    #[raw_opcode]
     #[inline(never)] // TODO better impl
-    fn rangecheck(#[frame] val: Field, max_bits: usize) {
+    fn rangecheck(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] val: Field,
+        max_bits: usize,
+    ) -> (*const u64, Frame) {
         // Convert field to bigint and check if it fits in max_bits
         let bigint = ark_ff::PrimeField::into_bigint(val);
         let check = bigint.to_bits_le().iter().skip(max_bits).all(|b| !b);
-        assert!(check);
+        if !check {
+            return trap(pc, frame, vm);
+        }
+        (unsafe { pc.offset(3) }, frame)
     }
 
     #[opcode]

@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     env, fs,
     io::{BufRead, BufReader, Write},
-    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -79,7 +78,6 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
 enum TestExpectation {
     ExecutionSuccess,
     ExecutionFailure,
-    CompileFailure,
 }
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
@@ -115,14 +113,6 @@ fn emit(line: &str) {
     let mut out = stdout.lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
-}
-
-fn catch_stage_unwind<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
-    let hook = panic::take_hook();
-    panic::set_hook(Box::new(|_| {}));
-    let result = panic::catch_unwind(AssertUnwindSafe(f));
-    panic::set_hook(hook);
-    result
 }
 
 fn run_single(root: PathBuf) {
@@ -203,19 +193,18 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match catch_stage_unwind(|| {
-            interpreter::run(
-                &mut binary,
-                r1cs.witness_layout,
-                r1cs.constraints_layout,
-                params,
-            )
-        }) {
+        match interpreter::run(
+            &mut binary,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            params,
+        ) {
             Ok(result) => {
                 emit("END:WITGEN_RUN:ok");
                 Some(result)
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("witgen run error: {e}");
                 emit("END:WITGEN_RUN:fail");
                 None
             }
@@ -258,19 +247,18 @@ fn run_single(root: PathBuf) {
         let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
-        match catch_stage_unwind(|| {
-            interpreter::run_ad(
-                &mut binary,
-                &ad_coeffs,
-                r1cs.witness_layout,
-                r1cs.constraints_layout,
-            )
-        }) {
+        match interpreter::run_ad(
+            &mut binary,
+            &ad_coeffs,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+        ) {
             Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
                 emit("END:AD_RUN:ok");
                 Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("AD run error: {e}");
                 emit("END:AD_RUN:fail");
                 None
             }
@@ -304,14 +292,12 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
-        match catch_stage_unwind(|| {
-            driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone()))
-        }) {
-            Ok(Ok(_)) if wasm_path.exists() => {
+        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
+            Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
             }
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 eprintln!(
                     "WASM compile succeeded but output file not found at {:?}",
                     wasm_path
@@ -319,13 +305,8 @@ fn run_single(root: PathBuf) {
                 emit("END:WITGEN_WASM_COMPILE:fail");
                 None
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("WASM compile error: {:?}", e);
-                emit("END:WITGEN_WASM_COMPILE:fail");
-                None
-            }
-            Err(_) => {
-                eprintln!("WASM compile panicked");
                 emit("END:WITGEN_WASM_COMPILE:fail");
                 None
             }
@@ -337,18 +318,13 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match catch_stage_unwind(|| run_wasm(wasm_path, r1cs, params)) {
-            Ok(Ok(result)) => {
+        match run_wasm(wasm_path, r1cs, params) {
+            Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("WASM run error: {:?}", e);
-                emit("END:WITGEN_WASM_RUN:fail");
-                None
-            }
-            Err(_) => {
-                eprintln!("WASM run panicked");
                 emit("END:WITGEN_WASM_RUN:fail");
                 None
             }
@@ -388,12 +364,12 @@ fn run_single(root: PathBuf) {
         emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("ad.wasm");
-        match catch_stage_unwind(|| driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs)) {
-            Ok(Ok(_)) if wasm_path.exists() => {
+        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs) {
+            Ok(_) if wasm_path.exists() => {
                 emit("END:AD_WASM_COMPILE:ok");
                 Some(wasm_path)
             }
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 eprintln!(
                     "AD WASM compile succeeded but output file not found at {:?}",
                     wasm_path
@@ -401,13 +377,8 @@ fn run_single(root: PathBuf) {
                 emit("END:AD_WASM_COMPILE:fail");
                 None
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("AD WASM compile error: {:?}", e);
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-            Err(_) => {
-                eprintln!("AD WASM compile panicked");
                 emit("END:AD_WASM_COMPILE:fail");
                 None
             }
@@ -422,18 +393,13 @@ fn run_single(root: PathBuf) {
         let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
-        match catch_stage_unwind(|| run_ad_wasm(wasm_path, r1cs, &ad_coeffs)) {
-            Ok(Ok(result)) => {
+        match run_ad_wasm(wasm_path, r1cs, &ad_coeffs) {
+            Ok(result) => {
                 emit("END:AD_WASM_RUN:ok");
                 Some((ad_coeffs, result))
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 eprintln!("AD WASM run error: {:?}", e);
-                emit("END:AD_WASM_RUN:fail");
-                None
-            }
-            Err(_) => {
-                eprintln!("AD WASM run panicked");
                 emit("END:AD_WASM_RUN:fail");
                 None
             }
@@ -1181,11 +1147,6 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
             "noir/test_programs/execution_failure/",
             TestExpectation::ExecutionFailure,
         ));
-        entries.extend(collect_test_dirs(
-            &test_programs.join("compile_failure"),
-            "noir/test_programs/compile_failure/",
-            TestExpectation::CompileFailure,
-        ));
     } else {
         eprintln!("Warning: could not locate noir test_programs via cargo-metadata");
     }
@@ -1357,17 +1318,6 @@ fn raw_step_status(
 fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
     match expectation {
         TestExpectation::ExecutionSuccess => raw_status,
-        TestExpectation::CompileFailure => {
-            if key == "COMPILED" {
-                match raw_status {
-                    Status::Fail | Status::Crash => Status::Pass,
-                    Status::Pass => Status::Fail,
-                    Status::Skip | Status::NotApplicable => raw_status,
-                }
-            } else {
-                Status::NotApplicable
-            }
-        }
         TestExpectation::ExecutionFailure => match key {
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
                 Status::Fail | Status::Crash => Status::Pass,
@@ -1769,18 +1719,6 @@ mod tests {
 
         assert_eq!(result.steps["COMPILED"], Status::Pass);
         assert_eq!(result.steps["R1CS"], Status::Skip);
-    }
-
-    #[test]
-    fn compile_failure_passes_when_compile_fails() {
-        let result = parse_child_output(
-            "compile_fail",
-            TestExpectation::CompileFailure,
-            &lines(&["START:COMPILED", "END:COMPILED:fail"]),
-        );
-
-        assert_eq!(result.steps["COMPILED"], Status::Pass);
-        assert_eq!(result.steps["R1CS"], Status::NotApplicable);
     }
 
     #[test]

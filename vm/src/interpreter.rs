@@ -235,6 +235,19 @@ pub struct WitgenResult {
     pub instrumenter: AllocationInstrumenter,
 }
 
+/// The program executed a trap: a failed assertion, a failed rangecheck, or
+/// (with the `check-constraints` feature) a violated constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrapError;
+
+impl std::fmt::Display for TrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VM trapped during execution")
+    }
+}
+
+impl std::error::Error for TrapError {}
+
 /// Intermediate result from phase 1 of witness generation.
 ///
 /// Contains the pre-commitment witness and all intermediate state needed to
@@ -268,7 +281,7 @@ pub fn run_phase1(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
-) -> Phase1Result {
+) -> Result<Phase1Result, TrapError> {
     let (struct_layouts, code_start) = parse_struct_layouts(program);
     let global_frame_size = program[code_start] as usize;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
@@ -325,9 +338,13 @@ pub fn run_phase1(
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
+    if vm.trapped {
+        return Err(TrapError);
+    }
+
     fix_multiplicities_section(&mut out_wit_pre_comm, witness_layout);
 
-    Phase1Result {
+    Ok(Phase1Result {
         out_wit_pre_comm,
         out_wit_post_comm,
         out_a,
@@ -335,7 +352,7 @@ pub fn run_phase1(
         out_c,
         tables: vm.tables,
         instrumenter: vm.allocation_instrumenter,
-    }
+    })
 }
 
 /// Phase 2 of witness generation: uses real Fiat-Shamir challenges to
@@ -605,10 +622,14 @@ pub fn run(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
-) -> WitgenResult {
-    let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs);
+) -> Result<WitgenResult, TrapError> {
+    let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs)?;
 
-    run_phase2_with_fake_challenges(phase1, witness_layout, constraints_layout)
+    Ok(run_phase2_with_fake_challenges(
+        phase1,
+        witness_layout,
+        constraints_layout,
+    ))
 }
 
 #[instrument(skip_all, name = "Interpreter::run_ad")]
@@ -617,7 +638,7 @@ pub fn run_ad(
     coeffs: &[Field],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-) -> (Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter) {
+) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
     let (struct_layouts, code_start) = parse_struct_layouts(program);
     let global_frame_size = program[code_start] as usize;
     let mut out_da = vec![Field::ZERO; witness_layout.size()];
@@ -650,7 +671,11 @@ pub fn run_ad(
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
-    (out_da, out_db, out_dc, vm.allocation_instrumenter)
+    if vm.trapped {
+        return Err(TrapError);
+    }
+
+    Ok((out_da, out_db, out_dc, vm.allocation_instrumenter))
 }
 
 fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
