@@ -22,7 +22,6 @@ use crate::{
         codegen::{
             bytecode::CodeGen,
             hlssa_to_r1cs::{R1CGen, R1CS},
-            llssa_to_llvm::WasmCompileOpts,
         },
         lowering::LowLevelReplacement,
         pass_manager::PassManager,
@@ -57,9 +56,14 @@ use crate::{
         REPLACEMENT_CRATES, add_lowlevel_replacements, prepare_replacement_crate,
     },
 };
+// Only used by the LLVM-gated `compile_*_llvm_targets` methods, so gate the import to keep the
+// LLVM-free build (`--no-default-features`) compiling.
+#[cfg(feature = "llvm")]
+use crate::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
 
 pub struct Driver {
     project: Project,
+    monomorphized_program: Option<noirc_frontend::monomorphization::ast::Program>,
     initial_ssa: Option<HLSSA>,
     static_struct_access_ssa: Option<HLSSA>,
     monomorphized_ssa: Option<HLSSA>,
@@ -97,6 +101,7 @@ impl Driver {
         fs::create_dir(&dir).unwrap();
         Self {
             project,
+            monomorphized_program: None,
             initial_ssa: None,
             static_struct_access_ssa: None,
             monomorphized_ssa: None,
@@ -111,6 +116,14 @@ impl Driver {
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
         self.project.get_only_crate().root_dir.join("mavros_debug")
+    }
+
+    /// The monomorphized AST produced by [`Self::run_noir_compiler`], retained for the AST
+    /// interpreter. Panics if called before `run_noir_compiler`.
+    pub fn monomorphized_program(&self) -> &noirc_frontend::monomorphization::ast::Program {
+        self.monomorphized_program
+            .as_ref()
+            .expect("run_noir_compiler must be called before monomorphized_program")
     }
 
     #[tracing::instrument(skip_all)]
@@ -173,6 +186,9 @@ impl Driver {
         let (ssa, main_is_unconstrained) = HLSSA::from_program(&program, lowlevel_replacements);
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
+        // Retain the monomorphized AST so the AST interpreter can validate it directly
+        // (the faithful field-agnostic oracle, upstream of SSA's integer-through-field lowering).
+        self.monomorphized_program = Some(program);
 
         fs::write(
             self.get_debug_output_dir().join("initial_ssa.txt"),
@@ -466,6 +482,7 @@ impl Driver {
         self.base_witgen_ssa = Some(ssa);
     }
 
+    #[cfg(feature = "llvm")]
     #[tracing::instrument(skip_all)]
     pub fn compile_llvm_targets(
         &mut self,
@@ -533,6 +550,7 @@ impl Driver {
         Ok(llvm_ir)
     }
 
+    #[cfg(feature = "llvm")]
     #[tracing::instrument(skip_all)]
     pub fn compile_ad_llvm_targets(
         &mut self,

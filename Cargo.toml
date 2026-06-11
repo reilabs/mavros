@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "ast-interpreter",
   "compiler",
   "mavros-artifacts",
   "opcode-gen",
@@ -22,11 +23,23 @@ repository = "https://github.com/reilabs/mavros"
 # The Mavros crates themselves so we can easily use them as `crate.workspace = true` in the crate
 # dependency lists.
 mavros-artifacts = { path = "./mavros-artifacts/" }
+mavros-ast-interpreter = { path = "./ast-interpreter" }
 mavros-compiler = { path = "./compiler" }
 mavros-opcode-gen = { path = "./opcode-gen/" }
 mavros-vm = { path = "./vm/" }
 mavros-wasm-layout = { path = "./wasm-layout/" }
 mavros-wasm-runtime = { path = "./wasm-runtime/" }
+
+# The Noir crates, pinned to a single git revision here so the compiler and ast-interpreter
+# crates cannot drift onto mismatched sources (the compiled-in field is a global).
+acvm = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "acvm" }
+fm = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "fm" }
+nargo = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "nargo" }
+nargo_toml = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "noirc_abi" }
+noirc_driver = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/worldfnd/noir.git", branch = "sl/goldilocks-port", package = "noirc_frontend" }
 
 # The rest of the shared dependencies (or ones that are fussy about versions)
 anyhow = { version = "1.0.87" }
@@ -80,3 +93,4 @@ to_string_in_format_args = "deny"
 unconditional_recursion = "deny"
 unnecessary_cast = "deny"
 useless_conversion = "deny"
+

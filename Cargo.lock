@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acir"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir_field",
  "base64 0.22.1",
@@ -26,7 +26,7 @@ dependencies = [
 [[package]]
 name = "acir_field"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "ark-bn254",
  "ark-ff",
@@ -40,7 +40,7 @@ dependencies = [
 [[package]]
 name = "acvm"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir",
  "acvm_blackbox_solver",
@@ -55,7 +55,7 @@ dependencies = [
 [[package]]
 name = "acvm_blackbox_solver"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir",
  "aes",
@@ -502,7 +502,7 @@ dependencies = [
 [[package]]
 name = "bn254_blackbox_solver"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir",
  "acvm_blackbox_solver",
@@ -526,7 +526,7 @@ dependencies = [
 [[package]]
 name = "brillig"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir_field",
  "serde",
@@ -535,7 +535,7 @@ dependencies = [
 [[package]]
 name = "brillig_vm"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir",
  "acvm_blackbox_solver",
@@ -1186,7 +1186,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1347,7 +1347,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1408,7 +1408,7 @@ checksum = "8ce81f49ae8a0482e4c55ea62ebbd7e5a686af544c00b9d090bba3ff9be97b3d"
 [[package]]
 name = "fm"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "codespan-reporting",
  "iter-extended",
@@ -1944,7 +1944,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "iter-extended"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 
 [[package]]
 name = "itertools"
@@ -2199,9 +2199,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "mavros-ast-interpreter"
+version = "0.1.0"
+dependencies = [
+ "acvm",
+ "fm",
+ "mavros-compiler",
+ "nargo",
+ "noirc_abi",
+ "noirc_driver",
+ "noirc_errors",
+ "noirc_frontend",
+ "num-bigint",
+ "num-traits",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mavros-compiler"
 version = "0.1.0"
 dependencies = [
+ "acvm",
  "anyhow",
  "ark-bn254",
  "ark-ff",
@@ -2296,7 +2316,7 @@ dependencies = [
 [[package]]
 name = "nargo"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "brillig",
@@ -2322,7 +2342,7 @@ dependencies = [
 [[package]]
 name = "nargo_toml"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "dirs",
  "fm",
@@ -2341,7 +2361,7 @@ dependencies = [
 [[package]]
 name = "noir_greybox_fuzzer"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "build-data",
@@ -2361,7 +2381,7 @@ dependencies = [
 [[package]]
 name = "noirc_abi"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "iter-extended",
@@ -2377,12 +2397,12 @@ dependencies = [
 [[package]]
 name = "noirc_arena"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 
 [[package]]
 name = "noirc_artifacts"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acir",
  "acvm",
@@ -2402,7 +2422,7 @@ dependencies = [
 [[package]]
 name = "noirc_driver"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "build-data",
@@ -2422,7 +2442,7 @@ dependencies = [
 [[package]]
 name = "noirc_errors"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "codespan-reporting",
  "fm",
@@ -2434,7 +2454,7 @@ dependencies = [
 [[package]]
 name = "noirc_evaluator"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "bn254_blackbox_solver",
@@ -2467,7 +2487,7 @@ dependencies = [
 [[package]]
 name = "noirc_frontend"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "bn254_blackbox_solver",
@@ -2497,7 +2517,7 @@ dependencies = [
 [[package]]
 name = "noirc_printable_type"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "acvm",
  "iter-extended",
@@ -2508,7 +2528,7 @@ dependencies = [
 [[package]]
 name = "noirc_span"
 version = "1.0.0-beta.19"
-source = "git+https://github.com/noir-lang/noir.git?tag=v1.0.0-beta.19#74d6be658e1ad252f87943292ba09bdd4da80bd4"
+source = "git+https://github.com/worldfnd/noir.git?branch=sl%2Fgoldilocks-port#3303e2c815d3987bc76a31d42b23746a29a5f9a3"
 dependencies = [
  "codespan",
  "serde",
@@ -2520,7 +2540,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2531,6 +2551,7 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -3262,7 +3283,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3691,7 +3712,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4605,7 +4626,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -31,7 +31,9 @@ pub fn ordered_params_from_btreemap(
 
 fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
     match (value, abi_type) {
-        (InputValue::Field(elem), _) => InputValueOrdered::Field(elem.into_repr()),
+        (InputValue::Field(elem), _) => {
+            InputValueOrdered::Field(crate::compiler::noir_field_to_bn254(elem.into_repr()))
+        }
         (InputValue::Vec(vec_elements), AbiType::Array { typ, .. }) => InputValueOrdered::Vec(
             vec_elements
                 .iter()
