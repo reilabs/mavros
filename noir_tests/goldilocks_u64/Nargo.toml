@@ -1,0 +1,6 @@
+[package]
+name = "goldilocks_u64"
+type = "bin"
+authors = [""]
+
+[dependencies]

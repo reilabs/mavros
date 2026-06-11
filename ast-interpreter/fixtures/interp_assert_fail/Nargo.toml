@@ -1,0 +1,6 @@
+[package]
+name = "interp_assert_fail"
+type = "bin"
+authors = [""]
+
+[dependencies]

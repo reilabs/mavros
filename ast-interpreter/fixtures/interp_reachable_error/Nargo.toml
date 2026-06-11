@@ -1,0 +1,6 @@
+[package]
+name = "interp_reachable_error"
+type = "bin"
+authors = [""]
+
+[dependencies]
