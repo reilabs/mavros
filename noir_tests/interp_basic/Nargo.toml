@@ -1,0 +1,6 @@
+[package]
+name = "interp_basic"
+type = "bin"
+authors = [""]
+
+[dependencies]

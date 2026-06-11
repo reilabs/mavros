@@ -1,0 +1,6 @@
+[package]
+name = "interp_inputs_u64"
+type = "bin"
+authors = [""]
+
+[dependencies]
