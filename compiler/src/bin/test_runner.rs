@@ -1147,6 +1147,11 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
             "noir/test_programs/execution_failure/",
             TestExpectation::ExecutionFailure,
         ));
+        entries.extend(collect_test_dirs(
+            &test_programs.join("execution_panic"),
+            "noir/test_programs/execution_panic/",
+            TestExpectation::ExecutionFailure,
+        ));
     } else {
         eprintln!("Warning: could not locate noir test_programs via cargo-metadata");
     }
