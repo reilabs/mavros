@@ -20,6 +20,7 @@ use crate::compiler::{
             builder::{HLFunctionBuilder, HLSSABuilder},
         },
     },
+    util::bit_mask,
 };
 
 pub struct Simplifier {
@@ -556,16 +557,6 @@ fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
         Some(Constant::U(bits, value) | Constant::I(bits, value)) => *value == bit_mask(*bits),
         _ => false,
-    }
-}
-
-fn bit_mask(bits: usize) -> u128 {
-    if bits == 0 {
-        0
-    } else if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
     }
 }
 
