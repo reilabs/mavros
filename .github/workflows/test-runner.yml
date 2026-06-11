@@ -112,10 +112,10 @@ jobs:
           path: target/release/test-runner
           retention-days: 1
 
-  # Run one half of the test suite. The matrix fans this single job definition
-  # out into test (shard 0) and test (shard 1); each downloads the prebuilt
-  # test-runner binary, runs its interleaved half of the tests, and uploads its
-  # partial STATUS.md as an artifact for the merge job. No compilation here.
+  # Run one quarter of the test suite. The matrix fans this single job
+  # definition out into test (shard 0..3); each downloads the prebuilt
+  # test-runner binary, runs its interleaved quarter of the tests, and uploads
+  # its partial STATUS.md as an artifact for the merge job. No compilation here.
   test:
     name: Run Tests (shard ${{ matrix.shard }})
     needs: build-test-runner
@@ -123,7 +123,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2, 3]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -163,7 +163,7 @@ jobs:
       - name: Run Tests
         run: |
           chmod +x target/release/test-runner
-          nix develop --command target/release/test-runner --output STATUS.part.md --jobs 4 --shard ${{ matrix.shard }} --shards 2
+          nix develop --command target/release/test-runner --output STATUS.part.md --jobs 4 --shard ${{ matrix.shard }} --shards 4
 
       - name: Upload partial STATUS.md
         uses: actions/upload-artifact@v4
@@ -172,7 +172,7 @@ jobs:
           path: STATUS.part.md
           retention-days: 1
 
-  # Merge the two shards' partial results into the final STATUS.md, then run the
+  # Merge the shards' partial results into the final STATUS.md, then run the
   # commit / regression / growth-comment steps that previously lived in the
   # single test job.
   merge-results:
@@ -198,20 +198,15 @@ jobs:
       # The merge / regression / growth steps are pure STATUS.md text
       # processing (Python scripts under .github/scripts), so this job needs
       # neither the Nix/LLVM toolchain nor the compiled test-runner binary.
-      - name: Download shard 0 results
+      # Pull every shard's artifact into its own subdir under shards/.
+      - name: Download shard results
         uses: actions/download-artifact@v4
         with:
-          name: status-shard-0
-          path: shard-0
-
-      - name: Download shard 1 results
-        uses: actions/download-artifact@v4
-        with:
-          name: status-shard-1
-          path: shard-1
+          pattern: status-shard-*
+          path: shards
 
       - name: Merge STATUS.md
-        run: python3 .github/scripts/merge_status.py --output STATUS.md shard-0/STATUS.part.md shard-1/STATUS.part.md
+        run: python3 .github/scripts/merge_status.py --output STATUS.md shards/status-shard-*/STATUS.part.md
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -121,15 +121,19 @@ fn parse_jobs_arg(args: &[String]) -> usize {
 /// 0-based and must be `< total`.
 fn parse_shard_arg(args: &[String]) -> Option<Shard> {
     let find = |flag: &str| -> Option<usize> {
-        args.windows(2)
-            .find(|w| w[0] == flag)
-            .map(|w| w[1].parse().unwrap_or_else(|_| panic!("{flag} requires an integer")))
+        args.windows(2).find(|w| w[0] == flag).map(|w| {
+            w[1].parse()
+                .unwrap_or_else(|_| panic!("{flag} requires an integer"))
+        })
     };
     match (find("--shard"), find("--shards")) {
         (None, None) => None,
         (Some(index), Some(total)) => {
             assert!(total >= 1, "--shards must be >= 1");
-            assert!(index < total, "--shard ({index}) must be < --shards ({total})");
+            assert!(
+                index < total,
+                "--shard ({index}) must be < --shards ({total})"
+            );
             Some(Shard { index, total })
         }
         _ => panic!("--shard and --shards must be supplied together"),
@@ -150,7 +154,10 @@ fn parse_merge_args(args: &[String]) -> Vec<PathBuf> {
         .take_while(|a| !a.starts_with("--"))
         .map(PathBuf::from)
         .collect();
-    assert!(!parts.is_empty(), "--merge requires at least one input file");
+    assert!(
+        !parts.is_empty(),
+        "--merge requires at least one input file"
+    );
     parts
 }
 
@@ -1737,7 +1744,9 @@ fn merge_status_files(parts: &[PathBuf], output_path: &Path) {
         let content = fs::read_to_string(part)
             .unwrap_or_else(|_| panic!("Cannot read shard output {}", part.display()));
         let mut lines = content.lines();
-        let h0 = lines.next().unwrap_or_else(|| panic!("{} is empty", part.display()));
+        let h0 = lines
+            .next()
+            .unwrap_or_else(|| panic!("{} is empty", part.display()));
         let h1 = lines
             .next()
             .unwrap_or_else(|| panic!("{} is missing its separator row", part.display()));
