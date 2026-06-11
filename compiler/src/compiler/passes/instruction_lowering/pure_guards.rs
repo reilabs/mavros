@@ -32,6 +32,7 @@ use crate::compiler::{
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
+    util::bit_mask,
 };
 
 use super::{InstructionLoweringRule, LoweringContext};
@@ -850,14 +851,6 @@ impl LowerPureGuards {
         } else {
             emitter.u_const(bits, 0)
         }
-    }
-}
-
-fn bit_mask(bits: usize) -> u128 {
-    if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
     }
 }
 
