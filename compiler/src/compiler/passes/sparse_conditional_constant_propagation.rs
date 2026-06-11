@@ -215,32 +215,30 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
                 self.process_value(v);
                 continue;
             }
-            if !self.force_stuck_conditions() {
-                break;
-            }
+            break;
         }
+        self.assert_no_stuck_conditions();
     }
 
-    /// A `JmpIf` condition can converge at ⊤ only through a self-referential block-parameter cycle
-    /// (a degenerate loop). Force such conditions to ⊥ so both successors are explored and the
-    /// rewrite never drops a block a kept terminator still targets. Returns `true` if anything
-    /// changed.
-    fn force_stuck_conditions(&mut self) -> bool {
-        let mut stuck = Vec::new();
+    /// A `JmpIf` condition can converge at ⊤ only if it (transitively) bottoms out at a block
+    /// parameter fed solely by itself along executable edges — a use its definition does not
+    /// dominate, i.e. malformed SSA. The rewrite would silently delete blocks the kept `JmpIf`
+    /// still targets, so ICE here instead.
+    fn assert_no_stuck_conditions(&self) {
         for bid in &self.reachable {
             if let Some(Terminator::JmpIf(cond, _, _)) =
                 self.function.get_block(*bid).get_terminator()
             {
-                if self.lattice_of(*cond) == LatticeElement::Top {
-                    stuck.push(*cond);
-                }
+                assert!(
+                    self.lattice_of(*cond) != LatticeElement::Top,
+                    "ICE: SCCP converged with JmpIf condition v{} in `{}` stuck at ⊤; \
+                     the condition is only defined through a self-referential block-parameter \
+                     cycle, so a use is not dominated by its definition (malformed SSA)",
+                    cond.0,
+                    self.function.get_name(),
+                );
             }
         }
-        for cond in &stuck {
-            self.lattice.insert(*cond, LatticeElement::Bottom);
-            self.value_worklist.push(*cond);
-        }
-        !stuck.is_empty()
     }
 
     fn lattice_of(&self, v: ValueId) -> LatticeElement {
@@ -1086,10 +1084,12 @@ mod tests {
 
     /// A degenerate loop: the branch condition is a parameter of a block that is itself only
     /// reachable through that branch, so no executable jump ever supplies the parameter and the
-    /// condition converges stuck at ⊤. `force_stuck_conditions` must lower it to ⊥ so both
-    /// successors are explored and the kept `JmpIf` never targets a deleted block.
+    /// condition converges stuck at ⊤. Such a condition has a use its definition does not
+    /// dominate — malformed SSA — and must ICE rather than let the rewrite delete blocks the kept
+    /// `JmpIf` still targets.
     #[test]
-    fn degenerate_loop_forces_stuck_condition() {
+    #[should_panic(expected = "stuck at ⊤")]
+    fn degenerate_loop_ices_on_stuck_condition() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let cond = ssa.fresh_value();
 
@@ -1109,14 +1109,6 @@ mod tests {
             .set_terminator(Terminator::Return(vec![]));
 
         SCCP::new().do_run(&mut ssa);
-
-        let f = ssa.get_main();
-        // The stuck condition is forced to ⊥: nothing folds, the branch and all blocks survive.
-        assert_eq!(f.get_blocks().count(), 4);
-        assert!(matches!(
-            f.get_block(header).get_terminator(),
-            Some(Terminator::JmpIf(c, t, e)) if *c == cond && *t == body && *e == exit
-        ));
     }
 
     /// A select whose condition is constant aliases to the chosen arm even when the arms are not
