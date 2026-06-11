@@ -1367,7 +1367,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .write_to_file(&self.module, FileType::Object, &obj_path)
             .unwrap();
 
-        let runtime_lib = build_wasm_runtime();
+        let runtime_lib = Self::build_wasm_runtime();
 
         let wasm_ld = std::env::var("LLVM_SYS_180_PREFIX")
             .map(|prefix| {
@@ -1420,60 +1420,41 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         std::fs::remove_file(&obj_path).ok();
     }
-}
 
-/// Environment variable pointing at a pre-built wasm-runtime static library. When set, WASM
-/// compilation uses it directly instead of invoking cargo.
-pub const WASM_RUNTIME_LIB_ENV: &str = "MAVROS_WASM_RUNTIME_LIB";
+    fn build_wasm_runtime() -> std::path::PathBuf {
+        use std::process::Command;
 
-/// Build (or locate) the wasm-runtime static library.
-///
-/// Resolving the workspace makes cargo walk the noir git checkout, which races against parallel
-/// test-runner children creating and deleting `mavros_debug` dirs for tests that live inside that
-/// checkout ("failed to read directory ... mavros_debug/...: No such file or directory"). The
-/// test runner therefore builds the runtime once up front and points children at the artifact
-/// via [WASM_RUNTIME_LIB_ENV], so they never invoke cargo.
-pub fn build_wasm_runtime() -> std::path::PathBuf {
-    use std::process::Command;
+        let metadata = cargo_metadata::MetadataCommand::new()
+            .exec()
+            .expect("Failed to get cargo metadata");
 
-    if let Ok(lib_path) = std::env::var(WASM_RUNTIME_LIB_ENV) {
-        let lib_path = std::path::PathBuf::from(lib_path);
-        if lib_path.exists() {
-            return lib_path;
+        let workspace_root = metadata.workspace_root.as_std_path();
+        let wasm_runtime_dir = workspace_root.join("wasm-runtime");
+
+        let output = Command::new("cargo")
+            .current_dir(&wasm_runtime_dir)
+            .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
+            .output()
+            .expect("Failed to run cargo build for wasm-runtime");
+
+        if !output.status.success() {
+            eprintln!(
+                "wasm-runtime build stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            panic!("Failed to build wasm-runtime for wasm32");
         }
-        panic!("{WASM_RUNTIME_LIB_ENV} is set but {lib_path:?} does not exist");
+
+        let lib_path = workspace_root
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join("libmavros_wasm_runtime.a");
+
+        if !lib_path.exists() {
+            panic!("wasm-runtime library not found at {:?}", lib_path);
+        }
+
+        lib_path
     }
-
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .exec()
-        .expect("Failed to get cargo metadata");
-
-    let workspace_root = metadata.workspace_root.as_std_path();
-    let wasm_runtime_dir = workspace_root.join("wasm-runtime");
-
-    let output = Command::new("cargo")
-        .current_dir(&wasm_runtime_dir)
-        .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
-        .output()
-        .expect("Failed to run cargo build for wasm-runtime");
-
-    if !output.status.success() {
-        eprintln!(
-            "wasm-runtime build stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        panic!("Failed to build wasm-runtime for wasm32");
-    }
-
-    let lib_path = workspace_root
-        .join("target")
-        .join("wasm32-unknown-unknown")
-        .join("release")
-        .join("libmavros_wasm_runtime.a");
-
-    if !lib_path.exists() {
-        panic!("wasm-runtime library not found at {:?}", lib_path);
-    }
-
-    lib_path
 }

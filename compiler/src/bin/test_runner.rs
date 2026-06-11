@@ -16,10 +16,7 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::codegen::{
-        hlssa_to_r1cs::R1CS,
-        llssa_to_llvm::{WASM_RUNTIME_LIB_ENV, WasmCompileOpts, build_wasm_runtime},
-    },
+    compiler::codegen::{hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::Driver,
     vm::{bytecode::TableInfo, interpreter},
 };
@@ -1132,13 +1129,6 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
 
     assert!(!entries.is_empty(), "No test directories found");
 
-    // Build the wasm runtime once before spawning workers and hand children the artifact path.
-    // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
-    // walk the noir git checkout while other children create and delete `mavros_debug` dirs for
-    // tests living inside it, crashing whichever child loses the race.
-    let wasm_runtime_lib = build_wasm_runtime();
-    eprintln!("Built wasm runtime at: {}", wasm_runtime_lib.display());
-
     let exe = env::current_exe().expect("Cannot determine own exe path");
     let total = entries.len();
     let ignored_count = entries
@@ -1172,7 +1162,6 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
 
                     let mut child = Command::new(&exe)
                         .args(["--run-single", abs.to_str().unwrap()])
-                        .env(WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::inherit())
                         .spawn()
