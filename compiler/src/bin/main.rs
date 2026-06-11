@@ -172,7 +172,8 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
-            Some(wasm_path)
+            let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build();
+            Some((wasm_path, WasmCompileOpts::release(runtime_lib)))
         } else {
             None
         };
@@ -182,12 +183,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
 
         driver
-            .compile_llvm_targets(
-                args.emit_llvm,
-                &r1cs,
-                wasm_config,
-                WasmCompileOpts::release(),
-            )
+            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config)
             .unwrap();
     }
 

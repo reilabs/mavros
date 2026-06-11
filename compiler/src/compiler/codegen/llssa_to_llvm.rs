@@ -31,13 +31,17 @@ use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
-/// How to optimize when compiling a module to WASM.
-#[derive(Clone, Copy, Debug)]
+/// How to compile a module to WASM.
+#[derive(Clone, Debug)]
 pub struct WasmCompileOpts {
     /// LLVM mid-end pass pipeline to run before codegen (e.g. `"default<O1>"`).
     pub midend_pipeline: Option<&'static str>,
     /// Codegen (instruction selection) optimization level.
     pub codegen_level: OptimizationLevel,
+    /// Pre-built wasm-runtime static library to link against. Callers are
+    /// responsible for building it (see [`crate::wasm_runtime`]); codegen
+    /// never invokes cargo.
+    pub runtime_lib: std::path::PathBuf,
 }
 
 impl WasmCompileOpts {
@@ -46,18 +50,20 @@ impl WasmCompileOpts {
     /// (FastISel). On large programs this compiles several times faster
     /// than `release()` while producing correct output — the right choice
     /// for tests and CI.
-    pub fn fast() -> Self {
+    pub fn fast(runtime_lib: std::path::PathBuf) -> Self {
         Self {
             midend_pipeline: Some("default<O1>"),
             codegen_level: OptimizationLevel::None,
+            runtime_lib,
         }
     }
 
     /// Optimized output for production artifacts.
-    pub fn release() -> Self {
+    pub fn release(runtime_lib: std::path::PathBuf) -> Self {
         Self {
             midend_pipeline: None,
             codegen_level: OptimizationLevel::Aggressive,
+            runtime_lib,
         }
     }
 }
@@ -1367,8 +1373,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .write_to_file(&self.module, FileType::Object, &obj_path)
             .unwrap();
 
-        let runtime_lib = Self::build_wasm_runtime();
-
         let wasm_ld = std::env::var("LLVM_SYS_180_PREFIX")
             .map(|prefix| {
                 let path = std::path::PathBuf::from(&prefix)
@@ -1397,7 +1401,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ])
             .arg(path)
             .arg(&obj_path)
-            .arg(&runtime_lib)
+            .arg(&opts.runtime_lib)
             .output()
             .unwrap_or_else(|_| {
                 panic!(
@@ -1419,42 +1423,5 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
 
         std::fs::remove_file(&obj_path).ok();
-    }
-
-    fn build_wasm_runtime() -> std::path::PathBuf {
-        use std::process::Command;
-
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .exec()
-            .expect("Failed to get cargo metadata");
-
-        let workspace_root = metadata.workspace_root.as_std_path();
-        let wasm_runtime_dir = workspace_root.join("wasm-runtime");
-
-        let output = Command::new("cargo")
-            .current_dir(&wasm_runtime_dir)
-            .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
-            .output()
-            .expect("Failed to run cargo build for wasm-runtime");
-
-        if !output.status.success() {
-            eprintln!(
-                "wasm-runtime build stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            panic!("Failed to build wasm-runtime for wasm32");
-        }
-
-        let lib_path = workspace_root
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join("release")
-            .join("libmavros_wasm_runtime.a");
-
-        if !lib_path.exists() {
-            panic!("wasm-runtime library not found at {:?}", lib_path);
-        }
-
-        lib_path
     }
 }

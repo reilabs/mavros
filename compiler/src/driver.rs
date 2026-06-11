@@ -471,8 +471,7 @@ impl Driver {
         &mut self,
         emit_llvm: bool,
         r1cs: &R1CS,
-        wasm_config: Option<std::path::PathBuf>,
-        wasm_opts: WasmCompileOpts,
+        wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
@@ -523,7 +522,7 @@ impl Driver {
             None
         };
 
-        if let Some(wasm_path) = wasm_config {
+        if let Some((wasm_path, wasm_opts)) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
             codegen.compile_to_wasm(&wasm_path, wasm_opts);
             info!(message = %"WASM object generated", path = %wasm_path.display());
