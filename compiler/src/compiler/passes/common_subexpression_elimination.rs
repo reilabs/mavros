@@ -11,8 +11,8 @@ use crate::compiler::{
     ssa::{
         BlockId, SSAConstantsSnapshot, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            LookupTarget, OpCode, Radix,
+            BinaryArithOpKind, CmpKind, Constant, Endianness, HLFunction, HLSSA, LookupTarget,
+            OpCode, Radix, Type,
         },
     },
 };
@@ -47,7 +47,7 @@ enum ExprNode {
     ArrayGet { array: ExprId, index: ExprId },
     Not(ExprId),
     ReadGlobal(u64),
-    Cast { value: ExprId, target: CastTarget },
+    Cast { value: ExprId, target: Type },
     SExt { value: ExprId, from_bits: usize, to_bits: usize },
     ValueOf(ExprId),
     BytesOf { value: ExprId, endianness: Endianness, count: usize },
@@ -259,7 +259,7 @@ impl ExprInterner {
         self.intern(ExprNode::ReadGlobal(index))
     }
 
-    fn cast(&mut self, value: ExprId, target: CastTarget) -> ExprId {
+    fn cast(&mut self, value: ExprId, target: Type) -> ExprId {
         self.intern(ExprNode::Cast { value, target })
     }
 
@@ -823,7 +823,7 @@ impl CSE {
                         target,
                     } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr = interner.cast(value_expr, *target);
+                        let result_expr = interner.cast(value_expr, target.clone());
                         record_expr(
                             &mut exprs,
                             &mut result,

@@ -5,8 +5,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, Endianness, LookupTarget, OpCode, Radix,
-            SequenceTargetType, Type, TypeExpr,
+            BinaryArithOpKind, Endianness, LookupTarget, OpCode, Radix, SequenceTargetType, Type,
+            TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -235,16 +235,8 @@ impl LowerWitnessFieldOps {
     ) {
         let l_type = context.types().get_value_type(if_t);
         let r_type = context.types().get_value_type(if_f);
-        let l_field = if l_type.strip_witness().is_field() {
-            if_t
-        } else {
-            b.cast_to_field(if_t)
-        };
-        let r_field = if r_type.strip_witness().is_field() {
-            if_f
-        } else {
-            b.cast_to_field(if_f)
-        };
+        let l_field = b.ensure_field(if_t, l_type);
+        let r_field = b.ensure_field(if_f, r_type);
 
         let l_sub_r = b.sub(l_field, r_field);
         let cond_field = b.ensure_field(cond, context.types().get_value_type(cond));
@@ -306,7 +298,7 @@ impl LowerWitnessFieldOps {
         let mut current_sum = b.field_const(Field::ZERO);
         let radix_val = match radix {
             Radix::Bytes => b.field_const(Field::from(256)),
-            Radix::Dyn(radix) => b.cast_to(CastTarget::Field, radix),
+            Radix::Dyn(radix) => b.cast_to(Type::field(), radix),
         };
         let rangecheck_type = match radix {
             Radix::Bytes => LookupTarget::Rangecheck(8),
@@ -331,7 +323,7 @@ impl LowerWitnessFieldOps {
         b.constrain(current_sum, constrain_one, value);
         let byte_elems: Vec<ValueId> = witnesses
             .iter()
-            .map(|&w| b.cast_to(CastTarget::U(8), w))
+            .map(|&w| b.cast_to(Type::witness_of(Type::u(8)), w))
             .collect();
         b.emit(OpCode::MkSeq {
             result,
@@ -372,10 +364,9 @@ impl LowerWitnessFieldOps {
     }
 }
 
-fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
+fn cast_target_for_integer_type(ty: &Type) -> Type {
     match ty.strip_witness().expr {
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        TypeExpr::U(_) | TypeExpr::I(_) => ty.clone(),
         other => panic!("expected integer type, got {:?}", other),
     }
 }

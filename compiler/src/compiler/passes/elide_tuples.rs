@@ -471,11 +471,19 @@ fn lower_instruction(
         } => {
             let values = components(value_map, *value);
             let results = components(value_map, *result);
-            for (v, r) in values.into_iter().zip(results) {
+            // A tuple-typed cast splits into one cast per leaf component,
+            // each targeting the corresponding leaf of the target type.
+            let leaf_targets = leaf_types(target);
+            assert_eq!(
+                leaf_targets.len(),
+                results.len(),
+                "cast target leaves must match the result component count"
+            );
+            for ((v, r), leaf) in values.into_iter().zip(results).zip(leaf_targets) {
                 out.push(OpCode::Cast {
                     result: r,
                     value: v,
-                    target: *target,
+                    target: leaf,
                 });
             }
         }

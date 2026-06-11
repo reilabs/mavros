@@ -5,7 +5,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, CmpKind, OpCode, TypeExpr,
+            CmpKind, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -73,8 +73,8 @@ impl LowerWitnessCompareOps {
     ) {
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
-        let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
-        let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
+        let lhs_field = b.ensure_field(lhs, lhs_type);
+        let rhs_field = b.ensure_field(rhs, rhs_type);
         let diff = b.sub(lhs_field, rhs_field);
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
@@ -85,10 +85,10 @@ impl LowerWitnessCompareOps {
         b.emit(OpCode::Cast {
             result,
             value: result_witness,
-            target: CastTarget::U(1),
+            target: Type::witness_of(Type::u(1)),
         });
 
-        let result_field = b.cast_to_field(result);
+        let result_field = b.ensure_field(result, &Type::witness_of(Type::u(1)));
         let one = b.field_const(Field::ONE);
         let not_result = b.sub(one, result_field);
         let quotient = b.div(not_result, diff);
@@ -130,8 +130,8 @@ impl LowerWitnessCompareOps {
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        let sign_l = self.sign_bit(b, lhs, bits);
-        let sign_r = self.sign_bit(b, rhs, bits);
+        let sign_l = self.sign_bit(b, lhs, bits, lhs_witness);
+        let sign_r = self.sign_bit(b, rhs, bits, rhs_witness);
         let signs_differ = b.xor(sign_l, sign_r);
 
         let unsigned_result = b.fresh_value();
@@ -150,7 +150,7 @@ impl LowerWitnessCompareOps {
         b.emit(OpCode::Cast {
             result,
             value: signed_result,
-            target: CastTarget::U(1),
+            target: Type::witness_of(Type::u(1)),
         });
     }
 
@@ -170,24 +170,24 @@ impl LowerWitnessCompareOps {
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-        let lhs_hint = b.cast_to(CastTarget::U(bits), lhs_pure);
-        let rhs_hint = b.cast_to(CastTarget::U(bits), rhs_pure);
+        let lhs_hint = b.cast_to(Type::u(bits), lhs_pure);
+        let rhs_hint = b.cast_to(Type::u(bits), rhs_pure);
         let result_hint = b.lt(lhs_hint, rhs_hint);
         let result_hint_field = b.cast_to_field(result_hint);
         let result_witness = b.write_witness(result_hint_field);
         b.emit(OpCode::Cast {
             result,
             value: result_witness,
-            target: CastTarget::U(1),
+            target: Type::witness_of(Type::u(1)),
         });
 
-        let result_field = b.cast_to_field(result);
+        let result_field = b.ensure_field(result, &Type::witness_of(Type::u(1)));
         self.emit_rangecheck(b, result_field, 1);
 
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
-        let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
-        let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
+        let lhs_field = b.ensure_field(lhs, lhs_type);
+        let rhs_field = b.ensure_field(rhs, rhs_type);
         let one = b.field_const(Field::ONE);
         let true_delta = b.sub(rhs_field, lhs_field);
         let true_delta = b.sub(true_delta, one);
@@ -198,9 +198,20 @@ impl LowerWitnessCompareOps {
         self.emit_rangecheck(b, selected_delta, bits);
     }
 
-    fn sign_bit(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
+    fn sign_bit(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        value: ValueId,
+        bits: usize,
+        is_witness: bool,
+    ) -> ValueId {
         let sign = b.bit_range(value, bits - 1, 1);
-        b.cast_to(CastTarget::U(1), sign)
+        let target = if is_witness {
+            Type::witness_of(Type::u(1))
+        } else {
+            Type::u(1)
+        };
+        b.cast_to(target, sign)
     }
 
     fn emit_rangecheck(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) {

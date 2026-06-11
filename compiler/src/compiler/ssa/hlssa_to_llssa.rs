@@ -781,9 +781,7 @@ fn lower_instruction(
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
 ) {
-    use crate::compiler::ssa::hlssa::{
-        CallTarget, CastTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
-    };
+    use crate::compiler::ssa::hlssa::{CallTarget, OpCode, Radix, RefCountOp, SequenceTargetType};
 
     match instruction {
         OpCode::BinaryArithOp {
@@ -1090,25 +1088,23 @@ fn lower_instruction(
         OpCode::Cast {
             result,
             value,
-            target,
+            target: _,
         } => {
             let ll_value = val_map[value];
             let source_type = fn_type_info.get_value_type(*value);
             let result_type = fn_type_info.get_value_type(*result);
-            if source_type.is_witness_of()
-                && result_type.is_witness_of()
-                && !matches!(target, CastTarget::WitnessOf)
-            {
+            if source_type.is_witness_of() && result_type.is_witness_of() {
                 // WitnessOf(A) → WitnessOf(B): no-op at runtime (both are AD refs)
                 val_map.insert(*result, ll_value);
                 return;
             }
-            match target {
-                CastTarget::WitnessOf => {
-                    // Pure value → AD constant node
-                    lower_ad_const_wrap(e, val_map, *result, *value, &source_type);
-                }
-                CastTarget::Field => {
+            if result_type.is_witness_of() {
+                // Witness injection: pure value → AD constant node
+                lower_ad_const_wrap(e, val_map, *result, *value, &source_type);
+                return;
+            }
+            match &result_type.expr {
+                HLTypeExpr::Field => {
                     if source_type.is_field() {
                         // Field → Field: identity cast (no-op)
                         val_map.insert(*result, ll_value);
@@ -1144,8 +1140,9 @@ fn lower_instruction(
                         val_map.insert(*result, field_val);
                     }
                 }
-                CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
-                    if matches!(target, CastTarget::I(bits) if *bits > MAX_SUPPORTED_SIGNED_BITS) {
+                HLTypeExpr::U(target_bits) | HLTypeExpr::I(target_bits) => {
+                    if matches!(result_type.expr, HLTypeExpr::I(bits) if bits > MAX_SUPPORTED_SIGNED_BITS)
+                    {
                         panic!(
                             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                         );
@@ -1198,15 +1195,17 @@ fn lower_instruction(
                     };
                     val_map.insert(*result, ll_result);
                 }
-                CastTarget::Nop => {
+                // Identity composite casts and array→slice casts: arrays and
+                // slices share the same heap layout, so the cast is a pure
+                // alias — ownership of the object transfers to the result,
+                // matching the VM backend's nop semantics.
+                HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => {
                     val_map.insert(*result, ll_value);
                 }
-                CastTarget::ArrayToSlice => {
-                    // Arrays and slices share the same heap layout, so this
-                    // cast is a pure alias: ownership of the object transfers
-                    // to the result, matching the VM backend's nop semantics.
-                    val_map.insert(*result, ll_value);
-                }
+                _ => panic!(
+                    "unsupported cast {} -> {} in HLSSA->LLSSA lowering",
+                    source_type, result_type
+                ),
             }
         }
 

@@ -26,7 +26,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, ValueId,
         hlssa::{
-            CallTarget, CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            CallTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
@@ -392,8 +392,8 @@ impl PrepareEntryPoint {
             TypeExpr::Field => e.write_witness(value_id),
             TypeExpr::U(size) | TypeExpr::I(size) => {
                 let cast_back = match &typ.expr {
-                    TypeExpr::U(s) => CastTarget::U(*s),
-                    TypeExpr::I(s) => CastTarget::I(*s),
+                    TypeExpr::U(s) => Type::u(*s),
+                    TypeExpr::I(s) => Type::i(*s),
                     _ => unreachable!(),
                 };
                 let as_field = e.cast_to_field(value_id);
@@ -525,8 +525,8 @@ impl PrepareEntryPoint {
                 }
 
                 let cast_back = match &typ.expr {
-                    TypeExpr::U(s) => CastTarget::U(*s),
-                    TypeExpr::I(s) => CastTarget::I(*s),
+                    TypeExpr::U(s) => Type::u(*s),
+                    TypeExpr::I(s) => Type::i(*s),
                     _ => unreachable!(),
                 };
                 e.cast_to(cast_back, field_param)
@@ -574,7 +574,7 @@ impl PrepareEntryPoint {
             TypeExpr::WitnessOf(inner) => {
                 let inner_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
                 let reconstructed = e.call(inner_fn, vec![input_array], 1);
-                e.cast_to_witness_of(reconstructed[0])
+                e.cast_to_witness_of(reconstructed[0], inner.as_ref().clone())
             }
             _ => todo!("Not implemented yet"),
         }
@@ -590,15 +590,15 @@ impl PrepareEntryPoint {
         match &typ.expr {
             TypeExpr::Field => {
                 let zero = e.field_const(ark_bn254::Fr::from(0));
-                e.cast_to_witness_of(zero)
+                e.cast_to_witness_of(zero, Type::field())
             }
             TypeExpr::U(size) => {
                 let zero = e.u_const(*size, 0);
-                e.cast_to_witness_of(zero)
+                e.cast_to_witness_of(zero, Type::u(*size))
             }
             TypeExpr::I(size) => {
                 let zero = e.i_const(*size, 0);
-                e.cast_to_witness_of(zero)
+                e.cast_to_witness_of(zero, Type::i(*size))
             }
             TypeExpr::Array(inner, size) => Self::emit_default_witness_array(e, inner, *size),
             TypeExpr::WitnessOf(inner) => Self::emit_default_witness_value(e, inner),

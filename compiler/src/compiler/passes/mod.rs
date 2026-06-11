@@ -17,6 +17,7 @@ pub mod simplifier;
 pub mod simplify_asserts;
 pub mod sparse_conditional_constant_propagation;
 pub mod specializer;
+pub mod spill_casts;
 pub mod strip_witness_of;
 pub mod trivial_phi_elimination;
 pub mod witness_lowering;

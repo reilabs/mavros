@@ -6,7 +6,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, Endianness, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
+            Endianness, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, Type,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -152,7 +152,7 @@ impl LowerLookupSpillingOps {
         let key_inner = key_type.strip_witness();
         let mut pure_key = if key_is_witness { b.value_of(key) } else { key };
         if key_inner.is_field() {
-            pure_key = b.cast_to(CastTarget::U(bits as usize), pure_key);
+            pure_key = b.cast_to(Type::u(bits as usize), pure_key);
         }
 
         let flag_field = b.ensure_field(flag, function_type_info.get_value_type(flag));
@@ -207,7 +207,7 @@ impl LowerLookupSpillingOps {
         let key_field = if key_inner.is_field() {
             key
         } else {
-            b.cast_to_field(key)
+            b.ensure_field(key, key_type)
         };
         let key_diff = b.sub(reconstructed_key, key_field);
         b.constrain(key_diff, flag_field, zero);
@@ -229,7 +229,7 @@ fn extract_low_chunk(
     };
     let modulus = b.u_const(value_bits, two_pow_u128(chunk_bits));
     let chunk = b.modulo(shifted, modulus);
-    b.cast_to(CastTarget::U(chunk_bits), chunk)
+    b.cast_to(Type::u(chunk_bits), chunk)
 }
 
 fn two_pow(exponent: usize) -> Field {

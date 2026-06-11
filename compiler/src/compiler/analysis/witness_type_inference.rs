@@ -9,9 +9,7 @@ use crate::compiler::{
     analysis::flow_analysis::{self, FlowAnalysis},
     ssa::{
         BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
-        hlssa::{
-            CallTarget, CastTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr,
-        },
+        hlssa::{CallTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
     },
 };
 
@@ -818,8 +816,8 @@ impl WitnessTypeInference {
                 OpCode::Cast {
                     result,
                     value,
-                    target: CastTarget::WitnessOf,
-                } => {
+                    target,
+                } if target.is_witness_of() => {
                     // WitnessOf casts emitted before inference (e.g. witness-typed
                     // default values for arrays that will hold witness elements)
                     // produce witness-typed results.

@@ -16,7 +16,7 @@ use crate::compiler::{
     ssa::{
         FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLFunctionBuilder, HLSSABuilder},
         },
     },
@@ -349,12 +349,6 @@ impl Simplifier {
                 value,
                 target,
             } => {
-                if matches!(target, CastTarget::Nop) {
-                    return Some(Rewrite::Alias {
-                        result: *result,
-                        target: *value,
-                    });
-                }
                 // cast(cast(x, T), T) → cast(x, T)
                 if let Some(ValueDefinition::Instruction(
                     _,
@@ -500,7 +494,7 @@ fn materialize_const(
         Some(Rewrite::Replace(vec![OpCode::Cast {
             result,
             value: tmp,
-            target: CastTarget::WitnessOf,
+            target: ty.clone(),
         }]))
     } else {
         let canon = fb.ssa.add_const(value);

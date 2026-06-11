@@ -27,8 +27,8 @@ use crate::compiler::{
     ssa::{
         Instruction, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS,
-            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type, TypeExpr,
+            BinaryArithOpKind, CmpKind, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS,
+            OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -399,7 +399,7 @@ impl LowerPureGuards {
             |e| vec![e.mul(lhs, rhs)],
             |e| {
                 let positive_max = e.u_const(bits, (1u128 << (bits - 1)) - 1);
-                let result_sign = e.cast_to(CastTarget::U(bits), result_sign);
+                let result_sign = e.cast_to(Type::u(bits), result_sign);
                 let max_mag = e.add(positive_max, result_sign);
                 let limit = e.div(max_mag, abs_r);
                 let overflow = e.lt(limit, abs_l);
@@ -415,7 +415,7 @@ impl LowerPureGuards {
 
     fn sign_bit(&self, emitter: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
         let sign = emitter.bit_range(value, bits - 1, 1);
-        emitter.cast_to(CastTarget::U(1), sign)
+        emitter.cast_to(Type::u(1), sign)
     }
 
     fn abs_as_u(
@@ -435,7 +435,7 @@ impl LowerPureGuards {
         let one = emitter.field_const(ark_bn254::Fr::from(1));
         let factor = emitter.sub(one, two_sign);
         let abs = emitter.mul(signed_value, factor);
-        emitter.cast_to(CastTarget::U(bits), abs)
+        emitter.cast_to(Type::u(bits), abs)
     }
 
     /// Lower `Guard(cond, shift(lhs, rhs) -> result)`.
@@ -497,9 +497,9 @@ impl LowerPureGuards {
     ) -> ValueId {
         let cmp_bits = bits.max(64);
         let cmp_target = if signed {
-            CastTarget::I(cmp_bits)
+            Type::i(cmp_bits)
         } else {
-            CastTarget::U(cmp_bits)
+            Type::u(cmp_bits)
         };
         let rhs_cmp = emitter.cast_to(cmp_target, rhs);
         let rhs_bound = if signed {
@@ -730,7 +730,7 @@ impl LowerPureGuards {
                 let v_cmp = if val_bits == cmp_bits {
                     value
                 } else {
-                    emitter.cast_to(CastTarget::U(cmp_bits), value)
+                    emitter.cast_to(Type::u(cmp_bits), value)
                 };
                 let bound = emitter.u_const(cmp_bits, 1u128 << max_bits);
                 let in_range = emitter.lt(v_cmp, bound);
@@ -802,8 +802,10 @@ impl LowerPureGuards {
         let idx_type = type_info.get_value_type(index);
         let idx_as_u32 = if matches!(idx_type.strip_witness().expr, TypeExpr::U(32)) {
             index
+        } else if idx_type.is_witness_of() {
+            emitter.cast_to(Type::witness_of(Type::u(32)), index)
         } else {
-            emitter.cast_to(CastTarget::U(32), index)
+            emitter.cast_to(Type::u(32), index)
         };
         let in_bounds = emitter.lt(idx_as_u32, len_val);
         emitter.not(in_bounds)

@@ -17,9 +17,7 @@ use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore},
     ssa::{
         BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
-        },
+        hlssa::{BinaryArithOpKind, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
     },
 };
 
@@ -557,36 +555,44 @@ impl ValueRangeAnalysis {
                 target,
             } => {
                 let in_r = get(bounds, *value);
-                let r = match target {
-                    CastTarget::Field => {
-                        // A negative integer casts to its two's-complement
-                        // field encoding `p − |v|`, which doesn't preserve
-                        // the integer interpretation of the bound. Saturate
-                        // to `[0, p−1]` whenever the input may be negative.
-                        if in_r.is_non_negative() {
-                            in_r
-                        } else {
-                            IntInterval::field_top()
+                // Range reasoning is on the scalar payload; a WitnessOf
+                // wrapper doesn't change the value. Payload-preserving casts
+                // (witness injection, identity) keep the input range.
+                let stripped = target.strip_witness();
+                let src_stripped = types.get_value_type(*value).strip_witness();
+                let r = if src_stripped == stripped {
+                    in_r
+                } else {
+                    match &stripped.expr {
+                        TypeExpr::Field => {
+                            // A negative integer casts to its two's-complement
+                            // field encoding `p − |v|`, which doesn't preserve
+                            // the integer interpretation of the bound. Saturate
+                            // to `[0, p−1]` whenever the input may be negative.
+                            if in_r.is_non_negative() {
+                                in_r
+                            } else {
+                                IntInterval::field_top()
+                            }
                         }
-                    }
-                    CastTarget::U(n) => {
-                        // Source bits stay if they fit in [0, 2^n); otherwise
-                        // we don't know what the wrap looks like.
-                        if in_r.fits_in_unsigned_bits(*n) {
-                            in_r
-                        } else {
-                            IntInterval::unsigned_full(*n)
+                        TypeExpr::U(n) => {
+                            // Source bits stay if they fit in [0, 2^n); otherwise
+                            // we don't know what the wrap looks like.
+                            if in_r.fits_in_unsigned_bits(*n) {
+                                in_r
+                            } else {
+                                IntInterval::unsigned_full(*n)
+                            }
                         }
-                    }
-                    CastTarget::I(n) => {
-                        if in_r.fits_in_signed_bits(*n) {
-                            in_r
-                        } else {
-                            IntInterval::signed_full(*n)
+                        TypeExpr::I(n) => {
+                            if in_r.fits_in_signed_bits(*n) {
+                                in_r
+                            } else {
+                                IntInterval::signed_full(*n)
+                            }
                         }
+                        _ => IntInterval::top(),
                     }
-                    CastTarget::Nop | CastTarget::WitnessOf => in_r,
-                    CastTarget::ArrayToSlice => IntInterval::top(),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }

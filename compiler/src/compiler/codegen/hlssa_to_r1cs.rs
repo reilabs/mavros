@@ -666,7 +666,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn cast(&self, _cast_target: &hlssa::CastTarget, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn cast(&self, _target: &Type, _ctx: &mut R1CGen) -> Self {
         self.clone()
     }
 

@@ -12,7 +12,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, OpCode, Type, TypeExpr,
+            OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -153,7 +153,7 @@ impl LowerWitnessArrayOps {
 
         let pure_idx = b.value_of(idx);
         let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
-        let idx_field = b.cast_to_field(idx);
+        let idx_field = b.ensure_field(idx, function_type_info.get_value_type(idx));
         let stride = leaf_scalar_count(&result_type);
         let base_key = if stride == 1 {
             idx_field
@@ -207,8 +207,7 @@ impl LowerWitnessArrayOps {
         let result_elem_type = result_type.get_array_element();
         let result_elem_back_cast = match &result_elem_type.strip_witness().expr {
             TypeExpr::Field => None,
-            TypeExpr::U(s) => Some(CastTarget::U(*s)),
-            TypeExpr::I(s) => Some(CastTarget::I(*s)),
+            TypeExpr::U(_) | TypeExpr::I(_) => Some(result_elem_type.clone()),
             other => panic!(
                 "ArraySet with witness idx: unsupported element type {:?}",
                 other
@@ -218,28 +217,30 @@ impl LowerWitnessArrayOps {
         let value_type = function_type_info.get_value_type(value);
         let value_field = b.ensure_field(value, value_type);
         let idx_bits = uint_bits(function_type_info.get_value_type(idx), "ArraySet index");
+        let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
         let updated_array = b.build_array_loop(length, result_elem_type.clone(), |b, i| {
             let cmp_index = if idx_bits == 32 {
                 i
             } else {
-                b.cast_to(CastTarget::U(idx_bits), i)
+                b.cast_to(Type::u(idx_bits), i)
             };
             let eq = b.eq(idx, cmp_index);
             let arr_i = b.array_get(arr, i);
-            let arr_i_field = b.cast_to_field(arr_i);
+            let arr_i_field = b.ensure_field(arr_i, &arr_elem_type);
 
             let new_i_field = b.select(eq, value_field, arr_i_field);
-            if let Some(target) = result_elem_back_cast {
-                b.cast_to(target, new_i_field)
+            if let Some(target) = &result_elem_back_cast {
+                b.cast_to(target.clone(), new_i_field)
             } else {
                 new_i_field
             }
         });
+        // Identity cast binding the pre-allocated result id to the built value.
         b.emit(OpCode::Cast {
             result,
             value: updated_array,
-            target: CastTarget::Nop,
+            target: result_type.clone(),
         });
     }
 
@@ -283,10 +284,11 @@ impl LowerWitnessArrayOps {
                     )
                 });
                 if let Some(result) = result_override {
+                    // Identity cast binding the pre-allocated result id.
                     b.emit(OpCode::Cast {
                         result,
                         value: built_array,
-                        target: CastTarget::Nop,
+                        target: target_type.clone(),
                     });
                     result
                 } else {
@@ -312,7 +314,7 @@ impl LowerWitnessArrayOps {
                 let leaf_field = b.cast_to_field(leaf_pure);
                 let leaf_wit = b.write_witness(leaf_field);
                 b.lookup_arr(arr, base_key, leaf_wit, flag);
-                let cast_target = scalar_cast_target(&stripped, "witnessed array read");
+                let cast_target = scalar_cast_target(target_type, "witnessed array read");
                 let id = result_override.unwrap_or_else(|| b.fresh_value());
                 b.emit(OpCode::Cast {
                     result: id,
@@ -340,11 +342,9 @@ fn leaf_scalar_count(t: &Type) -> usize {
     }
 }
 
-fn scalar_cast_target(ty: &Type, context: &str) -> CastTarget {
+fn scalar_cast_target(ty: &Type, context: &str) -> Type {
     match &ty.strip_all_witness().expr {
-        TypeExpr::U(s) => CastTarget::U(*s),
-        TypeExpr::I(s) => CastTarget::I(*s),
-        TypeExpr::Field => CastTarget::Field,
+        TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field => ty.clone(),
         other => panic!("{context}: unsupported scalar type {:?}", other),
     }
 }

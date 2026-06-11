@@ -45,8 +45,8 @@ use crate::compiler::{
     ssa::{
         BlockId, Instruction, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, HLFunction, HLSSA,
-            HLSSAConstantsSnapshot, MAX_SUPPORTED_SIGNED_BITS, OpCode,
+            BinaryArithOpKind, CmpKind, Constant, HLFunction, HLSSA, HLSSAConstantsSnapshot,
+            MAX_SUPPORTED_SIGNED_BITS, OpCode, Type, TypeExpr,
         },
     },
     util::{bit_mask, decode_signed, encode_signed, fits_signed},
@@ -728,24 +728,28 @@ fn eval_field_mul(a: &Constant, b: &Constant) -> Option<Constant> {
 /// HLSSA casts are raw-bits conversions (sign extension is the separate `SExt` op): integers
 /// zero-extend into fields, fields truncate to their low bits, and integer-to-integer casts
 /// zero-extend or truncate.
-fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
-    match target {
-        CastTarget::Nop => Some(v.clone()),
-        // WitnessOf wraps the value into a witness type: not a pure constant.
-        // ArrayToSlice transfers ownership of a runtime object: nothing to fold.
-        CastTarget::WitnessOf | CastTarget::ArrayToSlice => None,
-        CastTarget::Field => match v {
+fn eval_cast(target: &Type, v: &Constant) -> Option<Constant> {
+    // A cast into the witness domain is never a pure constant: the witness
+    // chain stays intact.
+    if target.is_witness_of() {
+        return None;
+    }
+    match &target.expr {
+        TypeExpr::Field => match v {
             Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(Field::from(*x))),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
         },
-        CastTarget::U(n) => int_cast_bits(v, *n).map(|bits| Constant::U(*n, bits)),
-        CastTarget::I(n) => {
+        TypeExpr::U(n) => int_cast_bits(v, *n).map(|bits| Constant::U(*n, bits)),
+        TypeExpr::I(n) => {
             if *n > MAX_SUPPORTED_SIGNED_BITS {
                 return None;
             }
             int_cast_bits(v, *n).map(|bits| Constant::I(*n, bits))
         }
+        // Composite targets (e.g. array→slice or element-wise witness
+        // conversions) transfer or transform runtime objects: nothing to fold.
+        _ => None,
     }
 }
 
@@ -1066,7 +1070,7 @@ mod tests {
         entry.push_instruction(OpCode::Cast {
             result: wit,
             value: c5,
-            target: CastTarget::WitnessOf,
+            target: Type::witness_of(Type::field()),
         });
         entry.push_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Add,

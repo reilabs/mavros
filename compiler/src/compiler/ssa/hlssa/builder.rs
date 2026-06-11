@@ -2,8 +2,8 @@ use crate::compiler::ssa::{
     ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, LookupTarget,
-        OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+        BinaryArithOpKind, CallTarget, CmpKind, Constant, Endianness, LookupTarget, OpCode, Radix,
+        RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
     },
 };
 
@@ -174,25 +174,24 @@ pub trait HLEmitter {
 
     // -- Casts --
 
+    /// Cast a value known to be pure to Field.
     fn cast_to_field(&mut self, value: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Cast {
-            result: r,
-            value,
-            target: CastTarget::Field,
-        });
-        r
+        self.cast_to(Type::field(), value)
     }
 
+    /// Cast a value of type `ty` to Field, preserving a toplevel WitnessOf
+    /// wrapper. No-op if the value already is a (witness) field.
     fn ensure_field(&mut self, value: ValueId, ty: &Type) -> ValueId {
         if ty.strip_witness().is_field() {
             value
+        } else if ty.is_witness_of() {
+            self.cast_to(Type::witness_of(Type::field()), value)
         } else {
             self.cast_to_field(value)
         }
     }
 
-    fn cast_to(&mut self, target: CastTarget, value: ValueId) -> ValueId {
+    fn cast_to(&mut self, target: Type, value: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::Cast {
             result: r,
@@ -202,14 +201,9 @@ pub trait HLEmitter {
         r
     }
 
-    fn cast_to_witness_of(&mut self, value: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Cast {
-            result: r,
-            value,
-            target: CastTarget::WitnessOf,
-        });
-        r
+    /// Wrap a pure value of type `inner` into `WitnessOf(inner)`.
+    fn cast_to_witness_of(&mut self, value: ValueId, inner: Type) -> ValueId {
+        self.cast_to(Type::witness_of(inner), value)
     }
 
     fn sext(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
@@ -671,7 +665,7 @@ impl HLBlockEmitter<'_> {
             TypeExpr::I(size) => self.i_const(*size, 0),
             TypeExpr::WitnessOf(inner) => {
                 let inner_default = self.default_value(inner);
-                self.cast_to_witness_of(inner_default)
+                self.cast_to_witness_of(inner_default, inner.as_ref().clone())
             }
             TypeExpr::Array(inner, size) => self.default_array(inner, *size),
             TypeExpr::Tuple(element_types) => {

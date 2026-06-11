@@ -5,7 +5,7 @@ use crate::compiler::ssa::SSAType;
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TypeExpr {
     Field,
     U(usize),
@@ -19,7 +19,7 @@ pub enum TypeExpr {
     Blob(Box<Type>, usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Type {
     pub expr: TypeExpr,
 }

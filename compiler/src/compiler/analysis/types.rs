@@ -11,8 +11,8 @@ use crate::compiler::{
     ssa::{
         FunctionId, ValueId,
         hlssa::{
-            CallTarget, CastTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
-            OpCode, Type, TypeExpr,
+            CallTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
+            TypeExpr,
         },
     },
 };
@@ -486,42 +486,13 @@ impl Types {
                 value,
                 target,
             } => {
-                let value_type = function_info
+                function_info
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
-                let result_type = match target {
-                    CastTarget::Field => {
-                        if value_type.is_witness_of() {
-                            Type::witness_of(Type::field())
-                        } else {
-                            Type::field()
-                        }
-                    }
-                    CastTarget::U(size) => {
-                        if value_type.is_witness_of() {
-                            Type::witness_of(Type::u(*size))
-                        } else {
-                            Type::u(*size)
-                        }
-                    }
-                    CastTarget::I(size) => {
-                        if value_type.is_witness_of() {
-                            Type::witness_of(Type::i(*size))
-                        } else {
-                            Type::i(*size)
-                        }
-                    }
-                    CastTarget::Nop => value_type.clone(),
-                    CastTarget::ArrayToSlice => match &value_type.expr {
-                        TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
-                        _ => panic!("ArrayToSlice cast on non-array type"),
-                    },
-                    CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
-                };
-
-                function_info.values.insert(*result, result_type);
+                // The cast target is the full result type.
+                function_info.values.insert(*result, target.clone());
                 Ok(())
             }
             OpCode::SExt {

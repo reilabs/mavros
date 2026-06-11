@@ -18,9 +18,23 @@ use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
         Instruction, Terminator, ValueId,
-        hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
+        hlssa::{HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
     },
 };
+
+/// Whether a cast from `src` to `target` is a pure alias at runtime: the
+/// result shares the operand's frame position / heap object. This holds for
+/// identity casts, array→slice casts (same heap layout), and casts between
+/// witness references.
+fn is_aliasing_cast(src: &Type, target: &Type) -> bool {
+    if src == target {
+        return true;
+    }
+    if src.is_witness_of() && target.is_witness_of() {
+        return true;
+    }
+    matches!((&src.expr, &target.expr), (TypeExpr::Array(s, _), TypeExpr::Slice(t)) if s == t)
+}
 
 pub struct RCInsertion {}
 
@@ -181,10 +195,7 @@ impl RCInsertion {
                         result: r,
                         value: v,
                         target,
-                    } if matches!(target, CastTarget::Nop | CastTarget::ArrayToSlice)
-                        || (type_info.get_value_type(*v).is_witness_of()
-                            && type_info.get_value_type(*r).is_witness_of()) =>
-                    {
+                    } if is_aliasing_cast(type_info.get_value_type(*v), target) => {
                         // Nop/alias cast: result aliases input in codegen (same frame position).
                         // WitnessOf(A) -> WitnessOf(B) casts are also no-ops at runtime.
                         if self.needs_rc(type_info, v) {

@@ -794,11 +794,12 @@ impl CodeGen {
                 hlssa::OpCode::Cast {
                     result: r,
                     value: v,
-                    target: tgt,
+                    target: _,
                 } => {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
-                    if matches!(tgt, hlssa::CastTarget::WitnessOf) {
+                    if r_type.is_witness_of() && !l_type.is_witness_of() {
+                        // Witness injection.
                         // PureToWitnessRef reads a Field (4 u64s) from the frame.
                         // If the source is not Field-sized, cast to Field first.
                         let field_pos = if l_type.expr != TypeExpr::Field {
@@ -828,11 +829,14 @@ impl CodeGen {
                         });
                         continue;
                     }
-                    let is_nop = matches!(
-                        tgt,
-                        hlssa::CastTarget::Nop | hlssa::CastTarget::ArrayToSlice
-                    ) || l_type.expr == r_type.expr
-                        || (l_type.is_witness_of() && r_type.is_witness_of());
+                    // Identity casts, array→slice casts (same heap layout) and
+                    // witness-to-witness casts are pure aliases.
+                    let is_nop = l_type.expr == r_type.expr
+                        || (l_type.is_witness_of() && r_type.is_witness_of())
+                        || matches!(
+                            (&l_type.expr, &r_type.expr),
+                            (TypeExpr::Array(a, _), TypeExpr::Slice(b)) if a == b
+                        );
                     if is_nop {
                         let pos = layouter.variables[v];
                         layouter.variables.insert(*r, pos);

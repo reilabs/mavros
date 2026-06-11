@@ -44,6 +44,7 @@ use crate::{
             simplify_asserts::SimplifyAsserts,
             sparse_conditional_constant_propagation::SCCP,
             specializer::Specializer,
+            spill_casts::SpillCasts,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
             witness_lowering::WitnessLowering,
@@ -393,6 +394,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                Box::new(SpillCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
@@ -532,6 +534,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                Box::new(SpillCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),

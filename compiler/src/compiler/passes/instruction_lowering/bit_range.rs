@@ -9,8 +9,8 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, Endianness, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
-            Type, TypeExpr,
+            BinaryArithOpKind, Endianness, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, Type,
+            TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -123,7 +123,7 @@ impl LowerBitRangeOps {
             target: cast_target_for_scalar_type(context.types().get_value_type(result)),
         });
 
-        let result_field = b.cast_to_field(result);
+        let result_field = b.ensure_field(result, context.types().get_value_type(result));
         b.rangecheck(result_field, width);
 
         let low_bits = offset;
@@ -165,7 +165,7 @@ impl LowerBitRangeOps {
             reconstructed = b.add(reconstructed, high_shifted);
         }
 
-        let value_field = b.cast_to_field(value);
+        let value_field = b.ensure_field(value, value_type);
         let diff = b.sub(value_field, reconstructed);
         let zero = b.field_const(Field::ZERO);
         let flag = b.field_const(Field::ONE);
@@ -188,7 +188,7 @@ impl LowerBitRangeOps {
         b.emit(OpCode::Cast {
             result,
             value: selected,
-            target: CastTarget::Field,
+            target: Type::witness_of(Type::field()),
         });
     }
 }
@@ -242,8 +242,8 @@ fn decompose_canonical_field_bytes(
 
     let limb2_pure = b.value_of(limbs[2]);
     let limb3_pure = b.value_of(limbs[3]);
-    let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
-    let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
+    let limb2_u64 = b.cast_to(Type::u(64), limb2_pure);
+    let limb3_u64 = b.cast_to(Type::u(64), limb3_pure);
     let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
     let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
     let hi_lt = b.lt(mod_limb2, limb2_u64);
@@ -325,7 +325,7 @@ fn split_partial_field_byte(
     let two_to_lo = b.field_const(Field::from(1u128 << lo_size));
 
     let byte_pure = b.value_of(byte_wit);
-    let byte_u8 = b.cast_to(CastTarget::U(8), byte_pure);
+    let byte_u8 = b.cast_to(Type::u(8), byte_pure);
     let divisor = b.u_const(8, 1u128 << lo_size);
     let hi_hint_u8 = b.div(byte_u8, divisor);
     let hi_hint = b.cast_to_field(hi_hint_u8);
@@ -358,7 +358,7 @@ fn lower_pure_bit_range_value(
                 bits <= MAX_SUPPORTED_UNSIGNED_BITS,
                 "pure integer BitRange lowering only supports up to {MAX_SUPPORTED_UNSIGNED_BITS}-bit integers"
             );
-            let unsigned = b.cast_to(CastTarget::U(bits), value);
+            let unsigned = b.cast_to(Type::u(bits), value);
             let mask = b.u_const(bits, bit_mask(bits, offset, width));
             let masked = b.fresh_value();
             b.emit(OpCode::BinaryArithOp {
@@ -444,11 +444,9 @@ fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {
     }
 }
 
-fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
+fn cast_target_for_scalar_type(ty: &Type) -> Type {
     match ty.strip_witness().expr {
-        TypeExpr::Field => CastTarget::Field,
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => ty.clone(),
         other => panic!("BitRange result must be scalar, got {:?}", other),
     }
 }

@@ -11,8 +11,8 @@ use noirc_frontend::monomorphization::ast::{
 use crate::compiler::ssa::{
     BlockId, FunctionId, ValueId,
     hlssa::{
-        Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
-        SequenceTargetType, Type, TypeExpr,
+        Blob, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix, SequenceTargetType, Type,
+        TypeExpr,
         builder::{HLEmitter, HLFunctionBuilder},
     },
 };
@@ -905,15 +905,15 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let (target, target_bits) = match &cast.r#type {
-            AstType::Field => (CastTarget::Field, 254),
+            AstType::Field => (Type::field(), 254),
             AstType::Integer(signedness, bit_size) => {
                 let bits = bit_size.bit_size() as usize;
                 match signedness {
-                    Signedness::Unsigned => (CastTarget::U(bits), bits),
-                    Signedness::Signed => (CastTarget::I(bits), bits),
+                    Signedness::Unsigned => (Type::u(bits), bits),
+                    Signedness::Signed => (Type::i(bits), bits),
                 }
             }
-            AstType::Bool => (CastTarget::U(1), 1),
+            AstType::Bool => (Type::u(1), 1),
             _ => panic!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
@@ -1432,11 +1432,9 @@ impl<'a> ExpressionConverter<'a> {
                 Some(result)
             }
             "as_vector" => {
+                let slice_type = self.type_converter.convert_type(&call.return_type);
                 let array = self.convert_expression(&call.arguments[0], b).unwrap();
-                Some(
-                    b.block(self.current_block)
-                        .cast_to(CastTarget::ArrayToSlice, array),
-                )
+                Some(b.block(self.current_block).cast_to(slice_type, array))
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
@@ -1470,13 +1468,13 @@ impl<'a> ExpressionConverter<'a> {
                 use noirc_frontend::shared::Signedness;
 
                 let target = match &call.return_type {
-                    AstType::Field => CastTarget::Field,
-                    AstType::Bool => CastTarget::U(1),
+                    AstType::Field => Type::field(),
+                    AstType::Bool => Type::u(1),
                     AstType::Integer(signedness, bit_size) => {
                         let bits = bit_size.bit_size() as usize;
                         match signedness {
-                            Signedness::Unsigned => CastTarget::U(bits),
-                            Signedness::Signed => CastTarget::I(bits),
+                            Signedness::Unsigned => Type::u(bits),
+                            Signedness::Signed => Type::i(bits),
                         }
                     }
                     other => panic!("unsafe_cast: unsupported target type {:?}", other),

@@ -51,10 +51,14 @@ pub enum OpCode {
         lhs: ValueId,
         rhs: ValueId,
     },
+    /// Converts `value` to type `target` (the full result type, including any
+    /// `WitnessOf` wrappers). Scalar numeric casts are raw-bits conversions;
+    /// composite targets (arrays with converted element types) are legal until
+    /// the backend-specific cast spilling expands them into loops.
     Cast {
         result: ValueId,
         value: ValueId,
-        target: CastTarget,
+        target: Type,
     },
     SExt {
         result: ValueId,
@@ -1638,32 +1642,6 @@ impl Display for SequenceTargetType {
             SequenceTargetType::Array(len) => write!(f, "Array[{}]", len),
             SequenceTargetType::Slice => write!(f, "Slice"),
             SequenceTargetType::Tuple => write!(f, "Tuple"),
-        }
-    }
-}
-
-// CAST TARGET
-// ================================================================================================
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CastTarget {
-    Field,
-    U(usize),
-    I(usize),
-    WitnessOf,
-    Nop,
-    ArrayToSlice,
-}
-
-impl Display for CastTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CastTarget::Field => write!(f, "Field"),
-            CastTarget::U(size) => write!(f, "u{}", size),
-            CastTarget::I(size) => write!(f, "i{}", size),
-            CastTarget::WitnessOf => write!(f, "WitnessOf"),
-            CastTarget::Nop => write!(f, "Nop"),
-            CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
         }
     }
 }

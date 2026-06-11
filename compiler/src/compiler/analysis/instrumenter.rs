@@ -21,8 +21,8 @@ use crate::compiler::{
     ssa::{
         FunctionId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
-            Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            BinaryArithOpKind, CmpKind, Endianness, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, Radix,
+            RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
         },
     },
     util::{spread_bits, unspread_bits},
@@ -832,47 +832,47 @@ impl Value {
         }
     }
 
-    fn cast_op(
-        &self,
-        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
-        _instrumenter: &mut dyn OpInstrumenter,
-    ) -> Value {
-        match (self, cast_target) {
-            (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
-            (Value::Unknown(_), CastTarget::U(s)) => Value::Unknown(ScalarKind::U(*s)),
-            (Value::Unknown(_), CastTarget::I(s)) => Value::Unknown(ScalarKind::I(*s)),
-            (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
-            (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => {
-                Value::Unknown(*kind)
+    fn cast_op(&self, target: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
+        match (self, &target.expr) {
+            (Value::WitnessOf(inner), TypeExpr::WitnessOf(t_inner)) => {
+                Value::WitnessOf(Box::new(inner.cast_op(t_inner, _instrumenter)))
             }
-            (Value::WitnessOf(inner), target) => {
-                Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
+            // Witness injection: convert the payload, then wrap.
+            (_, TypeExpr::WitnessOf(t_inner)) => {
+                Value::WitnessOf(Box::new(self.cast_op(t_inner, _instrumenter)))
             }
-            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
-            (Value::I(s, v), CastTarget::Field) => {
+            // Witness strip: unwrap, then convert.
+            (Value::WitnessOf(inner), _) => inner.cast_op(target, _instrumenter),
+            (Value::Unknown(_), TypeExpr::U(s)) => Value::Unknown(ScalarKind::U(*s)),
+            (Value::Unknown(_), TypeExpr::I(s)) => Value::Unknown(ScalarKind::I(*s)),
+            (Value::Unknown(_), TypeExpr::Field) => Value::Unknown(ScalarKind::Field),
+            (Value::Unknown(kind), _) => Value::Unknown(*kind),
+            (Value::U(_, v), TypeExpr::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
+            (Value::U(_, v), TypeExpr::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
+            (Value::I(_, v), TypeExpr::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
+            (Value::I(_, v), TypeExpr::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
+            (Value::U(_, v), TypeExpr::Field) => Value::Field(Field::from(*v)),
+            (Value::I(s, v), TypeExpr::Field) => {
                 Value::Field(Field::from(Self::to_signed(*v, *s) as u64))
             }
-            (Value::Field(f), CastTarget::Field) => Value::Field(*f),
-            (Value::Field(f), CastTarget::U(s)) => {
+            (Value::Field(f), TypeExpr::Field) => Value::Field(*f),
+            (Value::Field(f), TypeExpr::U(s)) => {
                 let bigint = f.into_bigint();
                 Value::U(
                     *s,
                     (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s),
                 )
             }
-            (Value::Field(f), CastTarget::I(s)) => {
+            (Value::Field(f), TypeExpr::I(s)) => {
                 let bigint = f.into_bigint();
                 Value::I(
                     *s,
                     (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s),
                 )
             }
-            (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
-            _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
+            // Composite (array/slice) targets are representation-preserving here.
+            (_, TypeExpr::Array(..) | TypeExpr::Slice(..)) => self.clone(),
+            _ => panic!("Cannot cast {:?} to {:?}", self, target),
         }
     }
 
@@ -1122,19 +1122,14 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn cast(
-        &self,
-        cast_target: &crate::compiler::ssa::hlssa::CastTarget,
-        _tp: &Type,
-        instrumenter: &mut CostAnalysis,
-    ) -> SpecSplitValue {
+    fn cast(&self, target: &Type, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
             unspecialized: self
                 .unspecialized
-                .cast_op(cast_target, instrumenter.get_unspecialized()),
+                .cast_op(target, instrumenter.get_unspecialized()),
             specialized: self
                 .specialized
-                .cast_op(cast_target, instrumenter.get_specialized()),
+                .cast_op(target, instrumenter.get_specialized()),
         }
     }
 

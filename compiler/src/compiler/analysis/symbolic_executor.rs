@@ -13,7 +13,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, Instruction, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, HLSSA,
+            BinaryArithOpKind, CallTarget, CmpKind, Constant, Endianness, HLSSA,
             HLSSAConstantsSnapshot, LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
             SliceOpDir, Type, TypeExpr,
         },
@@ -41,7 +41,7 @@ where
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
-    fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
+    fn cast(&self, target: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
     fn to_bits(
         &self,
@@ -260,10 +260,7 @@ impl SymbolicExecutor {
                         target: cast_target,
                     } => {
                         let a = &scope[a];
-                        scope.insert(
-                            *r,
-                            a.cast(cast_target, &fn_type_info.get_value_type(*r), ctx),
-                        );
+                        scope.insert(*r, a.cast(cast_target, ctx));
                     }
                     OpCode::SExt {
                         result: r,

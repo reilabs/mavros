@@ -21,7 +21,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
+            BinaryArithOpKind, Blob, CmpKind, Constant, Endianness, HLFunction, HLSSA,
             MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
             TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
@@ -420,48 +420,40 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn cast(
-        &self,
-        cast_target: &CastTarget,
-        _out_type: &Type,
-        ctx: &mut SpecializationState,
-    ) -> Self {
+    fn cast(&self, target: &Type, ctx: &mut SpecializationState) -> Self {
         let self_const = ctx.const_vals.get(&self.0).cloned();
+        // Casts of known constants fold: scalar numeric casts fold to the
+        // converted constant; witness injections and representation-preserving
+        // casts pass the constant through (witnessing a constant is a no-op
+        // that downstream folding can then eliminate entirely).
         match self_const {
-            Some(ConstVal::U(_, v)) => match cast_target {
-                CastTarget::U(s) | CastTarget::I(s) => {
+            Some(ConstVal::U(_, v)) => match &target.strip_witness().expr {
+                TypeExpr::U(s) | TypeExpr::I(s) if !target.is_witness_of() => {
                     let res = v & bit_mask(*s).unwrap();
                     let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
                 }
-                CastTarget::Field => {
+                TypeExpr::Field if !target.is_witness_of() => {
                     let res = Field::from(v);
                     let res_v = ctx.field_const(res);
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)
                 }
-                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => *self,
+                _ => *self,
             },
-            Some(ConstVal::Field(f)) => match cast_target {
-                CastTarget::U(s) | CastTarget::I(s) => {
+            Some(ConstVal::Field(f)) => match &target.strip_witness().expr {
+                TypeExpr::U(s) | TypeExpr::I(s) if !target.is_witness_of() => {
                     let v: u128 = f.into_bigint().as_ref()[0] as u128;
                     let res = v & bit_mask(*s).unwrap();
                     let res_v = ctx.u_const(*s, res);
                     ctx.const_vals.insert(res_v, ConstVal::U(*s, res));
                     Self(res_v)
                 }
-                CastTarget::Field
-                | CastTarget::Nop
-                | CastTarget::ArrayToSlice
-                | CastTarget::WitnessOf => *self,
+                _ => *self,
             },
-            None => {
-                let res = ctx.cast_to(*cast_target, self.0);
-                Self(res)
-            }
             _ => {
-                let res = ctx.cast_to(*cast_target, self.0);
+                let res = ctx.cast_to(target.clone(), self.0);
                 Self(res)
             }
         }

@@ -5,7 +5,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CmpKind, OpCode, TypeExpr,
+            CmpKind, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -92,7 +92,7 @@ impl LowerWitnessAssertOps {
         value: ValueId,
     ) {
         let value_type = context.types().get_value_type(value);
-        let value_field = b.ensure_field(value, &value_type.strip_witness());
+        let value_field = b.ensure_field(value, value_type);
         self.lower_assert_field(b, context, guard, value_field);
     }
 
@@ -119,8 +119,8 @@ impl LowerWitnessAssertOps {
     ) {
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
-        let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
-        let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
+        let lhs_field = b.ensure_field(lhs, lhs_type);
+        let rhs_field = b.ensure_field(rhs, rhs_type);
         if let Some(condition) = guard {
             let cond_field = b.ensure_field(condition, context.types().get_value_type(condition));
             let diff = b.sub(lhs_field, rhs_field);
@@ -144,14 +144,22 @@ impl LowerWitnessAssertOps {
     ) {
         match context.types().get_value_type(rhs).strip_witness().expr {
             TypeExpr::U(_) if guard.is_some() && !lhs_witness && !rhs_witness => {
-                self.lower_assert_lt_via_cmp(b, context, guard, lhs, rhs);
+                self.lower_assert_lt_via_cmp(b, context, guard, lhs, rhs, false);
             }
             TypeExpr::U(bits) => self.lower_unsigned_assert_lt(b, context, guard, lhs, rhs, bits),
-            TypeExpr::I(_) => self.lower_assert_lt_via_cmp(b, context, guard, lhs, rhs),
+            TypeExpr::I(_) => self.lower_assert_lt_via_cmp(
+                b,
+                context,
+                guard,
+                lhs,
+                rhs,
+                lhs_witness || rhs_witness,
+            ),
             _ => panic!("ICE: AssertCmp Lt rhs is not an integer type"),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_assert_lt_via_cmp(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -159,9 +167,15 @@ impl LowerWitnessAssertOps {
         guard: Option<ValueId>,
         lhs: ValueId,
         rhs: ValueId,
+        cmp_is_witness: bool,
     ) {
         let cmp = b.lt(lhs, rhs);
-        let cmp_field = b.cast_to_field(cmp);
+        let target = if cmp_is_witness {
+            Type::witness_of(Type::field())
+        } else {
+            Type::field()
+        };
+        let cmp_field = b.cast_to(target, cmp);
         self.lower_assert_field(b, context, guard, cmp_field);
     }
 
@@ -177,8 +191,8 @@ impl LowerWitnessAssertOps {
         assert!(bits > 0, "rangecheck width must be at least 1 bit");
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
-        let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
-        let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
+        let lhs_field = b.ensure_field(lhs, lhs_type);
+        let rhs_field = b.ensure_field(rhs, rhs_type);
         let diff = b.sub(rhs_field, lhs_field);
         let one = b.field_const(Field::ONE);
         let diff_minus_one = b.sub(diff, one);
@@ -218,9 +232,9 @@ impl LowerWitnessAssertOps {
         let a_type = context.types().get_value_type(a);
         let b_type = context.types().get_value_type(r1c_b);
         let c_type = context.types().get_value_type(c);
-        let a_field = b.ensure_field(a, &a_type.strip_witness());
-        let b_field = b.ensure_field(r1c_b, &b_type.strip_witness());
-        let c_field = b.ensure_field(c, &c_type.strip_witness());
+        let a_field = b.ensure_field(a, a_type);
+        let b_field = b.ensure_field(r1c_b, b_type);
+        let c_field = b.ensure_field(c, c_type);
 
         if let Some(condition) = guard {
             let product = b.mul(a_field, b_field);

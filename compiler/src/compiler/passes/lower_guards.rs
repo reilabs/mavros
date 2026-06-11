@@ -11,7 +11,7 @@ use crate::compiler::{
     ssa::{
         Instruction, ValueId,
         hlssa::{
-            CastTarget, OpCode, SequenceTargetType, Type, TypeExpr,
+            OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -117,7 +117,7 @@ impl LowerGuards {
             TypeExpr::I(bits) => emitter.i_const(*bits, 0),
             TypeExpr::WitnessOf(inner) => {
                 let inner_val = Self::default_value(emitter, inner);
-                emitter.cast_to(CastTarget::WitnessOf, inner_val)
+                emitter.cast_to_witness_of(inner_val, inner.as_ref().clone())
             }
             TypeExpr::Array(elem, n) => {
                 let elem_default = Self::default_value(emitter, elem);

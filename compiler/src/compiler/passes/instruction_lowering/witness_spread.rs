@@ -11,7 +11,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, OpCode, Type, TypeExpr,
+            OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -80,7 +80,7 @@ impl LowerWitnessSpreadOps {
         value: ValueId,
         bits: u8,
     ) {
-        let spread_wit = self.write_spread_witness_and_lookup(b, value, bits);
+        let spread_wit = self.write_spread_witness_and_lookup(b, function_type_info, value, bits);
         b.emit(OpCode::Cast {
             result,
             value: spread_wit,
@@ -103,13 +103,15 @@ impl LowerWitnessSpreadOps {
         self.write_unspread_result(b, function_type_info, result_odd, odd_hint);
         self.write_unspread_result(b, function_type_info, result_even, even_hint);
 
-        let odd_spread = self.write_spread_witness_and_lookup(b, result_odd, bits);
+        let odd_spread =
+            self.write_spread_witness_and_lookup(b, function_type_info, result_odd, bits);
         let two = b.field_const(Field::from(2));
         let two_odd_spread = b.mul(two, odd_spread);
-        let value_field = b.cast_to_field(value);
+        let value_field = b.ensure_field(value, function_type_info.get_value_type(value));
         let even_spread = b.sub(value_field, two_odd_spread);
 
-        let even_field = b.cast_to_field(result_even);
+        let even_field =
+            b.ensure_field(result_even, function_type_info.get_value_type(result_even));
         let one = b.field_const(Field::ONE);
         b.lookup_spread(bits, even_field, even_spread, one);
     }
@@ -133,11 +135,12 @@ impl LowerWitnessSpreadOps {
     fn write_spread_witness_and_lookup(
         &self,
         b: &mut HLBlockEmitter<'_>,
+        function_type_info: &FunctionTypeInfo,
         value: ValueId,
         bits: u8,
     ) -> ValueId {
         let value_pure = b.value_of(value);
-        let value_field = b.cast_to_field(value);
+        let value_field = b.ensure_field(value, function_type_info.get_value_type(value));
         let spread_hint = b.spread(value_pure, bits);
         let spread_hint_field = b.cast_to_field(spread_hint);
         let spread_wit = b.write_witness(spread_hint_field);
@@ -147,10 +150,9 @@ impl LowerWitnessSpreadOps {
     }
 }
 
-fn cast_target_for_type(ty: &Type) -> CastTarget {
+fn cast_target_for_type(ty: &Type) -> Type {
     match ty.strip_all_witness().expr {
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        TypeExpr::U(_) | TypeExpr::I(_) => ty.clone(),
         other => panic!(
             "Expected integer type for witness spread result, got {:?}",
             other

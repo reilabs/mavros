@@ -11,7 +11,7 @@ use crate::compiler::{
     ssa::{
         BlockId, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, DMatrix, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            BinaryArithOpKind, DMatrix, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
@@ -91,18 +91,16 @@ impl WitnessLowering {
                         OpCode::Cast {
                             result: r,
                             value: v,
-                            target,
+                            ref target,
                         } => {
                             let v_type = type_info.get_value_type(v);
-                            if v_type.is_witness_of()
-                                && matches!(
-                                    target,
-                                    crate::compiler::ssa::hlssa::CastTarget::WitnessOf
-                                )
-                            {
-                                // Already WitnessOf — don't double-wrap
+                            if *v_type == *target {
+                                // Identity cast — nothing to do.
                                 replacements.insert(r, v);
                             } else {
+                                // Witness-to-witness casts with differing payload
+                                // types are kept: they are runtime no-ops but
+                                // carry the type conversion.
                                 emitter.emit(instruction);
                             }
                         }
@@ -209,11 +207,13 @@ impl WitnessLowering {
                                 let arg_type = type_info.get_value_type(*arg);
                                 assert!(
                                     arg_type.strip_witness().is_field(),
-                                    "Lookup args must be fields, got {:?}",
-                                    arg_type
+                                    "Lookup args must be fields, got {:?} for arg {:?}",
+                                    arg_type,
+                                    arg
                                 );
                                 if !arg_type.is_witness_of() {
-                                    new_args.push(emitter.cast_to_witness_of(*arg));
+                                    let inner = arg_type.clone();
+                                    new_args.push(emitter.cast_to_witness_of(*arg, inner));
                                 } else {
                                     new_args.push(*arg);
                                 }
@@ -221,7 +221,8 @@ impl WitnessLowering {
                             let new_flag = {
                                 let flag_type = type_info.get_value_type(flag);
                                 if !flag_type.is_witness_of() {
-                                    emitter.cast_to_witness_of(flag)
+                                    let inner = flag_type.clone();
+                                    emitter.cast_to_witness_of(flag, inner)
                                 } else {
                                     flag
                                 }
@@ -265,9 +266,16 @@ impl WitnessLowering {
                                 (_, false, _, false) => {
                                     emitter.emit(instruction);
                                 }
-                                (wit, true, pure, false) | (pure, false, wit, true) => match kind {
+                                (wit, true, pure, false) | (pure, false, wit, true) => {
+                                    let pure_type = if a_type.is_witness_of() {
+                                        b_type.clone()
+                                    } else {
+                                        a_type.clone()
+                                    };
+                                    match kind {
                                     BinaryArithOpKind::Add => {
-                                        let pure_refed = emitter.cast_to_witness_of(pure);
+                                        let pure_refed =
+                                            emitter.cast_to_witness_of(pure, pure_type);
                                         emitter.emit(OpCode::BinaryArithOp {
                                             kind,
                                             result: r,
@@ -304,7 +312,8 @@ impl WitnessLowering {
                                         )
                                     }
                                     BinaryArithOpKind::Sub => {
-                                        let pure_refed = emitter.cast_to_witness_of(pure);
+                                        let pure_refed =
+                                            emitter.cast_to_witness_of(pure, pure_type);
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
                                         let neg_one =
@@ -332,7 +341,8 @@ impl WitnessLowering {
                                             kind
                                         )
                                     }
-                                },
+                                }
+                                }
                             }
                         }
                         OpCode::Store { ptr, value } => {
@@ -481,123 +491,9 @@ impl WitnessLowering {
         }
     }
 
-    /// Emit instructions to convert a value from `source_type` to `target_type`.
-    /// For scalars (Field/U), emits a CastToWitnessOf instruction inline.
-    /// For arrays, generates a loop that converts each element, which splits the
-    /// current block and creates new blocks.
-    fn emit_value_conversion(
-        &self,
-        value: ValueId,
-        source_type: &Type,
-        target_type: &Type,
-        emitter: &mut HLBlockEmitter<'_>,
-    ) -> ValueId {
-        let converted_source = self.witness_lowering_in_type(source_type);
-        if converted_source == *target_type {
-            return value;
-        }
-
-        match (&source_type.expr, &target_type.expr) {
-            (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_))
-            | (TypeExpr::I(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
-            (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-                assert_eq!(
-                    src_size, tgt_size,
-                    "Array size mismatch in witness_lowering conversion"
-                );
-                self.emit_array_conversion_loop(
-                    value,
-                    src_inner,
-                    tgt_inner,
-                    *src_size,
-                    source_type,
-                    target_type,
-                    emitter,
-                )
-            }
-            (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
-            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => {
-                // Both source and target are WitnessOf — same runtime representation.
-                value
-            }
-            (TypeExpr::Ref(_), TypeExpr::Ref(_)) => {
-                // Ref types pass through — same runtime representation (pointer).
-                value
-            }
-            _ => panic!(
-                "witness_lowering value conversion not supported: {:?} -> {:?}",
-                source_type, target_type
-            ),
-        }
-    }
-
-    fn emit_array_conversion_loop(
-        &self,
-        source_array: ValueId,
-        src_elem_type: &Type,
-        tgt_elem_type: &Type,
-        array_len: usize,
-        _source_array_type: &Type,
-        target_array_type: &Type,
-        emitter: &mut HLBlockEmitter<'_>,
-    ) -> ValueId {
-        let initial_dst =
-            self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);
-
-        let results = emitter.build_counted_loop(
-            array_len,
-            vec![(initial_dst, target_array_type.clone())],
-            |emitter, i_val, accs| {
-                let dst_val = accs[0];
-                let elem = emitter.array_get(source_array, i_val);
-                let converted =
-                    self.emit_value_conversion(elem, src_elem_type, tgt_elem_type, emitter);
-                let new_dst = emitter.array_set(dst_val, i_val, converted);
-                vec![new_dst]
-            },
-        );
-
-        results[0]
-    }
-
-    /// Create a dummy array of the given target type, properly laid out in memory.
-    fn create_dummy_array(
-        &self,
-        elem_type: &Type,
-        array_len: usize,
-        _array_type: &Type,
-        b: &mut impl HLEmitter,
-    ) -> ValueId {
-        if array_len == 0 {
-            return b.mk_seq(Vec::new(), SequenceTargetType::Array(0), elem_type.clone());
-        }
-        let dummy_elem = self.create_dummy_value(elem_type, b);
-        b.mk_repeated(
-            dummy_elem,
-            SequenceTargetType::Array(array_len),
-            array_len,
-            elem_type.clone(),
-        )
-    }
-
-    /// Create a single dummy value of the given target type.
-    fn create_dummy_value(&self, target_type: &Type, b: &mut impl HLEmitter) -> ValueId {
-        match &target_type.expr {
-            TypeExpr::WitnessOf(_) => {
-                let dummy_field = b.field_const(ark_bn254::Fr::from(0u64));
-                b.cast_to_witness_of(dummy_field)
-            }
-            TypeExpr::Array(inner, size) => self.create_dummy_array(inner, *size, target_type, b),
-            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
-                b.field_const(ark_bn254::Fr::from(0u64))
-            }
-            _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
-        }
-    }
-
     /// Convert a value to the given target type if its converted type doesn't already match.
+    /// Emits a single (possibly composite) Cast; backend-specific cast spilling
+    /// expands composite casts into loops later in the pipeline.
     fn convert_if_needed(
         &self,
         value: ValueId,
@@ -608,9 +504,14 @@ impl WitnessLowering {
         let value_type = type_info.get_value_type(value);
         let converted_type = self.witness_lowering_in_type(&value_type);
         if converted_type == *target_type {
-            value
-        } else {
-            self.emit_value_conversion(value, &value_type, target_type, emitter)
+            return value;
+        }
+        match (&value_type.expr, &target_type.expr) {
+            // Same runtime representation — pass through.
+            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => value,
+            (TypeExpr::Ref(_), TypeExpr::Ref(_)) => value,
+            (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
+            _ => emitter.cast_to(target_type.clone(), value),
         }
     }
 
@@ -624,7 +525,8 @@ impl WitnessLowering {
         if val_type.is_witness_of() {
             val
         } else {
-            b.cast_to_witness_of(val)
+            let inner = val_type.clone();
+            b.cast_to_witness_of(val, inner)
         }
     }
 

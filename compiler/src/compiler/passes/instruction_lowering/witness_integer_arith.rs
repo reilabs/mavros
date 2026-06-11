@@ -8,8 +8,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode, Type,
-            TypeExpr,
+            BinaryArithOpKind, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -121,8 +120,8 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
+        let lhs_field = b.ensure_field(lhs, context.types().get_value_type(lhs));
+        let rhs_field = b.ensure_field(rhs, context.types().get_value_type(rhs));
         let value = match kind {
             BinaryArithOpKind::Add => b.add(lhs_field, rhs_field),
             BinaryArithOpKind::Sub => b.sub(lhs_field, rhs_field),
@@ -141,7 +140,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::U(bits),
+            target: context.types().get_value_type(result).clone(),
         });
     }
 
@@ -157,12 +156,14 @@ impl LowerWitnessIntegerArithOps {
     ) {
         let product_range = context.range(lhs).mul(&context.range(rhs));
         if bits == 128 && !range_fits_field_injectively(&product_range) {
-            let lhs_limbs = split_u128_value(b, lhs);
-            let rhs_limbs = split_u128_value(b, rhs);
-            let lhs_lo = b.cast_to_field(lhs_limbs.lo);
-            let lhs_hi = b.cast_to_field(lhs_limbs.hi);
-            let rhs_lo = b.cast_to_field(rhs_limbs.lo);
-            let rhs_hi = b.cast_to_field(rhs_limbs.hi);
+            let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
+            let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
+            let lhs_limbs = split_u128_value(b, lhs, lhs_witness);
+            let rhs_limbs = split_u128_value(b, rhs, rhs_witness);
+            let lhs_lo = b.cast_to(field_target(lhs_witness), lhs_limbs.lo);
+            let lhs_hi = b.cast_to(field_target(lhs_witness), lhs_limbs.hi);
+            let rhs_lo = b.cast_to(field_target(rhs_witness), rhs_limbs.lo);
+            let rhs_hi = b.cast_to(field_target(rhs_witness), rhs_limbs.hi);
 
             let lo_product = b.mul(lhs_lo, rhs_lo);
             let lhs_cross = b.mul(lhs_lo, rhs_hi);
@@ -170,7 +171,9 @@ impl LowerWitnessIntegerArithOps {
             let high_product = b.mul(lhs_hi, rhs_hi);
             let zero = b.field_const(Field::ZERO);
             let flag = guard
-                .map(|condition| b.cast_to_field(condition))
+                .map(|condition| {
+                    b.ensure_field(condition, context.types().get_value_type(condition))
+                })
                 .unwrap_or_else(|| b.field_const(Field::ONE));
             b.constrain(flag, high_product, zero);
 
@@ -183,7 +186,7 @@ impl LowerWitnessIntegerArithOps {
             b.emit(OpCode::Cast {
                 result,
                 value,
-                target: CastTarget::U(bits),
+                target: context.types().get_value_type(result).clone(),
             });
             return;
         }
@@ -193,8 +196,8 @@ impl LowerWitnessIntegerArithOps {
             "unsigned multiplication product range is too wide for a single-field product"
         );
 
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
+        let lhs_field = b.ensure_field(lhs, context.types().get_value_type(lhs));
+        let rhs_field = b.ensure_field(rhs, context.types().get_value_type(rhs));
         let value = b.mul(lhs_field, rhs_field);
         if !product_range.fits_in_unsigned_bits(bits) {
             let rc_bits = narrow_rangecheck_width(&product_range, bits);
@@ -204,7 +207,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::U(bits),
+            target: context.types().get_value_type(result).clone(),
         });
     }
 
@@ -226,12 +229,14 @@ impl LowerWitnessIntegerArithOps {
         );
         let lhs_range = context.range(lhs);
         let rhs_range = context.range(rhs);
+        let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
+        let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let sign_l = match known_sign(&lhs_range, bits) {
             Some(false) => b.field_const(Field::ZERO),
             Some(true) => b.field_const(Field::ONE),
             None => {
                 let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
-                b.cast_to_field(sign_l_bits)
+                b.cast_to(field_target(lhs_witness), sign_l_bits)
             }
         };
         let sign_r = match known_sign(&rhs_range, bits) {
@@ -239,11 +244,11 @@ impl LowerWitnessIntegerArithOps {
             Some(true) => b.field_const(Field::ONE),
             None => {
                 let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
-                b.cast_to_field(sign_r_bits)
+                b.cast_to(field_target(rhs_witness), sign_r_bits)
             }
         };
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
+        let lhs_field = b.ensure_field(lhs, context.types().get_value_type(lhs));
+        let rhs_field = b.ensure_field(rhs, context.types().get_value_type(rhs));
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
@@ -263,8 +268,6 @@ impl LowerWitnessIntegerArithOps {
             _ => unreachable!(),
         };
 
-        let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
-        let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
         let result_hint = match kind {
@@ -272,7 +275,7 @@ impl LowerWitnessIntegerArithOps {
             BinaryArithOpKind::Sub => b.sub(lhs_pure, rhs_pure),
             _ => unreachable!(),
         };
-        let result_hint_unsigned = b.cast_to(CastTarget::U(bits), result_hint);
+        let result_hint_unsigned = b.cast_to(Type::u(bits), result_hint);
         let result_value = encode_signed_value(
             b,
             signed_raw,
@@ -284,7 +287,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value: result_value,
-            target: CastTarget::I(bits),
+            target: context.types().get_value_type(result).clone(),
         });
     }
 
@@ -317,7 +320,7 @@ impl LowerWitnessIntegerArithOps {
             Some(true) => b.field_const(Field::ONE),
             None => {
                 let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
-                b.cast_to_field(sign_l_bits)
+                b.cast_to(field_target(lhs_witness), sign_l_bits)
             }
         };
         let sign_r = match known_sign(&rhs_range, bits) {
@@ -325,18 +328,18 @@ impl LowerWitnessIntegerArithOps {
             Some(true) => b.field_const(Field::ONE),
             None => {
                 let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
-                b.cast_to_field(sign_r_bits)
+                b.cast_to(field_target(rhs_witness), sign_r_bits)
             }
         };
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
+        let lhs_field = b.ensure_field(lhs, context.types().get_value_type(lhs));
+        let rhs_field = b.ensure_field(rhs, context.types().get_value_type(rhs));
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
         let result_hint = b.mul(lhs_pure, rhs_pure);
-        let result_hint_unsigned = b.cast_to(CastTarget::U(bits), result_hint);
+        let result_hint_unsigned = b.cast_to(Type::u(bits), result_hint);
         let product = b.mul(lhs_signed, rhs_signed);
         let result_value = encode_signed_value(
             b,
@@ -350,7 +353,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value: result_value,
-            target: CastTarget::I(bits),
+            target: context.types().get_value_type(result).clone(),
         });
     }
 
@@ -389,7 +392,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::U(bits),
+            target: context.types().get_value_type(result).clone(),
         });
     }
 
@@ -421,8 +424,8 @@ impl LowerWitnessIntegerArithOps {
             Some(true) => (b.u_const(1, 1), b.field_const(Field::ONE)),
             None => {
                 let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
-                let sign_l_u1 = b.cast_to(CastTarget::U(1), sign_l_bits);
-                let sign_l = b.cast_to_field(sign_l_u1);
+                let sign_l_u1 = b.cast_to(u_target(1, sign_l_is_witness), sign_l_bits);
+                let sign_l = b.cast_to(field_target(sign_l_is_witness), sign_l_u1);
                 (sign_l_u1, sign_l)
             }
         };
@@ -440,14 +443,14 @@ impl LowerWitnessIntegerArithOps {
                 Some(true) => (b.u_const(1, 1), b.field_const(Field::ONE)),
                 None => {
                     let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
-                    let sign_r_u1 = b.cast_to(CastTarget::U(1), sign_r_bits);
-                    let sign_r = b.cast_to_field(sign_r_u1);
+                    let sign_r_u1 = b.cast_to(u_target(1, sign_r_is_witness), sign_r_bits);
+                    let sign_r = b.cast_to(field_target(sign_r_is_witness), sign_r_u1);
                     (sign_r_u1, sign_r)
                 }
             }
         };
-        let lhs_field = b.cast_to_field(lhs);
-        let rhs_field = b.cast_to_field(rhs);
+        let lhs_field = b.ensure_field(lhs, context.types().get_value_type(lhs));
+        let rhs_field = b.ensure_field(rhs, context.types().get_value_type(rhs));
 
         let abs_l = self.write_abs_value(b, lhs_field, sign_l, bits);
         let abs_r = if lhs == rhs {
@@ -484,9 +487,9 @@ impl LowerWitnessIntegerArithOps {
             guard_is_witness,
         );
 
-        let quotient_sign_u1 = b.xor(sign_l_u1, sign_r_u1);
-        let quotient_sign = b.cast_to_field(quotient_sign_u1);
         let quotient_sign_is_witness = sign_l_is_witness || sign_r_is_witness;
+        let quotient_sign_u1 = b.xor(sign_l_u1, sign_r_u1);
+        let quotient_sign = b.cast_to(field_target(quotient_sign_is_witness), quotient_sign_u1);
 
         let quotient = self.write_signed_magnitude_result(
             b,
@@ -517,7 +520,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::I(bits),
+            target: context.types().get_value_type(result).clone(),
         });
     }
 
@@ -570,7 +573,7 @@ impl LowerWitnessIntegerArithOps {
         let signed_value = b.mul(magnitude, factor);
 
         let encoded_hint = b.select(magnitude_is_zero, zero, encoded_if_nonzero);
-        let encoded_hint = b.cast_to(CastTarget::U(bits), encoded_hint);
+        let encoded_hint = b.cast_to(Type::u(bits), encoded_hint);
         encode_signed_value(
             b,
             signed_value,
@@ -584,6 +587,24 @@ impl LowerWitnessIntegerArithOps {
 
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
+}
+
+/// Cast target for a Field-typed value of the given witnessness.
+fn field_target(is_witness: bool) -> Type {
+    if is_witness {
+        Type::witness_of(Type::field())
+    } else {
+        Type::field()
+    }
+}
+
+/// Cast target for a U(bits)-typed value of the given witnessness.
+fn u_target(bits: usize, is_witness: bool) -> Type {
+    if is_witness {
+        Type::witness_of(Type::u(bits))
+    } else {
+        Type::u(bits)
+    }
 }
 
 fn guarded_rangecheck(
@@ -742,17 +763,22 @@ struct U128Limbs {
     hi: ValueId,
 }
 
-fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
-    let value = b.cast_to(CastTarget::U(128), value);
+fn split_u128_value(b: &mut impl HLEmitter, value: ValueId, is_witness: bool) -> U128Limbs {
+    let value = b.cast_to(u_target(128, is_witness), value);
     U128Limbs {
-        lo: split_u128_limb(b, value, 0),
-        hi: split_u128_limb(b, value, 64),
+        lo: split_u128_limb(b, value, 0, is_witness),
+        hi: split_u128_limb(b, value, 64, is_witness),
     }
 }
 
-fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
+fn split_u128_limb(
+    b: &mut impl HLEmitter,
+    value: ValueId,
+    offset: usize,
+    is_witness: bool,
+) -> ValueId {
     let limb = b.bit_range(value, offset, 64);
-    b.cast_to(CastTarget::U(64), limb)
+    b.cast_to(u_target(64, is_witness), limb)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -771,13 +797,13 @@ fn lower_unsigned_divmod(
     if bits == 128 {
         if dividend == divisor {
             let active = if let Some(condition) = guard {
-                b.cast_to_field(condition)
+                b.cast_to(field_target(guard_is_witness), condition)
             } else {
                 b.field_const(Field::ONE)
             };
             let zero = b.field_const(Field::ZERO);
             let one = b.field_const(Field::ONE);
-            let divisor_field = b.cast_to_field(divisor);
+            let divisor_field = b.cast_to(field_target(divisor_is_witness), divisor);
             let divisor_minus_one = b.sub(divisor_field, one);
             guarded_rangecheck(b, divisor_minus_one, 128, guard);
             return DivModResult {
@@ -799,8 +825,8 @@ fn lower_unsigned_divmod(
             divisor
         };
 
-        let mut dividend_hint = b.cast_to(CastTarget::U(128), dividend_pure);
-        let mut divisor_hint = b.cast_to(CastTarget::U(128), divisor_pure);
+        let mut dividend_hint = b.cast_to(Type::u(128), dividend_pure);
+        let mut divisor_hint = b.cast_to(Type::u(128), divisor_pure);
         if let Some(condition) = guard {
             let condition = if guard_is_witness {
                 b.value_of(condition)
@@ -832,8 +858,8 @@ fn lower_unsigned_divmod(
             guard,
         );
 
-        let r_u128 = b.cast_to(CastTarget::U(128), r_wit);
-        let q_u128 = b.cast_to(CastTarget::U(128), q_wit);
+        let r_u128 = b.cast_to(Type::witness_of(Type::u(128)), r_wit);
+        let q_u128 = b.cast_to(Type::witness_of(Type::u(128)), q_wit);
         let product = b.fresh_value();
         emit_guarded(
             b,
@@ -885,14 +911,14 @@ fn lower_unsigned_divmod(
 
     if dividend == divisor {
         let active = if let Some(condition) = guard {
-            b.cast_to_field(condition)
+            b.cast_to(field_target(guard_is_witness), condition)
         } else {
             b.field_const(Field::ONE)
         };
         let zero = b.field_const(Field::ZERO);
         let one = b.field_const(Field::ONE);
 
-        let divisor_field = b.cast_to_field(divisor);
+        let divisor_field = b.cast_to(field_target(divisor_is_witness), divisor);
         let divisor_minus_one = b.sub(divisor_field, one);
         guarded_rangecheck(b, divisor_minus_one, bits, guard);
 
@@ -915,8 +941,8 @@ fn lower_unsigned_divmod(
         divisor
     };
 
-    let mut dividend_hint = b.cast_to(CastTarget::U(bits), dividend_pure);
-    let mut divisor_hint = b.cast_to(CastTarget::U(bits), divisor_pure);
+    let mut dividend_hint = b.cast_to(Type::u(bits), dividend_pure);
+    let mut divisor_hint = b.cast_to(Type::u(bits), divisor_pure);
     if let Some(condition) = guard {
         let condition = if guard_is_witness {
             b.value_of(condition)
@@ -932,8 +958,8 @@ fn lower_unsigned_divmod(
     let q_hint_field = b.cast_to_field(q_hint);
     let q_wit = b.write_witness(q_hint_field);
 
-    let dividend_field = b.cast_to_field(dividend);
-    let divisor_field = b.cast_to_field(divisor);
+    let dividend_field = b.cast_to(field_target(dividend_is_witness), dividend);
+    let divisor_field = b.cast_to(field_target(divisor_is_witness), divisor);
     let product = b.mul(q_wit, divisor_field);
     let r_raw = b.sub(dividend_field, product);
 
