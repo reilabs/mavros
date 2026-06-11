@@ -124,10 +124,6 @@ impl Driver {
         )
         .map_err(Error::NoirCompilerError)?;
 
-        // Replaced foreign functions (blake3, poseidon2_permutation, ...) have already been
-        // rewritten at parse time to call their pure-Noir implementations in
-        // `std::mavros::replacements` (see `project.rs`), so monomorphization needs no special
-        // handling for them.
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
