@@ -799,17 +799,12 @@ impl LLStruct {
         Self::new(vec![LLFieldType::Int(RC_SIZE_BITS as u32)])
     }
 
-    /// RC'd fixed-size array: { Inline(RcHeader), Int(64) table_id, InlineArray(elem_struct, count) }
-    pub fn rc_array(elem: LLStruct, count: usize) -> Self {
-        Self::new(vec![
-            LLFieldType::Inline(Self::rc_header()),
-            LLFieldType::Int(64),
-            LLFieldType::InlineArray(elem, count),
-        ])
-    }
-
-    /// RC'd slice: { Inline(RcHeader), Int(64) table_id, Int(64) len, FlexArray(elem_struct) }
-    pub fn rc_slice(elem: LLStruct) -> Self {
+    /// RC'd sequence: { Inline(RcHeader), Int(64) table_id, Int(64) len, FlexArray(elem_struct) }
+    ///
+    /// Arrays and slices share this single layout (arrays allocate with a
+    /// constant flex count), so `Cast ArrayToSlice` is a pure alias and
+    /// consumers never distinguish the two shapes.
+    pub fn rc_seq(elem: LLStruct) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(64),
