@@ -1,4 +1,5 @@
 pub mod abi_helpers;
+pub mod collections;
 pub mod compiler;
 pub mod driver;
 pub mod error;

@@ -19,15 +19,16 @@
 //!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
 //!    results into the constraint system.
 
-use std::collections::HashMap;
-
-use crate::compiler::{
-    pass_manager::{AnalysisStore, Pass},
-    ssa::{
-        BlockId, FunctionId, ValueId,
-        hlssa::{
-            CallTarget, CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        pass_manager::{AnalysisStore, Pass},
+        ssa::{
+            BlockId, FunctionId, ValueId,
+            hlssa::{
+                CallTarget, CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+                builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+            },
         },
     },
 };
@@ -222,7 +223,7 @@ impl PrepareEntryPoint {
     /// rangecheck + reconstruct, and replace original results.
     fn process_unconstrained_calls(ssa: &mut HLSSA) {
         // Pre-collect callee return types (need immutable ssa access)
-        let mut callee_return_types: HashMap<FunctionId, Vec<Type>> = HashMap::new();
+        let mut callee_return_types: HashMap<FunctionId, Vec<Type>> = HashMap::default();
         let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
         for &fid in &func_ids {
             for (_, block) in ssa.get_function(fid).get_blocks() {

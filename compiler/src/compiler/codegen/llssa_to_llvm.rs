@@ -3,31 +3,33 @@
 //! Translates LLSSA into LLVM IR, which can then be compiled to WebAssembly.
 //! Operates on LLSSA + Type — types are explicit in the LLSSA ops, no TypeInfo needed.
 
-use std::collections::HashMap;
-use std::num::NonZeroU32;
-use std::path::Path;
+use std::{num::NonZeroU32, path::Path};
 
-use inkwell::AddressSpace;
-use inkwell::IntPredicate;
-use inkwell::OptimizationLevel;
-use inkwell::builder::Builder;
-use inkwell::context::Context;
-use inkwell::module::{Linkage, Module};
-use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
-};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
+use inkwell::{
+    AddressSpace, IntPredicate, OptimizationLevel,
+    builder::Builder,
+    context::Context,
+    module::{Linkage, Module},
+    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple},
+    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum},
+    values::{
+        BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
+    },
 };
 
-use crate::compiler::analysis::flow_analysis;
-use crate::compiler::analysis::flow_analysis::FlowAnalysis;
-use crate::compiler::ssa::llssa::{
-    Blob as LLBlob, Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType, LLFunction, LLOp,
-    LLSSA, LLStruct, Type,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::flow_analysis::{self, FlowAnalysis},
+        ssa::{
+            BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId,
+            llssa::{
+                Blob as LLBlob, Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType,
+                LLFunction, LLOp, LLSSA, LLStruct, Type,
+            },
+        },
+    },
 };
-use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId};
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
@@ -109,10 +111,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             context,
             module,
             builder,
-            value_map: HashMap::new(),
-            constants: HashMap::new(),
-            block_map: HashMap::new(),
-            function_map: HashMap::new(),
+            value_map: HashMap::default(),
+            constants: HashMap::default(),
+            block_map: HashMap::default(),
+            function_map: HashMap::default(),
             vm_ptr: None,
             field_mul_fn: None,
             field_add_fn: None,
@@ -611,7 +613,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // Track phi nodes
         let mut phi_nodes: HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>> =
-            HashMap::new();
+            HashMap::default();
 
         // Generate code in dominator order
         for block_id in cfg.get_domination_pre_order() {

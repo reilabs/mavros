@@ -1,0 +1,5 @@
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "Iteration order is nondeterministic and leaks into compiler output; use crate::collections::HashMap (FxHash) or BTreeMap" },
+  { path = "std::collections::HashSet", reason = "Iteration order is nondeterministic and leaks into compiler output; use crate::collections::HashSet (FxHash) or BTreeSet" },
+  { path = "std::collections::hash_map::RandomState", reason = "Randomly seeded per process, which breaks deterministic compilation; use crate::collections::FxBuildHasher" },
+]

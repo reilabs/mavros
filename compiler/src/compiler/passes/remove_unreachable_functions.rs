@@ -3,12 +3,13 @@
 //! This pass should run after defunctionalization, and entry point preparation. This ensures that
 //! all calls are static and hence avoids producing incorrect results.
 
-use std::collections::HashSet;
-
-use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::hlssa::HLSSA,
+use crate::{
+    collections::HashSet,
+    compiler::{
+        analysis::flow_analysis::FlowAnalysis,
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        ssa::hlssa::HLSSA,
+    },
 };
 
 pub struct RemoveUnreachableFunctions {}

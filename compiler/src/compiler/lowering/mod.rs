@@ -6,17 +6,18 @@
 mod expression_converter;
 mod type_converter;
 
-use std::collections::{HashMap, HashSet};
-
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::ssa::{
-    FunctionId,
-    hlssa::{
-        HLFunction, HLSSA,
-        builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::ssa::{
+        FunctionId,
+        hlssa::{
+            HLFunction, HLSSA,
+            builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+        },
     },
 };
 
@@ -47,10 +48,10 @@ pub struct SSAConverter {
 impl SSAConverter {
     pub fn new() -> Self {
         Self {
-            constrained_mapper: HashMap::new(),
-            unconstrained_mapper: HashMap::new(),
-            natively_unconstrained: HashSet::new(),
-            global_slots: HashMap::new(),
+            constrained_mapper: HashMap::default(),
+            unconstrained_mapper: HashMap::default(),
+            natively_unconstrained: HashSet::default(),
+            global_slots: HashMap::default(),
             type_converter: TypeConverter::new(),
         }
     }
@@ -197,15 +198,18 @@ impl SSAConverter {
 
         // Topological sort: process globals in dependency order.
         // Build adjacency: each global depends on other globals referenced in its initializer.
-        let all_ids: Vec<GlobalId> = program.globals.keys().copied().collect();
-        let mut visited = std::collections::HashSet::new();
-        let mut in_stack = std::collections::HashSet::new();
+        // `Program.globals` is a `BTreeMap`, so key order is already deterministic; the sort
+        // makes slot assignment robust even if that container ever changes.
+        let mut all_ids: Vec<GlobalId> = program.globals.keys().copied().collect();
+        all_ids.sort();
+        let mut visited = crate::collections::HashSet::default();
+        let mut in_stack = crate::collections::HashSet::default();
 
         fn topo_visit(
             gid: GlobalId,
             program: &Program,
-            visited: &mut std::collections::HashSet<GlobalId>,
-            in_stack: &mut std::collections::HashSet<GlobalId>,
+            visited: &mut crate::collections::HashSet<GlobalId>,
+            in_stack: &mut crate::collections::HashSet<GlobalId>,
             ordered: &mut Vec<GlobalId>,
         ) {
             if visited.contains(&gid) {

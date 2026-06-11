@@ -11,7 +11,6 @@ pub mod traits;
 use bimap::BiHashMap;
 use itertools::Itertools;
 use std::{
-    collections::HashMap,
     fmt::Debug,
     hash::Hash,
     sync::{
@@ -20,6 +19,8 @@ use std::{
     },
     vec,
 };
+
+use crate::collections::HashMap;
 
 pub use id::{BlockId, FunctionId, ValueId};
 pub use traits::{Instruction, SSAAnotator, SSAType};
@@ -34,7 +35,14 @@ pub use traits::{Instruction, SSAAnotator, SSAType};
 /// values are `Arc`-shared so reads can hand back owned handles without keeping the lock held. The
 /// lock is an implementation detail: all access goes through [`SSA`] methods that acquire and
 /// release it internally, so callers never see a guard.
-pub type SSAConstants<C> = RwLock<BiHashMap<ValueId, Arc<C>>>;
+pub type SSAConstants<C> = RwLock<
+    BiHashMap<
+        ValueId,
+        Arc<C>,
+        crate::collections::FxBuildHasher,
+        crate::collections::FxBuildHasher,
+    >,
+>;
 
 /// An owned, lock-free snapshot of the constants (the `ValueId -> value` direction only), handed
 /// out by [`SSA::const_snapshot`] so callers can iterate and look up constants without holding the
@@ -112,7 +120,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     pub fn with_main(name: String) -> Self {
         let main_function = Function::<Op, Ty>::empty(name);
         let main_id = FunctionId(0);
-        let mut functions = HashMap::new();
+        let mut functions = HashMap::default();
         functions.insert(main_id, main_function);
         SSA {
             functions,
@@ -122,7 +130,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             main_id,
             next_function_id: 1,
             next_value_id: AtomicU64::new(0),
-            constants: RwLock::new(BiHashMap::new()),
+            constants: RwLock::new(BiHashMap::default()),
         }
     }
 }
@@ -137,7 +145,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     ) {
         (
             SSA {
-                functions: HashMap::new(),
+                functions: HashMap::default(),
                 global_types: Vec::new(),
                 globals_init_fn: self.globals_init_fn,
                 globals_deinit_fn: self.globals_deinit_fn,
@@ -248,7 +256,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
                 }
             }
         }
-        let mut remap: HashMap<ValueId, ValueId> = HashMap::new();
+        let mut remap: HashMap<ValueId, ValueId> = HashMap::default();
         for v in all_ids {
             if remap.contains_key(&v) || self.is_const(v) {
                 continue;
@@ -503,7 +511,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     pub fn empty(name: String) -> Self {
         let entry = Block::empty();
         let entry_id = BlockId(0);
-        let mut blocks = HashMap::new();
+        let mut blocks = HashMap::default();
         blocks.insert(entry_id, entry);
         Function {
             entry_block: BlockId(0),
@@ -518,7 +526,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         (
             Function {
                 entry_block: self.entry_block,
-                blocks: HashMap::new(),
+                blocks: HashMap::default(),
                 next_block: self.next_block,
                 name: self.name,
                 returns: vec![],
@@ -866,7 +874,7 @@ impl SSAAnotator for DefaultSSAAnnotator {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use crate::collections::HashMap;
 
     use crate::compiler::ssa::hlssa::{Constant, HLSSA};
 
@@ -877,7 +885,7 @@ mod tests {
         let a = ssa.add_const(Constant::U(8, 1));
         let b = ssa.add_const(Constant::U(8, 2));
 
-        let mut seen = HashMap::new();
+        let mut seen = HashMap::default();
         ssa.for_each_const(|vid, cv| {
             seen.insert(*vid, cv.as_ref().clone());
         });

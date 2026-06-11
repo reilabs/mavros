@@ -5,29 +5,30 @@
 //! in defunctionalization wherever needed. In some cases, we can call the specialized version
 //! directly instead.
 
-use std::collections::{HashMap, HashSet};
-
 use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
 use tracing::{info, instrument};
 
-use crate::compiler::{
-    Field,
-    analysis::{
-        instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
-        symbolic_executor::{self, SymbolicExecutor},
-        types::TypeInfo,
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        BlockId, FunctionId, ValueId,
-        hlssa::{
-            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
-            TypeExpr,
-            builder::{HLEmitter, HLFunctionBuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        Field,
+        analysis::{
+            instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
+            symbolic_executor::{self, SymbolicExecutor},
+            types::TypeInfo,
         },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            BlockId, FunctionId, ValueId,
+            hlssa::{
+                BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
+                HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType,
+                Type, TypeExpr,
+                builder::{HLEmitter, HLFunctionBuilder},
+            },
+        },
+        util::{spread_bits, unspread_bits},
     },
-    util::{spread_bits, unspread_bits},
 };
 
 fn bit_mask(width: usize) -> Option<u128> {
@@ -781,7 +782,7 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
         // Build a mapping from old ValueIds to new ValueIds
         let orig_inputs: Vec<_> = inner.get_inputs().cloned().collect();
         let orig_results: Vec<_> = inner.get_results().cloned().collect();
-        let mut id_map: HashMap<ValueId, ValueId> = HashMap::new();
+        let mut id_map: HashMap<ValueId, ValueId> = HashMap::default();
         for (orig, new_val) in orig_inputs.iter().zip(inputs.iter()) {
             id_map.insert(*orig, new_val.0);
         }
@@ -817,8 +818,8 @@ impl Pass for Specializer {
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let summary = store.get::<Summary>();
-        let mut speculative_ids: HashSet<FunctionId> = HashSet::new();
-        let mut accepted_ids: HashSet<FunctionId> = HashSet::new();
+        let mut speculative_ids: HashSet<FunctionId> = HashSet::default();
+        let mut accepted_ids: HashSet<FunctionId> = HashSet::default();
 
         for (sig, summary) in summary.functions.iter() {
             if summary.specialization_total_savings > 0 {
@@ -899,7 +900,7 @@ impl Specializer {
         // (still `&mut ssa` here) so the constants for `Field`/`U`/`I` signature params are
         // interned eagerly.
         let mut call_params: Vec<Val> = vec![];
-        let mut const_vals: HashMap<ValueId, ConstVal> = HashMap::new();
+        let mut const_vals: HashMap<ValueId, ConstVal> = HashMap::default();
         for (param, sig) in original_param_types
             .iter()
             .zip(signature.get_params().iter())

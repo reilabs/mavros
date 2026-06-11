@@ -3,14 +3,15 @@
 //!
 //! This eliminates the need to jump (obviously), but also reduces block parameter traffic.
 
-use std::collections::HashMap;
-
-use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        BlockId, Instruction, Terminator, ValueId,
-        hlssa::{HLFunction, HLSSA, OpCode},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::flow_analysis::FlowAnalysis,
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            BlockId, Instruction, Terminator, ValueId,
+            hlssa::{HLFunction, HLSSA, OpCode},
+        },
     },
 };
 
@@ -29,7 +30,7 @@ pub struct ValueReplacements {
 impl ValueReplacements {
     pub fn new() -> Self {
         Self {
-            replacements: HashMap::new(),
+            replacements: HashMap::default(),
         }
     }
 
@@ -119,7 +120,7 @@ impl FixDoubleJumps {
         for (function_id, function) in ssa.iter_functions_mut() {
             let cfg = flow_analysis.get_function_cfg(*function_id);
             let jumps = cfg.find_redundant_jumps();
-            let mut replacements = HashMap::<BlockId, BlockId>::new();
+            let mut replacements = HashMap::<BlockId, BlockId>::default();
             let mut value_replacements = ValueReplacements::new();
             for (mut source, mut target) in jumps {
                 while let Some(src) = replacements.get(&source) {

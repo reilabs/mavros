@@ -5,20 +5,25 @@
 //! standard Cytron-style (TOPLAS '91) dominance-frontier iteration. Note that the escape analysis
 //! is currently extremely conservative, and can be improved.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use tracing::{Level, debug, instrument};
 
-use crate::compiler::analysis::types::{FunctionTypeInfo, TypeInfo};
-use crate::compiler::passes::fix_double_jumps::ValueReplacements;
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        BlockId, Terminator, ValueId,
-        hlssa::{
-            HLFunction, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLFunctionBuilder, HLSSABuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{
+            flow_analysis::{CFG, FlowAnalysis},
+            types::{FunctionTypeInfo, TypeInfo},
+        },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::ValueReplacements,
+        ssa::{
+            BlockId, Terminator, ValueId,
+            hlssa::{
+                HLFunction, HLSSA, OpCode, Type, TypeExpr,
+                builder::{HLFunctionBuilder, HLSSABuilder},
+            },
         },
     },
 };
@@ -82,7 +87,7 @@ impl Mem2Reg {
         cfg: &CFG,
         phi_map: &HashMap<BlockId, Vec<(ValueId, ValueId)>>,
     ) {
-        let mut ptr_values = HashMap::<BlockId, HashMap<ValueId, ValueId>>::new();
+        let mut ptr_values = HashMap::<BlockId, HashMap<ValueId, ValueId>>::default();
         let mut value_replacements = ValueReplacements::new();
 
         // Traverse the CFG in domination pre-order
@@ -94,10 +99,10 @@ impl Mem2Reg {
                 if let Some(parent_values) = ptr_values.get(&parent) {
                     parent_values.clone()
                 } else {
-                    HashMap::new()
+                    HashMap::default()
                 }
             } else {
-                HashMap::new()
+                HashMap::default()
             };
 
             // add phi parameters
@@ -201,7 +206,7 @@ impl Mem2Reg {
         phi_blocks: &HashMap<ValueId, HashSet<BlockId>>,
         type_info: &FunctionTypeInfo,
     ) -> HashMap<BlockId, Vec<(ValueId, ValueId)>> {
-        let mut result: HashMap<BlockId, Vec<(ValueId, ValueId)>> = HashMap::new();
+        let mut result: HashMap<BlockId, Vec<(ValueId, ValueId)>> = HashMap::default();
         for (value, blocks) in phi_blocks {
             for block in blocks {
                 let param = fb
@@ -220,8 +225,8 @@ impl Mem2Reg {
         HashMap<ValueId, HashSet<BlockId>>,
         HashMap<ValueId, BlockId>,
     ) {
-        let mut writes: HashMap<ValueId, HashSet<BlockId>> = HashMap::new();
-        let mut defs: HashMap<ValueId, BlockId> = HashMap::new();
+        let mut writes: HashMap<ValueId, HashSet<BlockId>> = HashMap::default();
+        let mut defs: HashMap<ValueId, BlockId> = HashMap::default();
         for (block_id, block) in function.get_blocks() {
             for instruction in block.get_instructions() {
                 match instruction {
@@ -247,11 +252,11 @@ impl Mem2Reg {
         defs: &HashMap<ValueId, BlockId>,
         cfg: &CFG,
     ) -> HashMap<ValueId, HashSet<BlockId>> {
-        let mut result: HashMap<ValueId, HashSet<BlockId>> = HashMap::new();
+        let mut result: HashMap<ValueId, HashSet<BlockId>> = HashMap::default();
 
         for (var, writes) in writes {
             let mut queue = VecDeque::<BlockId>::new();
-            let mut visited = HashSet::<BlockId>::new();
+            let mut visited = HashSet::<BlockId>::default();
             queue.extend(writes);
 
             while let Some(block) = queue.pop_front() {
