@@ -21,7 +21,6 @@ use crate::compiler::ssa::{
 };
 
 use expression_converter::ExpressionConverter;
-pub use expression_converter::LowLevelReplacement;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
@@ -43,20 +42,16 @@ pub struct SSAConverter {
 
     /// Utility for converting between types.
     type_converter: TypeConverter,
-
-    /// Maps a given low-level function name to its replacement
-    lowlevel_replacements: HashMap<String, LowLevelReplacement>,
 }
 
 impl SSAConverter {
-    pub fn new(lowlevel_replacements: HashMap<String, LowLevelReplacement>) -> Self {
+    pub fn new() -> Self {
         Self {
             constrained_mapper: HashMap::new(),
             unconstrained_mapper: HashMap::new(),
             natively_unconstrained: HashSet::new(),
             global_slots: HashMap::new(),
             type_converter: TypeConverter::new(),
-            lowlevel_replacements,
         }
     }
 
@@ -258,7 +253,6 @@ impl SSAConverter {
                 &self.natively_unconstrained,
                 false,
                 &self.global_slots,
-                &self.lowlevel_replacements,
                 entry,
             );
 
@@ -324,7 +318,6 @@ impl SSAConverter {
             &self.natively_unconstrained,
             in_unconstrained,
             &self.global_slots,
-            &self.lowlevel_replacements,
             entry_block,
         );
 
@@ -355,11 +348,8 @@ impl SSAConverter {
 
 impl HLSSA {
     /// Create SSA directly from a monomorphized program.
-    pub fn from_program(
-        program: &Program,
-        lowlevel_replacements: HashMap<String, LowLevelReplacement>,
-    ) -> (HLSSA, bool) {
-        let mut converter = SSAConverter::new(lowlevel_replacements);
+    pub fn from_program(program: &Program) -> (HLSSA, bool) {
+        let mut converter = SSAConverter::new();
         converter.convert_program(program)
     }
 }

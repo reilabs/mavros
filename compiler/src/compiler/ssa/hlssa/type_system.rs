@@ -5,7 +5,7 @@ use crate::compiler::ssa::SSAType;
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Field,
     U(usize),
@@ -16,9 +16,10 @@ pub enum TypeExpr {
     Ref(Box<Type>),
     Tuple(Vec<Type>),
     Function,
+    Blob(Box<Type>, usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     pub expr: TypeExpr,
 }
@@ -43,6 +44,7 @@ impl Display for Type {
                     .join(", ")
             ),
             TypeExpr::Function => write!(f, "Function"),
+            TypeExpr::Blob(inner, len) => write!(f, "Blob<{}; {}>", inner, len),
         }
     }
 }
@@ -79,6 +81,12 @@ impl Type {
     pub fn function() -> Self {
         Type {
             expr: TypeExpr::Function,
+        }
+    }
+
+    pub fn blob(elem: Type, len: usize) -> Self {
+        Type {
+            expr: TypeExpr::Blob(Box::new(elem), len),
         }
     }
 
@@ -180,6 +188,10 @@ impl Type {
         matches!(self.expr, TypeExpr::Function)
     }
 
+    pub fn is_blob(&self) -> bool {
+        matches!(self.expr, TypeExpr::Blob(..))
+    }
+
     pub fn has_eq(&self) -> bool {
         matches!(self.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
     }
@@ -198,6 +210,7 @@ impl Type {
         match &self.expr {
             TypeExpr::Array(inner, _) => *inner.clone(),
             TypeExpr::Slice(inner) => *inner.clone(),
+            TypeExpr::Blob(inner, _) => *inner.clone(),
             TypeExpr::WitnessOf(inner) => {
                 let elem = inner.get_array_element();
                 Type::witness_of(elem)
@@ -329,6 +342,7 @@ impl Type {
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => x == y, // invariant
             (TypeExpr::Function, TypeExpr::Function) => true,
+            (TypeExpr::Blob(x, n), TypeExpr::Blob(y, m)) => n == m && x == y,
             _ => false,
         }
     }
@@ -388,6 +402,11 @@ impl Type {
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => Type::join(x, y).ref_of(),
             (TypeExpr::Function, TypeExpr::Function) => Type::function(),
+            (TypeExpr::Blob(x, n), TypeExpr::Blob(y, m)) => {
+                assert_eq!(n, m, "Cannot join Blob({}) and Blob({})", n, m);
+                assert_eq!(x, y, "Cannot join blobs with different element types");
+                Type::blob(*x.clone(), *n)
+            }
             _ => panic!("Cannot join types {} and {}", a, b),
         }
     }
@@ -435,6 +454,7 @@ impl Type {
             TypeExpr::U(_) => false,
             TypeExpr::I(_) => false,
             TypeExpr::Function => false,
+            TypeExpr::Blob(inner, _) => inner.contains_ptrs(),
             TypeExpr::Tuple(elements) => elements.iter().any(|e| e.contains_ptrs()),
         }
     }
@@ -447,6 +467,8 @@ impl Type {
                 inner_types.iter().map(|t| t.calculate_type_size()).sum()
             }
             TypeExpr::Function => 1,
+            // Blobs are by-value sequences, not pointers to heap data.
+            TypeExpr::Blob(inner, n) => inner.calculate_type_size() * n,
             TypeExpr::U(_) => 1,
             TypeExpr::I(_) => 1,
             TypeExpr::WitnessOf(_) => 1, // pointer-sized (witness tape reference)

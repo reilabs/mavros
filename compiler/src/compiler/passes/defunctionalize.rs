@@ -255,7 +255,11 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                 contains_function(inner)
             }
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => false,
+            TypeExpr::Field
+            | TypeExpr::U(_)
+            | TypeExpr::I(_)
+            | TypeExpr::WitnessOf(_)
+            | TypeExpr::Blob(..) => false,
         }
     }
 
@@ -465,7 +469,12 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
                             }
                         }
-                        OpCode::TupleProj { result, tuple, .. } => {
+                        OpCode::TupleProj { result, tuple, .. }
+                        | OpCode::TupleRefProj {
+                            result,
+                            tuple_ref: tuple,
+                            ..
+                        } => {
                             changed |= propagate(&mut reaching, (fid, *tuple), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *result)) {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *tuple));
@@ -633,7 +642,11 @@ fn replace_function_type(typ: &mut Type) {
                 replace_function_type(elem);
             }
         }
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {}
+        TypeExpr::Field
+        | TypeExpr::U(_)
+        | TypeExpr::I(_)
+        | TypeExpr::WitnessOf(_)
+        | TypeExpr::Blob(..) => {}
     }
 }
 
@@ -641,6 +654,7 @@ fn replace_function_type(typ: &mut Type) {
 fn replace_function_types_in_instruction(instr: &mut OpCode) {
     match instr {
         OpCode::MkSeq { elem_type, .. } => replace_function_type(elem_type),
+        OpCode::MkSeqOfBlob { element_type, .. } => replace_function_type(element_type),
         OpCode::MkRepeated { elem_type, .. } => replace_function_type(elem_type),
         OpCode::Alloc { elem_type, .. } => replace_function_type(elem_type),
         OpCode::MkTuple { element_types, .. } => {

@@ -23,6 +23,7 @@ pub fn const_value_type(value: &Constant) -> Type {
         Constant::I(size, _) => Type::i(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
+        Constant::Blob(blob) => Type::blob(blob.elem_type.clone(), blob.len()),
     }
 }
 
@@ -35,6 +36,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
         TypeExpr::Tuple(fields) => {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
+        TypeExpr::Blob(..) => t,
         TypeExpr::Ref(_) | TypeExpr::Function => Type::witness_of(t),
     }
 }
@@ -453,6 +455,22 @@ impl Types {
                 function_info.values.insert(*r, top_tp.of(t.clone()));
                 Ok(())
             }
+            OpCode::MkSeqOfBlob {
+                result: r,
+                element_type,
+                blob,
+            } => {
+                let len = match function_info.values.get(blob) {
+                    Some(Type {
+                        expr: TypeExpr::Blob(_, len),
+                    }) => *len,
+                    other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
+                };
+                function_info
+                    .values
+                    .insert(*r, element_type.clone().array_of(len));
+                Ok(())
+            }
             OpCode::MkRepeated {
                 result: r,
                 element: _,
@@ -660,6 +678,21 @@ impl Types {
                 })?;
                 let element_type = tuple_type.get_tuple_element(*idx);
                 function_info.values.insert(*result, element_type);
+                Ok(())
+            }
+            OpCode::TupleRefProj {
+                result,
+                tuple_ref,
+                idx,
+            } => {
+                let tuple_ref_type = function_info.values.get(tuple_ref).ok_or_else(|| {
+                    format!(
+                        "Tuple reference value {:?} not found in type assignments",
+                        tuple_ref
+                    )
+                })?;
+                let element_type = tuple_ref_type.get_pointed().get_tuple_element(*idx);
+                function_info.values.insert(*result, element_type.ref_of());
                 Ok(())
             }
             OpCode::MkTuple {

@@ -4,6 +4,7 @@
 //! distinction. This pass converts all `WitnessOf(X)` types back to `X` and removes
 //! `Cast { target: WitnessOf }` instructions.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
@@ -91,6 +92,9 @@ impl StripWitnessOf {
             OpCode::MkSeq { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
+            OpCode::MkSeqOfBlob { element_type, .. } => {
+                *element_type = element_type.strip_all_witness();
+            }
             OpCode::MkRepeated { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
@@ -98,10 +102,8 @@ impl StripWitnessOf {
                 *elem_type = elem_type.strip_all_witness();
             }
             OpCode::Cast { .. } => {}
-            OpCode::MkTuple { element_types, .. } => {
-                for tp in element_types.iter_mut() {
-                    *tp = tp.strip_all_witness();
-                }
+            OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
+                ice_non_elided_tuple()
             }
             OpCode::ReadGlobal { result_type, .. } => {
                 *result_type = result_type.strip_all_witness();
@@ -139,7 +141,6 @@ impl StripWitnessOf {
             | OpCode::DLookup { .. }
             | OpCode::MulConst { .. }
             | OpCode::Rangecheck { .. }
-            | OpCode::TupleProj { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
             | OpCode::Spread { .. }

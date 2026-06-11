@@ -48,7 +48,6 @@ pub enum WitnessShape {
     Scalar(WitnessInfo),
     Array(WitnessInfo, Box<WitnessShape>),
     Ref(WitnessInfo, Box<WitnessShape>),
-    Tuple(WitnessInfo, Vec<WitnessShape>),
 }
 
 impl Display for WitnessShape {
@@ -60,13 +59,6 @@ impl Display for WitnessShape {
             }
             WitnessShape::Ref(info, inner) => {
                 write!(f, "[*{info} of {inner}]")
-            }
-            WitnessShape::Tuple(info, children) => {
-                write!(
-                    f,
-                    "({info} of <{}>)",
-                    children.iter().map(|child| child.to_string()).join(", ")
-                )
             }
         }
     }
@@ -85,14 +77,6 @@ impl WitnessShape {
             (WitnessShape::Ref(t1, inner1), WitnessShape::Ref(t2, inner2)) => {
                 WitnessShape::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
             }
-            (WitnessShape::Tuple(t1, children1), WitnessShape::Tuple(t2, children2)) => {
-                let children_join = children1
-                    .iter()
-                    .zip(children2.iter())
-                    .map(|(c1, c2)| c1.join(c2))
-                    .collect();
-                WitnessShape::Tuple(t1.join(*t2), children_join)
-            }
             _ => panic!(
                 "Cannot join different witness types: {:?} vs {:?}",
                 self, other
@@ -105,7 +89,16 @@ impl WitnessShape {
             WitnessShape::Scalar(info) => *info,
             WitnessShape::Array(info, _) => *info,
             WitnessShape::Ref(info, _) => *info,
-            WitnessShape::Tuple(info, _) => *info,
+        }
+    }
+
+    /// Whether any level of this shape is witness-typed.
+    pub fn contains_witness(&self) -> bool {
+        match self {
+            WitnessShape::Scalar(info) => info.is_witness(),
+            WitnessShape::Array(info, inner) | WitnessShape::Ref(info, inner) => {
+                info.is_witness() || inner.contains_witness()
+            }
         }
     }
 
@@ -114,9 +107,6 @@ impl WitnessShape {
             WitnessShape::Array(_, inner) => Some(*inner.clone()),
             WitnessShape::Ref(_, inner) => Some(*inner.clone()),
             WitnessShape::Scalar(_) => None,
-            WitnessShape::Tuple(_, _) => {
-                panic!("Error: child_witness_type shouldn't be called for Tuple values")
-            }
         }
     }
 
@@ -125,15 +115,13 @@ impl WitnessShape {
             WitnessShape::Scalar(_) => WitnessShape::Scalar(toplevel),
             WitnessShape::Array(_, inner) => WitnessShape::Array(toplevel, inner.clone()),
             WitnessShape::Ref(_, inner) => WitnessShape::Ref(toplevel, inner.clone()),
-            WitnessShape::Tuple(_, inner) => WitnessShape::Tuple(toplevel, inner.clone()),
         }
     }
 
-    /// Push witness info into the leaves of composites (arrays, tuples)
-    /// instead of wrapping at the top level. For scalars and refs this
-    /// is equivalent to `with_toplevel_info`. For arrays and tuples, the
-    /// info is pushed recursively into children, keeping the top-level
-    /// info unchanged.
+    /// Push witness info into the leaves of composites (arrays) instead of
+    /// wrapping at the top level. For scalars and refs this is equivalent to
+    /// `with_toplevel_info`. For arrays, the info is pushed recursively into
+    /// children, keeping the top-level info unchanged.
     pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessShape {
         match self {
             WitnessShape::Scalar(existing) => WitnessShape::Scalar(existing.join(info)),
@@ -141,13 +129,6 @@ impl WitnessShape {
                 WitnessShape::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
             }
             WitnessShape::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
-            WitnessShape::Tuple(top, children) => WitnessShape::Tuple(
-                *top,
-                children
-                    .iter()
-                    .map(|child| child.with_witness_in_leaves(info))
-                    .collect(),
-            ),
         }
     }
 }

@@ -325,6 +325,8 @@ pub fn run_phase1(
 
     let frame = Frame::base_frame(program[code_start + 2], &mut vm);
 
+    // Main takes its inputs as a single Blob<Field; N> parameter stored by
+    // value in the frame, starting right after the two return slots.
     for (input_index, el) in flat_inputs.iter().enumerate() {
         unsafe {
             *(frame.data.add(2 + (4 * input_index)) as *mut Field) = *el;

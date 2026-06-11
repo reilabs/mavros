@@ -5,6 +5,7 @@ use mavros_compiler::Project;
 use mavros_compiler::api;
 use mavros_compiler::compiler::Field;
 use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
+use mavros_compiler::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
 use mavros_compiler::driver::Driver;
 use mavros_compiler::plotting;
 
@@ -171,7 +172,8 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
-            Some(wasm_path)
+            let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build();
+            Some((wasm_path, WasmCompileOpts::release(runtime_lib)))
         } else {
             None
         };

@@ -2468,3 +2468,38 @@ fn test_16() {
             ],
     );
 }
+
+// ====================
+// Generic entry point
+// ====================
+
+/// Length-coercion helper for dispatching a generic width to the fixed-width permutations.
+/// The live branch always has N == M; the dead branches still have to type-check and stay
+/// in-bounds until constant folding prunes them, hence the copy bounded by min(N, M).
+fn resize<let N: u32, let M: u32>(input: [Field; N]) -> [Field; M] {
+    let mut out = [0; M];
+    let bound = if N < M { N } else { M };
+    for i in 0..bound {
+        out[i] = input[i];
+    }
+    out
+}
+
+pub fn poseidon2_permutation<let N: u32>(input: [Field; N]) -> [Field; N] {
+    if N == 2 {
+        resize(t2(resize(input)))
+    } else if N == 3 {
+        resize(t3(resize(input)))
+    } else if N == 4 {
+        resize(t4(resize(input)))
+    } else if N == 8 {
+        resize(t8(resize(input)))
+    } else if N == 12 {
+        resize(t12(resize(input)))
+    } else if N == 16 {
+        resize(t16(resize(input)))
+    } else {
+        assert(false, "unsupported poseidon2 permutation state width");
+        input
+    }
+}

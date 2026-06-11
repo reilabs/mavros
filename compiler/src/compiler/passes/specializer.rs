@@ -21,7 +21,7 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
+            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
             MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
             TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
@@ -50,7 +50,7 @@ enum ConstVal {
     I(usize, u128),
     Field(Field),
     Array(Vec<ValueId>),
-    Tuple(Vec<ValueId>),
+    Blob(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
@@ -317,7 +317,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let index_const = ctx.const_vals.get(&index.0).cloned();
         match (a_const, index_const) {
-            (Some(ConstVal::Array(a)), Some(ConstVal::U(_, index))) => {
+            (Some(ConstVal::Array(a) | ConstVal::Blob(a)), Some(ConstVal::U(_, index))) => {
                 let res = a[index as usize];
                 Self(res)
             }
@@ -343,17 +343,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Self(res)
             }
             (a, i) => panic!("Not yet implemented {:?}", (a, i)),
-        }
-    }
-
-    fn tuple_get(&self, index: usize, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
-        let a_const = ctx.const_vals.get(&self.0);
-        match a_const {
-            Some(ConstVal::Tuple(a)) => {
-                let res = a[index];
-                Self(res)
-            }
-            _ => panic!("Not yet implemented {:?}", a_const),
         }
     }
 
@@ -530,6 +519,50 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
+    fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut SpecializationState) -> Self {
+        fn constant_for(ctx: &SpecializationState<'_>, value: ValueId, typ: &Type) -> Constant {
+            match ctx
+                .const_vals
+                .get(&value)
+                .unwrap_or_else(|| panic!("Blob element v{} is not a constant", value.0))
+            {
+                ConstVal::U(bits, value) => Constant::U(*bits, *value),
+                ConstVal::I(bits, value) => Constant::I(*bits, *value),
+                ConstVal::Field(value) => Constant::Field(*value),
+                ConstVal::Blob(elements) => {
+                    let inner = typ.get_array_element();
+                    Constant::Blob(Blob::new(
+                        inner.clone(),
+                        elements
+                            .iter()
+                            .map(|element| constant_for(ctx, *element, &inner))
+                            .collect(),
+                    ))
+                }
+                other => panic!(
+                    "Blob element v{} is not a scalar/blob constant: {:?}",
+                    value.0, other
+                ),
+            }
+        }
+
+        let element_ids = elements.iter().map(|v| v.0).collect::<Vec<_>>();
+        let constants = element_ids
+            .iter()
+            .map(|element| constant_for(ctx, *element, &elem_type))
+            .collect();
+        let val = ctx.emit_constant(Constant::Blob(Blob::new(elem_type, constants)));
+        ctx.const_vals.insert(val, ConstVal::Blob(element_ids));
+        Self(val)
+    }
+
+    fn expect_blob(&self, ctx: &mut SpecializationState) -> Vec<Self> {
+        match ctx.const_vals.get(&self.0) {
+            Some(ConstVal::Blob(elements)) => elements.iter().copied().map(Self).collect(),
+            other => panic!("Expected blob, got {:?}", other),
+        }
+    }
+
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut SpecializationState,
@@ -539,13 +572,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
         let val = ctx.mk_seq(a.clone(), seq_type, elem_type.clone());
         ctx.const_vals.insert(val, ConstVal::Array(a));
-        Self(val)
-    }
-
-    fn mk_tuple(elems: Vec<Self>, ctx: &mut SpecializationState, elem_types: &[Type]) -> Self {
-        let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.mk_tuple(a.clone(), elem_types.to_vec());
-        ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
 
@@ -887,6 +913,10 @@ impl Specializer {
                     info!("TODO: Aborting specialization on an array value");
                     return;
                 }
+                ValueSignature::Blob(_) => {
+                    info!("TODO: Aborting specialization on a blob value");
+                    return;
+                }
                 ValueSignature::Unknown(_)
                 | ValueSignature::UnknownSlice
                 | ValueSignature::WitnessOf(_) => {
@@ -908,10 +938,6 @@ impl Specializer {
                     let val = ssa.add_const(Constant::I(*bits_size, *value));
                     call_params.push(Val(val));
                     const_vals.insert(val, ConstVal::I(*bits_size, *value));
-                }
-                ValueSignature::Tuple(_) => {
-                    info!("TODO: Aborting specialization on a tuple value");
-                    return;
                 }
             }
         }
@@ -1005,10 +1031,19 @@ impl Specializer {
             for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
                 match psig {
                     ValueSignature::PointerTo(_) => {
-                        todo!();
+                        unreachable!(
+                            "ICE: pointer specializations are rejected before dispatcher generation"
+                        );
                     }
                     ValueSignature::Array(_) => {
-                        todo!();
+                        unreachable!(
+                            "ICE: array specializations are rejected before dispatcher generation"
+                        );
+                    }
+                    ValueSignature::Blob(_) => {
+                        unreachable!(
+                            "ICE: blob specializations are rejected before dispatcher generation"
+                        );
                     }
                     ValueSignature::Unknown(_)
                     | ValueSignature::UnknownSlice
@@ -1029,9 +1064,6 @@ impl Specializer {
                         let cst = entry.i_const(*bits_size, *value);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
-                    }
-                    ValueSignature::Tuple(_) => {
-                        todo!();
                     }
                 }
             }

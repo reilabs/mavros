@@ -3,6 +3,7 @@
 //! Does not float expressions across branches or otherwise move them outside the block in which
 //! they appear (#172).
 
+use crate::compiler::util::ice_non_elided_tuple;
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{
@@ -44,7 +45,6 @@ enum ExprNode {
     BitRange { value: ExprId, offset: usize, width: usize },
     Select { condition: ExprId, then: ExprId, otherwise: ExprId },
     ArrayGet { array: ExprId, index: ExprId },
-    TupleGet { tuple: ExprId, index: ExprId },
     Not(ExprId),
     ReadGlobal(u64),
     Cast { value: ExprId, target: CastTarget },
@@ -241,10 +241,6 @@ impl ExprInterner {
 
     fn array_get(&mut self, array: ExprId, index: ExprId) -> ExprId {
         self.intern(ExprNode::ArrayGet { array, index })
-    }
-
-    fn tuple_get(&mut self, tuple: ExprId, index: ExprId) -> ExprId {
-        self.intern(ExprNode::TupleGet { tuple, index })
     }
 
     fn select(&mut self, condition: ExprId, then: ExprId, otherwise: ExprId) -> ExprId {
@@ -489,7 +485,7 @@ impl CSE {
                 Constant::U(bits, value) => interner.uconst(*bits, *value),
                 Constant::I(bits, value) => interner.iconst(*bits, *value),
                 Constant::Field(value) => interner.fconst(*value),
-                Constant::FnPtr(_) => continue,
+                Constant::FnPtr(_) | Constant::Blob(_) => continue,
             };
             exprs.insert(*vid, id);
         }
@@ -1016,8 +1012,8 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::MkSeqOfBlob { .. }
                     | OpCode::MkRepeated { .. }
-                    | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }
@@ -1045,23 +1041,9 @@ impl CSE {
                             result_expr,
                         );
                     }
-                    OpCode::TupleProj {
-                        result: r,
-                        tuple,
-                        idx,
-                    } => {
-                        let tuple_expr = get_expr(&exprs, &mut interner, tuple);
-                        let index_expr = interner.uconst(64, *idx as u128);
-                        let result_expr = interner.tuple_get(tuple_expr, index_expr);
-                        record_expr(
-                            &mut exprs,
-                            &mut result,
-                            block_id,
-                            instruction_idx,
-                            *r,
-                            result_expr,
-                        );
-                    }
+                    OpCode::TupleProj { .. }
+                    | OpCode::TupleRefProj { .. }
+                    | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }

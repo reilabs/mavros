@@ -5,6 +5,7 @@
 //! It also handles cases where values die along edges instead of within a block to actually perform
 //! the necessary decrements.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use itertools::Itertools;
 use tracing::{Level, debug, instrument, trace};
 
@@ -173,41 +174,8 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
                     }
-                    OpCode::TupleProj {
-                        result,
-                        tuple,
-                        idx: _,
-                    } => {
-                        if !currently_live.contains(tuple) {
-                            // The tuple dies here, so we drop it _after_ the read.
-                            new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Drop,
-                                value: *tuple,
-                            });
-                        }
-                        if self.needs_rc(type_info, result) {
-                            if currently_live.contains(result) {
-                                // The result gets a bump to the RC counter, because
-                                // it's now both accessed here and in the array.
-                                new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(1),
-                                    value: *result,
-                                });
-                            } else {
-                                panic!(
-                                    "ICE: Result of TupleProj (V{} in block {}) is not live. This is a bug.",
-                                    result.0, block_id.0
-                                )
-                            }
-                        } else {
-                            trace!(
-                                "TupleProj: result={} of type {:?} does not need RC",
-                                result.0,
-                                type_info.get_value_type(*result)
-                            );
-                        }
-                        new_instructions.push(instruction.clone());
-                        currently_live.insert(*tuple);
+                    OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
+                        ice_non_elided_tuple()
                     }
                     OpCode::Cast {
                         result: r,
@@ -372,6 +340,22 @@ impl RCInsertion {
                         }
                         currently_live.extend(inputs);
                     }
+                    OpCode::MkSeqOfBlob {
+                        result,
+                        element_type,
+                        blob: _,
+                    } => {
+                        new_instructions.push(instruction.clone());
+                        assert!(
+                            !self.type_needs_rc(element_type),
+                            "MkSeqOfBlob only supports scalar element types"
+                        );
+                        if !currently_live.contains(result) {
+                            panic!(
+                                "ICE: Result of MkSeqOfBlob is immediately dropped. This is a bug."
+                            )
+                        }
+                    }
                     OpCode::MkRepeated {
                         result,
                         element,
@@ -507,8 +491,9 @@ impl RCInsertion {
                         array,
                         index: _,
                     } => {
-                        if !currently_live.contains(array) {
+                        if !currently_live.contains(array) && self.needs_rc(type_info, array) {
                             // The array dies here, so we drop it _after_ the read.
+                            // Blobs are not RC'd and need no drop.
                             new_instructions.push(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *array,
@@ -728,42 +713,7 @@ impl RCInsertion {
                     OpCode::Guard { .. } => {
                         panic!("ICE: Guard should be lowered before RC insertion");
                     }
-                    OpCode::MkTuple {
-                        result,
-                        elems,
-                        element_types,
-                    } => {
-                        new_instructions.push(instruction.clone());
-                        for (input, group) in elems
-                            .iter()
-                            .zip(element_types)
-                            .sorted_by_key(|(v, _)| v.0)
-                            .chunk_by(|(v, _)| *v)
-                            .into_iter()
-                        {
-                            let items: Vec<_> = group.collect();
-                            let count = items.iter().count();
-                            let (_, elem_type) = items[0];
-
-                            if self.type_needs_rc(elem_type) {
-                                let mut count = count;
-                                if !currently_live.contains(input) {
-                                    count -= 1;
-                                }
-                                if count > 0 {
-                                    new_instructions.push(OpCode::MemOp {
-                                        kind: RefCountOp::Bump(count),
-                                        value: *input,
-                                    });
-                                }
-                            }
-                        }
-
-                        if !currently_live.contains(result) {
-                            panic!("ICE: Result of MkTuple is immediately dropped. This is a bug.")
-                        }
-                        currently_live.extend(elems);
-                    }
+                    OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                 }
             }
             for param in block.get_parameter_values() {
@@ -854,8 +804,9 @@ impl RCInsertion {
             TypeExpr::U(_) => false,
             TypeExpr::I(_) => false,
             TypeExpr::WitnessOf(_) => true,
-            TypeExpr::Tuple(_) => true,
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Function => false,
+            TypeExpr::Blob(..) => false,
         }
     }
 }
