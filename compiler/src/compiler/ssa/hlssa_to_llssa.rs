@@ -53,6 +53,7 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => LLType::Ptr,
+        HLTypeExpr::Blob(..) => LLType::Ptr,
         _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
@@ -78,14 +79,9 @@ fn elem_struct(ty: &HLType) -> LLStruct {
     }
 }
 
-/// Get the RC'd array struct for an Array<T, N> type.
-fn rc_array_struct(elem_type: &HLType, count: usize) -> LLStruct {
-    LLStruct::rc_array(elem_struct(elem_type), count)
-}
-
-/// Get the RC'd slice struct for a Slice<T> type.
-fn rc_slice_struct(elem_type: &HLType) -> LLStruct {
-    LLStruct::rc_slice(elem_struct(elem_type))
+/// Get the RC'd sequence struct shared by Array<T, N> and Slice<T> types.
+fn rc_seq_struct(elem_type: &HLType) -> LLStruct {
+    LLStruct::rc_seq(elem_struct(elem_type))
 }
 
 /// Convert an HLSSA element type to an LLFieldType for use in RC'd cell struct layouts.
@@ -133,16 +129,18 @@ fn sequence_elem_type(ty: &HLType) -> &HLType {
 
 fn sequence_rc_struct(ty: &HLType) -> LLStruct {
     match &ty.expr {
-        HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
-        HLTypeExpr::Slice(inner) => rc_slice_struct(inner),
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => rc_seq_struct(inner),
         _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
 
+/// Arrays and slices share the same layout: { rc, table_id, len, data }.
+const SEQ_LEN_FIELD: usize = 2;
+const SEQ_DATA_FIELD: usize = 3;
+
 fn sequence_data_field(ty: &HLType) -> usize {
     match &ty.expr {
-        HLTypeExpr::Array(..) => 2,
-        HLTypeExpr::Slice(..) => 3,
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => SEQ_DATA_FIELD,
         _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
@@ -152,7 +150,7 @@ fn sequence_len_value(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> 
         HLTypeExpr::Array(_, n) => e.emit_int_const(64, *n as u64),
         HLTypeExpr::Slice(_) => {
             let rc_struct = sequence_rc_struct(ty);
-            let len_ptr = e.struct_field_ptr(ptr, rc_struct, 2);
+            let len_ptr = e.struct_field_ptr(ptr, rc_struct, SEQ_LEN_FIELD);
             e.ll_load(len_ptr, LLType::i64())
         }
         _ => panic!("Expected array or slice type, got: {}", ty),
@@ -160,6 +158,10 @@ fn sequence_len_value(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> 
 }
 
 fn sequence_data_ptr(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> ValueId {
+    // Blob values are already raw pointers to their packed element data.
+    if ty.is_blob() {
+        return ptr;
+    }
     let rc_struct = sequence_rc_struct(ty);
     e.struct_field_ptr(ptr, rc_struct, sequence_data_field(ty))
 }
@@ -548,9 +550,14 @@ fn lower_inner(
 /// All HLSSA constants are interned into LLSSA's module-level constants table. Scalar `U`/`I`
 /// constants become `LLConstant::Int`; field constants become an aggregate `LLConstant::Struct`
 /// holding the four-limb `field_elem()` layout with one `Int` value per limb.
+///
+/// Blob constants additionally get a `ConstDataPtr` emitted in the entry block, and the HLSSA
+/// value maps to that pointer. This keeps the runtime representation of blob values uniform:
+/// a blob value in LLSSA is always a raw pointer to its packed element data.
 fn lower_constants_llssa(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
+    ll_func: &mut LLFunction,
     llssa: &mut LLSSA,
     val_map: &mut HashMap<ValueId, ValueId>,
 ) {
@@ -588,12 +595,27 @@ fn lower_constants_llssa(
     let mut referenced: Vec<ValueId> = referenced.into_iter().collect();
     referenced.sort_by_key(|v| v.0);
 
+    let entry_id = ll_func.get_entry_id();
+    let mut e = LLBlockEmitter::new(ll_func, llssa, entry_id);
     for vid in referenced {
-        let ll_constant = lower_constant_to_ll_constant(
-            constants.get(&vid).expect("vid is in constants").as_ref(),
-        );
-        let ll_val = llssa.add_const(ll_constant);
-        val_map.insert(vid, ll_val);
+        let constant = constants.get(&vid).expect("vid is in constants");
+        let ll_constant = lower_constant_to_ll_constant(constant.as_ref());
+        let ll_val = e.ssa.add_const(ll_constant);
+        match constant.as_ref() {
+            // An empty blob has no backing data; its (never dereferenced)
+            // data pointer is null.
+            Constant::Blob(blob) if blob.is_empty() => {
+                let null_ptr = e.ssa.add_const(LLConstant::NullPtr);
+                val_map.insert(vid, null_ptr);
+            }
+            Constant::Blob(blob) => {
+                let data_ptr = e.const_data_ptr(elem_struct(&blob.elem_type), ll_val);
+                val_map.insert(vid, data_ptr);
+            }
+            _ => {
+                val_map.insert(vid, ll_val);
+            }
+        }
     }
 }
 
@@ -688,7 +710,7 @@ fn lower_function(
         }
     }
 
-    lower_constants_llssa(function, constants, llssa, &mut val_map);
+    lower_constants_llssa(function, constants, &mut ll_func, llssa, &mut val_map);
 
     // Lower instructions and terminators in domination order
     for block_id in cfg.get_domination_pre_order() {
@@ -1180,15 +1202,10 @@ fn lower_instruction(
                     val_map.insert(*result, ll_value);
                 }
                 CastTarget::ArrayToSlice => {
-                    lower_array_to_slice(
-                        e,
-                        val_map,
-                        *result,
-                        *value,
-                        &source_type,
-                        drop_fns,
-                        ad_fns,
-                    );
+                    // Arrays and slices share the same heap layout, so this
+                    // cast is a pure alias: ownership of the object transfers
+                    // to the result, matching the VM backend's nop semantics.
+                    val_map.insert(*result, ll_value);
                 }
             }
         }
@@ -1589,14 +1606,21 @@ fn lower_unspread(
 // Array lowering helpers
 // =============================================================================
 
-fn init_rc_sequence_header(e: &mut LLBlockEmitter<'_>, ptr: ValueId, rc_struct: LLStruct) {
+fn init_rc_sequence_header(
+    e: &mut LLBlockEmitter<'_>,
+    ptr: ValueId,
+    rc_struct: LLStruct,
+    len: ValueId,
+) {
     let rc_hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
     let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
     let one = e.emit_int_const(64, 1);
     e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(ptr, rc_struct, 1);
+    let table_id = e.struct_field_ptr(ptr, rc_struct.clone(), 1);
     let unassigned = e.emit_int_const(64, u64::MAX);
     e.ll_store(table_id, unassigned);
+    let len_ptr = e.struct_field_ptr(ptr, rc_struct, SEQ_LEN_FIELD);
+    e.ll_store(len_ptr, len);
 }
 
 /// Lower MkSeq(Array) to heap allocation + element stores.
@@ -1612,7 +1636,7 @@ fn lower_mk_array(
     let (arr, rc_struct) = lower_alloc_rc_array(e, elem_type, count);
 
     // Store elements
-    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let data = e.struct_field_ptr(arr, rc_struct, SEQ_DATA_FIELD);
     for (i, elem) in elems.iter().enumerate() {
         let idx = e.emit_int_const(64, i as u64);
         let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
@@ -1631,16 +1655,14 @@ fn lower_mk_slice(
     elems: &[ValueId],
     elem_type: &HLType,
 ) {
-    let rc_struct = rc_slice_struct(elem_type);
+    let rc_struct = rc_seq_struct(elem_type);
     let es = elem_struct(elem_type);
     let len = e.emit_int_const(64, elems.len() as u64);
 
     let slice = e.heap_alloc(rc_struct.clone(), Some(len));
-    init_rc_sequence_header(e, slice, rc_struct.clone());
-    let len_ptr = e.struct_field_ptr(slice, rc_struct.clone(), 2);
-    e.ll_store(len_ptr, len);
+    init_rc_sequence_header(e, slice, rc_struct.clone(), len);
 
-    let data = e.struct_field_ptr(slice, rc_struct, 3);
+    let data = e.struct_field_ptr(slice, rc_struct, SEQ_DATA_FIELD);
     for (i, elem) in elems.iter().enumerate() {
         let idx = e.emit_int_const(64, i as u64);
         let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
@@ -1664,11 +1686,10 @@ fn lower_mk_blob_array(
     let (arr, rc_struct) = lower_alloc_rc_array(e, elem_type, count);
 
     if count > 0 {
-        let data = e.struct_field_ptr(arr, rc_struct, 2);
-        let ll_blob = val_map[&blob];
-        let rodata = e.const_data_ptr(es.clone(), ll_blob);
+        let data = e.struct_field_ptr(arr, rc_struct, SEQ_DATA_FIELD);
+        let blob_data = val_map[&blob];
         let count_val = e.emit_int_const(64, count as u64);
-        e.memcpy(data, rodata, es, Some(count_val));
+        e.memcpy(data, blob_data, es, Some(count_val));
     }
 
     val_map.insert(result, arr);
@@ -1679,9 +1700,10 @@ fn lower_alloc_rc_array(
     elem_type: &HLType,
     count: usize,
 ) -> (ValueId, LLStruct) {
-    let rc_struct = rc_array_struct(elem_type, count);
-    let arr = e.heap_alloc(rc_struct.clone(), None);
-    init_rc_sequence_header(e, arr, rc_struct.clone());
+    let rc_struct = rc_seq_struct(elem_type);
+    let len = e.emit_int_const(64, count as u64);
+    let arr = e.heap_alloc(rc_struct.clone(), Some(len));
+    init_rc_sequence_header(e, arr, rc_struct.clone(), len);
 
     (arr, rc_struct)
 }
@@ -1701,7 +1723,7 @@ fn lower_mk_repeated_array(
     let es = elem_struct(elem_type);
     let (arr, rc_struct) = lower_alloc_rc_array(e, elem_type, count);
 
-    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let data = e.struct_field_ptr(arr, rc_struct, SEQ_DATA_FIELD);
     let ll_element = val_map[&element];
 
     let len = e.emit_int_const(64, count as u64);
@@ -1722,16 +1744,14 @@ fn lower_mk_repeated_slice(
     elem_type: &HLType,
     count: usize,
 ) {
-    let rc_struct = rc_slice_struct(elem_type);
+    let rc_struct = rc_seq_struct(elem_type);
     let es = elem_struct(elem_type);
     let len = e.emit_int_const(64, count as u64);
 
     let slice = e.heap_alloc(rc_struct.clone(), Some(len));
-    init_rc_sequence_header(e, slice, rc_struct.clone());
-    let len_ptr = e.struct_field_ptr(slice, rc_struct.clone(), 2);
-    e.ll_store(len_ptr, len);
+    init_rc_sequence_header(e, slice, rc_struct.clone(), len);
 
-    let data = e.struct_field_ptr(slice, rc_struct, 3);
+    let data = e.struct_field_ptr(slice, rc_struct, SEQ_DATA_FIELD);
     let ll_element = val_map[&element];
 
     e.build_counted_loop(len, vec![], |emitter, i, _accs| {
@@ -1745,8 +1765,7 @@ fn lower_mk_repeated_slice(
 
 fn rc_struct_for_droppable_type(ty: &HLType) -> LLStruct {
     match &ty.expr {
-        HLTypeExpr::Array(inner, n) => rc_array_struct(inner, *n),
-        HLTypeExpr::Slice(inner) => rc_slice_struct(inner),
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => rc_seq_struct(inner),
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
@@ -1759,55 +1778,6 @@ fn bump_rc_value(e: &mut LLBlockEmitter<'_>, value: ValueId, ty: &HLType, n: usi
     let hdr = e.struct_field_ptr(value, rc_struct, 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
     modify_rc(e, rc_ptr, n as i64);
-}
-
-fn bump_copied_sequence_elements(
-    e: &mut LLBlockEmitter<'_>,
-    data: ValueId,
-    elem_type: &HLType,
-    len: ValueId,
-) {
-    if !needs_drop(&elem_type.expr) {
-        return;
-    }
-    let es = elem_struct(elem_type);
-    e.build_counted_loop(len, vec![], |e, i_val, _| {
-        let elem_ptr = e.array_elem_ptr(data, es.clone(), i_val);
-        let elem_val = e.ll_load(elem_ptr, LLType::Ptr);
-        bump_rc_value(e, elem_val, elem_type, 1);
-        vec![]
-    });
-}
-
-fn lower_array_to_slice(
-    e: &mut LLBlockEmitter<'_>,
-    val_map: &mut HashMap<ValueId, ValueId>,
-    result: ValueId,
-    array: ValueId,
-    array_type: &HLType,
-    drop_fns: &mut Vec<DropFnEntry>,
-    ad_fns: &mut AdFunctions,
-) {
-    let (elem_type, count) = array_info(array_type);
-    if needs_drop(&elem_type.expr) {
-        get_or_create_drop_fn(elem_type, e.ssa, drop_fns, ad_fns);
-    }
-
-    let array_struct = rc_array_struct(elem_type, count);
-    let slice_struct = rc_slice_struct(elem_type);
-    let len = e.emit_int_const(64, count as u64);
-    let slice = e.heap_alloc(slice_struct.clone(), Some(len));
-    init_rc_sequence_header(e, slice, slice_struct.clone());
-    let len_ptr = e.struct_field_ptr(slice, slice_struct.clone(), 2);
-    e.ll_store(len_ptr, len);
-
-    let ll_array = val_map[&array];
-    let old_data = e.struct_field_ptr(ll_array, array_struct, 2);
-    let new_data = e.struct_field_ptr(slice, slice_struct, 3);
-    e.memcpy(new_data, old_data, elem_struct(elem_type), Some(len));
-    bump_copied_sequence_elements(e, new_data, elem_type, len);
-
-    val_map.insert(result, slice);
 }
 
 fn lower_to_bytes(
@@ -1855,22 +1825,15 @@ fn lower_to_bytes(
 
     // Allocate RC'd array of u8
     let u8_type = HLType::u(8);
-    let rc_struct = rc_array_struct(&u8_type, count);
+    let rc_struct = rc_seq_struct(&u8_type);
     let es = elem_struct(&u8_type);
 
-    let arr = e.heap_alloc(rc_struct.clone(), None);
-
-    // Init RC to 1
-    let rc_hdr = e.struct_field_ptr(arr, rc_struct.clone(), 0);
-    let rc_word = e.struct_field_ptr(rc_hdr, LLStruct::rc_header(), 0);
-    let one = e.emit_int_const(64, 1);
-    e.ll_store(rc_word, one);
-    let table_id = e.struct_field_ptr(arr, rc_struct.clone(), 1);
-    let unassigned = e.emit_int_const(64, u64::MAX);
-    e.ll_store(table_id, unassigned);
+    let len = e.emit_int_const(64, count as u64);
+    let arr = e.heap_alloc(rc_struct.clone(), Some(len));
+    init_rc_sequence_header(e, arr, rc_struct.clone(), len);
 
     // Store bytes into the array
-    let data = e.struct_field_ptr(arr, rc_struct, 2);
+    let data = e.struct_field_ptr(arr, rc_struct, SEQ_DATA_FIELD);
     for i in 0..count {
         let src_idx = match endianness {
             Endianness::Big => count - 1 - i,
@@ -1972,9 +1935,9 @@ fn lower_array_get(
     index: ValueId,
 ) {
     let arr_type = fn_type_info.get_value_type(array);
-    let et = sequence_elem_type(arr_type);
-    let es = elem_struct(et);
-    let ll_elem_type = lower_type(et);
+    let et = arr_type.get_array_element();
+    let es = elem_struct(&et);
+    let ll_elem_type = lower_type(&et);
 
     let ll_arr = val_map[&array];
     let ll_idx = val_map[&index];
@@ -2060,19 +2023,10 @@ fn lower_array_set(
             modify_rc(ce, rc_ptr, -1);
 
             // Allocate new array/slice
-            let flex_count = if matches!(arr_type.expr, HLTypeExpr::Slice(_)) {
-                Some(len)
-            } else {
-                None
-            };
-            let new_arr = ce.heap_alloc(rc_struct.clone(), flex_count);
+            let new_arr = ce.heap_alloc(rc_struct.clone(), Some(len));
 
             // Init new RC to 1
-            init_rc_sequence_header(ce, new_arr, rc_struct.clone());
-            if matches!(arr_type.expr, HLTypeExpr::Slice(_)) {
-                let len_ptr = ce.struct_field_ptr(new_arr, rc_struct.clone(), 2);
-                ce.ll_store(len_ptr, len);
-            }
+            init_rc_sequence_header(ce, new_arr, rc_struct.clone(), len);
 
             // Copy all data
             let old_data = sequence_data_ptr(ce, ll_arr, arr_type);
@@ -3377,8 +3331,8 @@ fn emit_lookup_leaf_loop(
     on_leaf: &mut impl FnMut(&mut LLBlockEmitter<'_>, ValueId, &HLType, ValueId),
 ) -> ValueId {
     let (elem_type, count) = array_info(array_type);
-    let rc_struct = rc_array_struct(elem_type, count);
-    let data = e.struct_field_ptr(array, rc_struct, 2);
+    let rc_struct = rc_seq_struct(elem_type);
+    let data = e.struct_field_ptr(array, rc_struct, SEQ_DATA_FIELD);
 
     let count = e.emit_int_const(64, count as u64);
     let results = e.build_counted_loop(
@@ -3445,9 +3399,9 @@ fn emit_array_lookup_const_rows(
 }
 
 fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLFunction {
-    let (elem_type, count) = array_info(array_type);
+    let (elem_type, _) = array_info(array_type);
     let lookup = LookupTableSpec::array(lookup_array_len(array_type));
-    let rc_struct = rc_array_struct(elem_type, count);
+    let rc_struct = rc_seq_struct(elem_type);
     let mut func = new_ll_function(llssa, format!("__array_lookup_{}", array_type));
     let entry = func.get_entry_id();
 
@@ -3955,9 +3909,9 @@ fn emit_array_ad_init_body(
     bump_db_fn: FunctionId,
     witness_layout: WitnessLayout,
 ) -> ValueId {
-    let (elem_type, count) = array_info(array_type);
+    let (elem_type, _) = array_info(array_type);
     let lookup = LookupTableSpec::array(lookup_array_len(array_type));
-    let rc_struct = rc_array_struct(elem_type, count);
+    let rc_struct = rc_seq_struct(elem_type);
 
     lookup.assert_key_value("AD table init");
 
@@ -4010,9 +3964,9 @@ fn generate_darray_ad_call(
     bump_db_fn: FunctionId,
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
-    let (elem_type, count) = array_info(array_type);
+    let (elem_type, _) = array_info(array_type);
     let lookup = LookupTableSpec::array(lookup_array_len(array_type));
-    let rc_struct = rc_array_struct(elem_type, count);
+    let rc_struct = rc_seq_struct(elem_type);
     let mut func = new_ll_function(llssa, format!("__darray_lookup_{}_ad_call", array_type));
     let entry = func.get_entry_id();
 
@@ -4294,8 +4248,9 @@ mod tests {
         let function = hlssa.get_main();
 
         let mut llssa = LLSSA::with_main("felt_test".to_string());
+        let mut ll_func = LLFunction::empty("felt_test".to_string());
         let mut val_map = HashMap::new();
-        lower_constants_llssa(function, &constants, &mut llssa, &mut val_map);
+        lower_constants_llssa(function, &constants, &mut ll_func, &mut llssa, &mut val_map);
 
         let dump = llssa.to_string(&DefaultSSAAnnotator);
         // The felt is a module-level aggregate constant...
@@ -4334,11 +4289,14 @@ mod tests {
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.block(entry);
-            let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(vec![
-                HLConstant::U(8, 1),
-                HLConstant::U(8, 2),
-                HLConstant::U(8, 3),
-            ])));
+            let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(
+                HLType::u(8),
+                vec![
+                    HLConstant::U(8, 1),
+                    HLConstant::U(8, 2),
+                    HLConstant::U(8, 3),
+                ],
+            )));
             let arr = e.mk_seq_of_blob(HLType::u(8), blob);
             e.terminate_return(vec![arr]);
         });

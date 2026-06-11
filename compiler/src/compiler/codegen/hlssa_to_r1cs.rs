@@ -740,7 +740,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from(f))
     }
 
-    fn of_blob(elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
+    fn of_blob(_elem_type: Type, elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
         Value::Blob(elements)
     }
 

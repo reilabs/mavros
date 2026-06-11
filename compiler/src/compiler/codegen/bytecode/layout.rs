@@ -96,6 +96,8 @@ impl FrameLayouter {
             TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
+            // Blobs are stored by value, inline in the frame.
+            TypeExpr::Blob(ref elem, n) => n * self.type_size(elem),
             _ => todo!(),
         }
     }

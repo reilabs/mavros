@@ -231,7 +231,10 @@ impl Value {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
             TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
-            TypeExpr::Blob(_) => panic!("Cannot create unknown value for Blob type"),
+            TypeExpr::Blob(elem, n) => {
+                let elem_unknown = Value::unknown_from_type(elem);
+                Value::Blob(vec![elem_unknown; *n])
+            }
         }
     }
 
@@ -672,6 +675,7 @@ impl Value {
             (Value::Array(vals), Value::U(_, index)) => {
                 vals.borrow().values[*index as usize].clone()
             }
+            (Value::Blob(vals), Value::U(_, index)) => vals[*index as usize].clone(),
             (Value::Array(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
                 Value::U(_, index) => vals.borrow().values[*index as usize].clone(),
                 _ => {
@@ -679,8 +683,19 @@ impl Value {
                     Value::unknown_from_type(tp)
                 }
             },
+            (Value::Blob(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
+                Value::U(_, index) => vals[*index as usize].clone(),
+                _ => {
+                    instrumenter.record_lookups(vals.len(), 1, 1);
+                    Value::unknown_from_type(tp)
+                }
+            },
             (Value::Array(vals), Value::Unknown(_)) => {
                 instrumenter.record_lookups(vals.borrow().values.len(), 1, 1);
+                Value::unknown_from_type(tp)
+            }
+            (Value::Blob(vals), Value::Unknown(_)) => {
+                instrumenter.record_lookups(vals.len(), 1, 1);
                 Value::unknown_from_type(tp)
             }
             (Value::Unknown(_) | Value::UnknownSlice, _) => Value::unknown_from_type(tp),
@@ -1500,7 +1515,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn of_blob(values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
+    fn of_blob(_elem_type: Type, values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
         let (unspecialized, specialized) = values
             .into_iter()
             .map(|v| (v.unspecialized, v.specialized))

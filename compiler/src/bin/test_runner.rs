@@ -16,9 +16,10 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::codegen::hlssa_to_r1cs::R1CS,
+    compiler::codegen::{hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::Driver,
     vm::{bytecode::TableInfo, interpreter},
+    wasm_runtime,
 };
 use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
@@ -272,7 +273,8 @@ fn run_single(root: PathBuf) {
         emit("START:WITGEN_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
-        match driver.compile_llvm_targets(false, r1cs, Some(wasm_path.clone())) {
+        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+        match driver.compile_llvm_targets(false, r1cs, Some((wasm_path.clone(), wasm_opts))) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -344,7 +346,8 @@ fn run_single(root: PathBuf) {
         emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("ad.wasm");
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs) {
+        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:AD_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -1124,6 +1127,13 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
 
     assert!(!entries.is_empty(), "No test directories found");
 
+    // Build the wasm runtime once before spawning workers and hand children the artifact path.
+    // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
+    // walk the noir git checkout while other children create and delete `mavros_debug` dirs for
+    // tests living inside it, crashing whichever child loses the race.
+    let wasm_runtime_lib = wasm_runtime::locate_or_build();
+    eprintln!("Built wasm runtime at: {}", wasm_runtime_lib.display());
+
     let exe = env::current_exe().expect("Cannot determine own exe path");
     let total = entries.len();
     let ignored_count = entries
@@ -1157,6 +1167,7 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
 
                     let mut child = Command::new(&exe)
                         .args(["--run-single", abs.to_str().unwrap()])
+                        .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::inherit())
                         .spawn()

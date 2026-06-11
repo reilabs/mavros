@@ -19,12 +19,6 @@ use crate::compiler::ssa::{
 
 use super::type_converter::TypeConverter;
 
-/// A LowLevel function replacement: either a single function or a family dispatched by array size.
-pub enum LowLevelReplacement {
-    Single(AstFuncId),
-    ByArraySize(HashMap<u32, AstFuncId>),
-}
-
 /// Loop context for break/continue support.
 struct LoopContext {
     loop_header: BlockId,
@@ -62,9 +56,6 @@ pub struct ExpressionConverter<'a> {
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
 
-    /// Maps LowLevel function name to its replacement
-    lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
-
     /// Current block being emitted into
     current_block: BlockId,
 }
@@ -75,7 +66,6 @@ impl<'a> ExpressionConverter<'a> {
         natively_unconstrained: &'a HashSet<AstFuncId>,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
-        lowlevel_replacements: &'a HashMap<String, LowLevelReplacement>,
         entry_block: BlockId,
     ) -> Self {
         Self {
@@ -87,7 +77,6 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
-            lowlevel_replacements,
             current_block: entry_block,
         }
     }
@@ -1005,7 +994,7 @@ impl<'a> ExpressionConverter<'a> {
                 // str<N>: array of u8 (UTF-8 bytes)
                 let elem_type = Type::u(8);
                 let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
-                let blob = b.emit_const(Constant::Blob(Blob::new(elems)));
+                let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
                 let arr = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
                 Some(arr)
             }
@@ -1025,7 +1014,8 @@ impl<'a> ExpressionConverter<'a> {
                     }
                 }
                 let cp_len = codepoint_constants.len();
-                let blob = b.emit_const(Constant::Blob(Blob::new(codepoint_constants)));
+                let blob =
+                    b.emit_const(Constant::Blob(Blob::new(Type::u(32), codepoint_constants)));
                 let cp_array = b
                     .block(self.current_block)
                     .mk_seq_of_blob(Type::u(32), blob);
@@ -1077,7 +1067,7 @@ impl<'a> ExpressionConverter<'a> {
 
         if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
             debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
-            let blob = b.emit_const(Constant::Blob(Blob::new(elements)));
+            let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elements)));
             let result = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
             return Some(result);
         }
@@ -1448,9 +1438,6 @@ impl<'a> ExpressionConverter<'a> {
                         .cast_to(CastTarget::ArrayToSlice, array),
                 )
             }
-            _ if self.lowlevel_replacements.contains_key(name) => {
-                self.convert_replacement_call(name, call, b)
-            }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
     }
@@ -1466,34 +1453,7 @@ impl<'a> ExpressionConverter<'a> {
             return Some(result);
         }
 
-        self.convert_replacement_call(name, call, b)
-    }
-
-    fn convert_replacement_call(
-        &mut self,
-        name: &str,
-        call: &noirc_frontend::monomorphization::ast::Call,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> Option<ValueId> {
-        let replacement = self
-            .lowlevel_replacements
-            .get(name)
-            .unwrap_or_else(|| panic!("No replacement registered for function '{name}'"));
-
-        let replacement_id = match replacement {
-            LowLevelReplacement::Single(func_id) => func_id,
-            LowLevelReplacement::ByArraySize(size_map) => {
-                let array_size = match &call.return_type {
-                    noirc_frontend::monomorphization::ast::Type::Array(n, _) => *n,
-                    _ => panic!("{} expected array return type", name),
-                };
-                size_map
-                    .get(&array_size)
-                    .unwrap_or_else(|| panic!("No {} replacement for size {}", name, array_size))
-            }
-        };
-
-        self.convert_static_call(replacement_id, call, b)
+        todo!("LowLevel function '{}' not yet supported", name)
     }
 
     /// Handle mavros-specific foreign functions directly in SSA,

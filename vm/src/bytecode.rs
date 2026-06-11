@@ -1190,6 +1190,28 @@ mod def {
         }
     }
 
+    /// Read an element out of a blob: a raw sequence of `len` elements of
+    /// `stride` cells each, stored inline in the frame starting at `source`.
+    #[opcode]
+    fn blob_get(
+        #[out] res: *mut u64,
+        source: FramePosition,
+        #[frame] index: u64,
+        stride: usize,
+        len: usize,
+        frame: Frame,
+    ) {
+        assert!(
+            (index as usize) < len,
+            "blob_get: index {} out of bounds for blob of length {}",
+            index,
+            len
+        );
+        unsafe {
+            frame.write_to(res, (source.0 + (index as usize) * stride) as isize, stride);
+        }
+    }
+
     #[opcode]
     fn tuple_proj(
         #[out] res: *mut u64,

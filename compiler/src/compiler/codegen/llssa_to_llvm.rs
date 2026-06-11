@@ -29,30 +29,41 @@ use crate::compiler::ssa::llssa::{
 };
 use crate::compiler::ssa::{BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId};
 
-use mavros_wasm_layout::WASM_PTR_SIZE;
-
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
-fn ll_type_size_bytes(ty: &Type) -> u32 {
-    match ty {
-        Type::Int(bits) => bits.div_ceil(8),
-        Type::Ptr => WASM_PTR_SIZE,
-        Type::Struct(s) => ll_struct_size_bytes(s),
+/// How to compile a module to WASM.
+#[derive(Clone, Debug)]
+pub struct WasmCompileOpts {
+    /// LLVM mid-end pass pipeline to run before codegen (e.g. `"default<O1>"`).
+    pub midend_pipeline: Option<&'static str>,
+    /// Codegen (instruction selection) optimization level.
+    pub codegen_level: OptimizationLevel,
+    /// Pre-built wasm-runtime static library to link against. Callers are
+    /// responsible for building it (see [`crate::wasm_runtime`]); codegen
+    /// never invokes cargo.
+    pub runtime_lib: std::path::PathBuf,
+}
+
+impl WasmCompileOpts {
+    /// Fast compilation at the cost of output quality. A cheap mid-end
+    /// pipeline keeps the module small, then codegen runs at `None`
+    /// (FastISel). On large programs this compiles several times faster
+    /// than `release()` while producing correct output — the right choice
+    /// for tests and CI.
+    pub fn fast(runtime_lib: std::path::PathBuf) -> Self {
+        Self {
+            midend_pipeline: Some("default<O1>"),
+            codegen_level: OptimizationLevel::None,
+            runtime_lib,
+        }
     }
-}
 
-fn ll_struct_size_bytes(s: &LLStruct) -> u32 {
-    s.fields.iter().map(ll_field_type_size_bytes).sum()
-}
-
-fn ll_field_type_size_bytes(ft: &LLFieldType) -> u32 {
-    match ft {
-        LLFieldType::Int(bits) => bits.div_ceil(8),
-        LLFieldType::Ptr => WASM_PTR_SIZE,
-        LLFieldType::Inline(s) => ll_struct_size_bytes(s),
-        LLFieldType::InlineArray(s, n) => ll_struct_size_bytes(s) * *n as u32,
-        LLFieldType::FlexArray(_) => {
-            panic!("FlexArray is not supported for WASM input parameters")
+    /// Optimized output for production artifacts.
+    pub fn release(runtime_lib: std::path::PathBuf) -> Self {
+        Self {
+            midend_pipeline: None,
+            codegen_level: OptimizationLevel::Aggressive,
+            runtime_lib,
         }
     }
 }
@@ -635,12 +646,27 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .vm_ptr
             .expect("main parameters are loaded relative to the VM pointer");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
-        let i32_type = self.context.i32_type();
         let mut parameters = parameters;
         if let Some((vm_param, _)) = parameters.next() {
             self.value_map.insert(*vm_param, vm_ptr.into());
         }
+
+        // Main's only remaining parameter is the input blob, which is bound
+        // directly to the host-provided inputs buffer; its elements are loaded
+        // lazily at each ArrayGet site.
+        let Some((blob_param, blob_type)) = parameters.next() else {
+            return;
+        };
+        assert!(
+            matches!(blob_type, Type::Ptr),
+            "main parameter must be the input blob pointer, got {:?}",
+            blob_type
+        );
+        assert!(
+            parameters.next().is_none(),
+            "main must have at most one parameter besides the VM pointer"
+        );
+
         let vm_type = self
             .convert_struct_type(&LLStruct::witgen_vm())
             .into_struct_type();
@@ -653,32 +679,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "inputs_slot",
             )
             .unwrap();
-        let mut input_ptr = self
+        let input_ptr = self
             .builder
             .build_load(ptr_type, input_slot, "inputs_ptr")
             .unwrap()
             .into_pointer_value();
-
-        for (param_id, param_type) in parameters {
-            let llvm_type = self.convert_type(param_type);
-            let value = self
-                .builder
-                .build_load(llvm_type, input_ptr, &format!("v{}", param_id.0))
-                .unwrap();
-            self.value_map.insert(*param_id, value);
-
-            let offset = ll_type_size_bytes(param_type);
-            input_ptr = unsafe {
-                self.builder
-                    .build_gep(
-                        i8_type,
-                        input_ptr,
-                        &[i32_type.const_int(offset as u64, false)],
-                        "next_input",
-                    )
-                    .unwrap()
-            };
-        }
+        self.value_map.insert(*blob_param, input_ptr.into());
     }
 
     fn compile_block(
@@ -822,17 +828,28 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::IntCmp { kind, result, a, b } => {
-                let lhs = self.value_map[a].into_int_value();
-                let rhs = self.value_map[b].into_int_value();
                 let predicate = match kind {
                     IntCmpOp::Eq => IntPredicate::EQ,
                     IntCmpOp::ULt => IntPredicate::ULT,
                     IntCmpOp::SLt => IntPredicate::SLT,
                 };
-                let val = self
-                    .builder
-                    .build_int_compare(predicate, lhs, rhs, &format!("v{}", result.0))
-                    .unwrap();
+                // icmp accepts pointer operands directly; this happens for
+                // null checks on RC'd cell slots.
+                let val = match (self.value_map[a], self.value_map[b]) {
+                    (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => self
+                        .builder
+                        .build_int_compare(predicate, lhs, rhs, &format!("v{}", result.0))
+                        .unwrap(),
+                    (lhs, rhs) => self
+                        .builder
+                        .build_int_compare(
+                            predicate,
+                            lhs.into_int_value(),
+                            rhs.into_int_value(),
+                            &format!("v{}", result.0),
+                        )
+                        .unwrap(),
+                };
                 self.value_map.insert(*result, val.into());
             }
 
@@ -1313,7 +1330,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.module.print_to_file(path).unwrap();
     }
 
-    pub fn compile_to_wasm(&self, path: &Path, optimization: OptimizationLevel) {
+    pub fn compile_to_wasm(&self, path: &Path, opts: WasmCompileOpts) {
         use std::process::Command;
 
         Target::initialize_webassembly(&InitializationConfig::default());
@@ -1321,23 +1338,40 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let target_triple = TargetTriple::create("wasm32-unknown-unknown");
         let target = Target::from_triple(&target_triple).unwrap();
 
+        // The module must carry the wasm32 triple + datalayout before any
+        // mid-end passes run: without a datalayout the optimizer folds
+        // struct GEPs using host (8-byte-pointer) field offsets, which
+        // miscompiles every VM-struct access on wasm32.
+        self.module.set_triple(&target_triple);
+
         let target_machine = target
             .create_target_machine(
                 &target_triple,
                 "generic",
                 "",
-                optimization,
+                opts.codegen_level,
                 RelocMode::Default,
                 CodeModel::Default,
             )
             .unwrap();
 
+        self.module
+            .set_data_layout(&target_machine.get_target_data().get_data_layout());
+
+        if let Some(pipeline) = opts.midend_pipeline {
+            self.module
+                .run_passes(
+                    pipeline,
+                    &target_machine,
+                    inkwell::passes::PassBuilderOptions::create(),
+                )
+                .unwrap();
+        }
+
         let obj_path = path.with_extension("o");
         target_machine
             .write_to_file(&self.module, FileType::Object, &obj_path)
             .unwrap();
-
-        let runtime_lib = Self::build_wasm_runtime();
 
         let wasm_ld = std::env::var("LLVM_SYS_180_PREFIX")
             .map(|prefix| {
@@ -1367,7 +1401,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ])
             .arg(path)
             .arg(&obj_path)
-            .arg(&runtime_lib)
+            .arg(&opts.runtime_lib)
             .output()
             .unwrap_or_else(|_| {
                 panic!(
@@ -1389,42 +1423,5 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
 
         std::fs::remove_file(&obj_path).ok();
-    }
-
-    fn build_wasm_runtime() -> std::path::PathBuf {
-        use std::process::Command;
-
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .exec()
-            .expect("Failed to get cargo metadata");
-
-        let workspace_root = metadata.workspace_root.as_std_path();
-        let wasm_runtime_dir = workspace_root.join("wasm-runtime");
-
-        let output = Command::new("cargo")
-            .current_dir(&wasm_runtime_dir)
-            .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
-            .output()
-            .expect("Failed to run cargo build for wasm-runtime");
-
-        if !output.status.success() {
-            eprintln!(
-                "wasm-runtime build stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            panic!("Failed to build wasm-runtime for wasm32");
-        }
-
-        let lib_path = workspace_root
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join("release")
-            .join("libmavros_wasm_runtime.a");
-
-        if !lib_path.exists() {
-            panic!("wasm-runtime library not found at {:?}", lib_path);
-        }
-
-        lib_path
     }
 }

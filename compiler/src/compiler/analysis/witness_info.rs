@@ -92,6 +92,16 @@ impl WitnessShape {
         }
     }
 
+    /// Whether any level of this shape is witness-typed.
+    pub fn contains_witness(&self) -> bool {
+        match self {
+            WitnessShape::Scalar(info) => info.is_witness(),
+            WitnessShape::Array(info, inner) | WitnessShape::Ref(info, inner) => {
+                info.is_witness() || inner.contains_witness()
+            }
+        }
+    }
+
     pub fn child_witness_type(&self) -> Option<WitnessShape> {
         match self {
             WitnessShape::Array(_, inner) => Some(*inner.clone()),

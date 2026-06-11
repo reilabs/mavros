@@ -73,6 +73,7 @@ jobs:
     steps:
       - name: Generate MavrosBot token
         id: app-token
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.STATUS_UPDATE_APP_ID }}
@@ -83,7 +84,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -108,7 +109,7 @@ jobs:
         run: make build-test-runner
 
       - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 2
+        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 4
 
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -138,6 +139,11 @@ jobs:
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
           COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
-          gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
+          echo "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
+          # GITHUB_TOKEN is read-only on fork PRs, so commenting would fail there;
+          # the report is still visible in the job summary above.
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
