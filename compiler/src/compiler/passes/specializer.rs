@@ -40,15 +40,6 @@ fn bit_mask(width: usize) -> Option<u128> {
     }
 }
 
-fn map_lookup_target(target: LookupTarget<Val>) -> LookupTarget<ValueId> {
-    match target {
-        LookupTarget::Rangecheck(bits) => LookupTarget::Rangecheck(bits),
-        LookupTarget::DynRangecheck(bound) => LookupTarget::DynRangecheck(bound.0),
-        LookupTarget::Array(array) => LookupTarget::Array(array.0),
-        LookupTarget::Spread(bits) => LookupTarget::Spread(bits),
-    }
-}
-
 pub struct Specializer {
     pub savings_to_code_ratio: f64,
 }
@@ -69,6 +60,12 @@ fn const_val_as_field(value: &ConstVal) -> Option<Field> {
         ConstVal::Field(f) => Some(*f),
         _ => None,
     }
+}
+
+/// The operands of an `a * b = c` constraint as field constants, if all three are known.
+fn r1c_consts(ctx: &SpecializationState<'_>, a: &Val, b: &Val, c: &Val) -> Option<(Field, Field, Field)> {
+    let field_const = |v: &Val| ctx.const_vals.get(&v.0).and_then(const_val_as_field);
+    Some((field_const(a)?, field_const(b)?, field_const(c)?))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -334,12 +331,9 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     }
 
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
-        let a_const = ctx.const_vals.get(&a.0).and_then(const_val_as_field);
-        let b_const = ctx.const_vals.get(&b.0).and_then(const_val_as_field);
-        let c_const = ctx.const_vals.get(&c.0).and_then(const_val_as_field);
-        match (a_const, b_const, c_const) {
-            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
-            _ => ctx.emit(OpCode::AssertR1C {
+        match r1c_consts(ctx, a, b, c) {
+            Some((a, b, c)) => assert_eq!(a * b, c),
+            None => ctx.emit(OpCode::AssertR1C {
                 a: a.0,
                 b: b.0,
                 c: c.0,
@@ -502,12 +496,9 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     }
 
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
-        let a_const = ctx.const_vals.get(&a.0).and_then(const_val_as_field);
-        let b_const = ctx.const_vals.get(&b.0).and_then(const_val_as_field);
-        let c_const = ctx.const_vals.get(&c.0).and_then(const_val_as_field);
-        match (a_const, b_const, c_const) {
-            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
-            _ => HLEmitter::constrain(ctx, a.0, b.0, c.0),
+        match r1c_consts(ctx, a, b, c) {
+            Some((a, b, c)) => assert_eq!(a * b, c),
+            None => HLEmitter::constrain(ctx, a.0, b.0, c.0),
         }
     }
 
@@ -813,7 +804,7 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
 
     fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
         self.emit(OpCode::Lookup {
-            target: map_lookup_target(target),
+            target: target.map(|v| v.0),
             args: args.into_iter().map(|arg| arg.0).collect(),
             flag: flag.0,
         });
@@ -821,7 +812,7 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
 
     fn dlookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
         self.emit(OpCode::DLookup {
-            target: map_lookup_target(target),
+            target: target.map(|v| v.0),
             args: args.into_iter().map(|arg| arg.0).collect(),
             flag: flag.0,
         });

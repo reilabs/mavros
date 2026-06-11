@@ -26,7 +26,7 @@ use crate::compiler::{
             TypeExpr,
         },
     },
-    util::{spread_bits, unspread_bits},
+    util::{bit_mask, decode_signed, encode_signed, spread_bits, unspread_bits},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -111,17 +111,18 @@ impl ValueSignature {
 #[derive(Debug, Clone)]
 pub struct ArrayData {
     values: Vec<Value>,
-    table_ids: Vec<ArrayTableAssignment>,
+    /// Instrumenters that have already allocated a lookup table for this array.
+    table_owners: Vec<InstrumenterId>,
+}
+
+impl ArrayData {
+    fn flattened_table_len(&self) -> usize {
+        self.values.iter().map(Value::flattened_table_len).sum()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InstrumenterId(usize);
-
-#[derive(Debug, Clone, Copy)]
-struct ArrayTableAssignment {
-    instrumenter_id: InstrumenterId,
-    table_id: usize,
-}
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -140,18 +141,13 @@ impl Value {
     fn array(values: Vec<Value>) -> Self {
         Value::Array(Rc::new(RefCell::new(ArrayData {
             values,
-            table_ids: Vec::new(),
+            table_owners: Vec::new(),
         })))
     }
 
     fn flattened_table_len(&self) -> usize {
         match self {
-            Value::Array(values) => values
-                .borrow()
-                .values
-                .iter()
-                .map(Value::flattened_table_len)
-                .sum(),
+            Value::Array(data) => data.borrow().flattened_table_len(),
             _ => 1,
         }
     }
@@ -174,36 +170,14 @@ impl Value {
         }
     }
 
-    fn bit_mask(bits: usize) -> u128 {
-        assert!(
-            (1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&bits),
-            "invalid integer width for bit mask: {bits}"
-        );
-        if bits == MAX_SUPPORTED_UNSIGNED_BITS {
-            u128::MAX
-        } else {
-            (1u128 << bits) - 1
-        }
-    }
-
     /// Interpret a u128 two's-complement value as signed i128 for `bits` width.
     fn to_signed(val: u128, bits: usize) -> i128 {
-        let mask = Self::bit_mask(bits);
-        let val = val & mask;
-        if bits == 128 {
-            return val as i128;
-        }
-        let sign_bit = 1u128 << (bits - 1);
-        if val & sign_bit != 0 {
-            (val | !mask) as i128
-        } else {
-            val as i128
-        }
+        decode_signed(bits, val & bit_mask(bits))
     }
 
     /// Store a signed result back as u128 masked to `bits` width.
     fn from_signed(val: i128, bits: usize) -> u128 {
-        (val as u128) & Self::bit_mask(bits)
+        encode_signed(bits, val)
     }
 
     fn unwrap_witness(&self) -> &Value {
@@ -243,13 +217,10 @@ impl Value {
             (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::I(_, a), Value::I(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                instrumenter.record_constraints(1);
-                Value::WitnessOf(Box::new(
-                    self.unwrap_witness()
-                        .ult_op(b.unwrap_witness(), instrumenter),
-                ))
-            }
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
+                self.unwrap_witness()
+                    .ult_op(b.unwrap_witness(), instrumenter),
+            )),
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
@@ -267,7 +238,6 @@ impl Value {
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                instrumenter.record_constraints(1);
                 Value::WitnessOf(Box::new(self.unwrap_witness().slt_op(
                     b.unwrap_witness(),
                     bits,
@@ -285,13 +255,10 @@ impl Value {
                 Value::U(1, if a == b { 1 } else { 0 })
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                instrumenter.record_constraints(1);
-                Value::WitnessOf(Box::new(
-                    self.unwrap_witness()
-                        .eq_op(b.unwrap_witness(), instrumenter),
-                ))
-            }
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
+                self.unwrap_witness()
+                    .eq_op(b.unwrap_witness(), instrumenter),
+            )),
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
@@ -306,7 +273,7 @@ impl Value {
         match binary_arith_op_kind {
             BinaryArithOpKind::Add => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_add(*b) & Self::bit_mask(*s))
+                    Value::U(*s, a.wrapping_add(*b) & bit_mask(*s))
                 }
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
@@ -328,7 +295,7 @@ impl Value {
             },
             BinaryArithOpKind::Sub => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_sub(*b) & Self::bit_mask(*s))
+                    Value::U(*s, a.wrapping_sub(*b) & bit_mask(*s))
                 }
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
@@ -353,7 +320,7 @@ impl Value {
                 (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_mul(*b) & Self::bit_mask(*s))
+                    Value::U(*s, a.wrapping_mul(*b) & bit_mask(*s))
                 }
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
@@ -363,21 +330,19 @@ impl Value {
                     ),
                 ),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
-                (Value::WitnessOf(a), Value::WitnessOf(b)) => match (a.as_ref(), b.as_ref()) {
-                    (Value::Unknown(_), Value::Unknown(_)) => {
+                (Value::WitnessOf(a), Value::WitnessOf(b)) => {
+                    if matches!(
+                        (a.as_ref(), b.as_ref()),
+                        (Value::Unknown(_), Value::Unknown(_))
+                    ) {
                         instrumenter.record_high_degree_mul();
-                        Value::WitnessOf(Box::new(a.binary_arith_op(
-                            b,
-                            binary_arith_op_kind,
-                            instrumenter,
-                        )))
                     }
-                    _ => Value::WitnessOf(Box::new(a.binary_arith_op(
+                    Value::WitnessOf(Box::new(a.binary_arith_op(
                         b,
                         binary_arith_op_kind,
                         instrumenter,
-                    ))),
-                },
+                    )))
+                }
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -398,21 +363,13 @@ impl Value {
                     )
                 }
                 (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
-                (_, Value::WitnessOf(b)) => match b.as_ref() {
-                    Value::Unknown(_) => {
-                        instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                            b,
-                            binary_arith_op_kind,
-                            instrumenter,
-                        )))
-                    }
-                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                (_, Value::WitnessOf(b)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b,
                         binary_arith_op_kind,
                         instrumenter,
-                    ))),
-                },
+                    )))
+                }
                 (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
                     b,
                     binary_arith_op_kind,
@@ -430,21 +387,13 @@ impl Value {
                         Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s),
                     )
                 }
-                (_, Value::WitnessOf(b)) => match b.as_ref() {
-                    Value::Unknown(_) => {
-                        instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                            b,
-                            binary_arith_op_kind,
-                            instrumenter,
-                        )))
-                    }
-                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                (_, Value::WitnessOf(b)) => {
+                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b,
                         binary_arith_op_kind,
                         instrumenter,
-                    ))),
-                },
+                    )))
+                }
                 (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
                     b,
                     binary_arith_op_kind,
@@ -455,7 +404,7 @@ impl Value {
             },
             BinaryArithOpKind::And => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a & b) & Self::bit_mask(*s)),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a & b) & bit_mask(*s)),
                 (Value::Field(_), Value::Field(_)) => todo!(),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -469,7 +418,7 @@ impl Value {
             },
             BinaryArithOpKind::Or => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a | b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a | b) & Self::bit_mask(*s)),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a | b) & bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -482,7 +431,7 @@ impl Value {
             },
             BinaryArithOpKind::Xor => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a ^ b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a ^ b) & Self::bit_mask(*s)),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a ^ b) & bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -499,7 +448,7 @@ impl Value {
                     if *b as usize >= *s {
                         0
                     } else {
-                        (a << b) & Self::bit_mask(*s)
+                        (a << b) & bit_mask(*s)
                     },
                 ),
                 (Value::I(s, a), Value::I(_, b)) => {
@@ -509,7 +458,7 @@ impl Value {
                         if shift as usize >= *s {
                             0
                         } else {
-                            (a << shift) & Self::bit_mask(*s)
+                            (a << shift) & bit_mask(*s)
                         },
                     )
                 }
@@ -631,74 +580,32 @@ impl Value {
         }
     }
 
-    fn assert_bool(&self, instrumenter: &mut dyn OpInstrumenter) {
-        if self.is_witness() {
-            instrumenter.record_constraints(1);
-        }
-    }
-
-    fn assert_cmp(
-        _kind: CmpKind,
-        a: &Self,
-        b: &Self,
-        _lhs_type: &Type,
-        instrumenter: &mut dyn OpInstrumenter,
-    ) {
-        if a.is_witness() || b.is_witness() {
-            instrumenter.record_constraints(1);
-        }
-    }
-
-    fn rangecheck(&self, max_bits: usize, instrumenter: &mut dyn OpInstrumenter) {
-        if self.is_witness() {
-            instrumenter.record_rangechecks(max_bits as u8, 1);
-        }
-    }
-
-    fn is_witness(&self) -> bool {
-        match self {
-            Value::Unknown(_) => false,
-            Value::Blob(_) => false,
-            Value::WitnessOf(_) => true,
-            _ => false,
-        }
-    }
-
-    fn array_get(&self, index: &Value, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn array_get(&self, index: &Value, tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         if matches!(self, Value::Unknown(_) | Value::UnknownSlice) {
             return Value::unknown_from_type(tp);
         }
 
-        let arr = self.unwrap_witness();
+        let borrowed;
+        let values: &[Value] = match self.unwrap_witness() {
+            Value::Array(data) => {
+                borrowed = data.borrow();
+                &borrowed.values
+            }
+            Value::Blob(values) => values,
+            Value::Unknown(_) | Value::UnknownSlice => return Value::unknown_from_type(tp),
+            _ => panic!(
+                "Cannot get array element from {:?} with index {:?}",
+                self, index
+            ),
+        };
 
-        match (arr, index) {
-            (Value::Array(vals), Value::U(_, index)) => {
-                vals.borrow().values[*index as usize].clone()
-            }
-            (Value::Blob(vals), Value::U(_, index)) => vals[*index as usize].clone(),
-            (Value::Array(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
-                Value::U(_, index) => vals.borrow().values[*index as usize].clone(),
-                _ => {
-                    instrumenter.record_lookups(vals.borrow().values.len(), 1, 1);
-                    Value::unknown_from_type(tp)
-                }
+        match index {
+            Value::U(_, i) => values[*i as usize].clone(),
+            Value::WitnessOf(inner) => match inner.as_ref() {
+                Value::U(_, i) => values[*i as usize].clone(),
+                _ => Value::unknown_from_type(tp),
             },
-            (Value::Blob(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
-                Value::U(_, index) => vals[*index as usize].clone(),
-                _ => {
-                    instrumenter.record_lookups(vals.len(), 1, 1);
-                    Value::unknown_from_type(tp)
-                }
-            },
-            (Value::Array(vals), Value::Unknown(_)) => {
-                instrumenter.record_lookups(vals.borrow().values.len(), 1, 1);
-                Value::unknown_from_type(tp)
-            }
-            (Value::Blob(vals), Value::Unknown(_)) => {
-                instrumenter.record_lookups(vals.len(), 1, 1);
-                Value::unknown_from_type(tp)
-            }
-            (Value::Unknown(_) | Value::UnknownSlice, _) => Value::unknown_from_type(tp),
+            Value::Unknown(_) => Value::unknown_from_type(tp),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
@@ -752,8 +659,8 @@ impl Value {
             Value::WitnessOf(inner) => {
                 Value::WitnessOf(Box::new(inner.bit_range_op(offset, width, _instrumenter)))
             }
-            Value::U(bits, v) => Value::U(*bits, (v >> offset) & Self::bit_mask(width)),
-            Value::I(bits, v) => Value::I(*bits, (v >> offset) & Self::bit_mask(width)),
+            Value::U(bits, v) => Value::U(*bits, (v >> offset) & bit_mask(width)),
+            Value::I(bits, v) => Value::I(*bits, (v >> offset) & bit_mask(width)),
             Value::Field(f) => {
                 let bits = f
                     .into_bigint()
@@ -808,12 +715,7 @@ impl Value {
                 Value::I(bits * 2, spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
-            Value::WitnessOf(inner) => {
-                if matches!(inner.as_ref(), Value::Unknown(_)) {
-                    instrumenter.record_lookups(256, 1, 1);
-                }
-                Value::WitnessOf(Box::new(inner.spread_op(instrumenter)))
-            }
+            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op(instrumenter))),
             Value::Unknown(ScalarKind::U(bits)) => {
                 assert!(
                     *bits <= 64,
@@ -859,9 +761,6 @@ impl Value {
             }
             Value::Field(_) => panic!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
-                if matches!(inner.as_ref(), Value::Unknown(_)) {
-                    instrumenter.record_constraints(1);
-                }
                 let (odd, even) = inner.unspread_op(instrumenter);
                 (
                     Value::WitnessOf(Box::new(odd)),
@@ -915,10 +814,10 @@ impl Value {
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
-            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
+            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
+            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
+            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
+            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
             (Value::I(s, v), CastTarget::Field) => {
                 Value::Field(Field::from(Self::to_signed(*v, *s) as u64))
@@ -928,14 +827,14 @@ impl Value {
                 let bigint = f.into_bigint();
                 Value::U(
                     *s,
-                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s),
+                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
                 )
             }
             (Value::Field(f), CastTarget::I(s)) => {
                 let bigint = f.into_bigint();
                 Value::I(
                     *s,
-                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s),
+                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
                 )
             }
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
@@ -943,12 +842,8 @@ impl Value {
         }
     }
 
-    fn constrain(_a: &Value, _b: &Value, _c: &Value, instrumenter: &mut dyn OpInstrumenter) {
-        match (
-            _a.as_field_const(),
-            _b.as_field_const(),
-            _c.as_field_const(),
-        ) {
+    fn constrain(a: &Value, b: &Value, c: &Value, instrumenter: &mut dyn OpInstrumenter) {
+        match (a.as_field_const(), b.as_field_const(), c.as_field_const()) {
             (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
             _ => instrumenter.record_constrain(),
         }
@@ -1019,11 +914,7 @@ impl Value {
                     _ => unreachable!(),
                 }
             }
-            Value::Unknown(_) => {
-                instrumenter.record_rangechecks(8, size);
-                instrumenter.record_constraints(1);
-                Value::array(vec![Value::Unknown(ScalarKind::U(8)); size])
-            }
+            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(8)); size]),
             Value::Field(f) => {
                 let radix_val = match radix {
                     Radix::Dyn(Value::U(_, r)) => *r,
@@ -1056,7 +947,7 @@ impl Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.not_op(_instrumenter))),
-            Value::U(s, v) => Value::U(*s, !v & Self::bit_mask(*s)),
+            Value::U(s, v) => Value::U(*s, !v & bit_mask(*s)),
             _ => panic!("Cannot perform not operation on {:?}", self),
         }
     }
@@ -1077,15 +968,14 @@ impl Value {
         }
     }
 
-    fn assert_r1c(_a: &Value, _b: &Value, _c: &Value, _get_unspecialized: &mut dyn OpInstrumenter) {
-    }
+    fn assert_r1c(_a: &Value, _b: &Value, _c: &Value, _instrumenter: &mut dyn OpInstrumenter) {}
 
     fn select(
         &self,
         if_true: &Value,
         if_false: &Value,
         _tp: &Type,
-        instrumenter: &mut dyn OpInstrumenter,
+        _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::U(_, 0) => if_false.clone(),
@@ -1094,9 +984,6 @@ impl Value {
                 Value::U(_, 0) => if_false.clone(),
                 Value::U(_, _) => if_true.clone(),
                 _ => {
-                    if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
-                        instrumenter.record_constraints(1);
-                    }
                     let mut result = if_true.clone();
                     result.forget_concrete();
                     result
@@ -1394,41 +1281,21 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         );
     }
 
-    fn assert_bool(&self, instrumenter: &mut CostAnalysis) {
-        self.specialized.assert_bool(instrumenter.get_specialized());
-        self.unspecialized
-            .assert_bool(instrumenter.get_unspecialized());
-    }
+    // Witness asserts and rangechecks are lowered to explicit Constrain/Lookup ops before the
+    // cost analysis runs (and those are costed via `record_constrain`/`record_lookup`), so any
+    // op still in these high-level forms carries no cost of its own.
+    fn assert_bool(&self, _instrumenter: &mut CostAnalysis) {}
 
     fn assert_cmp(
-        kind: CmpKind,
-        a: &Self,
-        b: &Self,
-        lhs_type: &Type,
-        instrumenter: &mut CostAnalysis,
+        _kind: CmpKind,
+        _a: &Self,
+        _b: &Self,
+        _lhs_type: &Type,
+        _instrumenter: &mut CostAnalysis,
     ) {
-        Value::assert_cmp(
-            kind,
-            &a.specialized,
-            &b.specialized,
-            lhs_type,
-            instrumenter.get_specialized(),
-        );
-        Value::assert_cmp(
-            kind,
-            &a.unspecialized,
-            &b.unspecialized,
-            lhs_type,
-            instrumenter.get_unspecialized(),
-        );
     }
 
-    fn rangecheck(&self, max_bits: usize, instrumenter: &mut CostAnalysis) {
-        self.unspecialized
-            .rangecheck(max_bits, instrumenter.get_unspecialized());
-        self.specialized
-            .rangecheck(max_bits, instrumenter.get_specialized());
-    }
+    fn rangecheck(&self, _max_bits: usize, _instrumenter: &mut CostAnalysis) {}
 
     fn to_bits(
         &self,
@@ -1634,12 +1501,9 @@ impl FunctionSignature {
 }
 
 trait OpInstrumenter {
-    fn record_constraints(&mut self, number: usize);
     fn record_constrain(&mut self);
     fn record_high_degree_mul(&mut self);
-    fn record_rangechecks(&mut self, size: u8, count: usize);
-    fn record_lookups(&mut self, keys: usize, results: usize, count: usize);
-    fn record_lookup(&mut self, target: &LookupTarget<Value>, args: &[Value], flag: &Value);
+    fn record_lookup(&mut self, target: &LookupTarget<Value>, flag: &Value);
 }
 
 trait FunctionInstrumenter {
@@ -1670,7 +1534,8 @@ struct Instrumenter {
     final_spread_lookups: HashMap<u8, usize>,
     total_table_lookups: usize,
 
-    /// Array table lengths indexed by IDs stored on `ArrayData` for this instrumenter.
+    /// Lengths of the array lookup tables this instrumenter has allocated, one entry per array
+    /// it has been marked as a table owner of (see `ArrayData::table_owners`).
     allocated_array_tables: Vec<usize>,
 }
 
@@ -1746,23 +1611,13 @@ impl Instrumenter {
         };
         self.array_lookups += 1;
         self.total_table_lookups += 1;
-        let existing_table_id = array
-            .borrow()
-            .table_ids
-            .iter()
-            .find(|table| table.instrumenter_id == self.id)
-            .map(|table| table.table_id);
-        if existing_table_id.is_some() {
+
+        if array.borrow().table_owners.contains(&self.id) {
             return;
         }
-
-        let table_id = self.allocated_array_tables.len();
         self.allocated_array_tables
-            .push(Value::Array(array.clone()).flattened_table_len());
-        array.borrow_mut().table_ids.push(ArrayTableAssignment {
-            instrumenter_id: self.id,
-            table_id,
-        });
+            .push(array.borrow().flattened_table_len());
+        array.borrow_mut().table_owners.push(self.id);
     }
 
     fn table_allocation_constraints(&self) -> usize {
@@ -1847,8 +1702,6 @@ impl Instrumenter {
 }
 
 impl OpInstrumenter for Instrumenter {
-    fn record_constraints(&mut self, _number: usize) {}
-
     fn record_constrain(&mut self) {
         self.constrains += 1;
     }
@@ -1857,11 +1710,7 @@ impl OpInstrumenter for Instrumenter {
         self.high_degree_muls += 1;
     }
 
-    fn record_rangechecks(&mut self, _size: u8, _count: usize) {}
-
-    fn record_lookups(&mut self, _keys: usize, _results: usize, _count: usize) {}
-
-    fn record_lookup(&mut self, target: &LookupTarget<Value>, _args: &[Value], flag: &Value) {
+    fn record_lookup(&mut self, target: &LookupTarget<Value>, flag: &Value) {
         match target {
             LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits, flag),
             LookupTarget::DynRangecheck(bound) => {
@@ -1886,18 +1735,6 @@ fn dynamic_rangecheck_bits(bound: &Value) -> u8 {
     };
     assert_eq!(bound, 256, "TODO: support dynamic rangecheck bound {bound}");
     8
-}
-
-fn map_lookup_target<T, U>(
-    target: &LookupTarget<T>,
-    mut map_value: impl FnMut(&T) -> U,
-) -> LookupTarget<U> {
-    match target {
-        LookupTarget::Rangecheck(bits) => LookupTarget::Rangecheck(*bits),
-        LookupTarget::DynRangecheck(bound) => LookupTarget::DynRangecheck(map_value(bound)),
-        LookupTarget::Array(array) => LookupTarget::Array(map_value(array)),
-        LookupTarget::Spread(bits) => LookupTarget::Spread(*bits),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1944,12 +1781,9 @@ impl FunctionInstrumenter for DummyInstrumenter {
 }
 
 impl OpInstrumenter for DummyInstrumenter {
-    fn record_constraints(&mut self, _: usize) {}
     fn record_constrain(&mut self) {}
     fn record_high_degree_mul(&mut self) {}
-    fn record_rangechecks(&mut self, _: u8, _: usize) {}
-    fn record_lookups(&mut self, _: usize, _: usize, _: usize) {}
-    fn record_lookup(&mut self, _: &LookupTarget<Value>, _: &[Value], _: &Value) {}
+    fn record_lookup(&mut self, _: &LookupTarget<Value>, _: &Value) {}
 }
 
 pub struct CostAnalysis {
@@ -2069,32 +1903,16 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     fn lookup(
         &mut self,
         target: LookupTarget<SpecSplitValue>,
-        args: Vec<SpecSplitValue>,
+        _args: Vec<SpecSplitValue>,
         flag: SpecSplitValue,
     ) {
-        let unspecialized_target = map_lookup_target(&target, |v| v.unspecialized.clone());
-        let specialized_target = map_lookup_target(&target, |v| v.specialized.clone());
-        let unspecialized_args = args
-            .iter()
-            .map(|arg| arg.unspecialized.clone())
-            .collect::<Vec<_>>();
-        let specialized_args = args
-            .iter()
-            .map(|arg| arg.specialized.clone())
-            .collect::<Vec<_>>();
-        let unspecialized_flag = flag.unspecialized;
-        let specialized_flag = flag.specialized;
+        let unspecialized_target = target.map(|v| v.unspecialized.clone());
+        self.get_unspecialized()
+            .record_lookup(&unspecialized_target, &flag.unspecialized);
 
-        self.get_unspecialized().record_lookup(
-            &unspecialized_target,
-            &unspecialized_args,
-            &unspecialized_flag,
-        );
-        self.get_specialized().record_lookup(
-            &specialized_target,
-            &specialized_args,
-            &specialized_flag,
-        );
+        let specialized_target = target.map(|v| v.specialized.clone());
+        self.get_specialized()
+            .record_lookup(&specialized_target, &flag.specialized);
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
@@ -2390,16 +2208,13 @@ impl CostAnalysis {
         self.walk_call_tree(&mut r, 1, self.entry_point.as_ref().unwrap());
 
         let mut aggregate = AggregatedConstraintCost::default();
-        for (_, summary) in r.functions.iter_mut() {
+        for (sig, summary) in r.functions.iter_mut() {
             summary.specialization_total_savings = summary
                 .raw_constraints
                 .saturating_sub(summary.specialized_constraints)
                 * summary.calls;
             r.total_savings_to_make += summary.specialization_total_savings;
-        }
-        for (sig, summary) in r.functions.iter() {
-            let cost = self.functions.get(sig).unwrap();
-            aggregate.add(&cost.raw, summary.calls);
+            aggregate.add(&self.functions[sig].raw, summary.calls);
         }
         r.total_constraints = aggregate.total_constraints();
         r

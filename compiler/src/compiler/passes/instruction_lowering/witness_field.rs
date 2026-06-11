@@ -24,7 +24,7 @@ impl InstructionLoweringRule for LowerWitnessFieldOps {
         instruction: &OpCode,
     ) -> bool {
         if let OpCode::Guard { condition, inner } = instruction {
-            self.process_guarded_op(b, context, *condition, inner.as_ref())
+            self.process_op(b, context, Some(*condition), inner.as_ref())
         } else {
             self.process_op(b, context, None, instruction)
         }
@@ -68,7 +68,7 @@ impl LowerWitnessFieldOps {
             } => self.lower_to_radix(
                 b,
                 context,
-                None,
+                guard,
                 *result,
                 *value,
                 *radix,
@@ -81,46 +81,6 @@ impl LowerWitnessFieldOps {
                 self.lower_rangecheck(b, context, guard, *value, *max_bits);
                 true
             }
-            _ => false,
-        }
-    }
-
-    fn process_guarded_op(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        condition: ValueId,
-        op: &OpCode,
-    ) -> bool {
-        match op {
-            OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
-                result,
-                lhs,
-                rhs,
-            } => self.lower_divmod(b, context, Some(condition), *kind, *result, *lhs, *rhs),
-            OpCode::Rangecheck { value, max_bits }
-                if context.types().get_value_type(*value).is_witness_of() =>
-            {
-                self.lower_rangecheck(b, context, Some(condition), *value, *max_bits);
-                true
-            }
-            OpCode::ToRadix {
-                result,
-                value,
-                radix,
-                endianness,
-                count,
-            } => self.lower_to_radix(
-                b,
-                context,
-                Some(condition),
-                *result,
-                *value,
-                *radix,
-                *endianness,
-                *count,
-            ),
             _ => false,
         }
     }
@@ -343,6 +303,7 @@ impl LowerWitnessFieldOps {
         let mut current_sum = b.field_const(Field::ZERO);
         let guard_field = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)));
+        let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
         let radix_val = match radix {
             Radix::Bytes => b.field_const(Field::from(256)),
             Radix::Dyn(radix) => b.cast_to(CastTarget::Field, radix),
@@ -360,7 +321,6 @@ impl LowerWitnessFieldOps {
             let byte = b.array_get(hint, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
-            let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
             b.lookup_rngchk(rangecheck_type, byte_wit, flag);
             let shift_prev_res = b.mul(current_sum, radix_val);
             current_sum = b.add(shift_prev_res, byte_wit);
@@ -396,12 +356,11 @@ impl LowerWitnessFieldOps {
         max_bits: usize,
     ) {
         let value_field = b.ensure_field(value, context.types().get_value_type(value));
+        let flag = guard
+            .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)))
+            .unwrap_or_else(|| b.field_const(Field::ONE));
+
         if max_bits == 0 {
-            let flag = guard
-                .map(|condition| {
-                    b.ensure_field(condition, context.types().get_value_type(condition))
-                })
-                .unwrap_or_else(|| b.field_const(Field::ONE));
             let zero = b.field_const(Field::ZERO);
             b.constrain(flag, value_field, zero);
             return;
@@ -410,9 +369,6 @@ impl LowerWitnessFieldOps {
         let max_bits: u8 = max_bits
             .try_into()
             .expect("rangecheck width must fit in LookupTarget::Rangecheck");
-        let flag = guard
-            .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)))
-            .unwrap_or_else(|| b.field_const(Field::ONE));
         b.lookup_rngchk(LookupTarget::Rangecheck(max_bits), value_field, flag);
     }
 }
