@@ -271,13 +271,6 @@ impl Driver {
                 Box::new(FixDoubleJumps::new()),
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(Specializer::new(5.0)),
-                // Specialization exposes fresh constants (folded call arguments and branch
-                // conditions); propagate them before the post-specialization cleanup.
-                Box::new(SCCP::new()),
-                Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
@@ -286,6 +279,13 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::pre_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Specializer::new(5.0)),
+                // Specialization exposes fresh constants (folded call arguments and branch
+                // conditions); propagate them before the post-specialization cleanup.
+                Box::new(SCCP::new()),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),

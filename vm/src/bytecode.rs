@@ -1442,6 +1442,27 @@ mod def {
     }
 
     #[opcode]
+    fn to_bytes_le(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
+        let val = ark_ff::PrimeField::into_bigint(val);
+        let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
+        unsafe {
+            for i in 0..count {
+                // Each limb in val.0 is a u64 (8 bytes), little-endian limb order.
+                let byte_idx = i as usize;
+                let limb_idx = byte_idx / 8;
+                let byte_in_limb = byte_idx % 8;
+                let byte_val = if limb_idx < val.0.len() {
+                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xFF
+                } else {
+                    0
+                };
+                *r.array_idx(i as usize, 1) = byte_val;
+            }
+            *res = r;
+        }
+    }
+
+    #[opcode]
     fn to_bits_le(#[out] res: *mut BoxedValue, #[frame] val: Field, count: u64, vm: &mut VM) {
         panic!("to_bits_be_lt_8 not implemented");
     }
