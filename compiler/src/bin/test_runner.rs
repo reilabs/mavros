@@ -194,7 +194,7 @@ fn run_single(root: PathBuf) {
     });
 
     // Load inputs (needed for witgen run)
-    let ordered_params = load_inputs(&root.join("Prover.toml"), &driver);
+    let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
     // 5. Run witgen  (depends on WITGEN_COMPILE)
     let witgen_result = witgen_binary.and_then(|mut binary| {

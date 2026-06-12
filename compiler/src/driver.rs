@@ -107,7 +107,13 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        self.project.get_only_crate().root_dir.join("mavros_debug")
+        self.project.package_root().join("mavros_debug")
+    }
+
+    /// Root directory of the package being compiled (the workspace member's
+    /// directory, not the workspace root). `Prover.toml` is read from here.
+    pub fn package_root(&self) -> &std::path::Path {
+        self.project.package_root()
     }
 
     #[tracing::instrument(skip_all)]

@@ -193,7 +193,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let params = api::read_prover_inputs(&args.root, driver.abi())?;
+    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
     let mut binary = api::compile_witgen(&mut driver)?;
 
     let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params)?;
