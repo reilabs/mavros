@@ -165,10 +165,6 @@ pub enum OpCode {
         kind: RefCountOp,
         value: ValueId,
     },
-    ValueOf {
-        result: ValueId,
-        value: ValueId,
-    },
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
@@ -613,14 +609,6 @@ impl Instruction for OpCode {
             OpCode::Not { result, value } => {
                 format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
-            OpCode::ValueOf { result, value } => {
-                format!(
-                    "v{}{} = value_of v{}",
-                    result.0,
-                    annotate_value(*result),
-                    value.0
-                )
-            }
             OpCode::ToBits {
                 result,
                 value,
@@ -918,10 +906,6 @@ impl Instruction for OpCode {
             Self::Not {
                 result: _,
                 value: v,
-            }
-            | Self::ValueOf {
-                result: _,
-                value: v,
             } => vec![v].into_iter(),
             Self::ToBits {
                 result: _,
@@ -1035,9 +1019,7 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. }
-            | Self::ValueOf { result: r, .. }
-            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1093,9 +1075,7 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. }
-            | Self::ValueOf { result: r, .. }
-            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1256,10 +1236,6 @@ impl Instruction for OpCode {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -1488,10 +1464,6 @@ impl Instruction for OpCode {
                 result: r,
                 value: v,
             }
-            | Self::ValueOf {
-                result: r,
-                value: v,
-            }
             | Self::Spread {
                 result: r,
                 value: v,
@@ -1651,8 +1623,7 @@ pub enum CastTarget {
     U(usize),
     I(usize),
     WitnessOf,
-    /// Strips one `WitnessOf` wrapper. Only ever emitted inside `Map` — scalar
-    /// strips use the dedicated `OpCode::ValueOf` instruction instead.
+    /// Strips one `WitnessOf` wrapper.
     ValueOf,
     Nop,
     ArrayToSlice,

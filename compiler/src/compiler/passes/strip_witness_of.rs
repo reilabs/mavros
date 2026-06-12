@@ -137,7 +137,6 @@ impl StripWitnessOf {
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::MemOp { .. }
-            | OpCode::ValueOf { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::NextDCoeff { .. }
             | OpCode::BumpD { .. }

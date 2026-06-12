@@ -471,7 +471,6 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::MemOp { .. }
-            | OpCode::ValueOf { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::FreshWitness { .. }
             | OpCode::NextDCoeff { .. }

@@ -849,8 +849,6 @@ fn emit_strip_witness(
     }
     match CastTarget::strip_conversion(source_type, target_type) {
         None => value,
-        // Scalar strips use the dedicated ValueOf instruction.
-        Some(CastTarget::ValueOf) => builder.value_of(value),
         Some(target) => builder.cast_to(target, value),
     }
 }

@@ -48,7 +48,6 @@ enum ExprNode {
     ReadGlobal(u64),
     Cast { value: ExprId, target: CastTarget },
     SExt { value: ExprId, from_bits: usize, to_bits: usize },
-    ValueOf(ExprId),
     BytesOf { value: ExprId, endianness: Endianness, count: usize },
     BitsOf { value: ExprId, endianness: Endianness, count: usize },
     Witness(ExprId),
@@ -268,10 +267,6 @@ impl ExprInterner {
             from_bits,
             to_bits,
         })
-    }
-
-    fn value_of(&mut self, value: ExprId) -> ExprId {
-        self.intern(ExprNode::ValueOf(value))
     }
 
     fn bytes_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
@@ -857,18 +852,6 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
                         let result_expr = interner.bit_range(value_expr, *offset, *width);
-                        record_expr(
-                            &mut exprs,
-                            &mut result,
-                            block_id,
-                            instruction_idx,
-                            *r,
-                            result_expr,
-                        );
-                    }
-                    OpCode::ValueOf { result: r, value } => {
-                        let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr = interner.value_of(value_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,

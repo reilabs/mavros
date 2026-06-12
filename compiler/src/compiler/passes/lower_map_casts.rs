@@ -157,7 +157,6 @@ fn apply_elem_cast(
 ) -> ValueId {
     match target {
         CastTarget::Map(inner) => lower_map(e, value, src_type, inner),
-        CastTarget::ValueOf => e.value_of(value),
         other => e.cast_to(other.clone(), value),
     }
 }

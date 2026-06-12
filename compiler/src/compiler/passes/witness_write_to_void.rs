@@ -6,7 +6,7 @@ use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::hlssa::{HLSSA, OpCode},
+    ssa::hlssa::{CastTarget, HLSSA, OpCode},
 };
 
 pub struct WitnessWriteToVoid {}
@@ -45,9 +45,10 @@ impl WitnessWriteToVoid {
                             }
                             *r = None;
                         }
-                        OpCode::ValueOf {
+                        OpCode::Cast {
                             result: r,
                             value: v,
+                            target: CastTarget::ValueOf,
                         } => {
                             replacements.insert(*r, *v);
                         }
@@ -62,9 +63,10 @@ impl WitnessWriteToVoid {
                                 }
                                 *r = None;
                             }
-                            OpCode::ValueOf {
+                            OpCode::Cast {
                                 result: r,
                                 value: v,
+                                target: CastTarget::ValueOf,
                             } => {
                                 replacements.insert(*r, *v);
                             }
@@ -76,13 +78,22 @@ impl WitnessWriteToVoid {
             }
 
             for (_, block) in function.get_blocks_mut() {
-                // Remove ValueOf instructions and Guard-wrapped ValueOf (identity in witgen pipeline)
+                // Remove ValueOf casts and Guard-wrapped ValueOf casts (identity in witgen pipeline)
+                let is_value_of = |instr: &OpCode| {
+                    matches!(
+                        instr,
+                        OpCode::Cast {
+                            target: CastTarget::ValueOf,
+                            ..
+                        }
+                    )
+                };
                 let old_instructions = block.take_instructions();
                 let new_instructions = old_instructions
                     .into_iter()
                     .filter(|instr| {
-                        !matches!(instr, OpCode::ValueOf { .. })
-                            && !matches!(instr, OpCode::Guard { inner, .. } if matches!(inner.as_ref(), OpCode::ValueOf { .. }))
+                        !is_value_of(instr)
+                            && !matches!(instr, OpCode::Guard { inner, .. } if is_value_of(inner.as_ref()))
                     })
                     .collect();
                 block.put_instructions(new_instructions);

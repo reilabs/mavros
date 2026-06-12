@@ -635,11 +635,6 @@ impl ValueRangeAnalysis {
                 Self::overwrite(bounds, *result, IntInterval::for_type(result_type), changed);
             }
 
-            OpCode::ValueOf { result, value } => {
-                let in_r = get(bounds, *value);
-                Self::overwrite(bounds, *result, cap_to_type(*result, in_r), changed);
-            }
-
             OpCode::Cmp { result, .. } => {
                 // Both Eq and Lt yield a u1 boolean regardless of operand types.
                 Self::overwrite(bounds, *result, IntInterval::unsigned_full(1), changed);

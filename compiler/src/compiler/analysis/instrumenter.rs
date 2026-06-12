@@ -749,7 +749,7 @@ impl Value {
     ) -> Value {
         match (self, cast_target) {
             (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
-            (Value::WitnessOf(inner), CastTarget::ValueOf) => (**inner).clone(),
+            (_, CastTarget::ValueOf) => self.unwrap_witness().clone(),
             (Value::Array(values), CastTarget::Map(inner)) => Value::array(
                 values
                     .iter()
@@ -1354,13 +1354,6 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         Self {
             unspecialized: Value::WitnessOf(Box::new(Value::Unknown(kind))),
             specialized: Value::WitnessOf(Box::new(Value::Unknown(kind))),
-        }
-    }
-
-    fn value_of(&self, _ctx: &mut CostAnalysis) -> Self {
-        Self {
-            unspecialized: self.unspecialized.unwrap_witness().clone(),
-            specialized: self.specialized.unwrap_witness().clone(),
         }
     }
 

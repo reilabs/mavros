@@ -863,8 +863,7 @@ impl WitnessTypeInference {
                 | OpCode::MulConst { .. }
                 | OpCode::Lookup { .. }
                 | OpCode::DLookup { .. }
-                | OpCode::Todo { .. }
-                | OpCode::ValueOf { .. } => {
+                | OpCode::Todo { .. } => {
                     panic!("Should not be present at this stage {:?}", instruction);
                 }
                 OpCode::Guard { .. } => {

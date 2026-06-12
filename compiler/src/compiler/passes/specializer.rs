@@ -690,11 +690,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(result)
     }
 
-    fn value_of(&self, ctx: &mut SpecializationState) -> Self {
-        let res = HLEmitter::value_of(ctx, self.0);
-        Self(res)
-    }
-
     fn mem_op(&self, kind: RefCountOp, ctx: &mut SpecializationState) {
         HLEmitter::mem_op(ctx, self.0, kind);
     }

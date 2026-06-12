@@ -252,7 +252,11 @@ pub trait HLEmitter {
 
     fn value_of(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::ValueOf { result: r, value });
+        self.emit(OpCode::Cast {
+            result: r,
+            value,
+            target: CastTarget::ValueOf,
+        });
         r
     }
 

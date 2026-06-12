@@ -441,7 +441,6 @@ impl WitnessLowering {
                         | OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
                         | OpCode::Todo { .. }
-                        | OpCode::ValueOf { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);
