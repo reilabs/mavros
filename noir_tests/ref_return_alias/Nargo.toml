@@ -1,0 +1,6 @@
+[package]
+name = "ref_return_alias"
+type = "bin"
+authors = [""]
+
+[dependencies]

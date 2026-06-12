@@ -7,9 +7,10 @@ use std::{
 };
 
 use ark_ff::AdditiveGroup as _;
-use noirc_frontend::debug::DebugInstrumenter;
-use noirc_frontend::monomorphization::Monomorphizer;
-use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
+use noirc_frontend::{
+    debug::DebugInstrumenter,
+    monomorphization::{Monomorphizer, debug_types::DebugTypeTracker},
+};
 use tracing::info;
 
 use crate::{
@@ -17,7 +18,8 @@ use crate::{
     compiler::{
         Field,
         analysis::{
-            flow_analysis::FlowAnalysis, types::Types, witness_type_inference::WitnessTypeInference,
+            flow_analysis::FlowAnalysis, types::Types,
+            witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
             bytecode::CodeGen,
@@ -35,6 +37,7 @@ use crate::{
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
+            lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
@@ -224,8 +227,8 @@ impl Driver {
             );
         }
 
-        let mut witness_inference = WitnessTypeInference::new();
-        witness_inference.run(&mut ssa, &flow_analysis).unwrap();
+        let mut witness_inference = WitnessTaintInference::new();
+        witness_inference.run(&mut ssa, &flow_analysis);
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
@@ -399,6 +402,13 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                // Cleanup before lowering Map casts: dead hint computations
+                // (e.g. strip-maps feeding unconstrained calls) are easy to
+                // delete while still single instructions, but not once they
+                // are expanded into loops with block-parameter cycles.
+                Box::new(CSE::post_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
@@ -538,6 +548,13 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                // Cleanup before lowering Map casts: dead hint computations
+                // (e.g. strip-maps feeding unconstrained calls) are easy to
+                // delete while still single instructions, but not once they
+                // are expanded into loops with block-parameter cycles.
+                Box::new(CSE::post_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),

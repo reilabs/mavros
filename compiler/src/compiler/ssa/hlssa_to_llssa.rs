@@ -1205,6 +1205,12 @@ fn lower_instruction(
                     // to the result, matching the VM backend's nop semantics.
                     val_map.insert(*result, ll_value);
                 }
+                CastTarget::ValueOf | CastTarget::Map(_) => {
+                    panic!(
+                        "ICE: {} cast should have been lowered before HLSSA->LLSSA lowering",
+                        target
+                    );
+                }
             }
         }
 

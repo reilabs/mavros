@@ -76,7 +76,6 @@ impl LowerSideEffectFreeGuards {
             | OpCode::SliceLen { .. }
             | OpCode::Select { .. }
             | OpCode::ToBits { .. }
-            | OpCode::ValueOf { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::FreshWitness { .. }
             | OpCode::NextDCoeff { .. }

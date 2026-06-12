@@ -9,14 +9,14 @@ use crate::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, Types},
             witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
-            witness_type_inference::WitnessTypeInference,
+            witness_taint_inference::WitnessTaintInference,
         },
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, OpCode,
+                BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA, OpCode,
                 SequenceTargetType, Type, TypeExpr,
-                builder::{HLBlockEmitter, HLEmitter, HLInstrBuilder, HLSSABuilder},
+                builder::{HLEmitter, HLInstrBuilder},
             },
         },
         util::ice_non_elided_tuple,
@@ -65,7 +65,7 @@ impl UntaintControlFlow {
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all, name = "UntaintControlFlow::apply_types")]
-    fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
+    fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
         result_ssa.set_global_types(old_global_types);
 
@@ -94,7 +94,9 @@ impl UntaintControlFlow {
 
             let mut new_parameters = Vec::new();
             for (value_id, typ) in block.take_parameters() {
-                let wt = function_wt.get_value_witness_type(value_id);
+                let wt = function_wt
+                    .try_get_value_witness_type(value_id)
+                    .expect("ICE: block parameter without an inferred witness shape");
                 new_parameters.push((value_id, apply_witness_type(typ, wt)));
             }
             new_block.put_parameters(new_parameters);
@@ -106,7 +108,9 @@ impl UntaintControlFlow {
                         result: r,
                         elem_type: l,
                     } => {
-                        let r_wt = function_wt.get_value_witness_type(r);
+                        let r_wt = function_wt
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape");
                         let child = r_wt.child_witness_type().unwrap();
                         let child_typ = apply_witness_type(l, &child);
                         OpCode::Alloc {
@@ -122,7 +126,8 @@ impl UntaintControlFlow {
                         elem_type: tp,
                     } => {
                         let r_wt = function_wt
-                            .get_value_witness_type(r)
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape")
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkSeq {
@@ -138,7 +143,8 @@ impl UntaintControlFlow {
                         blob,
                     } => {
                         let r_wt = function_wt
-                            .get_value_witness_type(r)
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape")
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkSeqOfBlob {
@@ -155,7 +161,8 @@ impl UntaintControlFlow {
                         elem_type: tp,
                     } => {
                         let r_wt = function_wt
-                            .get_value_witness_type(r)
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape")
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkRepeated {
@@ -169,6 +176,12 @@ impl UntaintControlFlow {
                     OpCode::MkTuple { .. }
                     | OpCode::TupleProj { .. }
                     | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
+                    // Guards are introduced by this pass itself (step 2) and by later passes,
+                    // never before witness inference; a Guard slipping through here would
+                    // silently skip the elem_type rewrite of a wrapped Alloc/MkSeq/... below.
+                    OpCode::Guard { .. } => {
+                        panic!("ICE: Guard should not be present during witness type application")
+                    }
                     OpCode::ReadGlobal {
                         result: r,
                         offset: l,
@@ -220,7 +233,7 @@ impl UntaintControlFlow {
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all, name = "UntaintControlFlow::run")]
-    pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTypeInference) -> HLSSA {
+    pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         // Step 1: bake WitnessOf into SSA types
         let mut ssa = self.apply_types(ssa, witness_inference);
 
@@ -229,7 +242,6 @@ impl UntaintControlFlow {
         let type_info = Types::new().run(&ssa, &flow_analysis);
 
         // Step 2: cast insertion + control flow linearization
-        let mut convert_fns: Vec<ConvertFnEntry> = Vec::new();
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
             if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
@@ -247,7 +259,6 @@ impl UntaintControlFlow {
                     function_wt,
                     &flow_analysis,
                     func_type_info,
-                    &mut convert_fns,
                 );
                 ssa.put_function(function_id, function);
             }
@@ -265,7 +276,6 @@ impl UntaintControlFlow {
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
         type_info: Option<&FunctionTypeInfo>,
-        convert_fns: &mut Vec<ConvertFnEntry>,
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
@@ -307,7 +317,6 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
-                convert_fns,
             );
         }
     }
@@ -323,7 +332,6 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
-        convert_fns: &mut Vec<ConvertFnEntry>,
     ) {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
@@ -339,7 +347,6 @@ impl UntaintControlFlow {
                 type_info,
                 block_taint,
                 &mut new_instructions,
-                convert_fns,
             );
         }
 
@@ -353,6 +360,19 @@ impl UntaintControlFlow {
                         // (handled when those blocks are processed)
                     }
                     WitnessType::Witness => {
+                        // The linearization below assumes acyclic if/else structure: a
+                        // witness-dependent back edge (a loop whose trip count depends on the
+                        // witness) cannot be linearized — the `merge == if_*` shortcuts would
+                        // emit an unconditional jump into the loop body, i.e. an infinite
+                        // loop. Constrained Noir cannot produce one (loop bounds are
+                        // compile-time), so fail loudly instead of silently mis-compiling.
+                        assert!(
+                            !cfg.is_loop_entry(block_id)
+                                && !cfg.dominates(if_true, block_id)
+                                && !cfg.dominates(if_false, block_id),
+                            "ICE: witness-dependent branch condition on a loop edge \
+                             (block {block_id:?}); witness loop bounds cannot be linearized"
+                        );
                         // The then branch is taken when `cond` is true, the
                         // else branch when it's false. Each branch must run
                         // under a different guard, so compute both taints —
@@ -520,13 +540,7 @@ impl UntaintControlFlow {
                         args.iter()
                             .zip(param_types.iter())
                             .map(|(arg, expected_type)| {
-                                convert_if_needed(
-                                    *arg,
-                                    expected_type,
-                                    ti,
-                                    &mut builder,
-                                    convert_fns,
-                                )
+                                convert_if_needed(*arg, expected_type, ti, &mut builder)
                             })
                             .collect()
                     };
@@ -543,13 +557,7 @@ impl UntaintControlFlow {
                             .iter()
                             .zip(return_types.iter())
                             .map(|(val, expected_type)| {
-                                convert_if_needed(
-                                    *val,
-                                    expected_type,
-                                    ti,
-                                    &mut builder,
-                                    convert_fns,
-                                )
+                                convert_if_needed(*val, expected_type, ti, &mut builder)
                             })
                             .collect()
                     };
@@ -573,7 +581,6 @@ impl UntaintControlFlow {
         type_info: Option<&FunctionTypeInfo>,
         block_taint: Option<ValueId>,
         new_instructions: &mut Vec<OpCode>,
-        convert_fns: &mut Vec<ConvertFnEntry>,
     ) {
         match instruction {
             // -- Constrained Call: push cfg_witness arg --
@@ -609,13 +616,7 @@ impl UntaintControlFlow {
                                 let arg_type = ti.get_value_type(arg);
                                 let pure_type = arg_type.strip_all_witness();
                                 if *arg_type != pure_type {
-                                    emit_strip_witness(
-                                        arg,
-                                        arg_type,
-                                        &pure_type,
-                                        &mut builder,
-                                        convert_fns,
-                                    )
+                                    emit_strip_witness(arg, arg_type, &pure_type, &mut builder)
                                 } else {
                                     arg
                                 }
@@ -657,9 +658,7 @@ impl UntaintControlFlow {
                 let new_vs: Vec<_> = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     vs.iter()
-                        .map(|v| {
-                            convert_if_needed(*v, &target_elem_type, ti, &mut builder, convert_fns)
-                        })
+                        .map(|v| convert_if_needed(*v, &target_elem_type, ti, &mut builder))
                         .collect()
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
@@ -687,7 +686,7 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let new_element = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    convert_if_needed(element, &target_elem_type, ti, &mut builder, convert_fns)
+                    convert_if_needed(element, &target_elem_type, ti, &mut builder)
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
                 maybe_guard(
@@ -719,14 +718,8 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    let ca = convert_if_needed(array, result_type, ti, &mut builder, convert_fns);
-                    let cv = convert_if_needed(
-                        value,
-                        &expected_elem_type,
-                        ti,
-                        &mut builder,
-                        convert_fns,
-                    );
+                    let ca = convert_if_needed(array, result_type, ti, &mut builder);
+                    let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
                     (ca, cv)
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
@@ -759,15 +752,7 @@ impl UntaintControlFlow {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     values
                         .iter()
-                        .map(|v| {
-                            convert_if_needed(
-                                *v,
-                                &expected_elem_type,
-                                ti,
-                                &mut builder,
-                                convert_fns,
-                            )
-                        })
+                        .map(|v| convert_if_needed(*v, &expected_elem_type, ti, &mut builder))
                         .collect()
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
@@ -790,7 +775,7 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let converted = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    convert_if_needed(value, &target_type, ti, &mut builder, convert_fns)
+                    convert_if_needed(value, &target_type, ti, &mut builder)
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
                 maybe_guard(
@@ -816,8 +801,8 @@ impl UntaintControlFlow {
                 let mut cast_instrs = Vec::new();
                 let (new_if_t, new_if_f) = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    let t = convert_if_needed(if_t, &target_type, ti, &mut builder, convert_fns);
-                    let f = convert_if_needed(if_f, &target_type, ti, &mut builder, convert_fns);
+                    let t = convert_if_needed(if_t, &target_type, ti, &mut builder);
+                    let f = convert_if_needed(if_f, &target_type, ti, &mut builder);
                     (t, f)
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
@@ -847,89 +832,30 @@ fn convert_if_needed(
     target_type: &Type,
     type_info: &FunctionTypeInfo,
     builder: &mut HLInstrBuilder<'_>,
-    convert_fns: &mut Vec<ConvertFnEntry>,
 ) -> ValueId {
     let value_type = type_info.get_value_type(value);
     if *value_type == *target_type {
         return value;
     }
-    emit_value_conversion(value, value_type, target_type, builder, convert_fns)
+    emit_value_conversion(value, value_type, target_type, builder)
 }
 
-/// Convert a value from source_type to target_type. Uses unrolled element-wise
-/// conversion for arrays. Conversions are pure: every read is in bounds by
-/// construction and the result is a fresh value, so they are safe to execute
-/// unconditionally, including in guarded (tainted) regions.
-///
-/// Large array conversions are outlined into shared per-type-pair helper
-/// functions containing a counted loop (see [`get_or_create_convert_fn`]);
-/// small ones are unrolled in place.
+/// Convert a value from source_type to target_type. Scalar witness injections
+/// become a single `WitnessOf` cast; arrays and slices become one composite
+/// `Map` cast, lowered to a loop late by `LowerMapCasts` (and erased entirely
+/// in the witgen pipeline by `StripWitnessOf`). Conversions are pure — the
+/// result is a fresh value — so they are safe to execute unconditionally,
+/// including in guarded (tainted) regions.
 fn emit_value_conversion(
     value: ValueId,
     source_type: &Type,
     target_type: &Type,
     builder: &mut HLInstrBuilder<'_>,
-    convert_fns: &mut Vec<ConvertFnEntry>,
 ) -> ValueId {
-    if source_type == target_type {
-        return value;
+    match CastTarget::conversion(source_type, target_type) {
+        None => value,
+        Some(target) => builder.cast_to(target, value),
     }
-    match (&source_type.expr, &target_type.expr) {
-        // Scalar: Field → WitnessOf(Field), U(n) → WitnessOf(U(n))
-        (TypeExpr::Field, TypeExpr::WitnessOf(_))
-        | (TypeExpr::U(_), TypeExpr::WitnessOf(_))
-        | (TypeExpr::I(_), TypeExpr::WitnessOf(_)) => builder.cast_to_witness_of(value),
-        // Array element conversion
-        (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-            assert_eq!(
-                src_size, tgt_size,
-                "Array size mismatch in witness cast insertion"
-            );
-            if *src_size > UNROLLED_CONVERSION_LIMIT && outlinable_pair(source_type, target_type) {
-                emit_conversion_call(value, source_type, target_type, builder, convert_fns)
-            } else {
-                emit_unrolled_array_conversion(
-                    value,
-                    src_inner,
-                    tgt_inner,
-                    *src_size,
-                    builder,
-                    convert_fns,
-                )
-            }
-        }
-        (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
-        _ => panic!(
-            "witness cast insertion: unsupported conversion {:?} -> {:?}",
-            source_type, target_type
-        ),
-    }
-}
-
-/// Unrolled element-wise array conversion, used below
-/// [`UNROLLED_CONVERSION_LIMIT`] where a helper-function call would cost more
-/// than it saves.
-fn emit_unrolled_array_conversion(
-    source_array: ValueId,
-    src_elem_type: &Type,
-    tgt_elem_type: &Type,
-    size: usize,
-    builder: &mut HLInstrBuilder<'_>,
-    convert_fns: &mut Vec<ConvertFnEntry>,
-) -> ValueId {
-    let mut elems = Vec::with_capacity(size);
-    for i in 0..size {
-        let idx = builder.u_const(32, i as u128);
-        let elem = builder.array_get(source_array, idx);
-        let converted =
-            emit_value_conversion(elem, src_elem_type, tgt_elem_type, builder, convert_fns);
-        elems.push(converted);
-    }
-    builder.mk_seq(
-        elems,
-        SequenceTargetType::Array(size),
-        tgt_elem_type.clone(),
-    )
 }
 
 /// Recursively strip WitnessOf from a value (for unconstrained call args).
@@ -938,229 +864,30 @@ fn emit_strip_witness(
     source_type: &Type,
     target_type: &Type,
     builder: &mut HLInstrBuilder<'_>,
-    convert_fns: &mut Vec<ConvertFnEntry>,
 ) -> ValueId {
-    match (&source_type.expr, &target_type.expr) {
-        _ if source_type == target_type => value,
-        // WitnessOf(X) → X: emit ValueOf
-        (TypeExpr::WitnessOf(inner), _) => {
-            let unwrapped = builder.value_of(value);
-            emit_strip_witness(unwrapped, inner, target_type, builder, convert_fns)
-        }
-        // Array: element-wise strip
-        (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-            assert_eq!(src_size, tgt_size);
-            if *src_size > UNROLLED_CONVERSION_LIMIT && outlinable_pair(source_type, target_type) {
-                return emit_conversion_call(value, source_type, target_type, builder, convert_fns);
-            }
-            let mut elems = Vec::with_capacity(*src_size);
-            for i in 0..*src_size {
-                let idx = builder.u_const(32, i as u128);
-                let elem = builder.array_get(value, idx);
-                let converted =
-                    emit_strip_witness(elem, src_inner, tgt_inner, builder, convert_fns);
-                elems.push(converted);
-            }
-            builder.mk_seq(
-                elems,
-                SequenceTargetType::Array(*src_size),
-                *tgt_inner.clone(),
-            )
-        }
-        (TypeExpr::Tuple(_), _) | (_, TypeExpr::Tuple(_)) => ice_non_elided_tuple(),
-        _ => panic!(
-            "emit_strip_witness: unsupported conversion {:?} -> {:?}",
-            source_type, target_type
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Outlined array conversions
-// ---------------------------------------------------------------------------
-
-/// Array conversions of at most this many elements are unrolled at the use
-/// site; larger ones become a call to a shared per-type-pair helper function
-/// containing a counted loop.
-const UNROLLED_CONVERSION_LIMIT: usize = 8;
-
-/// A generated array-conversion helper: `fn(src) -> tgt`.
-pub struct ConvertFnEntry {
-    src: Type,
-    tgt: Type,
-    fn_id: FunctionId,
-}
-
-/// Whether a `src → tgt` conversion is expressible by the outlined helper
-/// functions: scalar witness injection/stripping at the leaves of (possibly
-/// nested) equally-sized arrays.
-fn outlinable_pair(src: &Type, tgt: &Type) -> bool {
-    match (&src.expr, &tgt.expr) {
-        (TypeExpr::Field, TypeExpr::WitnessOf(_))
-        | (TypeExpr::U(_), TypeExpr::WitnessOf(_))
-        | (TypeExpr::I(_), TypeExpr::WitnessOf(_)) => true,
-        (TypeExpr::WitnessOf(inner), TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)) => {
-            inner.as_ref() == tgt
-        }
-        (TypeExpr::Array(s, n), TypeExpr::Array(t, m)) => {
-            n == m && (s == t || outlinable_pair(s, t))
-        }
-        _ => false,
-    }
-}
-
-/// Emit a call to the (shared) conversion helper for `src → tgt`.
-fn emit_conversion_call(
-    value: ValueId,
-    src: &Type,
-    tgt: &Type,
-    builder: &mut HLInstrBuilder<'_>,
-    convert_fns: &mut Vec<ConvertFnEntry>,
-) -> ValueId {
-    let fn_id = get_or_create_convert_fn(src, tgt, builder.ssa, convert_fns);
-    let result = builder.ssa.fresh_value();
-    builder.push(OpCode::Call {
-        results: vec![result],
-        function: CallTarget::Static(fn_id),
-        args: vec![value],
-        unconstrained: false,
-    });
-    result
-}
-
-/// Get or create the conversion helper function for an array `src → tgt`
-/// pair. The helper copies the array element by element in a counted loop,
-/// converting at the leaves; nested arrays convert through a child helper.
-fn get_or_create_convert_fn(
-    src: &Type,
-    tgt: &Type,
-    ssa: &mut HLSSA,
-    convert_fns: &mut Vec<ConvertFnEntry>,
-) -> FunctionId {
-    if let Some(entry) = convert_fns
-        .iter()
-        .find(|entry| entry.src == *src && entry.tgt == *tgt)
-    {
-        return entry.fn_id;
-    }
-
-    let (src_elem, tgt_elem, size) = match (&src.expr, &tgt.expr) {
-        (TypeExpr::Array(s, n), TypeExpr::Array(t, m)) => {
-            assert_eq!(n, m, "Array size mismatch in witness cast insertion");
-            (s.as_ref().clone(), t.as_ref().clone(), *n)
-        }
-        _ => panic!(
-            "conversion helpers are only generated for array types: {:?} -> {:?}",
-            src, tgt
-        ),
-    };
-
-    // Nested arrays convert through a child helper; create it first.
-    let child_fn = match (&src_elem.expr, &tgt_elem.expr) {
-        (TypeExpr::Array(..), TypeExpr::Array(..)) if src_elem != tgt_elem => Some(
-            get_or_create_convert_fn(&src_elem, &tgt_elem, ssa, convert_fns),
-        ),
-        _ => None,
-    };
-
-    let fn_id = ssa.add_function(format!("convert_{}", convert_fns.len()));
-    convert_fns.push(ConvertFnEntry {
-        src: src.clone(),
-        tgt: tgt.clone(),
-        fn_id,
-    });
-
-    let mut sb = HLSSABuilder::new(ssa);
-    sb.modify_function(fn_id, |b| {
-        b.function.add_return_type(tgt.clone());
-        let entry_block = b.function.get_entry_id();
-        let mut e = b.block(entry_block);
-        let param = e.add_parameter(src.clone());
-
-        let default_elem = emit_typed_default(&mut e, &tgt_elem);
-        let initial = e.mk_repeated(
-            default_elem,
-            SequenceTargetType::Array(size),
-            size,
-            tgt_elem.clone(),
-        );
-        let converted = e.build_counted_loop(size, vec![(initial, tgt.clone())], |e, i, accs| {
-            let elem = e.array_get(param, i);
-            let converted = emit_elem_conversion(e, elem, &src_elem, &tgt_elem, child_fn);
-            let updated = e.array_set(accs[0], i, converted);
-            vec![updated]
-        });
-        e.terminate_return(vec![converted[0]]);
-    });
-
-    fn_id
-}
-
-/// Convert one element inside a conversion helper's loop body.
-fn emit_elem_conversion(
-    e: &mut HLBlockEmitter<'_>,
-    value: ValueId,
-    src: &Type,
-    tgt: &Type,
-    child_fn: Option<FunctionId>,
-) -> ValueId {
-    if src == tgt {
+    if source_type == target_type {
         return value;
     }
-    match (&src.expr, &tgt.expr) {
-        (TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::WitnessOf(_)) => {
-            e.cast_to_witness_of(value)
-        }
-        (TypeExpr::WitnessOf(_), TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)) => {
-            e.value_of(value)
-        }
-        (TypeExpr::Array(..), TypeExpr::Array(..)) => {
-            let child_fn = child_fn.expect("child conversion helper should have been pre-created");
-            e.call(child_fn, vec![value], 1)[0]
-        }
-        _ => panic!("unsupported element conversion {:?} -> {:?}", src, tgt),
+    // Toplevel WitnessOf(X) → X: emit ValueOf, then keep stripping inside.
+    if let TypeExpr::WitnessOf(inner) = &source_type.expr {
+        let unwrapped = builder.value_of(value);
+        return emit_strip_witness(unwrapped, inner, target_type, builder);
     }
-}
-
-/// A zero value of exactly `typ` (witness wrappers included), used to seed
-/// conversion-loop accumulators with the type they will hold.
-fn emit_typed_default(e: &mut HLBlockEmitter<'_>, typ: &Type) -> ValueId {
-    match &typ.expr {
-        TypeExpr::Field => e.field_const(ark_bn254::Fr::from(0)),
-        TypeExpr::U(size) => e.u_const(*size, 0),
-        TypeExpr::I(size) => e.i_const(*size, 0),
-        TypeExpr::WitnessOf(inner) => {
-            let zero = emit_typed_default(e, inner);
-            e.cast_to_witness_of(zero)
-        }
-        TypeExpr::Array(inner, size) => {
-            let elem = emit_typed_default(e, inner);
-            e.mk_repeated(
-                elem,
-                SequenceTargetType::Array(*size),
-                *size,
-                *inner.clone(),
-            )
-        }
-        _ => panic!("unsupported default value type {:?}", typ),
+    match CastTarget::strip_conversion(source_type, target_type) {
+        None => value,
+        Some(target) => builder.cast_to(target, value),
     }
 }
 
 /// Append conversion instructions emitted at a typed-slot boundary,
-/// Guard-wrapping them in tainted blocks. Calls to conversion helpers are
-/// pushed unguarded: the helpers are pure and in-bounds by construction, so
-/// they are safe to execute unconditionally.
+/// Guard-wrapping them in tainted blocks.
 fn flush_conversion_instrs(
     instrs: &mut Vec<OpCode>,
     taint: Option<ValueId>,
     cast_instrs: Vec<OpCode>,
 ) {
     for instr in cast_instrs {
-        if matches!(instr, OpCode::Call { .. }) {
-            instrs.push(instr);
-        } else {
-            maybe_guard(instrs, taint, instr);
-        }
+        maybe_guard(instrs, taint, instr);
     }
 }
 
@@ -1288,6 +1015,8 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
+        // A WitnessOf wrapper on the container means the handle/length is witness-dependent;
+        // a wrapper on the element means the elements are. Both are applied faithfully.
         (TypeExpr::Array(inner, size), WitnessShape::Array(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
             if top.is_witness() {
@@ -1313,15 +1042,113 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
             }
         }
         (TypeExpr::Tuple(_), _) => ice_non_elided_tuple(),
-        (TypeExpr::Blob(elem, n), wt @ WitnessShape::Array(..)) => {
+        (TypeExpr::Blob(elem, n), wt @ WitnessShape::Scalar(info)) => {
             // Blobs hold raw constant/input data; they can never carry witness
-            // values at any level.
+            // values at any level. The taint inference models them as opaque
+            // scalar leaves.
             assert!(
-                !wt.contains_witness(),
+                !info.is_witness(),
                 "ICE: Blob type inferred as witness-bearing: {wt}"
             );
             Type::blob(*elem, n)
         }
         (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar(w: WitnessType) -> WitnessShape {
+        WitnessShape::Scalar(w)
+    }
+    fn array(top: WitnessType, inner: WitnessShape) -> WitnessShape {
+        WitnessShape::Array(top, Box::new(inner))
+    }
+    fn reference(top: WitnessType, inner: WitnessShape) -> WitnessShape {
+        WitnessShape::Ref(top, Box::new(inner))
+    }
+    use WitnessType::{Pure, Witness};
+
+    /// A fully-witness array (container *and* element witness) materializes faithfully as
+    /// `WitnessOf(Array(WitnessOf(Field), N))`: the container wrapper records the witnessed
+    /// handle, the element wrapper the witnessed elements.
+    #[test]
+    fn fully_witness_array_wraps_container_and_leaves() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Witness, scalar(Witness));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(
+            got,
+            Type::witness_of(Type::witness_of(Type::field()).array_of(3))
+        );
+        // Peeling the element of the witnessed container must not double-wrap (regression).
+        assert_eq!(got.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    /// Nested fully-witness array `[[Field; 2]; 3]`: every witness level of the shape lands on
+    /// the corresponding type level.
+    #[test]
+    fn nested_fully_witness_array_wraps_every_witness_level() {
+        let ty = Type::field().array_of(2).array_of(3);
+        let shape = array(Witness, array(Witness, scalar(Witness)));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(
+            got,
+            Type::witness_of(
+                Type::witness_of(Type::witness_of(Type::field()).array_of(2)).array_of(3)
+            )
+        );
+        // An already-witnessed element is returned as-is, not wrapped again.
+        assert_eq!(
+            got.get_array_element(),
+            Type::witness_of(Type::witness_of(Type::field()).array_of(2))
+        );
+    }
+
+    /// Array of refs `[&Field; 2]` with a witness container: the wrapper lands on the array
+    /// container, not the ref elements.
+    #[test]
+    fn witness_array_of_refs_wraps_container() {
+        let ty = Type::field().ref_of().array_of(2);
+        let shape = array(Witness, reference(Pure, scalar(Pure)));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(got, Type::witness_of(Type::field().ref_of().array_of(2)));
+        // Element peel is well-formed: the element of a witnessed container is witnessed.
+        assert_eq!(
+            got.get_array_element(),
+            Type::witness_of(Type::field().ref_of())
+        );
+    }
+
+    /// Container-only witness (`Array(Witness, Scalar(Pure))`): the handle/length is witnessed
+    /// but the pure elements stay pure — the witness must not be folded into the leaves.
+    #[test]
+    fn container_only_witness_array_keeps_pure_leaves() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Witness, scalar(Pure));
+        let got = apply_witness_type(ty, &shape);
+        assert_eq!(got, Type::witness_of(Type::field().array_of(3)));
+        assert_eq!(got.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    /// Leaf-only witness (`Array(Pure, Scalar(Witness))`) was already valid and must be preserved.
+    #[test]
+    fn leaf_only_witness_array_is_preserved() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Pure, scalar(Witness));
+        assert_eq!(
+            apply_witness_type(ty, &shape),
+            Type::witness_of(Type::field()).array_of(3)
+        );
+    }
+
+    /// A fully-pure array stays pure.
+    #[test]
+    fn pure_array_is_unchanged() {
+        let ty = Type::field().array_of(3);
+        let shape = array(Pure, scalar(Pure));
+        assert_eq!(apply_witness_type(ty, &shape), Type::field().array_of(3));
     }
 }

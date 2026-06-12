@@ -476,7 +476,7 @@ fn lower_instruction(
                 out.push(OpCode::Cast {
                     result: r,
                     value: v,
-                    target: *target,
+                    target: target.clone(),
                 });
             }
         }

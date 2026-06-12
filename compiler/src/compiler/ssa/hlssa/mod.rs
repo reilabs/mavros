@@ -165,10 +165,6 @@ pub enum OpCode {
         kind: RefCountOp,
         value: ValueId,
     },
-    ValueOf {
-        result: ValueId,
-        value: ValueId,
-    },
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
@@ -613,14 +609,6 @@ impl Instruction for OpCode {
             OpCode::Not { result, value } => {
                 format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
             }
-            OpCode::ValueOf { result, value } => {
-                format!(
-                    "v{}{} = value_of v{}",
-                    result.0,
-                    annotate_value(*result),
-                    value.0
-                )
-            }
             OpCode::ToBits {
                 result,
                 value,
@@ -918,10 +906,6 @@ impl Instruction for OpCode {
             Self::Not {
                 result: _,
                 value: v,
-            }
-            | Self::ValueOf {
-                result: _,
-                value: v,
             } => vec![v].into_iter(),
             Self::ToBits {
                 result: _,
@@ -1035,9 +1019,7 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. }
-            | Self::ValueOf { result: r, .. }
-            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1093,9 +1075,7 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. }
-            | Self::ValueOf { result: r, .. }
-            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1256,10 +1236,6 @@ impl Instruction for OpCode {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -1488,10 +1464,6 @@ impl Instruction for OpCode {
                 result: r,
                 value: v,
             }
-            | Self::ValueOf {
-                result: r,
-                value: v,
-            }
             | Self::Spread {
                 result: r,
                 value: v,
@@ -1645,14 +1617,151 @@ impl Display for SequenceTargetType {
 // CAST TARGET
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CastTarget {
     Field,
     U(usize),
     I(usize),
     WitnessOf,
+    /// Strips one `WitnessOf` wrapper.
+    ValueOf,
     Nop,
     ArrayToSlice,
+    /// Applies the inner cast to every element of an array or slice.
+    /// Lowered to an explicit loop late, by `LowerMapCasts`; witness-only maps
+    /// never reach codegen in the witgen pipeline (`StripWitnessOf` erases them).
+    Map(Box<CastTarget>),
+}
+
+impl CastTarget {
+    /// The cast target injecting witness wrappers to convert a value of type
+    /// `src` into type `tgt`, or `None` when no conversion is needed (equal
+    /// types, or types differing only in ways that share a runtime
+    /// representation).
+    ///
+    /// Panics on conversions casts cannot express — in particular on
+    /// witness *strips* (`WitnessOf(X) → X`): silently erasing witness-ness at
+    /// a typed-slot boundary would drop the constraint connection, so such a
+    /// request always indicates a witness-inference inconsistency. Strips are
+    /// only legal for unconstrained call arguments, via [`Self::strip_conversion`].
+    pub fn conversion(src: &Type, tgt: &Type) -> Option<CastTarget> {
+        Self::conversion_impl(src, tgt, false)
+    }
+
+    /// The cast target stripping witness wrappers to convert a value of type
+    /// `src` into type `tgt` (for unconstrained call arguments), or `None`
+    /// when the types already match.
+    pub fn strip_conversion(src: &Type, tgt: &Type) -> Option<CastTarget> {
+        Self::conversion_impl(src, tgt, true)
+    }
+
+    fn conversion_impl(src: &Type, tgt: &Type, strip: bool) -> Option<CastTarget> {
+        if src == tgt {
+            return None;
+        }
+        match (&src.expr, &tgt.expr) {
+            (TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::WitnessOf(_))
+                if !strip =>
+            {
+                Some(CastTarget::WitnessOf)
+            }
+            (TypeExpr::WitnessOf(inner), TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
+                if strip && inner.as_ref() == tgt =>
+            {
+                Some(CastTarget::ValueOf)
+            }
+            // Same runtime representation on both sides.
+            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) if !strip => None,
+            (TypeExpr::Ref(_), TypeExpr::Ref(_)) if !strip => None,
+            (TypeExpr::Array(s, n), TypeExpr::Array(t, m)) => {
+                assert_eq!(
+                    n, m,
+                    "array size mismatch in cast conversion: {src} -> {tgt}"
+                );
+                Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
+            }
+            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
+                Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
+            }
+            _ => panic!(
+                "no cast target converts {:?} -> {:?} (strip: {})",
+                src, tgt, strip
+            ),
+        }
+    }
+
+    /// The type a cast with this target produces for an input of `value_type`.
+    pub fn result_type(&self, value_type: &Type) -> Type {
+        match self {
+            CastTarget::Field => {
+                if value_type.is_witness_of() {
+                    Type::witness_of(Type::field())
+                } else {
+                    Type::field()
+                }
+            }
+            CastTarget::U(size) => {
+                if value_type.is_witness_of() {
+                    Type::witness_of(Type::u(*size))
+                } else {
+                    Type::u(*size)
+                }
+            }
+            CastTarget::I(size) => {
+                if value_type.is_witness_of() {
+                    Type::witness_of(Type::i(*size))
+                } else {
+                    Type::i(*size)
+                }
+            }
+            CastTarget::Nop => value_type.clone(),
+            CastTarget::ArrayToSlice => match &value_type.expr {
+                TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
+                _ => panic!("ArrayToSlice cast on non-array type"),
+            },
+            CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
+            CastTarget::ValueOf => match &value_type.expr {
+                TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
+                _ => panic!("ValueOf cast on non-WitnessOf type {:?}", value_type),
+            },
+            CastTarget::Map(inner) => match &value_type.expr {
+                TypeExpr::Array(elem, len) => inner.result_type(elem).array_of(*len),
+                TypeExpr::Slice(elem) => inner.result_type(elem).slice_of(),
+                _ => panic!("Map cast on non-sequence type {:?}", value_type),
+            },
+        }
+    }
+
+    /// Whether this cast only changes the witness representation of a value
+    /// (injects or strips `WitnessOf` wrappers, possibly elementwise). After
+    /// stripping `WitnessOf` from all types such casts are identities.
+    pub fn is_witness_repr_only(&self) -> bool {
+        match self {
+            CastTarget::WitnessOf | CastTarget::ValueOf => true,
+            CastTarget::Map(inner) => inner.is_witness_repr_only(),
+            CastTarget::Field
+            | CastTarget::U(_)
+            | CastTarget::I(_)
+            | CastTarget::Nop
+            | CastTarget::ArrayToSlice => false,
+        }
+    }
+
+    /// Whether this cast strips witness wrappers (`ValueOf`, possibly under
+    /// `Map`s). Strips are only emitted for hint chains and unconstrained call
+    /// arguments, both of which are dead by R1CS generation.
+    pub fn is_value_of(&self) -> bool {
+        match self {
+            CastTarget::ValueOf => true,
+            CastTarget::Map(inner) => inner.is_value_of(),
+            CastTarget::Field
+            | CastTarget::U(_)
+            | CastTarget::I(_)
+            | CastTarget::WitnessOf
+            | CastTarget::Nop
+            | CastTarget::ArrayToSlice => false,
+        }
+    }
 }
 
 impl Display for CastTarget {
@@ -1662,8 +1771,10 @@ impl Display for CastTarget {
             CastTarget::U(size) => write!(f, "u{}", size),
             CastTarget::I(size) => write!(f, "i{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
+            CastTarget::ValueOf => write!(f, "ValueOf"),
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
+            CastTarget::Map(inner) => write!(f, "Map({})", inner),
         }
     }
 }
