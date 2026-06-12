@@ -1766,6 +1766,18 @@ pub enum LookupTarget<V> {
     Spread(u8),
 }
 
+impl<V> LookupTarget<V> {
+    /// Map the value payload (dynamic rangecheck bound or array operand), keeping the target kind.
+    pub fn map<U>(&self, mut f: impl FnMut(&V) -> U) -> LookupTarget<U> {
+        match self {
+            LookupTarget::Rangecheck(bits) => LookupTarget::Rangecheck(*bits),
+            LookupTarget::DynRangecheck(bound) => LookupTarget::DynRangecheck(f(bound)),
+            LookupTarget::Array(array) => LookupTarget::Array(f(array)),
+            LookupTarget::Spread(bits) => LookupTarget::Spread(*bits),
+        }
+    }
+}
+
 // RADIX
 // ================================================================================================
 

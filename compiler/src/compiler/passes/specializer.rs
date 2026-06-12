@@ -22,8 +22,8 @@ use crate::{
             BlockId, FunctionId, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
-                HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType,
-                Type, TypeExpr,
+                HLSSA, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp,
+                SequenceTargetType, Type, TypeExpr,
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
@@ -53,6 +53,25 @@ enum ConstVal {
     Array(Vec<ValueId>),
     Blob(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
+}
+
+fn const_val_as_field(value: &ConstVal) -> Option<Field> {
+    match value {
+        ConstVal::U(_, v) | ConstVal::I(_, v) => Some(Field::from(*v)),
+        ConstVal::Field(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// The operands of an `a * b = c` constraint as field constants, if all three are known.
+fn r1c_consts(
+    ctx: &SpecializationState<'_>,
+    a: &Val,
+    b: &Val,
+    c: &Val,
+) -> Option<(Field, Field, Field)> {
+    let field_const = |v: &Val| ctx.const_vals.get(&v.0).and_then(const_val_as_field);
+    Some((field_const(a)?, field_const(b)?, field_const(c)?))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -202,12 +221,19 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *b,
             (BinaryArithOpKind::Add, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *self,
 
+            (BinaryArithOpKind::Add, _, _) => Self(ctx.add(self.0, b.0)),
+            (BinaryArithOpKind::Sub, _, _) => Self(ctx.sub(self.0, b.0)),
+            (BinaryArithOpKind::Mul, _, _) => Self(ctx.mul(self.0, b.0)),
+            (BinaryArithOpKind::Div, _, _) => Self(ctx.div(self.0, b.0)),
+
             (BinaryArithOpKind::Mod, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val % b_val;
                 let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
+            (BinaryArithOpKind::Mod, _, _) => Self(ctx.modulo(self.0, b.0)),
+
             (BinaryArithOpKind::And, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val & b_val;
                 let res_v = ctx.u_const(s, res);
@@ -310,8 +336,15 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn assert_r1c(_a: &Self, _b: &Self, _c: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+        match r1c_consts(ctx, a, b, c) {
+            Some((a, b, c)) => assert_eq!(a * b, c),
+            None => ctx.emit(OpCode::AssertR1C {
+                a: a.0,
+                b: b.0,
+                c: c.0,
+            }),
+        }
     }
 
     fn array_get(&self, index: &Self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
@@ -468,8 +501,11 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn constrain(_a: &Self, _b: &Self, _c: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+        match r1c_consts(ctx, a, b, c) {
+            Some((a, b, c)) => assert_eq!(a * b, c),
+            None => HLEmitter::constrain(ctx, a.0, b.0, c.0),
+        }
     }
 
     fn to_bits(
@@ -620,12 +656,30 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn write_witness(&self, tp: Option<&Type>, ctx: &mut SpecializationState) -> Self {
+        if ctx.const_vals.contains_key(&self.0) {
+            return *self;
+        }
+        match tp {
+            Some(_) => Self(HLEmitter::write_witness(ctx, self.0)),
+            None => {
+                ctx.emit(OpCode::WriteWitness {
+                    result: None,
+                    value: self.0,
+                    pinned: false,
+                });
+                *self
+            }
+        }
     }
 
-    fn fresh_witness(_result_type: &Type, _ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn fresh_witness(result_type: &Type, ctx: &mut SpecializationState) -> Self {
+        let result = ctx.fresh_value();
+        ctx.emit(OpCode::FreshWitness {
+            result,
+            result_type: result_type.clone(),
+        });
+        Self(result)
     }
 
     fn value_of(&self, ctx: &mut SpecializationState) -> Self {
@@ -753,6 +807,22 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
     }
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
+
+    fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
+        self.emit(OpCode::Lookup {
+            target: target.map(|v| v.0),
+            args: args.into_iter().map(|arg| arg.0).collect(),
+            flag: flag.0,
+        });
+    }
+
+    fn dlookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
+        self.emit(OpCode::DLookup {
+            target: target.map(|v| v.0),
+            args: args.into_iter().map(|arg| arg.0).collect(),
+            flag: flag.0,
+        });
+    }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
