@@ -7,9 +7,10 @@ use std::{
 };
 
 use ark_ff::AdditiveGroup as _;
-use noirc_frontend::debug::DebugInstrumenter;
-use noirc_frontend::monomorphization::Monomorphizer;
-use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
+use noirc_frontend::{
+    debug::DebugInstrumenter,
+    monomorphization::{Monomorphizer, debug_types::DebugTypeTracker},
+};
 use tracing::info;
 
 use crate::{
@@ -17,7 +18,8 @@ use crate::{
     compiler::{
         Field,
         analysis::{
-            flow_analysis::FlowAnalysis, types::Types, witness_type_inference::WitnessTypeInference,
+            flow_analysis::FlowAnalysis, types::Types,
+            witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
             bytecode::CodeGen,
@@ -218,8 +220,8 @@ impl Driver {
             );
         }
 
-        let mut witness_inference = WitnessTypeInference::new();
-        witness_inference.run(&mut ssa, &flow_analysis).unwrap();
+        let mut witness_inference = WitnessTaintInference::new();
+        witness_inference.run(&mut ssa, &flow_analysis);
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),

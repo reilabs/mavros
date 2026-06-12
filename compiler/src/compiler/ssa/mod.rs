@@ -231,6 +231,17 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     /// The copy has been inserted into the SSA, and while it contains the same block identifiers,
     /// all value identifiers barring those for constants are now unique to the new occurrences.
     pub fn duplicate_function(&mut self, function_id: FunctionId) -> FunctionId {
+        self.duplicate_function_with_remap(function_id).0
+    }
+
+    /// Like [`Self::duplicate_function`], but also returns the `old ValueId -> new ValueId` remap.
+    ///
+    /// Block ids are preserved; only non-constant value ids are freshened. Callers that need to
+    /// translate per-value analysis results from the original onto the clone use the remap.
+    pub fn duplicate_function_with_remap(
+        &mut self,
+        function_id: FunctionId,
+    ) -> (FunctionId, HashMap<ValueId, ValueId>) {
         let mut cloned = self
             .functions
             .get(&function_id)
@@ -304,7 +315,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             }
         }
 
-        self.insert_function(cloned)
+        (self.insert_function(cloned), remap)
     }
 
     /// Allocate a fresh `ValueId` from the SSA-wide counter.
