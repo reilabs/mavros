@@ -583,6 +583,14 @@ impl CallGraph {
             .map(|node| self.node_to_func[&node])
             .unique()
     }
+
+    /// The functions `caller` calls, each yielded once.
+    pub fn get_callees(&self, caller: FunctionId) -> impl Iterator<Item = FunctionId> + '_ {
+        self.call_graph
+            .neighbors_directed(self.func_to_node[&caller], Direction::Outgoing)
+            .map(|node| self.node_to_func[&node])
+            .unique()
+    }
 }
 
 impl CallGraph {

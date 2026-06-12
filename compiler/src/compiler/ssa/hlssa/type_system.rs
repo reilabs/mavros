@@ -127,6 +127,17 @@ impl Type {
         }
     }
 
+    /// Wrap `inner` in WitnessOf unless it already is witnessed — the idempotent variant of
+    /// [`Self::witness_of`], used where a level *inherits* witness-ness from its container and an
+    /// already-witnessed inner must not be wrapped twice (witness-of-witness collapses).
+    pub fn witness_of_collapsed(inner: Type) -> Self {
+        if inner.is_witness_of() {
+            inner
+        } else {
+            Type::witness_of(inner)
+        }
+    }
+
     // --- Predicates ---
 
     pub fn is_numeric(&self) -> bool {
@@ -214,14 +225,7 @@ impl Type {
             TypeExpr::Array(inner, _) => *inner.clone(),
             TypeExpr::Slice(inner) => *inner.clone(),
             TypeExpr::Blob(inner, _) => *inner.clone(),
-            TypeExpr::WitnessOf(inner) => {
-                let elem = inner.get_array_element();
-                if elem.is_witness_of() {
-                    elem
-                } else {
-                    Type::witness_of(elem)
-                }
-            }
+            TypeExpr::WitnessOf(inner) => Type::witness_of_collapsed(inner.get_array_element()),
             _ => panic!("Type is not an array: {}", self),
         }
     }
@@ -239,12 +243,7 @@ impl Type {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements[index].clone(),
             TypeExpr::WitnessOf(inner) => {
-                let elem = inner.get_tuple_element(index);
-                if elem.is_witness_of() {
-                    elem
-                } else {
-                    Type::witness_of(elem)
-                }
+                Type::witness_of_collapsed(inner.get_tuple_element(index))
             }
             _ => panic!("Type is not a tuple: {}", self),
         }
@@ -258,13 +257,7 @@ impl Type {
             TypeExpr::WitnessOf(inner) => inner
                 .get_tuple_elements()
                 .into_iter()
-                .map(|elem| {
-                    if elem.is_witness_of() {
-                        elem
-                    } else {
-                        Type::witness_of(elem)
-                    }
-                })
+                .map(Type::witness_of_collapsed)
                 .collect(),
             _ => panic!("Type is not a tuple: {}", self),
         }
@@ -310,6 +303,19 @@ impl Type {
             TypeExpr::WitnessOf(inner) => *inner.clone(),
             _ => self.clone(),
         }
+    }
+
+    /// Strip every top-level WitnessOf wrapper, by reference — the borrow-returning sibling of
+    /// [`Self::strip_witness`] for callers that only inspect the underlying structure.
+    ///
+    /// With the no-nested-wrapper invariant enforced by [`Self::witness_of`] the loop runs at
+    /// most once, but stacked wrappers are tolerated anyway.
+    pub fn peel_witness(&self) -> &Type {
+        let mut t = self;
+        while let TypeExpr::WitnessOf(inner) = &t.expr {
+            t = inner;
+        }
+        t
     }
 
     /// Recursively strip all WitnessOf wrappers at every level.

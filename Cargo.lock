@@ -2209,6 +2209,7 @@ dependencies = [
  "bincode",
  "cargo_metadata",
  "clap",
+ "fixedbitset 0.4.2",
  "fm",
  "inkwell",
  "itertools 0.14.0",

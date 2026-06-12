@@ -9,9 +9,10 @@
 //! The graph is generic over the node type for easier adaptability, with the added benefit of being
 //! able to unit-test it in isolation.
 
-use crate::collections::{HashMap, HashSet};
-
+use fixedbitset::FixedBitSet;
 use std::{collections::VecDeque, hash::Hash};
+
+use crate::collections::{HashMap, HashSet};
 
 /// A directed `≥` graph over nodes `N`.
 #[derive(Clone, Debug)]
@@ -71,23 +72,22 @@ impl<N: Eq + Hash + Clone> TaintGraph<N> {
     /// Multi-source reachability in a single traversal: for each node, which of `sources` taint it.
     ///
     /// Bit `i` of the returned bitset for node `n` is set iff `sources[i]` reaches `n` —
-    /// equivalently iff `n ∈ self.solve([sources[i]])`. Each node carries a word-bitset of source
+    /// equivalently iff `n ∈ self.solve([sources[i]])`. Each node carries a bitset of source
     /// indices that grows monotonically to a fixpoint (a node is re-queued whenever its bits grow),
     /// so all sources share one traversal instead of one BFS per source. Summary extraction uses it
     /// to read every `(sink, source)` pair from a single solve.
-    pub fn reaching_sources(&self, sources: &[N]) -> HashMap<N, Vec<u64>> {
-        let words = sources.len().div_ceil(64);
-        let mut reaching: HashMap<N, Vec<u64>> = HashMap::default();
+    pub fn reaching_sources(&self, sources: &[N]) -> HashMap<N, FixedBitSet> {
+        let mut reaching: HashMap<N, FixedBitSet> = HashMap::default();
         let mut queue: VecDeque<N> = VecDeque::new();
         // Nodes currently pending in `queue`: a node whose bits grow several times before it is
         // popped needs only one pending visit, since the visit reads its latest bits.
         let mut in_queue: HashSet<N> = HashSet::default();
 
         for (i, s) in sources.iter().enumerate() {
-            let bits = reaching
+            reaching
                 .entry(s.clone())
-                .or_insert_with(|| vec![0u64; words]);
-            bits[i / 64] |= 1u64 << (i % 64);
+                .or_insert_with(|| FixedBitSet::with_capacity(sources.len()))
+                .insert(i);
             if in_queue.insert(s.clone()) {
                 queue.push_back(s.clone());
             }
@@ -98,25 +98,27 @@ impl<N: Eq + Hash + Clone> TaintGraph<N> {
             let Some(deps) = self.taints.get(&b) else {
                 continue;
             };
-            // Snapshot `b`'s bits so we can borrow `reaching` mutably for each dependent `a`.
-            let b_bits = reaching
-                .get(&b)
-                .cloned()
-                .unwrap_or_else(|| vec![0u64; words]);
+            // Move `b`'s bits out of the map (and put them back below) so the map can be borrowed
+            // mutably for each dependent `a` without cloning the bitset on every pop. A popped
+            // node always has an entry — it was enqueued when its bits first grew — and self-edges
+            // are dropped by `add_ge`, so the emptied slot is never read inside the loop.
+            let b_bits = std::mem::take(
+                reaching
+                    .get_mut(&b)
+                    .expect("ICE: queued node without a reaching set"),
+            );
             for a in deps {
                 let bits = reaching
                     .entry(a.clone())
-                    .or_insert_with(|| vec![0u64; words]);
-                let mut changed = false;
-                for w in 0..words {
-                    let before = bits[w];
-                    bits[w] |= b_bits[w];
-                    changed |= bits[w] != before;
-                }
-                if changed && in_queue.insert(a.clone()) {
-                    queue.push_back(a.clone());
+                    .or_insert_with(|| FixedBitSet::with_capacity(sources.len()));
+                if !b_bits.is_subset(bits) {
+                    bits.union_with(&b_bits);
+                    if in_queue.insert(a.clone()) {
+                        queue.push_back(a.clone());
+                    }
                 }
             }
+            *reaching.get_mut(&b).unwrap() = b_bits;
         }
         reaching
     }
@@ -185,7 +187,7 @@ mod tests {
         let bit = |node: u32, i: usize| {
             reaching
                 .get(&node)
-                .map(|bits| bits[i / 64] & (1u64 << (i % 64)) != 0)
+                .map(|bits| bits.contains(i))
                 .unwrap_or(false)
         };
 

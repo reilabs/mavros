@@ -66,9 +66,10 @@
 //! subtree:
 //!
 //! - Store `*ptr = value`: ptr.deref ≥ value at every non-Deref-descended level, plus cfg(block)
-//!   into the pointee's witness leaves (scalars descending arrays, and nested-ref *handles* —
-//!   which ref a slot holds after a conditional ref store is itself witness-dependent). The
-//!   nested-ref *pointee* levels unify, as for any copy.
+//!   *and* ptr.top into the pointee's witness leaves (scalars descending arrays, and nested-ref
+//!   *handles* — which ref a slot holds after a conditional ref store is itself witness-dependent,
+//!   and *which* slot a store through a witness-selected pointer wrote is too: the latter is the
+//!   dual of Load's result.top ≥ ptr.top). The nested-ref *pointee* levels unify, as for any copy.
 //! - Load `result = *ptr`: result ≥ ptr.deref (level for level, again unifying nested-ref
 //!   levels), and result.top ≥ ptr.top.
 //!
@@ -111,11 +112,11 @@
 //! - phi/merge parameters at the join of a witness `JmpIf` take an edge from the *branch condition
 //!   itself* (the merge value differs by which witness-chosen arm ran),
 //! - writes performed under witness control flow (`Store`/`ArraySet`/`SlicePush`/`InitGlobal` join
-//!   cfg(block)—the function's cfg-flag position `Cfg(f)` plus every dominating witness branch
+//!   cfg(block)—the function's cfg-flag position `Cfg` plus every dominating witness branch
 //!   condition—into the written leaf, because the write must be predicated and its post-state is
 //!   witness-dependent).
 //!
-//! `Cfg(f)` feeds only (b): a merge under a pure local condition stays pure even when the function
+//! `Cfg` feeds only (b): a merge under a pure local condition stays pure even when the function
 //! as a whole is called under witness control flow, since either the whole call runs or none of it
 //! does.
 //!
@@ -174,6 +175,8 @@ mod graph;
 mod phases;
 mod position;
 
+use std::collections::BTreeSet;
+
 use crate::collections::HashMap;
 use crate::compiler::{
     analysis::{
@@ -213,19 +216,10 @@ impl WitnessTaintInference {
         self.functions.get(&func_id)
     }
 
-    pub fn set_function_witness_type(&mut self, func_id: FunctionId, wt: FunctionWitnessType) {
-        self.functions.insert(func_id, wt);
-    }
-
-    pub fn remove_function_witness_type(&mut self, func_id: FunctionId) {
-        self.functions.remove(&func_id);
-    }
-
     /// Run the analysis, specializing `ssa` per call context and populating one
     /// [`FunctionWitnessType`] per specialized `FunctionId`.
-    pub fn run(&mut self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) -> Result<(), String> {
+    pub fn run(&mut self, ssa: &mut HLSSA, flow_analysis: &FlowAnalysis) {
         self.functions = phases::run(ssa, flow_analysis);
-        Ok(())
     }
 }
 
@@ -264,14 +258,19 @@ impl SSAAnotator for WitnessTaintInference {
 /// caller's graph (see [`builder`]).
 ///
 /// Inputs are the levels the caller determines: every parameter level, the Deref-descended levels
-/// of every return (the caller may write through a returned ref), read globals, the cfg flag, and
-/// `Top`. Outputs are the levels the callee communicates back: every return level and the
+/// of every return (the caller may write through a returned ref), transitively read globals, the
+/// cfg flag, and `Top`. Outputs are the levels the callee communicates back: every return level and the
 /// Deref-descended levels of every parameter (ref-argument writes, and inputs pinned from `Top`).
 /// Deref-descended levels are both — they name shared memory either side can write.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FunctionSummary {
     /// `(output, input)` pairs, with each meaning `output ≥ input`.
-    edges: Vec<(Position, Position)>,
+    ///
+    /// A `BTreeSet`, so `Eq` is structural by construction: the phase-1 fixpoint compares
+    /// summaries with `!=` to decide convergence, and an order-sensitive container would make
+    /// identical summaries compare unequal (spurious re-queues, and non-termination on recursive
+    /// call graphs). Iteration order is deterministic as a bonus.
+    edges: BTreeSet<(Position, Position)>,
 }
 
 #[cfg(test)]
@@ -297,7 +296,7 @@ mod tests {
     fn run_wti(ssa: &mut HLSSA) -> WitnessTaintInference {
         let flow = FlowAnalysis::run(ssa);
         let mut wti = WitnessTaintInference::new();
-        wti.run(ssa, &flow).unwrap();
+        wti.run(ssa, &flow);
         wti
     }
 
@@ -428,6 +427,41 @@ mod tests {
         });
         let fwt = run(&mut ssa);
         assert_eq!(fwt.returns_witness, vec![pure(), witness()]);
+    }
+
+    /// A `Guard` delegates to its inner opcode, with the guard condition joined into the result:
+    /// a guarded add of two pure constants is Witness when the condition is Witness (after
+    /// `LowerGuards` the result is a merge phi over the condition).
+    #[test]
+    fn guard_delegates_and_joins_condition() {
+        use crate::compiler::ssa::hlssa::{BinaryArithOpKind, OpCode};
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_main_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.block(entry);
+            let x = e.add_parameter(Type::field());
+            let w = e.write_witness(x);
+            let cond = e.eq(w, x); // Witness condition
+            let c1 = e.field_const(fr(1));
+            let c2 = e.field_const(fr(2));
+            let r = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition: cond,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Add,
+                    result: r,
+                    lhs: c1,
+                    rhs: c2,
+                }),
+            });
+            e.terminate_return(vec![r]);
+        });
+        let fwt = run(&mut ssa);
+        assert_eq!(fwt.returns_witness, vec![witness()]);
     }
 
     /// Interprocedural ref-argument output: a callee that writes a witness into `*p` back-taints the
@@ -606,6 +640,52 @@ mod tests {
             );
             let q = e.load(p); // q is r1 or r2 depending on the witness branch
             let v = e.load(q); // ...so v is 1 or 2 depending on the witness branch
+            e.terminate_return(vec![v]);
+        });
+        let fwt = run(&mut ssa);
+        assert_eq!(fwt.returns_witness, vec![witness()]);
+    }
+
+    /// The dual of the loaded-handle case: an *unconditional* store of a pure value through a
+    /// witness-selected pointer must taint the candidate slots, because *which* slot received the
+    /// value is witness-dependent — so reading one of the ORIGINAL bindings afterward is Witness.
+    /// (Reads through the selected pointer itself are covered by Load's `result ≥ ptr`; this
+    /// exercises the Store-side `written ≥ ptr` edge.)
+    #[test]
+    fn store_through_witness_selected_ref_taints_original() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_main_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.block(entry);
+            let x = e.add_parameter(Type::field());
+            let r1 = e.alloc(Type::field());
+            let r2 = e.alloc(Type::field());
+            let c1 = e.field_const(fr(1));
+            let c2 = e.field_const(fr(2));
+            e.store(r1, c1);
+            e.store(r2, c2);
+            let p = e.alloc(Type::field().ref_of());
+            e.store(p, r1);
+            let w = e.write_witness(x);
+            let zero = e.field_const(fr(0));
+            let cond = e.eq(w, zero); // witness condition
+            // if cond { *p = r2 }
+            e.build_if_else(
+                cond,
+                vec![],
+                |e| {
+                    e.store(p, r2);
+                    vec![]
+                },
+                |_| vec![],
+            );
+            let q = e.load(p); // q is r1 or r2 depending on the witness branch
+            let c5 = e.field_const(fr(5));
+            e.store(q, c5); // unconditional pure store through the witness-selected pointer
+            let v = e.load(r1); // r1's pointee is 1 or 5 depending on the witness branch
             e.terminate_return(vec![v]);
         });
         let fwt = run(&mut ssa);

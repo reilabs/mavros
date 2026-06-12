@@ -4,18 +4,18 @@
 //! [`specialize_contexts`] (phase 2) instantiates those summaries from `main` into per-context
 //! clones. See each function's own documentation for the details.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::collections::{HashMap, HashSet};
 use crate::compiler::{
     analysis::{
-        flow_analysis::{CFG, FlowAnalysis},
+        flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo, Types},
         witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
         witness_taint_inference::{
             FunctionSummary, WitnessTaint,
             builder::{build_graph, compute_block_conditions},
-            position::{Descent, Owner, Position, paths_of_type, peel_witness},
+            position::{Descent, Owner, Position, paths_of_type},
         },
     },
     ssa::{
@@ -56,11 +56,19 @@ fn compute_summaries(
         .map(|f| (*f, FunctionSummary::default()))
         .collect();
 
-    // The formal input/output skeleton is summary-independent: compute it once per function rather
+    // The formal input/output skeleton is summary-independent (the transitive read-globals depend
+    // only on the call graph, not the evolving summaries): compute it once per function rather
     // than on every worklist pop.
+    let read_globals = transitive_read_globals(ssa, flow, fids);
+    let global_types = ssa.get_global_types();
     let skeletons: HashMap<FunctionId, SummarySkeleton> = fids
         .iter()
-        .map(|f| (*f, summary_skeleton(*f, ssa.get_function(*f))))
+        .map(|f| {
+            (
+                *f,
+                summary_skeleton(ssa.get_function(*f), &read_globals[f], global_types),
+            )
+        })
         .collect();
 
     // Seed the worklist callee-first (post-order from main), so summaries are computed before
@@ -84,7 +92,6 @@ fn compute_summaries(
         queued.remove(&f);
         let func = ssa.get_function(f);
         let g = build_graph(
-            f,
             func,
             types.get_function(f),
             flow.get_function_cfg(f),
@@ -113,61 +120,112 @@ fn compute_summaries(
 ///
 /// - `inputs` are the levels the *caller* determines: every parameter level, the Deref-descended
 ///   levels of every return (a returned ref is as much "caller chooses" as a ref parameter — the
-///   caller may write through it), the globals the function reads, the cfg flag, and `Top`.
+///   caller may write through it), the globals the function reads (transitively, through any
+///   callee), the cfg flag, and `Top`.
 /// - `outputs` are the levels whose taint the *callee* communicates back: every return level and
 ///   the Deref-descended levels of every parameter (the callee may write through a ref argument).
 ///
 /// Deref-descended levels are both: they name shared memory that either side can write.
 ///
-/// Depends only on the function (signature plus the globals it reads), never on the evolving
-/// summaries, so phase 1 computes it once per function.
+/// Depends only on the function (signature plus the globals it transitively reads), never on the
+/// evolving summaries, so phase 1 computes it once per function.
 struct SummarySkeleton {
     inputs: Vec<Position>,
     outputs: Vec<Position>,
 }
 
-fn summary_skeleton(fid: FunctionId, func: &HLFunction) -> SummarySkeleton {
-    let params = param_level_positions(fid, func);
-    let returns = return_level_positions(fid, func);
-    let is_deref = |p: &Position| p.path.contains(&Descent::Deref);
+fn summary_skeleton(
+    func: &HLFunction,
+    read_globals: &BTreeSet<usize>,
+    global_types: &[Type],
+) -> SummarySkeleton {
+    let params = param_level_positions(func);
+    let returns = return_level_positions(func);
 
     let mut inputs: Vec<Position> = params.clone();
-    inputs.extend(returns.iter().filter(|p| is_deref(p)).cloned());
-    let mut outputs: Vec<Position> = params.into_iter().filter(is_deref).collect();
+    inputs.extend(returns.iter().cloned().filter(Position::is_deref_descended));
+    let mut outputs: Vec<Position> = params
+        .into_iter()
+        .filter(Position::is_deref_descended)
+        .collect();
     outputs.extend(returns);
 
-    // Globals the function reads are summary inputs, so `output ≥ Global(g)` edges propagate to
-    // callers when the callee summary is instantiated (Global maps to itself across the call).
-    let mut global_inputs: HashSet<Position> = HashSet::default();
-    for (_, block) in func.get_blocks() {
-        for instr in block.get_instructions() {
-            if let OpCode::ReadGlobal {
-                offset,
-                result_type,
-                ..
-            } = instr
-            {
-                let owner = Owner::Global(*offset as usize);
-                for p in paths_of_type(result_type) {
-                    global_inputs.insert(Position::root(owner.clone()).extend(&p));
-                }
-            }
+    // Globals the function reads — directly or through any callee — are summary inputs, so
+    // `output ≥ Global(g)` edges propagate to callers when the callee summary is instantiated
+    // (Global maps to itself across the call). Callee reads count too: instantiating a callee
+    // summary plants its `Global` sources in *this* function's graph, and a source that is not
+    // also an input here would be dropped from this function's own summary — the dependence
+    // would be lost two or more call levels above the read.
+    for g in read_globals {
+        let owner = Owner::Global(*g);
+        for p in paths_of_type(&global_types[*g]) {
+            inputs.push(Position::root(owner.clone()).extend(&p));
         }
     }
 
-    inputs.extend(global_inputs);
-    inputs.push(Position::root(Owner::Cfg(fid)));
+    inputs.push(Position::root(Owner::Cfg));
     inputs.push(Position::top());
     SummarySkeleton { inputs, outputs }
 }
 
+/// For each function, the globals it reads transitively: its own `ReadGlobal`s plus its callees',
+/// closed over the call graph (a small fixpoint, since recursion is allowed).
+///
+/// Depends only on the code and the call graph, never on the evolving summaries. `BTreeSet` keeps
+/// the skeleton's input order deterministic.
+fn transitive_read_globals(
+    ssa: &HLSSA,
+    flow: &FlowAnalysis,
+    fids: &[FunctionId],
+) -> HashMap<FunctionId, BTreeSet<usize>> {
+    let mut read_globals: HashMap<FunctionId, BTreeSet<usize>> = fids
+        .iter()
+        .map(|f| {
+            let mut globals = BTreeSet::new();
+            for (_, block) in ssa.get_function(*f).get_blocks() {
+                for instr in block.get_instructions() {
+                    if let OpCode::ReadGlobal { offset, .. } = instr {
+                        globals.insert(*offset as usize);
+                    }
+                }
+            }
+            (*f, globals)
+        })
+        .collect();
+
+    let call_graph = flow.get_call_graph();
+    let mut worklist: VecDeque<FunctionId> = fids.iter().copied().collect();
+    let mut queued: HashSet<FunctionId> = worklist.iter().copied().collect();
+    while let Some(f) = worklist.pop_front() {
+        queued.remove(&f);
+        let callee_globals: Vec<usize> = call_graph
+            .get_callees(f)
+            .filter(|c| read_globals.contains_key(c))
+            .flat_map(|c| read_globals[&c].iter().copied().collect::<Vec<_>>())
+            .collect();
+        let globals = read_globals.get_mut(&f).unwrap();
+        let mut grown = false;
+        for g in callee_globals {
+            grown |= globals.insert(g);
+        }
+        if grown {
+            for c in call_graph.get_callers(f) {
+                if read_globals.contains_key(&c) && queued.insert(c) {
+                    worklist.push_back(c);
+                }
+            }
+        }
+    }
+    read_globals
+}
+
 /// Every level of every parameter of `func`, as formal `Param` positions.
-fn param_level_positions(fid: FunctionId, func: &HLFunction) -> Vec<Position> {
+fn param_level_positions(func: &HLFunction) -> Vec<Position> {
     let mut out = Vec::new();
     for (i, (_, ty)) in func.get_entry().get_parameters().enumerate() {
         for p in paths_of_type(ty) {
             out.push(Position {
-                owner: Owner::Param(fid, i),
+                owner: Owner::Param(i),
                 path: p,
             });
         }
@@ -176,12 +234,12 @@ fn param_level_positions(fid: FunctionId, func: &HLFunction) -> Vec<Position> {
 }
 
 /// Every level of every return of `func`, as formal `Return` positions.
-fn return_level_positions(fid: FunctionId, func: &HLFunction) -> Vec<Position> {
+fn return_level_positions(func: &HLFunction) -> Vec<Position> {
     let mut out = Vec::new();
     for (j, ty) in func.get_returns().iter().enumerate() {
         for p in paths_of_type(ty) {
             out.push(Position {
-                owner: Owner::Return(fid, j),
+                owner: Owner::Return(j),
                 path: p,
             });
         }
@@ -195,24 +253,18 @@ fn extract_summary(g: &WitnessTaint, skeleton: &SummarySkeleton) -> FunctionSumm
     // edge is read off the outputs' bitsets — instead of one full BFS per input.
     let reaching = g.reaching_sources(&skeleton.inputs);
 
-    // BTreeSet so the edge Vec below has a canonical order: the phase-1 fixpoint compares summaries
-    // with `!=` to decide convergence, and hash-ordered edges would make identical summaries
-    // compare unequal (spurious re-queues, and non-termination on recursive call graphs).
     let mut edges: BTreeSet<(Position, Position)> = BTreeSet::new();
-
     for output in &skeleton.outputs {
         let Some(bits) = reaching.get(output) else {
             continue;
         };
         for (i, input) in skeleton.inputs.iter().enumerate() {
-            if bits[i / 64] & (1u64 << (i % 64)) != 0 && input != output {
+            if bits.contains(i) && input != output {
                 edges.insert((output.clone(), input.clone()));
             }
         }
     }
-    FunctionSummary {
-        edges: edges.into_iter().collect(),
-    }
+    FunctionSummary { edges }
 }
 
 // SPECIALIZATION CONTEXT
@@ -228,13 +280,38 @@ struct Ctx {
     fid: FunctionId,
     arg_shapes: Vec<WitnessShape>,
 
-    /// The caller-determined taint of each return: only Deref-descended levels (the memory a
-    /// returned ref names, which the caller may write) carry information; every other level is
-    /// `Pure` *by construction* ([`deref_shape_from`] never reads any other level), so contexts
-    /// never split on callee-determined output bits. The entry context's all-[`pure_shape`]
-    /// returns satisfy this trivially.
-    ret_shapes: Vec<WitnessShape>,
+    /// The caller-determined taint of each return. The [`DerefShape`] newtype guarantees that
+    /// only Deref-descended levels (the memory a returned ref names, which the caller may write)
+    /// carry information, so contexts never split on callee-determined output bits.
+    ret_shapes: Vec<DerefShape>,
     cfg_witness: WitnessType,
+}
+
+/// A return's caller-determined taint: a [`WitnessShape`] carrying information only at
+/// Deref-descended levels — everything at or above the first `Ref` is `Pure`.
+///
+/// The invariant is guaranteed by construction: the only constructors are [`DerefShape::pure`]
+/// (trivially all-Pure) and [`DerefShape::from_solution`] (which never reads a non-Deref level),
+/// so a [`Ctx`] literally cannot hold callee-determined output taint.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DerefShape(WitnessShape);
+
+impl DerefShape {
+    /// The all-Pure shape of `ty` — the no-caller-writes case (e.g. the entry context, which has
+    /// no caller to write through its returned refs).
+    fn pure(ty: &Type) -> Self {
+        DerefShape(pure_shape(ty))
+    }
+
+    /// Build only the Deref-descended levels of a value's shape from the solved witness set;
+    /// every level at or above the first `Ref` is `Pure` by construction.
+    ///
+    /// Deref-descended levels name shared mutable memory the caller may write, so this is exactly
+    /// the caller-determined taint of a call result — the shape-level counterpart of the
+    /// skeleton's `path.contains(&Descent::Deref)` input filter.
+    fn from_solution(owner: Owner, ty: &Type, witness: &HashSet<Position>) -> Self {
+        DerefShape(go_shape_from(&owner, &mut Vec::new(), ty, witness, false))
+    }
 }
 
 /// Run the whole analysis, mutating `ssa` (clones + call rewiring + entry point) and returning the
@@ -264,7 +341,7 @@ pub fn run(ssa: &mut HLSSA, flow: &FlowAnalysis) -> HashMap<FunctionId, Function
     let (_summaries, graphs) = compute_summaries(ssa, flow, &types, &block_conds, &fids);
 
     let witness_globals = compute_witness_globals(ssa, &types, &graphs, &fids);
-    specialize_contexts(ssa, flow, &types, &graphs, &block_conds, &witness_globals)
+    specialize_contexts(ssa, &types, &graphs, &block_conds, &witness_globals)
 }
 
 // WITNESS GLOBAL HANDLING
@@ -280,10 +357,11 @@ pub fn run(ssa: &mut HLSSA, flow: &FlowAnalysis) -> HashMap<FunctionId, Function
 /// witness branch conditions accounted for. The fixpoint accounts for an init that reads another
 /// global.
 ///
-/// We do not seed the writer's cfg flag: initializers run unconditionally (see the seed comment
-/// below), so their flag is Pure. Today this returns the empty set: every `InitGlobal` lives in
-/// `globals_init`, runs unconditionally, and writes a compile-time constant. This will support
-/// mutable globals with very few changes as a result.
+/// We do not seed the writer's cfg flag: initializers run unconditionally (asserted below — only
+/// the dedicated `globals_init` function may contain `InitGlobal`), so their flag is Pure. Today
+/// this returns the empty set: every `InitGlobal` lives in `globals_init`, runs unconditionally,
+/// and writes a compile-time constant. This will support mutable globals with very few changes as
+/// a result.
 fn compute_witness_globals(
     ssa: &HLSSA,
     types: &TypeInfo,
@@ -303,6 +381,20 @@ fn compute_witness_globals(
         })
         .collect();
 
+    // The Cfg-seed skip below is sound only while initializers run unconditionally. That holds
+    // today by construction — `InitGlobal` is only ever emitted into the dedicated `globals_init`
+    // function, which the entry wrapper calls exactly once, never under a witness branch — but
+    // nothing else enforces it, so fail loudly if it breaks: a writer outside `globals_init`
+    // could run under a *caller's* witness control flow, and skipping its Cfg seed would
+    // under-taint the global program-wide.
+    assert!(
+        writers
+            .iter()
+            .all(|f| Some(*f) == ssa.get_globals_init_fn()),
+        "ICE: InitGlobal outside the dedicated globals_init function ({:?}); compute_witness_globals assumes global initializers run unconditionally",
+        writers
+    );
+
     let mut witness: HashSet<usize> = HashSet::default();
     loop {
         let mut changed = false;
@@ -320,17 +412,17 @@ fn compute_witness_globals(
             // We deliberately do NOT seed the writer's cfg flag (`Cfg`). Global initializers run
             // unconditionally — `globals_init` is called exactly once at program entry, never under a
             // witness branch — so their cfg flag is structurally Pure. Seeding it Witness made *every*
-            // initialized global witness, because each `InitGlobal` records `global ≥ Cfg(f)` (see
+            // initialized global witness, because each `InitGlobal` records `global ≥ Cfg` (see
             // `add_cf_taint_to`); that spurious taint then forced witness loop bounds and witness array
             // reads downstream. A witness branch *inside* an initializer is still captured: that path
             // adds `global ≥ cond` for the real branch conditions, and `cond` becomes witness through
             // the Top/param seeds.
             let mut seeds: Vec<Position> = vec![Position::top()];
-            seeds.extend(param_level_positions(*f, func));
+            seeds.extend(param_level_positions(func));
             seeds.extend(
-                return_level_positions(*f, func)
+                return_level_positions(func)
                     .into_iter()
-                    .filter(|p| p.path.contains(&Descent::Deref)),
+                    .filter(Position::is_deref_descended),
             );
             for gid in &witness {
                 let owner = Owner::Global(*gid);
@@ -378,9 +470,11 @@ struct ContextSolution {
     /// The witness shape of each return value, positionally.
     return_shapes: Vec<WitnessShape>,
 
-    /// Constrained static call sites, in BFS-of-blocks then instruction order — each paired with
-    /// the concrete callee context it resolves to.
-    calls: Vec<Ctx>,
+    /// Each constrained static call site, keyed by `(block, instruction index)`, paired with the
+    /// concrete callee context it resolves to. Cloning preserves block ids and instruction order,
+    /// so rewiring looks each call up by its site (`BTreeMap` keeps clone-discovery order
+    /// deterministic).
+    calls: BTreeMap<(BlockId, usize), Ctx>,
 }
 
 /// Walk the reachable `(function, concrete arg shapes, concrete return-deref shapes, concrete
@@ -393,7 +487,6 @@ struct ContextSolution {
 /// `WitnessOf` types and a context-specific cfg-flag parameter into each body.
 fn specialize_contexts(
     ssa: &mut HLSSA,
-    flow: &FlowAnalysis,
     types: &TypeInfo,
     graphs: &HashMap<FunctionId, WitnessTaint>,
     block_conds: &HashMap<FunctionId, HashMap<BlockId, Vec<ValueId>>>,
@@ -409,13 +502,12 @@ fn specialize_contexts(
         .map(|(_, ty)| pure_shape(ty))
         .collect();
 
-    // The entry has no caller to write through its returned refs: all-Pure, which trivially
-    // satisfies the `ret_shapes` invariant (information only at Deref-descended levels).
-    let main_rets: Vec<WitnessShape> = ssa
+    // The entry has no caller to write through its returned refs: all-Pure.
+    let main_rets: Vec<DerefShape> = ssa
         .get_function(main_id)
         .get_returns()
         .iter()
-        .map(pure_shape)
+        .map(DerefShape::pure)
         .collect();
     let main_ctx = Ctx {
         fid: main_id,
@@ -437,18 +529,16 @@ fn specialize_contexts(
     while let Some(ctx) = worklist.pop_front() {
         let result = solve_context(
             &FunctionData {
-                fid: ctx.fid,
                 func: ssa.get_function(ctx.fid),
                 types: types.get_function(ctx.fid),
                 graph: &graphs[&ctx.fid],
                 block_conds: &block_conds[&ctx.fid],
-                cfg: flow.get_function_cfg(ctx.fid),
             },
             &ctx,
             witness_globals,
             &global_types,
         );
-        for cc in &result.calls {
+        for cc in result.calls.values() {
             if !ctx_clone.contains_key(cc) {
                 let (cid, remap) = ssa.duplicate_function_with_remap(cc.fid);
                 ctx_clone.insert(cc.clone(), (cid, remap));
@@ -480,27 +570,35 @@ fn specialize_contexts(
             },
         );
 
-        // Rewire each constrained static call to the clone of the callee context. The clone
-        // preserves block ids and instruction order, so calls line up positionally with
-        // `result.calls`.
-        let cfg = flow.get_function_cfg(ctx.fid);
+        // Rewire each constrained static call to the clone of the callee context, looking it up
+        // by its `(block, instruction index)` site — the clone preserves both.
         let mut clone_func = ssa.take_function(*clone_id);
-        let mut calls = result.calls.iter();
-        for bid in cfg.get_blocks_bfs() {
-            for instr in clone_func.get_block_mut(bid).get_instructions_mut() {
+        let clone_bids: Vec<BlockId> = clone_func.get_blocks().map(|(bid, _)| *bid).collect();
+        let mut rewired = 0usize;
+        for bid in clone_bids {
+            for (idx, instr) in clone_func
+                .get_block_mut(bid)
+                .get_instructions_mut()
+                .enumerate()
+            {
                 if let OpCode::Call {
                     function: CallTarget::Static(t),
                     unconstrained: false,
                     ..
                 } = instr
                 {
-                    let cc = calls.next().expect("Call counts match during rewiring");
+                    let cc = result
+                        .calls
+                        .get(&(bid, idx))
+                        .expect("ICE: constrained call site without a solved context");
                     *t = ctx_clone[cc].0;
+                    rewired += 1;
                 }
             }
         }
-        assert!(
-            calls.next().is_none(),
+        assert_eq!(
+            rewired,
+            result.calls.len(),
             "ICE: Leftover call contexts in Witness Taint Inference after rewiring"
         );
         ssa.put_function(*clone_id, clone_func);
@@ -514,12 +612,10 @@ fn specialize_contexts(
 /// `FunctionId`, bundled so the context-specific inputs ([`Ctx`]) stand out at the call site.
 #[derive(Clone, Copy)]
 struct FunctionData<'a> {
-    fid: FunctionId,
     func: &'a HLFunction,
     types: &'a FunctionTypeInfo,
     graph: &'a WitnessTaint,
     block_conds: &'a HashMap<BlockId, Vec<ValueId>>,
-    cfg: &'a CFG,
 }
 
 /// Solve one concrete context.
@@ -536,12 +632,10 @@ fn solve_context(
     global_types: &[Type],
 ) -> ContextSolution {
     let FunctionData {
-        fid,
         func,
         types,
         graph,
         block_conds,
-        cfg,
     } = *f;
 
     // Seeds: Top, the witness levels of each argument, the caller-written deref levels of each
@@ -549,22 +643,16 @@ fn solve_context(
     // `compute_witness_globals`).
     let mut seeds: Vec<Position> = vec![Position::top()];
     for (i, shape) in ctx.arg_shapes.iter().enumerate() {
-        seed_shape(Owner::Param(fid, i), shape, &mut Vec::new(), &mut seeds);
+        seed_shape(Owner::Param(i), shape, &mut Vec::new(), &mut seeds);
     }
 
+    // `DerefShape` guarantees these seeds are Deref-descended (caller-determined levels only).
     for (j, shape) in ctx.ret_shapes.iter().enumerate() {
-        let start = seeds.len();
-        seed_shape(Owner::Return(fid, j), shape, &mut Vec::new(), &mut seeds);
-        assert!(
-            seeds[start..]
-                .iter()
-                .all(|p| p.path.contains(&Descent::Deref)),
-            "ICE: context return seeds must be Deref-descended (caller-determined levels only)"
-        );
+        seed_shape(Owner::Return(j), &shape.0, &mut Vec::new(), &mut seeds);
     }
 
     if ctx.cfg_witness == WitnessType::Witness {
-        seeds.push(Position::root(Owner::Cfg(fid)));
+        seeds.push(Position::root(Owner::Cfg));
     }
 
     for gid in witness_globals {
@@ -578,16 +666,16 @@ fn solve_context(
     // Per-value shapes.
     let mut value_shapes: HashMap<ValueId, WitnessShape> = HashMap::default();
     for (v, ty) in func.get_entry().get_parameters() {
-        value_shapes.insert(*v, shape_from(Owner::Value(fid, *v), ty, &witness));
+        value_shapes.insert(*v, shape_from(Owner::Value(*v), ty, &witness));
     }
     for (_, block) in func.get_blocks() {
         for (v, ty) in block.get_parameters() {
-            value_shapes.insert(*v, shape_from(Owner::Value(fid, *v), ty, &witness));
+            value_shapes.insert(*v, shape_from(Owner::Value(*v), ty, &witness));
         }
         for instr in block.get_instructions() {
             for r in instr.get_results() {
                 let ty = types.get_value_type(*r);
-                value_shapes.insert(*r, shape_from(Owner::Value(fid, *r), ty, &witness));
+                value_shapes.insert(*r, shape_from(Owner::Value(*r), ty, &witness));
             }
         }
     }
@@ -596,7 +684,7 @@ fn solve_context(
         .get_returns()
         .iter()
         .enumerate()
-        .map(|(j, ty)| shape_from(Owner::Return(fid, j), ty, &witness))
+        .map(|(j, ty)| shape_from(Owner::Return(j), ty, &witness))
         .collect();
 
     // Per-block cfg-witness: the incoming flag, or any dominating witness branch condition.
@@ -605,7 +693,7 @@ fn solve_context(
         let mut info = ctx.cfg_witness;
         if let Some(conds) = block_conds.get(bid) {
             for cond in conds {
-                if witness.contains(&Position::root(Owner::Value(fid, *cond))) {
+                if witness.contains(&Position::root(Owner::Value(*cond))) {
                     info = WitnessType::Witness;
                 }
             }
@@ -613,12 +701,11 @@ fn solve_context(
         block_cfg_witness.insert(*bid, info);
     }
 
-    // Constrained static call sites (BFS order) with their concrete callee contexts.
-    let mut calls: Vec<Ctx> = Vec::new();
-    for bid in cfg.get_blocks_bfs() {
-        let block = func.get_block(bid);
-        let block_cw = *block_cfg_witness.get(&bid).unwrap();
-        for instr in block.get_instructions() {
+    // Constrained static call sites, keyed by site, with their concrete callee contexts.
+    let mut calls: BTreeMap<(BlockId, usize), Ctx> = BTreeMap::new();
+    for (bid, block) in func.get_blocks() {
+        let block_cw = *block_cfg_witness.get(bid).unwrap();
+        for (idx, instr) in block.get_instructions().enumerate() {
             if let OpCode::Call {
                 function: CallTarget::Static(callee),
                 args,
@@ -637,20 +724,27 @@ fn solve_context(
                     .collect();
 
                 // The result value's deref levels picked up the caller's writes through the
-                // returned ref (via unification with its aliases) during this solve; restricted
-                // to those levels it is the caller-determined return input of the callee context.
-                let ret_shapes: Vec<WitnessShape> = results
+                // returned ref (via unification with its aliases) during this solve; restricted to
+                // those levels it is the caller-determined return input of the callee context.
+                let ret_shapes: Vec<DerefShape> = results
                     .iter()
                     .map(|r| {
-                        deref_shape_from(Owner::Value(fid, *r), types.get_value_type(*r), &witness)
+                        DerefShape::from_solution(
+                            Owner::Value(*r),
+                            types.get_value_type(*r),
+                            &witness,
+                        )
                     })
                     .collect();
-                calls.push(Ctx {
-                    fid: *callee,
-                    arg_shapes,
-                    ret_shapes,
-                    cfg_witness: block_cw,
-                });
+                calls.insert(
+                    (*bid, idx),
+                    Ctx {
+                        fid: *callee,
+                        arg_shapes,
+                        ret_shapes,
+                        cfg_witness: block_cw,
+                    },
+                );
             }
         }
     }
@@ -666,21 +760,11 @@ fn solve_context(
 // SHAPE HELPERS
 // ================================================================================================
 
-/// The all-`Pure` shape skeleton of a type.
+/// The all-`Pure` shape skeleton of a type: [`shape_from`] with an empty witness set (the owner is
+/// irrelevant — no position is ever found). One shared walker, so a new `TypeExpr` variant has a
+/// single place to be handled.
 fn pure_shape(ty: &Type) -> WitnessShape {
-    match &peel_witness(ty).expr {
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => WitnessShape::Scalar(WitnessType::Pure),
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
-            WitnessShape::Array(WitnessType::Pure, Box::new(pure_shape(inner)))
-        }
-        TypeExpr::Ref(inner) => WitnessShape::Ref(WitnessType::Pure, Box::new(pure_shape(inner))),
-        TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
-        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-    }
+    shape_from(Owner::Top, ty, &HashSet::default())
 }
 
 /// Build a value's `WitnessShape` from the solved witness set: each level is Witness iff its
@@ -689,18 +773,9 @@ fn shape_from(owner: Owner, ty: &Type, witness: &HashSet<Position>) -> WitnessSh
     go_shape_from(&owner, &mut Vec::new(), ty, witness, true)
 }
 
-/// Build only the Deref-descended levels of a value's `WitnessShape` from the solved witness set;
-/// every level at or above the first `Ref` is `Pure` by construction.
-///
-/// Deref-descended levels name shared mutable memory the caller may write, so this is exactly the
-/// caller-determined taint of a call result — the shape-level counterpart of the skeleton's
-/// `path.contains(&Descent::Deref)` input filter. Used to build a [`Ctx`]'s `ret_shapes`.
-fn deref_shape_from(owner: Owner, ty: &Type, witness: &HashSet<Position>) -> WitnessShape {
-    go_shape_from(&owner, &mut Vec::new(), ty, witness, false)
-}
-
-/// Shared recursion of [`shape_from`] / [`deref_shape_from`]: when `read` is false a level is
-/// `Pure` without consulting the witness set, and descending through a `Ref` turns reading on.
+/// Shared recursion of [`shape_from`] / [`DerefShape::from_solution`]: when `read` is false a
+/// level is `Pure` without consulting the witness set, and descending through a `Ref` turns
+/// reading on.
 fn go_shape_from(
     owner: &Owner,
     path: &mut Vec<Descent>,
@@ -708,7 +783,7 @@ fn go_shape_from(
     witness: &HashSet<Position>,
     read: bool,
 ) -> WitnessShape {
-    let ty = peel_witness(ty);
+    let ty = ty.peel_witness();
     let info = if read
         && witness.contains(&Position {
             owner: owner.clone(),

@@ -94,7 +94,9 @@ impl UntaintControlFlow {
 
             let mut new_parameters = Vec::new();
             for (value_id, typ) in block.take_parameters() {
-                let wt = function_wt.get_value_witness_type(value_id);
+                let wt = function_wt
+                    .try_get_value_witness_type(value_id)
+                    .expect("ICE: block parameter without an inferred witness shape");
                 new_parameters.push((value_id, apply_witness_type(typ, wt)));
             }
             new_block.put_parameters(new_parameters);
@@ -106,7 +108,9 @@ impl UntaintControlFlow {
                         result: r,
                         elem_type: l,
                     } => {
-                        let r_wt = function_wt.get_value_witness_type(r);
+                        let r_wt = function_wt
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape");
                         let child = r_wt.child_witness_type().unwrap();
                         let child_typ = apply_witness_type(l, &child);
                         OpCode::Alloc {
@@ -122,7 +126,8 @@ impl UntaintControlFlow {
                         elem_type: tp,
                     } => {
                         let r_wt = function_wt
-                            .get_value_witness_type(r)
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape")
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkSeq {
@@ -138,7 +143,8 @@ impl UntaintControlFlow {
                         blob,
                     } => {
                         let r_wt = function_wt
-                            .get_value_witness_type(r)
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape")
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkSeqOfBlob {
@@ -155,7 +161,8 @@ impl UntaintControlFlow {
                         elem_type: tp,
                     } => {
                         let r_wt = function_wt
-                            .get_value_witness_type(r)
+                            .try_get_value_witness_type(r)
+                            .expect("ICE: instruction result without an inferred witness shape")
                             .child_witness_type()
                             .unwrap();
                         OpCode::MkRepeated {
@@ -169,6 +176,12 @@ impl UntaintControlFlow {
                     OpCode::MkTuple { .. }
                     | OpCode::TupleProj { .. }
                     | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
+                    // Guards are introduced by this pass itself (step 2) and by later passes,
+                    // never before witness inference; a Guard slipping through here would
+                    // silently skip the elem_type rewrite of a wrapped Alloc/MkSeq/... below.
+                    OpCode::Guard { .. } => {
+                        panic!("ICE: Guard should not be present during witness type application")
+                    }
                     OpCode::ReadGlobal {
                         result: r,
                         offset: l,
@@ -353,6 +366,19 @@ impl UntaintControlFlow {
                         // (handled when those blocks are processed)
                     }
                     WitnessType::Witness => {
+                        // The linearization below assumes acyclic if/else structure: a
+                        // witness-dependent back edge (a loop whose trip count depends on the
+                        // witness) cannot be linearized — the `merge == if_*` shortcuts would
+                        // emit an unconditional jump into the loop body, i.e. an infinite
+                        // loop. Constrained Noir cannot produce one (loop bounds are
+                        // compile-time), so fail loudly instead of silently mis-compiling.
+                        assert!(
+                            !cfg.is_loop_entry(block_id)
+                                && !cfg.dominates(if_true, block_id)
+                                && !cfg.dominates(if_false, block_id),
+                            "ICE: witness-dependent branch condition on a loop edge \
+                             (block {block_id:?}); witness loop bounds cannot be linearized"
+                        );
                         // The then branch is taken when `cond` is true, the
                         // else branch when it's false. Each branch must run
                         // under a different guard, so compute both taints —

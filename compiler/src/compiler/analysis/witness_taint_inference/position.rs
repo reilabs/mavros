@@ -5,10 +5,14 @@
 //! `Array`/`Slice` element).
 //!
 //! `Owner::Top` is the synthetic always-Witness source.
+//!
+//! Throughout the analysis, types are walked through `Type::peel_witness`: witness-ness is computed
+//! by the analysis itself (via the `≥` graph), so the `WitnessOf` annotations the IR already carries
+//! (on `WriteWitness` results and witness-derived values) are transparent to the type structure.
 
 use crate::compiler::{
     ssa::{
-        FunctionId, ValueId,
+        ValueId,
         hlssa::{Type, TypeExpr},
     },
     util::ice_non_elided_tuple,
@@ -55,6 +59,11 @@ impl Position {
             path,
         }
     }
+
+    /// Whether this position names memory behind a `Ref` (its path descends through a `Deref`).
+    pub fn is_deref_descended(&self) -> bool {
+        self.path.contains(&Descent::Deref)
+    }
 }
 
 // UTILITY TYPES
@@ -71,20 +80,25 @@ pub enum Descent {
 }
 
 /// What a [`Position`] belongs to.
+///
+/// Owners are implicitly scoped to one function: graphs and summaries are built per function, and
+/// [`map_formal`](super::builder) translates every callee formal into caller positions at the call
+/// site, so positions of different functions never share a container and no `FunctionId` is
+/// needed to disambiguate them.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Owner {
-    /// The `i`-th parameter of a function (a formal input).
-    Param(FunctionId, usize),
+    /// The `i`-th parameter of the function (a formal input).
+    Param(usize),
 
-    /// The `i`-th return value of a function (a formal output).
-    Return(FunctionId, usize),
+    /// The `i`-th return value of the function (a formal output).
+    Return(usize),
 
-    /// An SSA value within a function (internal).
-    Value(FunctionId, ValueId),
+    /// An SSA value within the function (internal).
+    Value(ValueId),
 
     /// The function's cfg-witness flag — whether it is called under witness-dependent control flow
     /// (a formal input).
-    Cfg(FunctionId),
+    Cfg,
 
     /// The `i`-th program global — a program-wide slot in `SSA::global_types`, shared by every
     /// function that reads or initializes it (reads/inits are not per-call formals, so global
@@ -102,19 +116,6 @@ pub enum Owner {
 // UTILITY FUNCTIONS
 // ================================================================================================
 
-/// Peel any `WitnessOf` wrappers off the top of a type.
-///
-/// Witness-ness is computed by the analysis (via the `≥` graph), so the `WitnessOf` annotations the
-/// IR already carries (on `WriteWitness` results and witness-derived values) are transparent to the
-/// type structure we walk.
-pub fn peel_witness(ty: &Type) -> &Type {
-    let mut t = ty;
-    while let TypeExpr::WitnessOf(inner) = &t.expr {
-        t = &**inner;
-    }
-    t
-}
-
 /// Enumerate, in pre-order, the path to every level of `ty` (the empty path for the top level, then
 /// each `Deref`/`Elem` descent).
 ///
@@ -128,7 +129,7 @@ pub fn paths_of_type(ty: &Type) -> Vec<Vec<Descent>> {
 }
 
 fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent>>) {
-    let ty = peel_witness(ty);
+    let ty = ty.peel_witness();
     out.push(prefix.clone());
     match &ty.expr {
         TypeExpr::Field

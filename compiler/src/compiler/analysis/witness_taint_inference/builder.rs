@@ -8,7 +8,9 @@
 //! Memory is resolved by unification: every copy-shaped flow is two-way (`≡`) at Deref-descended
 //! levels and covariant (`≥`) at value levels (see [`GraphBuilder::copy_levels`]), so all aliases
 //! of an object share its pointee positions and reference invariance emerges. A store taints the
-//! pointee's scalars covariantly (`*ptr ≥ value`, never the reverse) and a load reads them.
+//! pointee's scalars covariantly (`*ptr ≥ value`, never the reverse) plus the pointer's own handle
+//! taint (which slot was written is witness-dependent under a witness-selected pointer), and a
+//! load reads them.
 
 use crate::collections::HashMap;
 use crate::compiler::{
@@ -17,12 +19,13 @@ use crate::compiler::{
         types::FunctionTypeInfo,
         witness_taint_inference::{
             FunctionSummary, WitnessTaint,
-            position::{Descent, Owner, Position, paths_of_type, peel_witness},
+            position::{Descent, Owner, Position, paths_of_type},
         },
     },
     ssa::{
         BlockId, FunctionId, Terminator, ValueId,
         hlssa::{CallTarget, CastTarget, HLFunction, OpCode, Radix, Type, TypeExpr},
+        traits::Instruction,
     },
     util::ice_non_elided_tuple,
 };
@@ -32,10 +35,7 @@ use crate::compiler::{
 
 /// Accumulates the `≥` edges for one function instance while [`build_graph`] walks it.
 struct GraphBuilder<'a> {
-    /// The function being analyzed; every internal position is owned by it.
-    function_id: FunctionId,
-
-    /// Types of that function's SSA values, used to enumerate the levels of each position.
+    /// Types of the function's SSA values, used to enumerate the levels of each position.
     types: &'a FunctionTypeInfo,
 
     /// The callee summaries known so far, instantiated at each constrained call site.
@@ -51,7 +51,7 @@ struct GraphBuilder<'a> {
 impl<'a> GraphBuilder<'a> {
     /// The root position of SSA value `value` (its top level).
     fn value_position(&self, value: ValueId) -> Position {
-        Position::root(Owner::Value(self.function_id, value))
+        Position::root(Owner::Value(value))
     }
 
     /// The type of SSA value `value`.
@@ -97,10 +97,10 @@ impl<'a> GraphBuilder<'a> {
         call_conditions: &[ValueId],
     ) -> Vec<Position> {
         match &formal.owner {
-            Owner::Param(_, i) => vec![self.value_position(args[*i]).extend(&formal.path)],
-            Owner::Return(_, j) => vec![self.value_position(results[*j]).extend(&formal.path)],
-            Owner::Cfg(_) => {
-                let mut positions = vec![Position::root(Owner::Cfg(self.function_id))];
+            Owner::Param(i) => vec![self.value_position(args[*i]).extend(&formal.path)],
+            Owner::Return(j) => vec![self.value_position(results[*j]).extend(&formal.path)],
+            Owner::Cfg => {
+                let mut positions = vec![Position::root(Owner::Cfg)];
                 for cond in call_conditions {
                     positions.push(self.value_position(*cond));
                 }
@@ -111,7 +111,7 @@ impl<'a> GraphBuilder<'a> {
                 path: formal.path.clone(),
             }],
             Owner::Top => vec![Position::top()],
-            Owner::Value(_, _) => {
+            Owner::Value(_) => {
                 panic!("ICE: summary referenced a non-formal position {formal:?}")
             }
         }
@@ -122,7 +122,7 @@ impl<'a> GraphBuilder<'a> {
     fn add_cf_taint_to(&mut self, target: &Position, branch_conditions: &[ValueId]) {
         self.cf_taint_applied = true;
         self.graph
-            .add_ge(target.clone(), Position::root(Owner::Cfg(self.function_id)));
+            .add_ge(target.clone(), Position::root(Owner::Cfg));
         for cond in branch_conditions {
             self.graph
                 .add_ge(target.clone(), self.value_position(*cond));
@@ -158,7 +158,6 @@ pub fn compute_block_conditions(func: &HLFunction, cfg: &CFG) -> HashMap<BlockId
 /// `block_conditions` is the per-block dominating witness-branch conditions from
 /// [`compute_block_conditions`].
 pub fn build_graph(
-    fid: FunctionId,
     func: &HLFunction,
     types: &FunctionTypeInfo,
     cfg: &CFG,
@@ -166,7 +165,6 @@ pub fn build_graph(
     summaries: &HashMap<FunctionId, FunctionSummary>,
 ) -> WitnessTaint {
     let mut builder = GraphBuilder {
-        function_id: fid,
         types,
         summaries,
         graph: WitnessTaint::new(),
@@ -179,7 +177,7 @@ pub fn build_graph(
         for path in paths_of_type(ty) {
             builder.graph.add_eq(
                 Position {
-                    owner: Owner::Param(fid, i),
+                    owner: Owner::Param(i),
                     path: path.clone(),
                 },
                 builder.value_position(*value).extend(&path),
@@ -230,7 +228,7 @@ pub fn build_graph(
                 for (j, value) in values.iter().enumerate() {
                     let return_type = &func.get_returns()[j];
                     builder.copy_levels(
-                        Position::root(Owner::Return(fid, j)),
+                        Position::root(Owner::Return(j)),
                         builder.value_position(*value),
                         return_type,
                     );
@@ -309,7 +307,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             );
         }
         OpCode::MkSeq { result, elems, .. } => {
-            let element_type = peel_witness(builder.value_type(*result)).get_array_element();
+            let element_type = builder
+                .value_type(*result)
+                .peel_witness()
+                .get_array_element();
             for element in elems {
                 builder.copy_levels(
                     builder.value_position(*result).child(Descent::Elem),
@@ -321,7 +322,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         OpCode::MkRepeated {
             result, element, ..
         } => {
-            let element_type = peel_witness(builder.value_type(*result)).get_array_element();
+            let element_type = builder
+                .value_type(*result)
+                .peel_witness()
+                .get_array_element();
             builder.copy_levels(
                 builder.value_position(*result).child(Descent::Elem),
                 builder.value_position(*element),
@@ -357,7 +361,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             index,
             value,
         } => {
-            let element_type = peel_witness(builder.value_type(*result)).get_array_element();
+            let element_type = builder
+                .value_type(*result)
+                .peel_witness()
+                .get_array_element();
             builder.copy_levels(
                 builder.value_position(*result).child(Descent::Elem),
                 builder.value_position(*array).child(Descent::Elem),
@@ -392,7 +399,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             values,
             ..
         } => {
-            let element_type = peel_witness(builder.value_type(*result)).get_array_element();
+            let element_type = builder
+                .value_type(*result)
+                .peel_witness()
+                .get_array_element();
             builder.copy_levels(
                 builder.value_position(*result).child(Descent::Elem),
                 builder.value_position(*slice).child(Descent::Elem),
@@ -421,7 +431,15 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             }
         }
         OpCode::SliceLen { .. } => {
-            // length is structural metadata: Pure. (no edges)
+            // No edges: the length is structural metadata, Pure for every slice this analysis
+            // can express. KNOWN LIMITATION (inherited from the previous pass): a slice whose
+            // *length* is witness-dependent has no representation — `leaf_paths` deliberately
+            // excludes container-top levels, so nothing ever taints a slice's top and there is
+            // no source for SliceLen to read. The phi-merge route (a slice merged at a witness
+            // JmpIf) is rejected loudly downstream (`UntaintControlFlow` panics on witness merge
+            // selects over slices); the ref route (a witness-conditional store of a slice
+            // through a ref) would need WitnessOf-slice support throughout untaint/lowering
+            // before this rule can be tightened.
         }
         OpCode::MkSeqOfBlob { .. } => {
             // the blob is compile-time constant data: the result starts Pure. (no edges)
@@ -458,7 +476,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             // A store writes the pointee: covariant at the written value levels (`*ptr ≥ value`,
             // never the reverse), two-way at nested-ref levels (storing a ref publishes it — the
             // slot's content and the stored ref become aliases).
-            let pointee = match &peel_witness(builder.value_type(*ptr)).expr {
+            let pointee = match &builder.value_type(*ptr).peel_witness().expr {
                 TypeExpr::Ref(inner) => &**inner,
                 other => panic!("ICE: Store through a non-ref value of type {other:?}"),
             };
@@ -469,15 +487,24 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             // taintable leaves include a nested ref's *handle* level: which ref a slot holds after
             // a conditional ref store is itself witness-dependent (the unification of the
             // candidates' pointees does not capture that).
+            //
+            // A store through a witness-selected pointer likewise leaves the written leaves
+            // witness-dependent — *which* slot received the value depends on the witness — so the
+            // pointer's own handle taint flows into them: the dual of Load's `result ≥ ptr`.
+            // (Unification spreads this over every alias of the candidate slots, the usual
+            // equality-based over-approximation.)
             for path in leaf_paths(pointee) {
                 let written = slot.extend(&path);
+                builder
+                    .graph
+                    .add_ge(written.clone(), builder.value_position(*ptr));
                 builder.add_cf_taint_to(&written, branch_conditions);
             }
         }
         OpCode::Load { result, ptr } => {
             // A load reads the pointee: covariant at value levels, two-way at nested-ref levels (a
             // loaded ref aliases the stored one).
-            let pointee = match &peel_witness(builder.value_type(*ptr)).expr {
+            let pointee = match &builder.value_type(*ptr).peel_witness().expr {
                 TypeExpr::Ref(inner) => &**inner,
                 other => panic!("ICE: Load through a non-ref value of type {other:?}"),
             };
@@ -578,6 +605,39 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
             ice_non_elided_tuple()
         }
+        OpCode::Guard { condition, inner } => {
+            // Phase 2 discovers and rewires call contexts by matching bare `OpCode::Call` only: a
+            // Guard-wrapped constrained call would be analyzed here but never contextualized,
+            // cloned, or rewired — silently. Fail loudly instead; nothing emits Guard-wrapped calls
+            // before this pass (Guards are introduced by UntaintControlFlow and later).
+            assert!(
+                !matches!(
+                    **inner,
+                    OpCode::Call {
+                        unconstrained: false,
+                        ..
+                    }
+                ),
+                "ICE: Guard-wrapped constrained call during witness-taint inference: {inner:?}"
+            );
+
+            // A guard predicates `inner` on `condition` (LowerGuards turns it into a JmpIf whose
+            // merge phis pick the inner's results or defaults), so delegate to the inner opcode
+            // with the condition joined into the dominating conditions — the cf-taint rule on the
+            // inner's writes must see it — and push the condition into every result leaf, exactly
+            // as the JmpIf merge rule would after lowering.
+            let mut conditions = branch_conditions.to_vec();
+            conditions.push(*condition);
+            build_instr(builder, inner, &conditions);
+            for result in inner.get_results() {
+                for path in leaf_paths(builder.value_type(*result)) {
+                    builder.graph.add_ge(
+                        builder.value_position(*result).extend(&path),
+                        builder.value_position(*condition),
+                    );
+                }
+            }
+        }
         OpCode::ValueOf { .. }
         | OpCode::FreshWitness { .. }
         | OpCode::Constrain { .. }
@@ -586,8 +646,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         | OpCode::MulConst { .. }
         | OpCode::Lookup { .. }
         | OpCode::DLookup { .. }
-        | OpCode::Todo { .. }
-        | OpCode::Guard { .. } => {
+        | OpCode::Todo { .. } => {
             panic!("ICE: opcode should not be present during witness-taint inference: {instr:?}")
         }
     }
@@ -608,6 +667,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::SlicePush { .. }
         | OpCode::Store { .. }
         | OpCode::InitGlobal { .. } => true,
+        OpCode::Guard { inner, .. } => writes_under_witness_cf(inner),
         OpCode::Cmp { .. }
         | OpCode::BinaryArithOp { .. }
         | OpCode::Not { .. }
@@ -646,18 +706,21 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::MulConst { .. }
         | OpCode::Lookup { .. }
         | OpCode::DLookup { .. }
-        | OpCode::Todo { .. }
-        | OpCode::Guard { .. } => false,
+        | OpCode::Todo { .. } => false,
     }
 }
 
 /// Paths to the witness "leaves" of `ty` for the purpose of pushing in a scalar taint: scalar
 /// leaves (descending arrays/slices), and the *root* of any `Ref` (a ref is opaque to leaf-pushing)
 /// — the positions a control-flow taint lands on.
+///
+/// Container-top levels (array/slice roots) are deliberately not leaves: an array's identity is
+/// fully covered by its element taint, and a witness-dependent slice *length* is not expressible
+/// in the current shape model (see the `SliceLen` rule in [`build_instr`]).
 fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
     let mut out = Vec::new();
     fn go(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent>>) {
-        match &peel_witness(ty).expr {
+        match &ty.peel_witness().expr {
             TypeExpr::Field
             | TypeExpr::U(_)
             | TypeExpr::I(_)

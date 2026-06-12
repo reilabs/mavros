@@ -221,7 +221,7 @@ impl Driver {
         }
 
         let mut witness_inference = WitnessTaintInference::new();
-        witness_inference.run(&mut ssa, &flow_analysis).unwrap();
+        witness_inference.run(&mut ssa, &flow_analysis);
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
