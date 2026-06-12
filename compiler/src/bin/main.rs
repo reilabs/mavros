@@ -196,7 +196,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let params = api::read_prover_inputs(&args.root, driver.abi())?;
     let mut binary = api::compile_witgen(&mut driver)?;
 
-    let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params);
+    let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params)?;
 
     let correct = api::check_witgen(&r1cs, &witgen_result);
     if !correct {
@@ -261,7 +261,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
 
     let (ad_a, ad_b, ad_c, ad_instrumenter) =
-        api::run_ad_from_binary(&mut ad_binary, &r1cs, &ad_coeffs);
+        api::run_ad_from_binary(&mut ad_binary, &r1cs, &ad_coeffs)?;
 
     let leftover_memory = plotting::plot_memory_chart(
         &ad_instrumenter,

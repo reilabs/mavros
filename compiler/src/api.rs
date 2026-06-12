@@ -54,7 +54,7 @@ pub fn run_witgen_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
     params: &[InputValueOrdered],
-) -> interpreter::WitgenResult {
+) -> Result<interpreter::WitgenResult, interpreter::TrapError> {
     interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
 }
 
@@ -64,7 +64,7 @@ pub fn run_witgen_phase1(
     binary: &mut [u64],
     r1cs: &R1CS,
     params: &[InputValueOrdered],
-) -> interpreter::Phase1Result {
+) -> Result<interpreter::Phase1Result, interpreter::TrapError> {
     interpreter::run_phase1(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
 }
 
@@ -94,12 +94,15 @@ pub fn run_ad_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
     coeffs: &[Field],
-) -> (
-    Vec<Field>,
-    Vec<Field>,
-    Vec<Field>,
-    crate::vm::bytecode::AllocationInstrumenter,
-) {
+) -> Result<
+    (
+        Vec<Field>,
+        Vec<Field>,
+        Vec<Field>,
+        crate::vm::bytecode::AllocationInstrumenter,
+    ),
+    interpreter::TrapError,
+> {
     interpreter::run_ad(binary, coeffs, r1cs.witness_layout, r1cs.constraints_layout)
 }
 
