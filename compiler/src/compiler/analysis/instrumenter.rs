@@ -118,7 +118,7 @@ pub enum Value {
     U(usize, u128),
     I(usize, u128),
     Field(Field),
-    Array(Rc<RefCell<Vec<Value>>>),
+    Array(Rc<Vec<Value>>),
     Blob(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
@@ -128,7 +128,7 @@ pub enum Value {
 
 impl Value {
     fn array(values: Vec<Value>) -> Self {
-        Value::Array(Rc::new(RefCell::new(values)))
+        Value::Array(Rc::new(values))
     }
 
     fn is_const_one(&self) -> bool {
@@ -472,7 +472,7 @@ impl Value {
             Value::Unknown(_) | Value::UnknownSlice => {}
             Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
-                for val in vals.borrow_mut().iter_mut() {
+                for val in Rc::make_mut(vals).iter_mut() {
                     val.blind();
                 }
             }
@@ -497,7 +497,7 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Array(vals) => {
-                for val in vals.borrow_mut().iter_mut() {
+                for val in Rc::make_mut(vals).iter_mut() {
                     val.forget_concrete();
                 }
             }
@@ -528,12 +528,9 @@ impl Value {
                 value: *v,
             },
             Value::Field(f) => ValueSignature::Field(*f),
-            Value::Array(vals) => ValueSignature::Array(
-                vals.borrow()
-                    .iter()
-                    .map(|v| v.make_unspecialized_sig())
-                    .collect(),
-            ),
+            Value::Array(vals) => {
+                ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
+            }
             Value::Blob(vals) => {
                 ValueSignature::Blob(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
             }
@@ -548,12 +545,8 @@ impl Value {
             return Value::unknown_from_type(tp);
         }
 
-        let borrowed;
         let values: &[Value] = match self.unwrap_witness() {
-            Value::Array(data) => {
-                borrowed = data.borrow();
-                &borrowed
-            }
+            Value::Array(values) => values,
             Value::Blob(values) => values,
             Value::Unknown(_) | Value::UnknownSlice => return Value::unknown_from_type(tp),
             _ => panic!(
@@ -584,23 +577,23 @@ impl Value {
     ) -> Value {
         match (self, index, value) {
             (Value::Array(vals), Value::U(_, index), value) => {
-                let mut new_vals = vals.borrow().clone();
+                let mut new_vals = vals.as_ref().clone();
                 new_vals[*index as usize] = value.clone();
                 Value::array(new_vals)
             }
             (Value::Array(vals), Value::WitnessOf(inner), value) => match inner.as_ref() {
                 Value::U(_, index) => {
-                    let mut new_vals = vals.borrow().clone();
+                    let mut new_vals = vals.as_ref().clone();
                     new_vals[*index as usize] = value.clone();
                     Value::array(new_vals)
                 }
                 _ => {
-                    let new_vals = vals.borrow().iter().map(|_| value.clone()).collect();
+                    let new_vals = vals.iter().map(|_| value.clone()).collect();
                     Value::array(new_vals)
                 }
             },
             (Value::Array(vals), _, value) => {
-                let new_vals = vals.borrow().iter().map(|_| value.clone()).collect();
+                let new_vals = vals.iter().map(|_| value.clone()).collect();
                 Value::array(new_vals)
             }
             (Value::UnknownSlice, _, _) => Value::UnknownSlice,
@@ -819,8 +812,7 @@ impl Value {
                 let result = inner.to_bits(endianness, size);
                 match result {
                     Value::Array(bits) => Value::array(
-                        bits.borrow()
-                            .iter()
+                        bits.iter()
                             .cloned()
                             .map(|b| Value::WitnessOf(Box::new(b)))
                             .collect(),
@@ -866,7 +858,6 @@ impl Value {
                 match result {
                     Value::Array(digits) => Value::array(
                         digits
-                            .borrow()
                             .iter()
                             .cloned()
                             .map(|d| Value::WitnessOf(Box::new(d)))
@@ -1856,7 +1847,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         assert_eq!(dir, SliceOpDir::Back); // TODO
         let new_unspec = match &slice.unspecialized {
             Value::Array(values) => {
-                let mut new_values = values.borrow().clone();
+                let mut new_values = values.as_ref().clone();
                 new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
                 Value::array(new_values)
             }
@@ -1865,7 +1856,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         };
         let new_spec = match &slice.specialized {
             Value::Array(values) => {
-                let mut new_values = values.borrow().clone();
+                let mut new_values = values.as_ref().clone();
                 new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
                 Value::array(new_values)
             }
@@ -1880,12 +1871,12 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
 
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
-            Value::Array(values) => Value::U(32, values.borrow().len() as u128),
+            Value::Array(values) => Value::U(32, values.len() as u128),
             Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.unspecialized),
         };
         let spec = match &slice.specialized {
-            Value::Array(values) => Value::U(32, values.borrow().len() as u128),
+            Value::Array(values) => Value::U(32, values.len() as u128),
             Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.specialized),
         };
