@@ -109,27 +109,11 @@ impl ValueSignature {
 }
 
 #[derive(Debug, Clone)]
-pub struct ArrayData {
-    values: Vec<Value>,
-    /// Instrumenters that have already allocated a lookup table for this array.
-    table_owners: Vec<InstrumenterId>,
-}
-
-impl ArrayData {
-    fn flattened_table_len(&self) -> usize {
-        self.values.iter().map(Value::flattened_table_len).sum()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InstrumenterId(usize);
-
-#[derive(Debug, Clone)]
 pub enum Value {
     U(usize, u128),
     I(usize, u128),
     Field(Field),
-    Array(Rc<RefCell<ArrayData>>),
+    Array(Rc<RefCell<Vec<Value>>>),
     Blob(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
@@ -139,17 +123,7 @@ pub enum Value {
 
 impl Value {
     fn array(values: Vec<Value>) -> Self {
-        Value::Array(Rc::new(RefCell::new(ArrayData {
-            values,
-            table_owners: Vec::new(),
-        })))
-    }
-
-    fn flattened_table_len(&self) -> usize {
-        match self {
-            Value::Array(data) => data.borrow().flattened_table_len(),
-            _ => 1,
-        }
+        Value::Array(Rc::new(RefCell::new(values)))
     }
 
     fn is_const_one(&self) -> bool {
@@ -237,13 +211,10 @@ impl Value {
                 Value::U(1, if sa < sb { 1 } else { 0 })
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                Value::WitnessOf(Box::new(self.unwrap_witness().slt_op(
-                    b.unwrap_witness(),
-                    bits,
-                    instrumenter,
-                )))
-            }
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
+                self.unwrap_witness()
+                    .slt_op(b.unwrap_witness(), bits, instrumenter),
+            )),
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
@@ -272,9 +243,7 @@ impl Value {
     ) -> Value {
         match binary_arith_op_kind {
             BinaryArithOpKind::Add => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_add(*b) & bit_mask(*s))
-                }
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_add(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -294,9 +263,7 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             BinaryArithOpKind::Sub => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_sub(*b) & bit_mask(*s))
-                }
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_sub(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -319,9 +286,7 @@ impl Value {
                 (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
                 (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
-                (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_mul(*b) & bit_mask(*s))
-                }
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_mul(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -363,13 +328,10 @@ impl Value {
                     )
                 }
                 (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
-                (_, Value::WitnessOf(b)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b,
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
+                (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
+                    self.unwrap_witness()
+                        .binary_arith_op(b, binary_arith_op_kind, instrumenter),
+                )),
                 (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
                     b,
                     binary_arith_op_kind,
@@ -387,13 +349,10 @@ impl Value {
                         Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s),
                     )
                 }
-                (_, Value::WitnessOf(b)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b,
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
+                (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
+                    self.unwrap_witness()
+                        .binary_arith_op(b, binary_arith_op_kind, instrumenter),
+                )),
                 (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
                     b,
                     binary_arith_op_kind,
@@ -508,7 +467,7 @@ impl Value {
             Value::Unknown(_) | Value::UnknownSlice => {}
             Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
-                for val in vals.borrow_mut().values.iter_mut() {
+                for val in vals.borrow_mut().iter_mut() {
                     val.blind();
                 }
             }
@@ -533,7 +492,7 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Array(vals) => {
-                for val in vals.borrow_mut().values.iter_mut() {
+                for val in vals.borrow_mut().iter_mut() {
                     val.forget_concrete();
                 }
             }
@@ -566,7 +525,6 @@ impl Value {
             Value::Field(f) => ValueSignature::Field(*f),
             Value::Array(vals) => ValueSignature::Array(
                 vals.borrow()
-                    .values
                     .iter()
                     .map(|v| v.make_unspecialized_sig())
                     .collect(),
@@ -589,7 +547,7 @@ impl Value {
         let values: &[Value] = match self.unwrap_witness() {
             Value::Array(data) => {
                 borrowed = data.borrow();
-                &borrowed.values
+                &borrowed
             }
             Value::Blob(values) => values,
             Value::Unknown(_) | Value::UnknownSlice => return Value::unknown_from_type(tp),
@@ -621,23 +579,23 @@ impl Value {
     ) -> Value {
         match (self, index, value) {
             (Value::Array(vals), Value::U(_, index), value) => {
-                let mut new_vals = vals.borrow().values.clone();
+                let mut new_vals = vals.borrow().clone();
                 new_vals[*index as usize] = value.clone();
                 Value::array(new_vals)
             }
             (Value::Array(vals), Value::WitnessOf(inner), value) => match inner.as_ref() {
                 Value::U(_, index) => {
-                    let mut new_vals = vals.borrow().values.clone();
+                    let mut new_vals = vals.borrow().clone();
                     new_vals[*index as usize] = value.clone();
                     Value::array(new_vals)
                 }
                 _ => {
-                    let new_vals = vals.borrow().values.iter().map(|_| value.clone()).collect();
+                    let new_vals = vals.borrow().iter().map(|_| value.clone()).collect();
                     Value::array(new_vals)
                 }
             },
             (Value::Array(vals), _, value) => {
-                let new_vals = vals.borrow().values.iter().map(|_| value.clone()).collect();
+                let new_vals = vals.borrow().iter().map(|_| value.clone()).collect();
                 Value::array(new_vals)
             }
             (Value::UnknownSlice, _, _) => Value::UnknownSlice,
@@ -857,7 +815,6 @@ impl Value {
                 match result {
                     Value::Array(bits) => Value::array(
                         bits.borrow()
-                            .values
                             .iter()
                             .cloned()
                             .map(|b| Value::WitnessOf(Box::new(b)))
@@ -905,7 +862,6 @@ impl Value {
                     Value::Array(digits) => Value::array(
                         digits
                             .borrow()
-                            .values
                             .iter()
                             .cloned()
                             .map(|d| Value::WitnessOf(Box::new(d)))
@@ -1515,7 +1471,6 @@ trait FunctionInstrumenter {
 
 #[derive(Debug, Clone)]
 struct Instrumenter {
-    id: InstrumenterId,
     constrains: usize,
     high_degree_muls: usize,
 
@@ -1533,16 +1488,11 @@ struct Instrumenter {
     final_rangecheck8_lookups: usize,
     final_spread_lookups: HashMap<u8, usize>,
     total_table_lookups: usize,
-
-    /// Lengths of the array lookup tables this instrumenter has allocated, one entry per array
-    /// it has been marked as a table owner of (see `ArrayData::table_owners`).
-    allocated_array_tables: Vec<usize>,
 }
 
 impl Instrumenter {
-    fn new(id: InstrumenterId) -> Self {
+    fn new() -> Self {
         Self {
-            id,
             constrains: 0,
             high_degree_muls: 0,
             rangecheck_lookups: HashMap::new(),
@@ -1553,7 +1503,6 @@ impl Instrumenter {
             final_rangecheck8_lookups: 0,
             final_spread_lookups: HashMap::new(),
             total_table_lookups: 0,
-            allocated_array_tables: Vec::new(),
         }
     }
 
@@ -1605,21 +1554,6 @@ impl Instrumenter {
         self.total_table_lookups += 1;
     }
 
-    fn record_array_lookup(&mut self, array: &Value) {
-        let Value::Array(array) = array else {
-            panic!("array lookup target must be an array, got {:?}", array);
-        };
-        self.array_lookups += 1;
-        self.total_table_lookups += 1;
-
-        if array.borrow().table_owners.contains(&self.id) {
-            return;
-        }
-        self.allocated_array_tables
-            .push(array.borrow().flattened_table_len());
-        array.borrow_mut().table_owners.push(self.id);
-    }
-
     fn table_allocation_constraints(&self) -> usize {
         let range_constraints = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
             (1usize << 8) + 1
@@ -1632,19 +1566,7 @@ impl Instrumenter {
             .filter(|bits| **bits >= 2)
             .map(|bits| 2 * (1usize << *bits as usize) + 1)
             .sum::<usize>();
-        let array_constraints = self
-            .allocated_array_tables
-            .iter()
-            .map(|len| 2 * len + 1)
-            .sum::<usize>();
-        range_constraints + spread_constraints + array_constraints
-    }
-
-    fn array_table_allocation_constraints(&self) -> usize {
-        self.allocated_array_tables
-            .iter()
-            .map(|len| 2 * len + 1)
-            .sum()
+        range_constraints + spread_constraints
     }
 
     fn lookup_data_constraints(&self) -> usize {
@@ -1669,10 +1591,6 @@ impl Instrumenter {
         self.recurring_constraints() + self.table_allocation_constraints()
     }
 
-    fn specialization_constraints(&self) -> usize {
-        self.recurring_constraints() + self.array_table_allocation_constraints()
-    }
-
     fn allocated_lookup_table_rows(&self) -> usize {
         let range_rows = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
             1usize << 8
@@ -1685,8 +1603,7 @@ impl Instrumenter {
             .filter(|bits| **bits >= 2)
             .map(|bits| 1usize << *bits as usize)
             .sum::<usize>();
-        let array_rows = self.allocated_array_tables.iter().sum::<usize>();
-        range_rows + spread_rows + array_rows
+        range_rows + spread_rows
     }
 
     fn detail_line(&self) -> String {
@@ -1718,7 +1635,14 @@ impl OpInstrumenter for Instrumenter {
                 self.record_rangecheck_lookup(bits, flag);
             }
             LookupTarget::Spread(bits) => self.record_spread_lookup(*bits),
-            LookupTarget::Array(array) => self.record_array_lookup(array),
+            // Array table *allocation* is deliberately not costed: tables are circuit-global
+            // (allocated once per distinct array, whichever function touches it first), so a
+            // per-function instrumenter has no sound way to attribute that cost. Only the
+            // recurring per-lookup cost is counted.
+            LookupTarget::Array(_) => {
+                self.array_lookups += 1;
+                self.total_table_lookups += 1;
+            }
         }
     }
 }
@@ -1791,7 +1715,6 @@ pub struct CostAnalysis {
     functions: HashMap<FunctionSignature, FunctionCost>,
     cache: HashMap<FunctionSignature, Vec<ValueSignature>>,
     stack: Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
-    next_instrumenter_id: usize,
 }
 
 impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
@@ -1928,7 +1851,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         assert_eq!(dir, SliceOpDir::Back); // TODO
         let new_unspec = match &slice.unspecialized {
             Value::Array(values) => {
-                let mut new_values = values.borrow().values.clone();
+                let mut new_values = values.borrow().clone();
                 new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
                 Value::array(new_values)
             }
@@ -1937,7 +1860,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         };
         let new_spec = match &slice.specialized {
             Value::Array(values) => {
-                let mut new_values = values.borrow().values.clone();
+                let mut new_values = values.borrow().clone();
                 new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
                 Value::array(new_values)
             }
@@ -1952,12 +1875,12 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
 
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
-            Value::Array(values) => Value::U(32, values.borrow().values.len() as u128),
+            Value::Array(values) => Value::U(32, values.borrow().len() as u128),
             Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.unspecialized),
         };
         let spec = match &slice.specialized {
-            Value::Array(values) => Value::U(32, values.borrow().values.len() as u128),
+            Value::Array(values) => Value::U(32, values.borrow().len() as u128),
             Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
             _ => panic!("Cannot get length of {:?}", slice.specialized),
         };
@@ -2031,7 +1954,6 @@ pub struct Summary {
 #[derive(Default)]
 struct AggregatedConstraintCost {
     recurring_constraints: usize,
-    array_table_constraints: usize,
     rangecheck_lookups: HashMap<u8, usize>,
     final_spread_lookups: HashMap<u8, usize>,
 }
@@ -2042,7 +1964,6 @@ impl AggregatedConstraintCost {
             return;
         }
         self.recurring_constraints += cost.recurring_constraints() * calls;
-        self.array_table_constraints += cost.array_table_allocation_constraints() * calls;
         for (bits, count) in cost.rangecheck_lookups.iter() {
             *self.rangecheck_lookups.entry(*bits).or_insert(0) += count * calls;
         }
@@ -2067,7 +1988,7 @@ impl AggregatedConstraintCost {
     }
 
     fn total_constraints(&self) -> usize {
-        self.recurring_constraints + self.array_table_constraints + self.shared_table_constraints()
+        self.recurring_constraints + self.shared_table_constraints()
     }
 }
 
@@ -2108,12 +2029,6 @@ impl Summary {
 }
 
 impl CostAnalysis {
-    fn fresh_instrumenter_id(&mut self) -> InstrumenterId {
-        let id = InstrumenterId(self.next_instrumenter_id);
-        self.next_instrumenter_id += 1;
-        id
-    }
-
     fn register_cached_call(&mut self, sig: FunctionSignature) {
         if !self.stack.is_empty() {
             let (_, cost) = self.stack.last_mut().unwrap();
@@ -2132,12 +2047,10 @@ impl CostAnalysis {
         if self.functions.contains_key(&sig) {
             self.stack.push((sig, Box::new(DummyInstrumenter {})));
         } else {
-            let raw_id = self.fresh_instrumenter_id();
-            let specialized_id = self.fresh_instrumenter_id();
             let instrumenter = FunctionCost {
                 calls: HashMap::new(),
-                raw: Instrumenter::new(raw_id),
-                specialized: Instrumenter::new(specialized_id),
+                raw: Instrumenter::new(),
+                specialized: Instrumenter::new(),
             };
             self.stack.push((sig, Box::new(instrumenter)));
         }
@@ -2199,8 +2112,8 @@ impl CostAnalysis {
                 sig.clone(),
                 SpecializationSummary {
                     calls: 0,
-                    raw_constraints: cost.raw.specialization_constraints(),
-                    specialized_constraints: cost.specialized.specialization_constraints(),
+                    raw_constraints: cost.raw.recurring_constraints(),
+                    specialized_constraints: cost.specialized.recurring_constraints(),
                     specialization_total_savings: 0,
                 },
             );
@@ -2245,7 +2158,6 @@ impl CostEstimator {
             stack: vec![],
             entry_point: Some(main_sig.clone()),
             cache: HashMap::new(),
-            next_instrumenter_id: 0,
         };
 
         self.run_fn_from_signature(ssa, type_info, main_sig, &mut costs);

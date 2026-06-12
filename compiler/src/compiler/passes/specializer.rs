@@ -63,7 +63,12 @@ fn const_val_as_field(value: &ConstVal) -> Option<Field> {
 }
 
 /// The operands of an `a * b = c` constraint as field constants, if all three are known.
-fn r1c_consts(ctx: &SpecializationState<'_>, a: &Val, b: &Val, c: &Val) -> Option<(Field, Field, Field)> {
+fn r1c_consts(
+    ctx: &SpecializationState<'_>,
+    a: &Val,
+    b: &Val,
+    c: &Val,
+) -> Option<(Field, Field, Field)> {
     let field_const = |v: &Val| ctx.const_vals.get(&v.0).and_then(const_val_as_field);
     Some((field_const(a)?, field_const(b)?, field_const(c)?))
 }
