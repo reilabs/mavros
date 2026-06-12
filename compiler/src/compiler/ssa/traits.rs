@@ -28,6 +28,10 @@ pub trait Instruction: Clone + Debug + 'static {
     /// Gets the call targets that are known statically, predominantly to aid in building graphs.
     fn get_static_call_targets(&self) -> Vec<FunctionId>;
 
+    /// Rewrites every statically-known call target through `f` (used when functions are
+    /// re-identified, e.g. while merging two SSAs).
+    fn map_call_targets(&mut self, f: &mut dyn FnMut(FunctionId) -> FunctionId);
+
     /// Display an instruction as a string.
     ///
     /// Takes closures for function name resolution and value annotation (so the trait doesn't

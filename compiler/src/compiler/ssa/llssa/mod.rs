@@ -534,6 +534,12 @@ impl Instruction for LLOp {
         }
     }
 
+    fn map_call_targets(&mut self, f: &mut dyn FnMut(FunctionId) -> FunctionId) {
+        if let LLOp::Call { func, .. } = self {
+            *func = f(*func);
+        }
+    }
+
     fn display_instruction(
         &self,
         func_name: &dyn Fn(FunctionId) -> String,

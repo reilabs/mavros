@@ -495,6 +495,11 @@ fn lower_inner(
         fn_map.insert(*fn_id, ll_fn_id);
     }
 
+    // Propagate any additional entry points (the main entry is already LLSSA's main).
+    for entry in hlssa.get_entry_points().iter().skip(1) {
+        llssa.add_entry_point(fn_map[entry]);
+    }
+
     // Second pass: lower each function body. Snapshot the constants once; every function lowering
     // reads from the same lock-free view.
     let constants = hlssa.const_snapshot();

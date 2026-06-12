@@ -155,33 +155,18 @@ fn run_single(root: PathBuf) {
         }
     };
 
-    // 3. Compile witgen  (depends on R1CS)
-    let witgen_binary = r1cs.as_ref().and_then(|_| {
-        emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen() {
+    // 3. Compile bytecode: a single binary with both the witgen and AD entry
+    //    points (depends on R1CS)
+    let program_binary = r1cs.as_ref().and_then(|_| {
+        emit("START:BYTECODE_COMPILE");
+        match driver.compile_bytecode() {
             Ok(b) => {
                 let bytes = b.len() * 8;
-                emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
+                emit(&format!("END:BYTECODE_COMPILE:ok:{bytes}"));
                 Some(b)
             }
             Err(_) => {
-                emit("END:WITGEN_COMPILE:fail");
-                None
-            }
-        }
-    });
-
-    // 4. Compile AD  (depends on R1CS, independent of witgen)
-    let ad_binary = r1cs.as_ref().and_then(|_| {
-        emit("START:AD_COMPILE");
-        match driver.compile_ad() {
-            Ok(b) => {
-                let bytes = b.len() * 8;
-                emit(&format!("END:AD_COMPILE:ok:{bytes}"));
-                Some(b)
-            }
-            Err(_) => {
-                emit("END:AD_COMPILE:fail");
+                emit("END:BYTECODE_COMPILE:fail");
                 None
             }
         }
@@ -190,22 +175,17 @@ fn run_single(root: PathBuf) {
     // Load inputs (needed for witgen run)
     let ordered_params = load_inputs(&root.join("Prover.toml"), &driver);
 
-    // 5. Run witgen  (depends on WITGEN_COMPILE)
-    let had_witgen_binary = witgen_binary.is_some();
-    let witgen_result = witgen_binary.and_then(|mut binary| {
+    // 5. Run witgen  (depends on BYTECODE_COMPILE)
+    let had_binary = program_binary.is_some();
+    let witgen_result = program_binary.as_ref().and_then(|binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        let result = interpreter::run(
-            &mut binary,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-            params,
-        );
+        let result = interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params);
         emit("END:WITGEN_RUN:ok");
         Some(result)
     });
-    if had_witgen_binary && witgen_result.is_none() {
+    if had_binary && witgen_result.is_none() {
         emit("START:WITGEN_RUN");
         emit("END:WITGEN_RUN:fail");
     }
@@ -238,8 +218,8 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 8. Run AD  (depends on AD_COMPILE, independent of witgen)
-    let ad_result = ad_binary.and_then(|mut binary| {
+    // 8. Run AD  (depends on BYTECODE_COMPILE, independent of witgen)
+    let ad_result = program_binary.as_ref().and_then(|binary| {
         emit("START:AD_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -247,7 +227,7 @@ fn run_single(root: PathBuf) {
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
         let (ad_a, ad_b, ad_c, ad_instrumenter) = interpreter::run_ad(
-            &mut binary,
+            binary,
             &ad_coeffs,
             r1cs.witness_layout,
             r1cs.constraints_layout,
@@ -278,15 +258,16 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 11. Compile WASM  (depends on R1CS)
+    // 11. Compile WASM: a single module exporting both the witgen and AD entry
+    //     points (depends on R1CS)
     let wasm_path = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:WITGEN_WASM_COMPILE");
+        emit("START:WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("witgen.wasm");
+        let wasm_path = tmpdir.keep().join("program.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
         match driver.compile_llvm_targets(false, r1cs, Some((wasm_path.clone(), wasm_opts))) {
             Ok(_) if wasm_path.exists() => {
-                emit("END:WITGEN_WASM_COMPILE:ok");
+                emit("END:WASM_COMPILE:ok");
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -294,18 +275,18 @@ fn run_single(root: PathBuf) {
                     "WASM compile succeeded but output file not found at {:?}",
                     wasm_path
                 );
-                emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:WASM_COMPILE:fail");
                 None
             }
             Err(e) => {
                 eprintln!("WASM compile error: {:?}", e);
-                emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:WASM_COMPILE:fail");
                 None
             }
         }
     });
 
-    // 12. Run WASM  (depends on WITGEN_WASM_COMPILE)
+    // 12. Run WASM  (depends on WASM_COMPILE)
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
@@ -351,35 +332,8 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 14. AD WASM Compile  (depends on R1CS)
-    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:AD_WASM_COMPILE");
-        let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("ad.wasm");
-        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
-            Ok(_) if wasm_path.exists() => {
-                emit("END:AD_WASM_COMPILE:ok");
-                Some(wasm_path)
-            }
-            Ok(_) => {
-                eprintln!(
-                    "AD WASM compile succeeded but output file not found at {:?}",
-                    wasm_path
-                );
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-            Err(e) => {
-                eprintln!("AD WASM compile error: {:?}", e);
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-        }
-    });
-
-    // 15. AD WASM Run  (depends on AD_WASM_COMPILE)
-    let ad_wasm_result = ad_wasm_path.as_ref().and_then(|wasm_path| {
+    // 15. AD WASM Run  (depends on WASM_COMPILE; same module, AD entry point)
+    let ad_wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -956,8 +910,8 @@ fn run_ad_wasm(
     }
 
     let func: wasmtime::Func = instance
-        .get_func(&mut store, "mavros_main")
-        .ok_or("mavros_main not found")?;
+        .get_func(&mut store, "mavros_ad_main")
+        .ok_or("mavros_ad_main not found")?;
 
     // AD main takes only vm_ptr (no input parameters)
     let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
@@ -1011,19 +965,17 @@ fn run_ad_wasm(
 const STEP_KEYS: &[&str] = &[
     "COMPILED",
     "R1CS",
-    "WITGEN_COMPILE",
-    "AD_COMPILE",
+    "BYTECODE_COMPILE",
     "WITGEN_RUN",
     "WITGEN_CORRECT",
     "WITGEN_NOLEAK",
     "AD_RUN",
     "AD_CORRECT",
     "AD_NOLEAK",
-    "WITGEN_WASM_COMPILE",
+    "WASM_COMPILE",
     "WITGEN_WASM_RUN",
     "WITGEN_WASM_CORRECT",
     "WITGEN_WASM_NOLEAK",
-    "AD_WASM_COMPILE",
     "AD_WASM_RUN",
     "AD_WASM_CORRECT",
     "AD_WASM_NOLEAK",
@@ -1034,8 +986,7 @@ struct TestResult {
     steps: HashMap<String, Status>,
     rows: Option<usize>,
     cols: Option<usize>,
-    witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    binary_bytes: Option<usize>,
 }
 
 /// Determined purely from child output:
@@ -1233,8 +1184,7 @@ fn ignored_test_result(name: &str) -> TestResult {
         steps,
         rows: None,
         cols: None,
-        witgen_bytes: None,
-        ad_bytes: None,
+        binary_bytes: None,
     }
 }
 
@@ -1243,8 +1193,7 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
     let mut ended = HashMap::<String, bool>::default();
     let mut rows = None;
     let mut cols = None;
-    let mut witgen_bytes = None;
-    let mut ad_bytes = None;
+    let mut binary_bytes = None;
 
     for line in lines {
         let parts: Vec<&str> = line.split(':').collect();
@@ -1258,11 +1207,8 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
                     rows = parts[3].parse().ok();
                     cols = parts[4].parse().ok();
                 }
-                if *key == "WITGEN_COMPILE" && parts.len() >= 4 {
-                    witgen_bytes = parts[3].parse().ok();
-                }
-                if *key == "AD_COMPILE" && parts.len() >= 4 {
-                    ad_bytes = parts[3].parse().ok();
+                if *key == "BYTECODE_COMPILE" && parts.len() >= 4 {
+                    binary_bytes = parts[3].parse().ok();
                 }
             }
             ["END", key, "fail"] => {
@@ -1291,8 +1237,7 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
         steps,
         rows,
         cols,
-        witgen_bytes,
-        ad_bytes,
+        binary_bytes,
     }
 }
 
@@ -1317,10 +1262,10 @@ const DUMP_STAGE_ORDER: &[&str] = &[
     "initial_ssa.txt",
     "monomorphized_ssa.txt",
     "untainted_ssa.txt",
+    "program_ssa.txt",
     "hlssa_before_lowering.txt",
     "llssa_after_lowering.txt",
-    "witgen_bytecode.txt",
-    "ad_bytecode.txt",
+    "program_bytecode.txt",
 ];
 
 fn parse_runs_arg(args: &[String]) -> usize {
@@ -1578,8 +1523,7 @@ struct ParsedRow {
     cells: Vec<String>,
     rows: Option<usize>,
     cols: Option<usize>,
-    witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    binary_bytes: Option<usize>,
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
@@ -1592,20 +1536,18 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 23 {
+        if cells.len() < 20 {
             continue;
         }
         let rows = cells[3].parse().ok();
         let cols = cells[4].parse().ok();
-        let witgen_bytes = cells[5].parse().ok();
-        let ad_bytes = cells[6].parse().ok();
+        let binary_bytes = cells[5].parse().ok();
         result.push(ParsedRow {
             name: cells[0].clone(),
             cells,
             rows,
             cols,
-            witgen_bytes,
-            ad_bytes,
+            binary_bytes,
         });
     }
     result
@@ -1614,22 +1556,20 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
 const REGRESSION_COLS: &[(usize, &str)] = &[
     (1, "Compiled"),
     (2, "R1CS"),
-    (7, "Witgen Compile"),
-    (8, "Witgen Run VM"),
-    (9, "Witgen Correct"),
-    (10, "Witgen No Leak"),
-    (11, "AD Compile"),
-    (12, "AD Run VM"),
-    (13, "AD Correct"),
-    (14, "AD No Leak"),
-    (15, "Witgen WASM Compile"),
-    (16, "Witgen WASM Run"),
-    (17, "Witgen WASM Correct"),
-    (18, "Witgen WASM No Leak"),
-    (19, "AD WASM Compile"),
-    (20, "AD WASM Run"),
-    (21, "AD WASM Correct"),
-    (22, "AD WASM No Leak"),
+    (6, "Bytecode Compile"),
+    (7, "Witgen Run VM"),
+    (8, "Witgen Correct"),
+    (9, "Witgen No Leak"),
+    (10, "AD Run VM"),
+    (11, "AD Correct"),
+    (12, "AD No Leak"),
+    (13, "WASM Compile"),
+    (14, "Witgen WASM Run"),
+    (15, "Witgen WASM Correct"),
+    (16, "Witgen WASM No Leak"),
+    (17, "AD WASM Run"),
+    (18, "AD WASM Correct"),
+    (19, "AD WASM No Leak"),
 ];
 
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
@@ -1763,11 +1703,11 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             }
         }
 
-        // Check witgen bytecode size changes
-        if let (Some(bw), Some(cw)) = (base.witgen_bytes, cur.witgen_bytes) {
+        // Check bytecode size changes
+        if let (Some(bw), Some(cw)) = (base.binary_bytes, cur.binary_bytes) {
             if cw > bw {
                 warnings.push(format!(
-                    "| {} | Witgen Size (bytes) | {} | {} | +{} ({:+.1}%) |",
+                    "| {} | Bytecode Size (bytes) | {} | {} | +{} ({:+.1}%) |",
                     cur.name,
                     bw,
                     cw,
@@ -1776,35 +1716,12 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
                 ));
             } else if cw < bw {
                 improvements.push(format!(
-                    "| {} | Witgen Size (bytes) | {} | {} | {} ({:.1}%) |",
+                    "| {} | Bytecode Size (bytes) | {} | {} | {} ({:.1}%) |",
                     cur.name,
                     bw,
                     cw,
                     cw as i64 - bw as i64,
                     (cw as f64 - bw as f64) / bw as f64 * 100.0
-                ));
-            }
-        }
-
-        // Check AD bytecode size changes
-        if let (Some(ba), Some(ca)) = (base.ad_bytes, cur.ad_bytes) {
-            if ca > ba {
-                warnings.push(format!(
-                    "| {} | AD Size (bytes) | {} | {} | +{} ({:+.1}%) |",
-                    cur.name,
-                    ba,
-                    ca,
-                    ca - ba,
-                    (ca as f64 - ba as f64) / ba as f64 * 100.0
-                ));
-            } else if ca < ba {
-                improvements.push(format!(
-                    "| {} | AD Size (bytes) | {} | {} | {} ({:.1}%) |",
-                    cur.name,
-                    ba,
-                    ca,
-                    ca as i64 - ba as i64,
-                    (ca as f64 - ba as f64) / ba as f64 * 100.0
                 ));
             }
         }
@@ -1896,37 +1813,33 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n");
+    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | Bytecode Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
+    md.push_str("|------|----------|------|------|------|---------------|------------------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|-----------------|-----------------|\n");
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
         let rows = r.rows.map_or("-".to_string(), |v| v.to_string());
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
-        let witgen_sz = r.witgen_bytes.map_or("-".to_string(), |v| v.to_string());
-        let ad_sz = r.ad_bytes.map_or("-".to_string(), |v| v.to_string());
+        let binary_sz = r.binary_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
             rows,
             cols,
-            witgen_sz,
-            ad_sz,
-            s("WITGEN_COMPILE"),
+            binary_sz,
+            s("BYTECODE_COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),
             s("WITGEN_NOLEAK"),
-            s("AD_COMPILE"),
             s("AD_RUN"),
             s("AD_CORRECT"),
             s("AD_NOLEAK"),
-            s("WITGEN_WASM_COMPILE"),
+            s("WASM_COMPILE"),
             s("WITGEN_WASM_RUN"),
             s("WITGEN_WASM_CORRECT"),
             s("WITGEN_WASM_NOLEAK"),
-            s("AD_WASM_COMPILE"),
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),

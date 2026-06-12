@@ -82,12 +82,9 @@ pub fn run_witgen_phase2(
     )
 }
 
-pub fn compile_witgen(driver: &mut Driver) -> Result<Vec<u64>, Error> {
-    Ok(driver.compile_witgen()?)
-}
-
-pub fn compile_ad(driver: &Driver) -> Result<Vec<u64>, Error> {
-    Ok(driver.compile_ad()?)
+/// Compiles the whole program (witgen and AD entry points) into a single VM binary.
+pub fn compile_bytecode(driver: &mut Driver) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_bytecode()?)
 }
 
 pub fn run_ad_from_binary(

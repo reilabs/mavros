@@ -10,7 +10,7 @@ use tracing::instrument;
 
 pub use crate::InputValueOrdered;
 
-use crate::bytecode::parse_struct_layouts;
+use crate::bytecode::{ENTRY_AD, ENTRY_WITGEN, parse_program_header};
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
     array::BoxedValue,
@@ -211,9 +211,9 @@ impl Frame {
 }
 
 fn prepare_dispatch(program: &mut [u64], code_start: usize) {
-    // `code_start` is the index of `global_frame_size`; the actual opcode
-    // stream begins at `code_start + 1`.
-    let mut current_offset = code_start + 1;
+    // `code_start` is the index of the first function marker, where the opcode
+    // stream begins.
+    let mut current_offset = code_start;
     while current_offset < program.len() {
         let opcode = program[current_offset];
         if opcode == u64::MAX {
@@ -269,8 +269,12 @@ pub fn run_phase1(
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
 ) -> Phase1Result {
-    let (struct_layouts, code_start) = parse_struct_layouts(program);
-    let global_frame_size = program[code_start] as usize;
+    let header = parse_program_header(program);
+    let entry = *header
+        .entry_points
+        .get(ENTRY_WITGEN)
+        .expect("Program has no witgen entry point");
+    let global_frame_size = header.global_frame_size;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
     let mut out_b = vec![Field::ZERO; constraints_layout.size()];
     let mut out_c = vec![Field::ZERO; constraints_layout.size()];
@@ -307,10 +311,10 @@ pub fn run_phase1(
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
         global_frame.as_mut_ptr(),
-        struct_layouts,
+        header.struct_layouts,
     );
 
-    let frame = Frame::base_frame(program[code_start + 2], &mut vm);
+    let frame = Frame::base_frame(program[entry + 1], &mut vm);
 
     // Main takes its inputs as a single Blob<Field; N> parameter stored by
     // value in the frame, starting right after the two return slots.
@@ -321,9 +325,9 @@ pub fn run_phase1(
     }
 
     let mut program = program.to_vec();
-    prepare_dispatch(&mut program, code_start);
+    prepare_dispatch(&mut program, header.code_start);
 
-    let pc = unsafe { program.as_mut_ptr().add(code_start + 3) };
+    let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
@@ -620,8 +624,12 @@ pub fn run_ad(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> (Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter) {
-    let (struct_layouts, code_start) = parse_struct_layouts(program);
-    let global_frame_size = program[code_start] as usize;
+    let header = parse_program_header(program);
+    let entry = *header
+        .entry_points
+        .get(ENTRY_AD)
+        .expect("Program has no AD entry point");
+    let global_frame_size = header.global_frame_size;
     let mut out_da = vec![Field::ZERO; witness_layout.size()];
     let mut out_db = vec![Field::ZERO; witness_layout.size()];
     let mut out_dc = vec![Field::ZERO; witness_layout.size()];
@@ -634,11 +642,11 @@ pub fn run_ad(
         witness_layout,
         constraints_layout,
         global_frame.as_mut_ptr(),
-        struct_layouts,
+        header.struct_layouts,
     );
 
     let frame = Frame::push(
-        program[code_start + 2],
+        program[entry + 1],
         Frame {
             data: std::ptr::null_mut(),
         },
@@ -646,9 +654,9 @@ pub fn run_ad(
     );
 
     let mut program = program.to_vec();
-    prepare_dispatch(&mut program, code_start);
+    prepare_dispatch(&mut program, header.code_start);
 
-    let pc = unsafe { program.as_mut_ptr().add(code_start + 3) };
+    let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
     unsafe { dispatch(pc, frame, &mut vm) };
 
