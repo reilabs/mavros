@@ -638,8 +638,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 }
             }
         }
-        OpCode::ValueOf { .. }
-        | OpCode::FreshWitness { .. }
+        OpCode::FreshWitness { .. }
         | OpCode::Constrain { .. }
         | OpCode::BumpD { .. }
         | OpCode::NextDCoeff { .. }
@@ -698,7 +697,6 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::TupleProj { .. }
         | OpCode::TupleRefProj { .. }
         | OpCode::MkTuple { .. }
-        | OpCode::ValueOf { .. }
         | OpCode::FreshWitness { .. }
         | OpCode::Constrain { .. }
         | OpCode::BumpD { .. }

@@ -126,7 +126,6 @@ impl DCE {
             | OpCode::Not { .. }
             | OpCode::MulConst { .. }
             | OpCode::ReadGlobal { .. }
-            | OpCode::ValueOf { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => false,
             OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {

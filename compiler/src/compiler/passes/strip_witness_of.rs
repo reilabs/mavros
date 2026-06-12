@@ -1,15 +1,16 @@
 //! Strips all `WitnessOf` type wrappers from the SSA.
 //!
 //! In the witgen pipeline, all computation is concrete — there's no need for the WitnessOf
-//! distinction. This pass converts all `WitnessOf(X)` types back to `X` and removes
-//! `Cast { target: WitnessOf }` instructions.
+//! distinction. This pass converts all `WitnessOf(X)` types back to `X` and removes casts
+//! that only change witness representation (`WitnessOf`, and `Map`s thereof over arrays
+//! and slices), which become identities once the types are stripped.
 
 use crate::compiler::util::ice_non_elided_tuple;
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::hlssa::{CastTarget, HLSSA, OpCode, Type},
+    ssa::hlssa::{HLSSA, OpCode, Type},
 };
 
 pub struct StripWitnessOf {}
@@ -53,7 +54,10 @@ impl StripWitnessOf {
                     *tp = tp.strip_all_witness();
                 }
 
-                // Remove Cast { target: WitnessOf } by replacing result → value
+                // Remove casts that only change witness representation (WitnessOf
+                // injections/strips and elementwise Maps thereof): with all
+                // WitnessOf types stripped they are identities, so the result
+                // simply aliases the input.
                 let old_instructions = block.take_instructions();
                 let new_instructions: Vec<_> = old_instructions
                     .into_iter()
@@ -61,8 +65,9 @@ impl StripWitnessOf {
                         if let OpCode::Cast {
                             result,
                             value,
-                            target: CastTarget::WitnessOf,
+                            target,
                         } = &instr
+                            && target.is_witness_repr_only()
                         {
                             replacements.insert(*result, *value);
                             return None;
@@ -132,7 +137,6 @@ impl StripWitnessOf {
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::MemOp { .. }
-            | OpCode::ValueOf { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::NextDCoeff { .. }
             | OpCode::BumpD { .. }

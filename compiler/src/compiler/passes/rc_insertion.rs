@@ -205,6 +205,12 @@ impl RCInsertion {
                         currently_live.insert(*v);
                         new_instructions.push(instruction);
                     }
+                    OpCode::Cast {
+                        target: CastTarget::ValueOf,
+                        ..
+                    } => {
+                        panic!("ICE: ValueOf cast should not appear at this stage");
+                    }
                     // These need to mark their inputs as live, but do not need to bump RCs
                     OpCode::Assert { .. }
                     | OpCode::AssertCmp { .. }
@@ -706,9 +712,6 @@ impl RCInsertion {
                         max_bits: _,
                     } => {
                         new_instructions.push(instruction);
-                    }
-                    OpCode::ValueOf { .. } => {
-                        panic!("ICE: ValueOf should not appear at this stage");
                     }
                     OpCode::Guard { .. } => {
                         panic!("ICE: Guard should be lowered before RC insertion");

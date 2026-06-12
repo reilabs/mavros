@@ -586,8 +586,10 @@ impl ValueRangeAnalysis {
                             IntInterval::signed_full(*n)
                         }
                     }
-                    CastTarget::Nop | CastTarget::WitnessOf => in_r,
-                    CastTarget::ArrayToSlice => IntInterval::top(),
+                    // ValueOf strips the WitnessOf wrapper: payload unchanged.
+                    CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
+                    // Sequence-level casts carry no scalar range.
+                    CastTarget::ArrayToSlice | CastTarget::Map(_) => IntInterval::top(),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }
@@ -631,11 +633,6 @@ impl ValueRangeAnalysis {
                 result_type,
             } => {
                 Self::overwrite(bounds, *result, IntInterval::for_type(result_type), changed);
-            }
-
-            OpCode::ValueOf { result, value } => {
-                let in_r = get(bounds, *value);
-                Self::overwrite(bounds, *result, cap_to_type(*result, in_r), changed);
             }
 
             OpCode::Cmp { result, .. } => {

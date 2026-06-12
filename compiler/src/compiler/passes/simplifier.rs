@@ -374,6 +374,25 @@ impl Simplifier {
                         });
                     }
                 }
+                // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
+                // value IS what ValueOf strips back to). Sound by witgen
+                // semantics.
+                if matches!(target, CastTarget::ValueOf)
+                    && let Some(ValueDefinition::Instruction(
+                        _,
+                        _,
+                        OpCode::WriteWitness {
+                            result: _,
+                            value: hint,
+                            pinned: _,
+                        },
+                    )) = defs.get_definition(*value)
+                {
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *hint,
+                    });
+                }
                 None
             }
             OpCode::Not { result, value } => {
@@ -428,36 +447,6 @@ impl Simplifier {
                 lhs,
                 rhs,
             } if *lhs == *rhs => materialize_one(types, *result, fb),
-            OpCode::ValueOf { result, value } => {
-                // ValueOf(ValueOf(x)) → ValueOf(x)
-                if let Some(ValueDefinition::Instruction(_, _, OpCode::ValueOf { .. })) =
-                    defs.get_definition(*value)
-                {
-                    return Some(Rewrite::Alias {
-                        result: *result,
-                        target: *value,
-                    });
-                }
-                // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
-                // value IS what ValueOf strips back to). Sound by witgen
-                // semantics.
-                if let Some(ValueDefinition::Instruction(
-                    _,
-                    _,
-                    OpCode::WriteWitness {
-                        result: _,
-                        value: hint,
-                        pinned: _,
-                    },
-                )) = defs.get_definition(*value)
-                {
-                    return Some(Rewrite::Alias {
-                        result: *result,
-                        target: *hint,
-                    });
-                }
-                None
-            }
             OpCode::WriteWitness {
                 result: Some(result),
                 value,
@@ -469,9 +458,10 @@ impl Simplifier {
                 if let Some(ValueDefinition::Instruction(
                     _,
                     _,
-                    OpCode::ValueOf {
+                    OpCode::Cast {
                         result: _,
                         value: inner,
+                        target: CastTarget::ValueOf,
                     },
                 )) = defs.get_definition(*value)
                 {

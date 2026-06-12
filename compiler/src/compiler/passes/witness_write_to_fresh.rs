@@ -92,7 +92,6 @@ impl WitnessWriteToFresh {
                         | OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
                         | OpCode::Todo { .. }
-                        | OpCode::ValueOf { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. }
                         | OpCode::Guard { .. } => instruction.clone(),

@@ -7,6 +7,7 @@ pub mod elide_tuples;
 pub mod fix_double_jumps;
 pub mod instruction_lowering;
 pub mod lower_guards;
+pub mod lower_map_casts;
 mod lowering_pass;
 pub mod mem2reg;
 pub mod prepare_entry_point;

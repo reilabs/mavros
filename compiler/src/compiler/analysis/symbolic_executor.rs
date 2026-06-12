@@ -78,7 +78,6 @@ where
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
-    fn value_of(&self, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: RefCountOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
     fn spread(&self, bits: u8, ctx: &mut Context) -> Self;
@@ -622,10 +621,6 @@ impl SymbolicExecutor {
                         let (odd_val, even_val) = val.unspread(*bits, ctx);
                         scope.insert(*result_odd, odd_val);
                         scope.insert(*result_even, even_val);
-                    }
-                    OpCode::ValueOf { result, value } => {
-                        let val = scope[value].clone();
-                        scope.insert(*result, val.value_of(ctx));
                     }
                     OpCode::Guard { condition, inner } => {
                         let condition_val = &scope[condition];

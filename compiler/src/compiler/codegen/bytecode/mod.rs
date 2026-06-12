@@ -798,6 +798,12 @@ impl CodeGen {
                 } => {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
+                    if matches!(tgt, hlssa::CastTarget::Map(_) | hlssa::CastTarget::ValueOf) {
+                        panic!(
+                            "ICE: {} cast should have been lowered before bytecode codegen",
+                            tgt
+                        );
+                    }
                     if matches!(tgt, hlssa::CastTarget::WitnessOf) {
                         // PureToWitnessRef reads a Field (4 u64s) from the frame.
                         // If the source is not Field-sized, cast to Field first.
