@@ -36,6 +36,10 @@ unit-test: ## Run the unit tests
 func-test: ## Run the functional test harness
 	$(SHELL_WRAPPER) cargo run --release --bin test-runner -- --output STATUS.md
 
+.PHONY: determinism-check
+determinism-check: ## Check that compilation output is byte-identical across repeated runs.
+	$(SHELL_WRAPPER) cargo run --release --bin test-runner -- --check-determinism --jobs 4
+
 .PHONY: test
 test: unit-test func-test ## Run all the tests
 

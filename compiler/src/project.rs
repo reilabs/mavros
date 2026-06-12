@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     fmt::Debug,
     path::{Path, PathBuf},
 };
@@ -12,15 +11,17 @@ use nargo::{
 };
 use nargo_toml::PackageSelection::All;
 use noirc_driver::stdlib_paths_with_source;
-use noirc_frontend::ast::{
-    BlockExpression, CallExpression, Expression, ExpressionKind, FunctionKind, Ident, NoirFunction,
-    Path as AstPath, PathKind, PathSegment, Pattern, Statement, StatementKind,
+use noirc_frontend::{
+    ast::{
+        BlockExpression, CallExpression, Expression, ExpressionKind, FunctionKind, Ident,
+        NoirFunction, Path as AstPath, PathKind, PathSegment, Pattern, Statement, StatementKind,
+    },
+    hir::ParsedFiles,
+    parser::{ItemKind, ParsedModule},
+    token::FunctionAttributeKind,
 };
-use noirc_frontend::hir::ParsedFiles;
-use noirc_frontend::parser::{ItemKind, ParsedModule};
-use noirc_frontend::token::FunctionAttributeKind;
 
-use crate::error::Error;
+use crate::{collections::HashSet, error::Error};
 
 pub struct Project {
     project_root: PathBuf,
@@ -68,7 +69,7 @@ const FOREIGN_REPLACEMENTS: &[&str] = &["blake3", "poseidon2_permutation", "sha2
 
 /// Rewrite all registered `#[foreign]` shims in the parsed files to call their replacements.
 fn replace_foreign_functions(parsed_files: &mut ParsedFiles) {
-    let mut replaced: HashSet<&'static str> = HashSet::new();
+    let mut replaced: HashSet<&'static str> = HashSet::default();
     for (module, _) in parsed_files.values_mut() {
         replace_foreign_functions_in_module(module, &mut replaced);
     }

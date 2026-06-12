@@ -3,34 +3,32 @@
 //! Array types lower to heap-allocated RC'd structs behind `Ptr`. MkSeq, ArrayGet, ArraySet, and
 //! MemOp (Bump/Drop) are lowered to explicit memory operations.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    marker::PhantomData,
-};
-
-use crate::compiler::{
-    analysis::{
-        flow_analysis::{self, FlowAnalysis},
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    ssa::{Instruction, hlssa::Endianness},
-};
-
-use super::{
-    BlockId, FunctionId, Terminator, ValueId,
-    hlssa::{
-        BinaryArithOpKind, CmpKind, Constant, DMatrix, HLFunction, HLSSA, HLSSAConstantsSnapshot,
-        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type as HLType,
-        TypeExpr as HLTypeExpr,
-    },
-    llssa::{
-        Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType,
-        LLFunction, LLOp, LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
-        builder::{LLBlockEmitter, LLEmitter},
-    },
-};
 use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
+use std::{collections::BTreeMap, marker::PhantomData};
+
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{
+            flow_analysis::{self, FlowAnalysis},
+            types::{FunctionTypeInfo, TypeInfo},
+        },
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
+                HLSSAConstantsSnapshot, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS,
+                Type as HLType, TypeExpr as HLTypeExpr,
+            },
+            llssa::{
+                Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
+                LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
+                builder::{LLBlockEmitter, LLEmitter},
+            },
+        },
+        util::ice_non_elided_tuple,
+    },
+};
 
 // =============================================================================
 // Type helpers
@@ -476,7 +474,7 @@ fn lower_inner(
     let main_id = hlssa.get_main_id();
     let main_name = hlssa.get_main().get_name().to_string();
     let mut llssa = LLSSA::with_main(main_name);
-    let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::new();
+    let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::default();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
     let mut lookup_fns = LookupFunctions::new();
@@ -561,7 +559,7 @@ fn lower_constants_llssa(
     llssa: &mut LLSSA,
     val_map: &mut HashMap<ValueId, ValueId>,
 ) {
-    let mut referenced = HashSet::new();
+    let mut referenced = HashSet::default();
     for (_, block) in function.get_blocks() {
         for instr in block.get_instructions() {
             for vid in instr.get_inputs() {
@@ -675,8 +673,8 @@ fn lower_function(
     constants: &HLSSAConstantsSnapshot,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
-    let mut val_map: HashMap<ValueId, ValueId> = HashMap::new();
-    let mut block_map: HashMap<BlockId, BlockId> = HashMap::new();
+    let mut val_map: HashMap<ValueId, ValueId> = HashMap::default();
+    let mut block_map: HashMap<BlockId, BlockId> = HashMap::default();
 
     let hl_entry_id = function.get_entry_id();
     let ll_entry_id = ll_func.get_entry_id();
@@ -4249,7 +4247,7 @@ mod tests {
 
         let mut llssa = LLSSA::with_main("felt_test".to_string());
         let mut ll_func = LLFunction::empty("felt_test".to_string());
-        let mut val_map = HashMap::new();
+        let mut val_map = HashMap::default();
         lower_constants_llssa(function, &constants, &mut ll_func, &mut llssa, &mut val_map);
 
         let dump = llssa.to_string(&DefaultSSAAnnotator);

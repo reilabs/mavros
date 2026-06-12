@@ -2,21 +2,22 @@
 //! into by providing their own `Value` and `Context` implementations that specialize it for their
 //! use-case.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::HashMap;
-
 use tracing::{Level, instrument};
 
-use crate::compiler::{
-    Field,
-    analysis::types::TypeInfo,
-    ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, HLSSA,
-            HLSSAConstantsSnapshot, LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
-            SliceOpDir, Type, TypeExpr,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        Field,
+        analysis::types::TypeInfo,
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, HLSSA,
+                HLSSAConstantsSnapshot, LookupTarget, OpCode, Radix, RefCountOp,
+                SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            },
         },
+        util::ice_non_elided_tuple,
     },
 };
 
@@ -698,7 +699,7 @@ struct Scope<'c, V> {
 impl<'c, V> Scope<'c, V> {
     fn new(consts: &'c HashMap<ValueId, V>) -> Self {
         Self {
-            locals: HashMap::new(),
+            locals: HashMap::default(),
             consts,
         }
     }
@@ -732,7 +733,7 @@ fn materialize_constants<V, Ctx>(
 where
     V: Value<Ctx>,
 {
-    let mut consts = HashMap::new();
+    let mut consts = HashMap::default();
     for (vid, cv) in constants {
         let v = materialize_constant_value(cv.as_ref(), ctx);
         consts.insert(*vid, v);

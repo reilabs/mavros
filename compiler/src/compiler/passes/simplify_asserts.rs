@@ -5,17 +5,18 @@
 //! `x == y`) wherever possible. Field equalities `assert(a * b == c)` also become native R1CS
 //! constraints wherever possible.
 
-use std::collections::HashMap;
-
-use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        Instruction, ValueId,
-        hlssa::{BinaryArithOpKind, CmpKind, HLSSA, OpCode, TypeExpr},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            types::{FunctionTypeInfo, TypeInfo},
+        },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            Instruction, ValueId,
+            hlssa::{BinaryArithOpKind, CmpKind, HLSSA, OpCode, TypeExpr},
+        },
     },
 };
 
@@ -45,7 +46,7 @@ impl SimplifyAsserts {
         for (function_id, function) in ssa.iter_functions_mut() {
             let function_type_info = type_info.get_function(*function_id);
 
-            let mut defs: HashMap<ValueId, OpCode> = HashMap::new();
+            let mut defs: HashMap<ValueId, OpCode> = HashMap::default();
             for (_, block) in function.get_blocks() {
                 for instruction in block.get_instructions() {
                     for result in instruction.get_results() {
@@ -54,7 +55,7 @@ impl SimplifyAsserts {
                 }
             }
 
-            let mut new_blocks = HashMap::new();
+            let mut new_blocks = HashMap::default();
             for (block_id, mut block) in function.take_blocks() {
                 let mut new_instructions = Vec::new();
                 for instruction in block.take_instructions().into_iter() {

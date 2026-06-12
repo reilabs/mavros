@@ -2,12 +2,13 @@
 //!
 //! TODO Check if we need this once we do our own SSA generation (#169).
 
-use std::collections::HashSet;
-
-use crate::compiler::{
-    analysis::flow_analysis::FlowAnalysis,
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{BlockId, hlssa::HLSSA},
+use crate::{
+    collections::HashSet,
+    compiler::{
+        analysis::flow_analysis::FlowAnalysis,
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        ssa::{BlockId, hlssa::HLSSA},
+    },
 };
 
 pub struct RemoveUnreachableBlocks {}

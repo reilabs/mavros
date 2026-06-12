@@ -1,9 +1,7 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::HashMap;
-
 use crate::{
+    collections::HashMap,
     compiler::{
         codegen::constants,
         ssa::{
@@ -12,6 +10,7 @@ use crate::{
                 HLSSA, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr,
             },
         },
+        util::ice_non_elided_tuple,
     },
     vm::{self, bytecode},
 };
@@ -26,7 +25,7 @@ impl FrameLayouter {
     pub fn new() -> Self {
         Self {
             next_free: 2,
-            variables: HashMap::new(),
+            variables: HashMap::default(),
         }
     }
 
@@ -132,7 +131,7 @@ impl StructLayoutInterner {
     pub fn new() -> Self {
         Self {
             table: Vec::new(),
-            index: HashMap::new(),
+            index: HashMap::default(),
         }
     }
 

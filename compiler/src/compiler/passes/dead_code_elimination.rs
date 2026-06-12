@@ -6,17 +6,19 @@
 //!
 //! TODO Refactor to use the existing liveness analysis (#157).
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::{HashMap, HashSet};
-
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{CallTarget, HLFunction, HLSSA, OpCode},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{CallTarget, HLFunction, HLSSA, OpCode},
+        },
+        util::ice_non_elided_tuple,
     },
 };
+
 pub struct DCE {
     config: Config,
 }
@@ -138,9 +140,9 @@ impl DCE {
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
-            HashMap::new();
+            HashMap::default();
         let mut static_calls_by_callee: HashMap<FunctionId, Vec<(FunctionId, BlockId, usize)>> =
-            HashMap::new();
+            HashMap::default();
 
         for function_id in &function_ids {
             let function = ssa.get_function(*function_id);
@@ -163,14 +165,15 @@ impl DCE {
             }
         }
 
-        let mut live_values: HashMap<FunctionId, HashSet<ValueId>> = HashMap::new();
-        let mut live_blocks: HashMap<FunctionId, HashSet<BlockId>> = HashMap::new();
+        let mut live_values: HashMap<FunctionId, HashSet<ValueId>> = HashMap::default();
+        let mut live_blocks: HashMap<FunctionId, HashSet<BlockId>> = HashMap::default();
         let mut live_instructions: HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>> =
-            HashMap::new();
-        let mut live_params: HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>> = HashMap::new();
-        let mut live_entry_params: HashMap<FunctionId, HashSet<usize>> = HashMap::new();
-        let mut live_branches: HashMap<FunctionId, HashSet<BlockId>> = HashMap::new();
-        let mut live_return_slots: HashMap<FunctionId, HashSet<usize>> = HashMap::new();
+            HashMap::default();
+        let mut live_params: HashMap<FunctionId, HashMap<BlockId, HashSet<usize>>> =
+            HashMap::default();
+        let mut live_entry_params: HashMap<FunctionId, HashSet<usize>> = HashMap::default();
+        let mut live_branches: HashMap<FunctionId, HashSet<BlockId>> = HashMap::default();
+        let mut live_return_slots: HashMap<FunctionId, HashSet<usize>> = HashMap::default();
 
         let mut worklist: Vec<WorkItem> = vec![];
 
@@ -483,7 +486,7 @@ impl DCE {
                             let new_target = self.closest_live_post_dominator(
                                 function_cfg,
                                 block_id,
-                                live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                live_blocks.get(&function_id).unwrap_or(&HashSet::default()),
                             );
                             Terminator::Jmp(new_target, vec![])
                         }
@@ -491,7 +494,7 @@ impl DCE {
                     Some(Terminator::JmpIf(condition, then, otherwise)) => {
                         if live_branches
                             .get(&function_id)
-                            .unwrap_or(&HashSet::new())
+                            .unwrap_or(&HashSet::default())
                             .contains(&block_id)
                         {
                             Terminator::JmpIf(
@@ -499,12 +502,12 @@ impl DCE {
                                 self.closest_live_block(
                                     function_cfg,
                                     then,
-                                    live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                    live_blocks.get(&function_id).unwrap_or(&HashSet::default()),
                                 ),
                                 self.closest_live_block(
                                     function_cfg,
                                     otherwise,
-                                    live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                    live_blocks.get(&function_id).unwrap_or(&HashSet::default()),
                                 ),
                             )
                         } else {
@@ -512,7 +515,7 @@ impl DCE {
                                 self.closest_live_post_dominator(
                                     function_cfg,
                                     block_id,
-                                    live_blocks.get(&function_id).unwrap_or(&HashSet::new()),
+                                    live_blocks.get(&function_id).unwrap_or(&HashSet::default()),
                                 ),
                                 vec![],
                             )
@@ -563,7 +566,7 @@ impl DCE {
     }
 
     fn generate_definitions(&self, function: &HLFunction) -> HashMap<ValueId, ValueDefinition> {
-        let mut definitions = HashMap::new();
+        let mut definitions = HashMap::default();
 
         for (block_id, block) in function.get_blocks() {
             for (i, (val, _)) in block.get_parameters().enumerate() {
@@ -588,7 +591,7 @@ impl DCE {
     ) -> bool {
         live_blocks
             .get(&function_id)
-            .unwrap_or(&HashSet::new())
+            .unwrap_or(&HashSet::default())
             .contains(&block_id)
     }
 
@@ -602,7 +605,7 @@ impl DCE {
         live_instructions
             .get(&function_id)
             .and_then(|blocks| blocks.get(&block_id))
-            .unwrap_or(&HashSet::new())
+            .unwrap_or(&HashSet::default())
             .contains(&i)
     }
 
@@ -616,7 +619,7 @@ impl DCE {
         live_params
             .get(&function_id)
             .and_then(|blocks| blocks.get(&block_id))
-            .unwrap_or(&HashSet::new())
+            .unwrap_or(&HashSet::default())
             .contains(&i)
     }
 
@@ -628,7 +631,7 @@ impl DCE {
     ) -> bool {
         live_entry_params
             .get(&function_id)
-            .unwrap_or(&HashSet::new())
+            .unwrap_or(&HashSet::default())
             .contains(&i)
     }
 
@@ -640,7 +643,7 @@ impl DCE {
     ) -> bool {
         live_return_slots
             .get(&function_id)
-            .unwrap_or(&HashSet::new())
+            .unwrap_or(&HashSet::default())
             .contains(&i)
     }
 

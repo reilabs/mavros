@@ -9,11 +9,12 @@
 //! which is always up to date (including values minted mid-pass), so callers resolve them live via
 //! [`crate::compiler::ssa::SSA::get_const`] rather than from a stale snapshot.
 
-use std::collections::HashMap;
-
-use crate::compiler::ssa::{
-    BlockId, Instruction, ValueId,
-    hlssa::{HLFunction, OpCode, Type},
+use crate::{
+    collections::HashMap,
+    compiler::ssa::{
+        BlockId, Instruction, ValueId,
+        hlssa::{HLFunction, OpCode, Type},
+    },
 };
 
 pub enum ValueDefinition {
@@ -28,7 +29,7 @@ pub struct FunctionValueDefinitions {
 impl FunctionValueDefinitions {
     pub fn new() -> Self {
         Self {
-            definitions: HashMap::new(),
+            definitions: HashMap::default(),
         }
     }
 

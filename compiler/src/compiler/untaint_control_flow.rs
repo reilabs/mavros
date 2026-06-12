@@ -1,24 +1,25 @@
 //! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::HashMap;
-
 use tracing::{Level, instrument};
 
-use crate::compiler::{
-    analysis::{
-        flow_analysis::{CFG, FlowAnalysis},
-        types::{FunctionTypeInfo, Types},
-        witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
-        witness_type_inference::WitnessTypeInference,
-    },
-    ssa::{
-        BlockId, FunctionId, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, OpCode, SequenceTargetType,
-            Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter, HLInstrBuilder, HLSSABuilder},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{
+            flow_analysis::{CFG, FlowAnalysis},
+            types::{FunctionTypeInfo, Types},
+            witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
+            witness_type_inference::WitnessTypeInference,
         },
+        ssa::{
+            BlockId, FunctionId, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, OpCode,
+                SequenceTargetType, Type, TypeExpr,
+                builder::{HLBlockEmitter, HLEmitter, HLInstrBuilder, HLSSABuilder},
+            },
+        },
+        util::ice_non_elided_tuple,
     },
 };
 
@@ -290,7 +291,7 @@ impl UntaintControlFlow {
 
         let return_types: Vec<Type> = function.get_returns().to_vec();
 
-        let mut block_taint_vars = HashMap::new();
+        let mut block_taint_vars = HashMap::default();
         for (block_id, _) in function.get_blocks() {
             block_taint_vars.insert(*block_id, cfg_witness_param);
         }

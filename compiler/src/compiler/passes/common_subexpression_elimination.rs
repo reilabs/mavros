@@ -3,22 +3,21 @@
 //! Does not float expressions across branches or otherwise move them outside the block in which
 //! they appear (#172).
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::{HashMap, HashSet};
-
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    ssa::{
-        BlockId, SSAConstantsSnapshot, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            LookupTarget, OpCode, Radix,
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::ValueReplacements,
+        ssa::{
+            BlockId, SSAConstantsSnapshot, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
+                LookupTarget, OpCode, Radix,
+            },
         },
+        util::ice_non_elided_tuple,
     },
-};
-use crate::compiler::{
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -385,7 +384,7 @@ impl CSE {
 
             // Side-effect dedup: same dominance grouping as the value loop,
             // but duplicates are dropped rather than redirected.
-            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::new();
+            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::default();
             for (_, occurrences) in assertions {
                 if occurrences.len() <= 1 {
                     continue;
@@ -473,13 +472,13 @@ impl CSE {
         HashMap<Assertion, Vec<(BlockId, usize)>>,
     ) {
         let mut interner = ExprInterner::default();
-        let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
-        let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::new();
+        let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::default();
+        let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::default();
 
         // Seed the value->expr map with the SSA's constants so they can be referenced as operands.
         // They are not recorded into `result`: the constant store already dedups them, so CSE must
         // not try to dedup the constants themselves.
-        let mut exprs: HashMap<ValueId, ExprId> = HashMap::new();
+        let mut exprs: HashMap<ValueId, ExprId> = HashMap::default();
         for (vid, cv) in constants {
             let id = match cv.as_ref() {
                 Constant::U(bits, value) => interner.uconst(*bits, *value),

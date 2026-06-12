@@ -1,7 +1,11 @@
 use itertools::Itertools;
 
-use crate::compiler::ssa::{BlockId, FunctionId, SSAAnotator, ValueId};
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
+
+use crate::{
+    collections::HashMap,
+    compiler::ssa::{BlockId, FunctionId, SSAAnotator, ValueId},
+};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub enum WitnessType {
