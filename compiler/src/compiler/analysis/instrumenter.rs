@@ -5,27 +5,30 @@
 //! execution combined with an instrumenter for the circuit cost, and gives the compiler an idea of
 //! how much a function could be shrunk through specialization on concrete inputs.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
 use itertools::Itertools;
 use tracing::instrument;
 
-use crate::compiler::{
-    Field,
-    analysis::{
-        symbolic_executor::{self, SymbolicExecutor},
-        types::TypeInfo,
-    },
-    ssa::{
-        FunctionId,
-        hlssa::{
-            BinaryArithOpKind, CmpKind, Endianness, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, Radix,
-            RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        Field,
+        analysis::{
+            symbolic_executor::{self, SymbolicExecutor},
+            types::TypeInfo,
         },
+        ssa::{
+            FunctionId,
+            hlssa::{
+                BinaryArithOpKind, CmpKind, Endianness, HLSSA,
+                MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SequenceTargetType, SliceOpDir,
+                Type, TypeExpr,
+            },
+        },
+        util::{ice_non_elided_tuple, spread_bits, unspread_bits},
     },
-    util::{spread_bits, unspread_bits},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1577,8 +1580,8 @@ impl Instrumenter {
     fn new() -> Self {
         Self {
             constraints: 0,
-            rangechecks: HashMap::new(),
-            lookups: HashMap::new(),
+            rangechecks: HashMap::default(),
+            lookups: HashMap::default(),
         }
     }
 }
@@ -1924,7 +1927,7 @@ impl CostAnalysis {
             self.stack.push((sig, Box::new(DummyInstrumenter {})));
         } else {
             let instrumenter = FunctionCost {
-                calls: HashMap::new(),
+                calls: HashMap::default(),
                 raw: Instrumenter::new(),
                 specialized: Instrumenter::new(),
             };
@@ -1977,7 +1980,7 @@ impl CostAnalysis {
 
     pub fn summarize(&self) -> Summary {
         let mut r = Summary {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
             total_constraints: 0,
             total_savings_to_make: 0,
         };
@@ -2024,10 +2027,10 @@ impl CostEstimator {
     pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
             stack: vec![],
             entry_point: Some(main_sig.clone()),
-            cache: HashMap::new(),
+            cache: HashMap::default(),
         };
 
         self.run_fn_from_signature(ssa, type_info, main_sig, &mut costs);

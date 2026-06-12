@@ -1,19 +1,20 @@
 //! Lowers witness operations such that there are no more implicit mixed pure / witness operations
 //! and so that every value entering an R1CS cosntraint has been explicitly cast to `WitnessOf`.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::HashMap;
-
-use crate::compiler::{
-    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
-    ssa::{
-        BlockId, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, DMatrix, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::ValueReplacements,
+        ssa::{
+            BlockId, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, DMatrix, HLSSA, OpCode, Type, TypeExpr,
+                builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+            },
         },
+        util::ice_non_elided_tuple,
     },
 };
 

@@ -2,17 +2,18 @@
 //! perform detailed bookkeeping of type information whenever transforming the IR.
 
 use core::panic;
-use std::collections::HashMap;
-
 use tracing::{Level, instrument};
 
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    ssa::{
-        FunctionId, ValueId,
-        hlssa::{
-            CallTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
-            TypeExpr,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
+        ssa::{
+            FunctionId, ValueId,
+            hlssa::{
+                CallTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
+                OpCode, Type, TypeExpr,
+            },
         },
     },
 };
@@ -74,7 +75,7 @@ impl Types {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis) -> TypeInfo {
         let mut type_info = TypeInfo {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
         };
 
         let function_types = ssa

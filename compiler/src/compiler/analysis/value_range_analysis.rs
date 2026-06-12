@@ -1,23 +1,26 @@
 //! Determines the smallest closed interval over which any numeric value in the SSA can range,
 //! uniformly across all integer types.
 
-use std::collections::HashMap;
-
 use ark_ff::PrimeField;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, Zero};
 use tracing::{Level, instrument};
 
-use crate::compiler::{
-    Field,
-    analysis::{
-        flow_analysis::{CFG, FlowAnalysis},
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore},
-    ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{BinaryArithOpKind, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        Field,
+        analysis::{
+            flow_analysis::{CFG, FlowAnalysis},
+            types::{FunctionTypeInfo, TypeInfo},
+        },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore},
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+            },
+        },
     },
 };
 
@@ -431,7 +434,7 @@ impl ValueRangeAnalysis {
     #[instrument(skip_all, name = "ValueRangeAnalysis::run")]
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, types: &TypeInfo) -> ValueRanges {
         let mut result = ValueRanges {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
         };
 
         // Constants are module-level singletons; pre-compute their bounds once.

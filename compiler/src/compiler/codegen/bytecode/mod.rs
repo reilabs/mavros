@@ -2,10 +2,8 @@
 
 pub mod layout;
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::HashMap;
-
 use crate::{
+    collections::HashMap,
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
@@ -22,6 +20,7 @@ use crate::{
                 Type, TypeExpr,
             },
         },
+        util::ice_non_elided_tuple,
     },
     vm::{self, bytecode},
 };
@@ -37,7 +36,8 @@ fn materialize_constants(
     layouter: &mut FrameLayouter,
     emitter: &mut EmitterState,
 ) {
-    let mut referenced: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
+    let mut referenced: crate::collections::HashSet<ValueId> =
+        crate::collections::HashSet::default();
     for (_, block) in function.get_blocks() {
         for instr in block.get_instructions() {
             for vid in instr.get_inputs() {
@@ -181,7 +181,7 @@ impl CodeGen {
 
         let mut functions = vec![function];
 
-        let mut function_ids = HashMap::new();
+        let mut function_ids = HashMap::default();
         function_ids.insert(ssa.get_main_id(), 0);
 
         let mut cur_fn_begin = functions[0].code.len();
@@ -1655,8 +1655,8 @@ impl EmitterState {
     fn new() -> Self {
         Self {
             code: Vec::new(),
-            block_entrances: HashMap::new(),
-            block_exits: HashMap::new(),
+            block_entrances: HashMap::default(),
+            block_exits: HashMap::default(),
         }
     }
 

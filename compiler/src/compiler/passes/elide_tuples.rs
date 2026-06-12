@@ -32,14 +32,15 @@
 //!    terminators using the `value_map`. Unreachable blocks (which the type snapshot never typed)
 //!    are dropped.
 
-use std::collections::{HashMap, HashSet};
-
-use crate::compiler::{
-    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{HLSSA, OpCode, Type, TypeExpr},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{HLSSA, OpCode, Type, TypeExpr},
+        },
     },
 };
 
@@ -112,7 +113,7 @@ impl ElideTuples {
     ) -> HashMap<ValueId, Vec<ValueId>> {
         let func = ssa.get_function(fid);
         let fti = type_info.get_function(fid);
-        let mut value_map: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        let mut value_map: HashMap<ValueId, Vec<ValueId>> = HashMap::default();
 
         // Sweep A: every block parameter gets its components, so all parameters are resolved before
         // any instruction (which may reference a dominating block's parameter) is visited.
@@ -896,7 +897,7 @@ mod tests {
         let old_global_types = vec![field(), tuple_global.clone(), u32t()];
         let global_offsets = vec![0usize, 1, 3];
 
-        let mut value_map: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        let mut value_map: HashMap<ValueId, Vec<ValueId>> = HashMap::default();
         value_map.insert(ValueId(10), vec![ValueId(11), ValueId(12)]); // read result
         value_map.insert(ValueId(20), vec![ValueId(21), ValueId(22)]); // init value
 

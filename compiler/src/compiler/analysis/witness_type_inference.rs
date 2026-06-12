@@ -1,15 +1,23 @@
 //! Performs whole program analysis to determine which values are potentially witness tainted, which
 //! are _only_ witnesses, and which are only non-witness values.
 
-use crate::compiler::util::ice_non_elided_tuple;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
-use super::witness_info::{FunctionWitnessType, WitnessShape, WitnessType};
-use crate::compiler::{
-    analysis::flow_analysis::{self, FlowAnalysis},
-    ssa::{
-        BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
-        hlssa::{CallTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{
+            flow_analysis::{self, FlowAnalysis},
+            witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
+        },
+        ssa::{
+            BlockId, FunctionId, SSAAnotator, Terminator, ValueId,
+            hlssa::{
+                CallTarget, Constant, HLBlock, HLFunction, HLSSA, OpCode, Type,
+                TypeExpr,
+            },
+        },
+        util::ice_non_elided_tuple,
     },
 };
 
@@ -63,7 +71,7 @@ pub struct WitnessTypeInference {
 impl WitnessTypeInference {
     pub fn new() -> Self {
         WitnessTypeInference {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
         }
     }
 
@@ -112,11 +120,11 @@ impl WitnessTypeInference {
         let main_specialized_id = ssa.duplicate_function(main_id);
         ssa.set_entry_point(main_specialized_id);
 
-        let mut specializations: HashMap<SpecKey, SpecValue> = HashMap::new();
+        let mut specializations: HashMap<SpecKey, SpecValue> = HashMap::default();
         let mut worklist: VecDeque<SpecKey> = VecDeque::new();
-        let mut queued: HashSet<SpecKey> = HashSet::new();
+        let mut queued: HashSet<SpecKey> = HashSet::default();
         // Track which specializations call which (for re-queuing callers)
-        let mut callers: HashMap<SpecKey, HashSet<SpecKey>> = HashMap::new();
+        let mut callers: HashMap<SpecKey, HashSet<SpecKey>> = HashMap::default();
 
         specializations.insert(
             main_key.clone(),
@@ -294,9 +302,9 @@ impl WitnessTypeInference {
         let block_queue: Vec<BlockId> = cfg.get_blocks_bfs().collect();
 
         // Inner state
-        let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::new();
-        let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::new();
-        let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::new();
+        let mut value_wt: HashMap<ValueId, WitnessShape> = HashMap::default();
+        let mut block_cfg: HashMap<BlockId, WitnessType> = HashMap::default();
+        let mut alloc_inner: HashMap<ValueId, WitnessShape> = HashMap::default();
 
         ssa.for_each_const(|vid, val| {
             let shape = match val.as_ref() {

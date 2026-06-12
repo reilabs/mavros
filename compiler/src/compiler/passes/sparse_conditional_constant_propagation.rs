@@ -31,25 +31,25 @@
 //! backend's residue into all of them, so the op is instead left in place to fail (or wrap)
 //! exactly as it would have at runtime. Division by a constant zero is likewise left alone.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use ark_ff::{PrimeField, Zero};
 
-use crate::compiler::{
-    Field,
-    pass_manager::{AnalysisStore, Pass},
-    passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
-    ssa::{
-        BlockId, Instruction, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CmpKind, Constant, HLFunction, HLSSA, HLSSAConstantsSnapshot,
-            MAX_SUPPORTED_SIGNED_BITS, OpCode, Type, TypeExpr,
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        Field,
+        pass_manager::{AnalysisStore, Pass},
+        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        ssa::{
+            BlockId, Instruction, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CmpKind, Constant, HLFunction, HLSSA,
+                HLSSAConstantsSnapshot, MAX_SUPPORTED_SIGNED_BITS, OpCode, Type, TypeExpr,
+            },
         },
+        util::{bit_mask, decode_signed, encode_signed, fits_signed},
     },
-    util::{bit_mask, decode_signed, encode_signed, fits_signed},
 };
 
 pub struct SCCP {}
@@ -158,7 +158,7 @@ struct FunctionLattice<'f, 'c> {
 
 impl<'f, 'c> FunctionLattice<'f, 'c> {
     fn new(function: &'f HLFunction, consts: &'c HLSSAConstantsSnapshot) -> Self {
-        let mut uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>> = HashMap::new();
+        let mut uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>> = HashMap::default();
         for (bid, block) in function.get_blocks() {
             for (idx, instr) in block.get_instructions().enumerate() {
                 for input in instr.get_inputs() {
@@ -179,10 +179,10 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
         Self {
             function,
             consts,
-            lattice: HashMap::new(),
-            exec_edges: HashSet::new(),
-            exec_preds: HashMap::new(),
-            reachable: HashSet::new(),
+            lattice: HashMap::default(),
+            exec_edges: HashSet::default(),
+            exec_preds: HashMap::default(),
+            reachable: HashSet::default(),
             edge_worklist: Vec::new(),
             value_worklist: Vec::new(),
             uses,
