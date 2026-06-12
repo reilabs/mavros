@@ -35,6 +35,7 @@ use crate::{
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
+            lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
@@ -393,6 +394,13 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                // Cleanup before lowering Map casts: dead hint computations
+                // (e.g. strip-maps feeding unconstrained calls) are easy to
+                // delete while still single instructions, but not once they
+                // are expanded into loops with block-parameter cycles.
+                Box::new(CSE::post_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
@@ -532,6 +540,13 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                // Cleanup before lowering Map casts: dead hint computations
+                // (e.g. strip-maps feeding unconstrained calls) are easy to
+                // delete while still single instructions, but not once they
+                // are expanded into loops with block-parameter cycles.
+                Box::new(CSE::post_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),

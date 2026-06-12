@@ -733,7 +733,11 @@ fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
         CastTarget::Nop => Some(v.clone()),
         // WitnessOf wraps the value into a witness type: not a pure constant.
         // ArrayToSlice transfers ownership of a runtime object: nothing to fold.
-        CastTarget::WitnessOf | CastTarget::ArrayToSlice => None,
+        // ValueOf/Map operate on witness wrappers and runtime sequences.
+        CastTarget::WitnessOf
+        | CastTarget::ArrayToSlice
+        | CastTarget::ValueOf
+        | CastTarget::Map(_) => None,
         CastTarget::Field => match v {
             Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(Field::from(*x))),
             Constant::Field(_) => Some(v.clone()),

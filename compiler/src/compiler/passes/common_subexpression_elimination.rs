@@ -822,7 +822,7 @@ impl CSE {
                         target,
                     } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr = interner.cast(value_expr, *target);
+                        let result_expr = interner.cast(value_expr, target.clone());
                         record_expr(
                             &mut exprs,
                             &mut result,

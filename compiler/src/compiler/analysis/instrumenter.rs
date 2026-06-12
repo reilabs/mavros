@@ -749,6 +749,14 @@ impl Value {
     ) -> Value {
         match (self, cast_target) {
             (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
+            (Value::WitnessOf(inner), CastTarget::ValueOf) => (**inner).clone(),
+            (Value::Array(values), CastTarget::Map(inner)) => Value::array(
+                values
+                    .iter()
+                    .map(|v| v.cast_op(inner, _instrumenter))
+                    .collect(),
+            ),
+            (Value::UnknownSlice, CastTarget::Map(_)) => Value::UnknownSlice,
             (Value::Unknown(_), CastTarget::U(s)) => Value::Unknown(ScalarKind::U(*s)),
             (Value::Unknown(_), CastTarget::I(s)) => Value::Unknown(ScalarKind::I(*s)),
             (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
