@@ -1638,9 +1638,18 @@ fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectat
             // Correctness/leak checks need a witness, and the AD pipeline only
             // feeds proving; neither is meaningful for a program whose witgen
             // is expected to trap. The child skips the AD steps entirely.
-            "WITGEN_CORRECT" | "WITGEN_NOLEAK" | "WITGEN_WASM_CORRECT" | "WITGEN_WASM_NOLEAK"
-            | "AD_COMPILE" | "AD_RUN" | "AD_CORRECT" | "AD_NOLEAK" | "AD_WASM_COMPILE"
-            | "AD_WASM_RUN" | "AD_WASM_CORRECT" | "AD_WASM_NOLEAK" => Status::NotApplicable,
+            "WITGEN_CORRECT"
+            | "WITGEN_NOLEAK"
+            | "WITGEN_WASM_CORRECT"
+            | "WITGEN_WASM_NOLEAK"
+            | "AD_COMPILE"
+            | "AD_RUN"
+            | "AD_CORRECT"
+            | "AD_NOLEAK"
+            | "AD_WASM_COMPILE"
+            | "AD_WASM_RUN"
+            | "AD_WASM_CORRECT"
+            | "AD_WASM_NOLEAK" => Status::NotApplicable,
             _ => raw_status,
         },
     }
