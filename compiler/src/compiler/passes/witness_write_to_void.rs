@@ -1,12 +1,15 @@
 //! This pass is intended to be the first step of the witness generation phase, and converts every
 //! witness write into a side-effect-only sink, with witnesses now flowing as plain values in the
 //! CFG.
+//!
+//! Witness-representation casts (`ValueOf`, `WitnessOf`, and `Map`s thereof at any depth) are NOT
+//! handled here: the `StripWitnessOf` pass that follows aliases all of them away.
 
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::fix_double_jumps::ValueReplacements,
-    ssa::hlssa::{CastTarget, HLSSA, OpCode},
+    ssa::hlssa::{HLSSA, OpCode},
 };
 
 pub struct WitnessWriteToVoid {}
@@ -45,59 +48,25 @@ impl WitnessWriteToVoid {
                             }
                             *r = None;
                         }
-                        OpCode::Cast {
-                            result: r,
-                            value: v,
-                            target: CastTarget::ValueOf,
-                        } => {
-                            replacements.insert(*r, *v);
-                        }
-                        OpCode::Guard { inner, .. } => match inner.as_mut() {
-                            OpCode::WriteWitness {
+                        OpCode::Guard { inner, .. } => {
+                            if let OpCode::WriteWitness {
                                 result: r,
                                 value: b,
                                 ..
-                            } => {
+                            } = inner.as_mut()
+                            {
                                 if let Some(r) = r {
                                     replacements.insert(*r, *b);
                                 }
                                 *r = None;
                             }
-                            OpCode::Cast {
-                                result: r,
-                                value: v,
-                                target: CastTarget::ValueOf,
-                            } => {
-                                replacements.insert(*r, *v);
-                            }
-                            _ => {}
-                        },
+                        }
                         _ => {}
                     }
                 }
             }
 
             for (_, block) in function.get_blocks_mut() {
-                // Remove ValueOf casts and Guard-wrapped ValueOf casts (identity in witgen pipeline)
-                let is_value_of = |instr: &OpCode| {
-                    matches!(
-                        instr,
-                        OpCode::Cast {
-                            target: CastTarget::ValueOf,
-                            ..
-                        }
-                    )
-                };
-                let old_instructions = block.take_instructions();
-                let new_instructions = old_instructions
-                    .into_iter()
-                    .filter(|instr| {
-                        !is_value_of(instr)
-                            && !matches!(instr, OpCode::Guard { inner, .. } if is_value_of(inner.as_ref()))
-                    })
-                    .collect();
-                block.put_instructions(new_instructions);
-
                 for instruction in block.get_instructions_mut() {
                     replacements.replace_instruction(instruction);
                 }
