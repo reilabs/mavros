@@ -23,14 +23,15 @@
 //! Collapsing one merge can expose newly-trivial phis elsewhere (the agreement only becomes visible
 //! once an upstream substitution lands), so the sweep iterates to a fixpoint per function.
 
-use std::collections::{HashMap, HashSet};
-
-use crate::compiler::{
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
-    ssa::{
-        BlockId, Terminator, ValueId,
-        hlssa::{HLFunction, HLSSA},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        ssa::{
+            BlockId, Terminator, ValueId,
+            hlssa::{HLFunction, HLSSA},
+        },
     },
 };
 
@@ -69,8 +70,8 @@ impl TrivialPhiElimination {
         // 1. Index the `Jmp` edges by target: every parameterized block is entered only via `Jmp`
         //    (a `JmpIf` carries no arguments), so record those targets separately to assert the
         //    invariant and to stay clear of them.
-        let mut incoming_args: HashMap<BlockId, Vec<Vec<ValueId>>> = HashMap::new();
-        let mut jmpif_targets: HashSet<BlockId> = HashSet::new();
+        let mut incoming_args: HashMap<BlockId, Vec<Vec<ValueId>>> = HashMap::default();
+        let mut jmpif_targets: HashSet<BlockId> = HashSet::default();
         for (_, block) in function.get_blocks() {
             match block.get_terminator() {
                 Some(Terminator::Jmp(target, args)) => {
@@ -86,7 +87,7 @@ impl TrivialPhiElimination {
 
         // 2. For each block, find the parameter slots whose incoming value agrees across all edges.
         let mut value_replacements = ValueReplacements::new();
-        let mut removed: HashMap<BlockId, HashSet<usize>> = HashMap::new();
+        let mut removed: HashMap<BlockId, HashSet<usize>> = HashMap::default();
         for (bid, block) in function.get_blocks() {
             // The entry block's parameters are supplied by the caller, not by edges, so they are
             // never phis.
@@ -106,7 +107,7 @@ impl TrivialPhiElimination {
                 bid.0
             );
 
-            let mut slots = HashSet::new();
+            let mut slots = HashSet::default();
             for (i, &p_i) in params.iter().enumerate() {
                 // The single value all predecessors agree on, or `None` while still unset. Edges
                 // that pass `p_i` back into itself (loop back-edges) don't count against agreement.

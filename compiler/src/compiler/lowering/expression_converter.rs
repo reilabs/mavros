@@ -1,23 +1,27 @@
 //! Converts monomorphized AST expressions to SSA instructions.
 
-use std::collections::{HashMap, HashSet};
-
-use noirc_frontend::ast::BinaryOpKind;
-use noirc_frontend::monomorphization::ast::{
-    Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If, Index,
-    LValue, Let, LocalId, Type as AstType, While,
-};
-
-use crate::compiler::ssa::{
-    BlockId, FunctionId, ValueId,
-    hlssa::{
-        Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
-        SequenceTargetType, Type, TypeExpr,
-        builder::{HLEmitter, HLFunctionBuilder},
+use noirc_frontend::{
+    ast::BinaryOpKind,
+    monomorphization::ast::{
+        Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
+        Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
 
-use super::type_converter::TypeConverter;
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        lowering::type_converter::TypeConverter,
+        ssa::{
+            BlockId, FunctionId, ValueId,
+            hlssa::{
+                Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
+                SequenceTargetType, Type, TypeExpr,
+                builder::{HLEmitter, HLFunctionBuilder},
+            },
+        },
+    },
+};
 
 /// Loop context for break/continue support.
 struct LoopContext {
@@ -69,8 +73,8 @@ impl<'a> ExpressionConverter<'a> {
         entry_block: BlockId,
     ) -> Self {
         Self {
-            bindings: HashMap::new(),
-            mutable_locals: HashSet::new(),
+            bindings: HashMap::default(),
+            mutable_locals: HashSet::default(),
             function_mapper,
             natively_unconstrained,
             type_converter: TypeConverter::new(),
