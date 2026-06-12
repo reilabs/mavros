@@ -191,21 +191,20 @@ impl Value {
         }
     }
 
-    fn ult_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn ult_op(&self, b: &Value) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::I(_, a), Value::I(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
-                self.unwrap_witness()
-                    .ult_op(b.unwrap_witness(), instrumenter),
-            )),
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                Value::WitnessOf(Box::new(self.unwrap_witness().ult_op(b.unwrap_witness())))
+            }
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
-    fn slt_op(&self, b: &Value, bits: usize, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn slt_op(&self, b: &Value, bits: usize) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) => {
                 let (sa, sb) = (Self::to_signed(*a, bits), Self::to_signed(*b, bits));
@@ -217,24 +216,22 @@ impl Value {
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
-                self.unwrap_witness()
-                    .slt_op(b.unwrap_witness(), bits, instrumenter),
+                self.unwrap_witness().slt_op(b.unwrap_witness(), bits),
             )),
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
-    fn eq_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn eq_op(&self, b: &Value) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) | (Value::I(_, a), Value::I(_, b)) => {
                 Value::U(1, if a == b { 1 } else { 0 })
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
-                self.unwrap_witness()
-                    .eq_op(b.unwrap_witness(), instrumenter),
-            )),
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                Value::WitnessOf(Box::new(self.unwrap_witness().eq_op(b.unwrap_witness())))
+            }
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
@@ -652,7 +649,7 @@ impl Value {
         }
     }
 
-    fn spread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn spread_op(&self) -> Value {
         match self {
             Value::U(bits, v) => {
                 assert!(
@@ -671,7 +668,7 @@ impl Value {
                 Value::I(bits * 2, spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
-            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op(instrumenter))),
+            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op())),
             Value::Unknown(ScalarKind::U(bits)) => {
                 assert!(
                     *bits <= 64,
@@ -693,7 +690,7 @@ impl Value {
         }
     }
 
-    fn unspread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> (Value, Value) {
+    fn unspread_op(&self) -> (Value, Value) {
         match self {
             Value::U(bits, v) => {
                 assert!(
@@ -717,7 +714,7 @@ impl Value {
             }
             Value::Field(_) => panic!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
-                let (odd, even) = inner.unspread_op(instrumenter);
+                let (odd, even) = inner.unspread_op();
                 (
                     Value::WitnessOf(Box::new(odd)),
                     Value::WitnessOf(Box::new(even)),
@@ -850,11 +847,10 @@ impl Value {
         radix: &Radix<Value>,
         _endianness: &crate::compiler::ssa::hlssa::Endianness,
         size: usize,
-        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::WitnessOf(inner) => {
-                let result = inner.to_radix(radix, _endianness, size, instrumenter);
+                let result = inner.to_radix(radix, _endianness, size);
                 match result {
                     Value::Array(digits) => Value::array(
                         digits
@@ -969,16 +965,10 @@ impl SpecSplitValue {
 }
 
 impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
-    fn ult(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        let unspecialized = self
-            .unspecialized
-            .ult_op(&b.unspecialized, instrumenter.get_unspecialized());
-        let specialized = self
-            .specialized
-            .ult_op(&b.specialized, instrumenter.get_specialized());
+    fn ult(&self, b: &SpecSplitValue, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized,
-            specialized,
+            unspecialized: self.unspecialized.ult_op(&b.unspecialized),
+            specialized: self.specialized.ult_op(&b.specialized),
         }
     }
 
@@ -986,30 +976,18 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         &self,
         b: &SpecSplitValue,
         bits: usize,
-        instrumenter: &mut CostAnalysis,
+        _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
-        let unspecialized =
-            self.unspecialized
-                .slt_op(&b.unspecialized, bits, instrumenter.get_unspecialized());
-        let specialized =
-            self.specialized
-                .slt_op(&b.specialized, bits, instrumenter.get_specialized());
         SpecSplitValue {
-            unspecialized,
-            specialized,
+            unspecialized: self.unspecialized.slt_op(&b.unspecialized, bits),
+            specialized: self.specialized.slt_op(&b.specialized, bits),
         }
     }
 
-    fn eq(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        let unspecialized = self
-            .unspecialized
-            .eq_op(&b.unspecialized, instrumenter.get_unspecialized());
-        let specialized = self
-            .specialized
-            .eq_op(&b.specialized, instrumenter.get_specialized());
+    fn eq(&self, b: &SpecSplitValue, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized,
-            specialized,
+            unspecialized: self.unspecialized.eq_op(&b.unspecialized),
+            specialized: self.specialized.eq_op(&b.specialized),
         }
     }
 
@@ -1268,7 +1246,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         endianness: Endianness,
         size: usize,
         _tp: &Type,
-        instrumenter: &mut CostAnalysis,
+        _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let spec_radix = match radix {
             Radix::Dyn(v) => Radix::Dyn(v.specialized.clone()),
@@ -1279,18 +1257,8 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             Radix::Bytes => Radix::Bytes,
         };
         SpecSplitValue {
-            unspecialized: self.unspecialized.to_radix(
-                &unspec_radix,
-                &endianness,
-                size,
-                instrumenter.get_unspecialized(),
-            ),
-            specialized: self.specialized.to_radix(
-                &spec_radix,
-                &endianness,
-                size,
-                instrumenter.get_specialized(),
-            ),
+            unspecialized: self.unspecialized.to_radix(&unspec_radix, &endianness, size),
+            specialized: self.specialized.to_radix(&spec_radix, &endianness, size),
         }
     }
 
@@ -1397,20 +1365,16 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut CostAnalysis) {}
 
-    fn spread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> Self {
+    fn spread(&self, _bits: u8, _instrumenter: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: self
-                .unspecialized
-                .spread_op(instrumenter.get_unspecialized()),
-            specialized: self.specialized.spread_op(instrumenter.get_specialized()),
+            unspecialized: self.unspecialized.spread_op(),
+            specialized: self.specialized.spread_op(),
         }
     }
 
-    fn unspread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> (Self, Self) {
-        let (unspec_odd, unspec_even) = self
-            .unspecialized
-            .unspread_op(instrumenter.get_unspecialized());
-        let (spec_odd, spec_even) = self.specialized.unspread_op(instrumenter.get_specialized());
+    fn unspread(&self, _bits: u8, _instrumenter: &mut CostAnalysis) -> (Self, Self) {
+        let (unspec_odd, unspec_even) = self.unspecialized.unspread_op();
+        let (spec_odd, spec_even) = self.specialized.unspread_op();
         (
             Self {
                 unspecialized: unspec_odd,
