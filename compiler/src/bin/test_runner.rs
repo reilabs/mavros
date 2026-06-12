@@ -42,9 +42,10 @@ use wasmtime::{Engine, Linker, Memory, Module, Store};
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path>
+    // Child mode: --run-single <path> [--expect-failure]
     if args.len() >= 3 && args[1] == "--run-single" {
-        run_single(PathBuf::from(&args[2]));
+        let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
+        run_single(PathBuf::from(&args[2]), expect_failure);
         return;
     }
 
@@ -123,7 +124,12 @@ fn emit(line: &str) {
     let _ = out.flush();
 }
 
-fn run_single(root: PathBuf) {
+/// Runs every pipeline step for one test directory, emitting START/END
+/// markers for the parent to parse. With `expect_failure` (execution_failure /
+/// execution_panic tests) the AD pipeline is skipped entirely: AD output only
+/// feeds proving, and a program whose witgen is expected to trap is never
+/// proven, so its AD columns are reported as N/A by the parent.
+fn run_single(root: PathBuf, expect_failure: bool) {
     // 1. Compile
     emit("START:COMPILED");
     let driver = (|| {
@@ -177,8 +183,9 @@ fn run_single(root: PathBuf) {
         }
     });
 
-    // 4. Compile AD  (depends on R1CS, independent of witgen)
-    let ad_binary = r1cs.as_ref().and_then(|_| {
+    // 4. Compile AD  (depends on R1CS, independent of witgen; skipped for
+    //    expected-failure tests)
+    let ad_binary = r1cs.as_ref().filter(|_| !expect_failure).and_then(|_| {
         emit("START:AD_COMPILE");
         match driver.compile_ad() {
             Ok(b) => {
@@ -368,32 +375,33 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 14. AD WASM Compile  (depends on R1CS)
-    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:AD_WASM_COMPILE");
-        let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("ad.wasm");
-        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
-            Ok(_) if wasm_path.exists() => {
-                emit("END:AD_WASM_COMPILE:ok");
-                Some(wasm_path)
+    // 14. AD WASM Compile  (depends on R1CS; skipped for expected-failure tests)
+    let ad_wasm_path: Option<std::path::PathBuf> =
+        r1cs.as_ref().filter(|_| !expect_failure).and_then(|r1cs| {
+            emit("START:AD_WASM_COMPILE");
+            let tmpdir = tempfile::tempdir().ok()?;
+            let wasm_path = tmpdir.keep().join("ad.wasm");
+            let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+            match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
+                Ok(_) if wasm_path.exists() => {
+                    emit("END:AD_WASM_COMPILE:ok");
+                    Some(wasm_path)
+                }
+                Ok(_) => {
+                    eprintln!(
+                        "AD WASM compile succeeded but output file not found at {:?}",
+                        wasm_path
+                    );
+                    emit("END:AD_WASM_COMPILE:fail");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("AD WASM compile error: {:?}", e);
+                    emit("END:AD_WASM_COMPILE:fail");
+                    None
+                }
             }
-            Ok(_) => {
-                eprintln!(
-                    "AD WASM compile succeeded but output file not found at {:?}",
-                    wasm_path
-                );
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-            Err(e) => {
-                eprintln!("AD WASM compile error: {:?}", e);
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-        }
-    });
+        });
 
     // 15. AD WASM Run  (depends on AD_WASM_COMPILE)
     let ad_wasm_result = ad_wasm_path.as_ref().and_then(|wasm_path| {
@@ -1206,8 +1214,12 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
 
                     let abs = fs::canonicalize(&entry.path).unwrap();
 
-                    let mut child = Command::new(&exe)
-                        .args(["--run-single", abs.to_str().unwrap()])
+                    let mut cmd = Command::new(&exe);
+                    cmd.args(["--run-single", abs.to_str().unwrap()]);
+                    if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
+                        cmd.arg("--expect-failure");
+                    }
+                    let mut child = cmd
                         .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::inherit())
@@ -1623,9 +1635,12 @@ fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectat
                 Status::Pass => Status::Fail,
                 Status::Skip | Status::NotApplicable => raw_status,
             },
-            "WITGEN_CORRECT" | "WITGEN_NOLEAK" | "WITGEN_WASM_CORRECT" | "WITGEN_WASM_NOLEAK" => {
-                Status::NotApplicable
-            }
+            // Correctness/leak checks need a witness, and the AD pipeline only
+            // feeds proving; neither is meaningful for a program whose witgen
+            // is expected to trap. The child skips the AD steps entirely.
+            "WITGEN_CORRECT" | "WITGEN_NOLEAK" | "WITGEN_WASM_CORRECT" | "WITGEN_WASM_NOLEAK"
+            | "AD_COMPILE" | "AD_RUN" | "AD_CORRECT" | "AD_NOLEAK" | "AD_WASM_COMPILE"
+            | "AD_WASM_RUN" | "AD_WASM_CORRECT" | "AD_WASM_NOLEAK" => Status::NotApplicable,
             _ => raw_status,
         },
     }
@@ -2040,6 +2055,35 @@ mod tests {
         assert_eq!(result.steps["WITGEN_CORRECT"], Status::NotApplicable);
         assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Pass);
         assert_eq!(result.steps["WITGEN_WASM_CORRECT"], Status::NotApplicable);
+    }
+
+    #[test]
+    fn execution_failure_reports_ad_steps_as_not_applicable() {
+        // The child skips the AD pipeline for expected-failure tests, so no
+        // AD START/END markers are emitted; the columns must read N/A, not ➖.
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:WITGEN_RUN",
+                "END:WITGEN_RUN:fail",
+            ]),
+        );
+
+        for key in [
+            "AD_COMPILE",
+            "AD_RUN",
+            "AD_CORRECT",
+            "AD_NOLEAK",
+            "AD_WASM_COMPILE",
+            "AD_WASM_RUN",
+            "AD_WASM_CORRECT",
+            "AD_WASM_NOLEAK",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
     }
 
     #[test]
