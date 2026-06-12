@@ -1523,7 +1523,8 @@ struct ParsedRow {
     cells: Vec<String>,
     rows: Option<usize>,
     cols: Option<usize>,
-    binary_bytes: Option<usize>,
+    witgen_bytes: Option<usize>,
+    ad_bytes: Option<usize>,
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
@@ -1536,18 +1537,20 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 20 {
+        if cells.len() < 23 {
             continue;
         }
         let rows = cells[3].parse().ok();
         let cols = cells[4].parse().ok();
-        let binary_bytes = cells[5].parse().ok();
+        let witgen_bytes = cells[5].parse().ok();
+        let ad_bytes = cells[6].parse().ok();
         result.push(ParsedRow {
             name: cells[0].clone(),
             cells,
             rows,
             cols,
-            binary_bytes,
+            witgen_bytes,
+            ad_bytes,
         });
     }
     result
@@ -1556,20 +1559,22 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
 const REGRESSION_COLS: &[(usize, &str)] = &[
     (1, "Compiled"),
     (2, "R1CS"),
-    (6, "Bytecode Compile"),
-    (7, "Witgen Run VM"),
-    (8, "Witgen Correct"),
-    (9, "Witgen No Leak"),
-    (10, "AD Run VM"),
-    (11, "AD Correct"),
-    (12, "AD No Leak"),
-    (13, "WASM Compile"),
-    (14, "Witgen WASM Run"),
-    (15, "Witgen WASM Correct"),
-    (16, "Witgen WASM No Leak"),
-    (17, "AD WASM Run"),
-    (18, "AD WASM Correct"),
-    (19, "AD WASM No Leak"),
+    (7, "Witgen Compile"),
+    (8, "Witgen Run VM"),
+    (9, "Witgen Correct"),
+    (10, "Witgen No Leak"),
+    (11, "AD Compile"),
+    (12, "AD Run VM"),
+    (13, "AD Correct"),
+    (14, "AD No Leak"),
+    (15, "Witgen WASM Compile"),
+    (16, "Witgen WASM Run"),
+    (17, "Witgen WASM Correct"),
+    (18, "Witgen WASM No Leak"),
+    (19, "AD WASM Compile"),
+    (20, "AD WASM Run"),
+    (21, "AD WASM Correct"),
+    (22, "AD WASM No Leak"),
 ];
 
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
@@ -1703,11 +1708,11 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             }
         }
 
-        // Check bytecode size changes
-        if let (Some(bw), Some(cw)) = (base.binary_bytes, cur.binary_bytes) {
+        // Check witgen bytecode size changes
+        if let (Some(bw), Some(cw)) = (base.witgen_bytes, cur.witgen_bytes) {
             if cw > bw {
                 warnings.push(format!(
-                    "| {} | Bytecode Size (bytes) | {} | {} | +{} ({:+.1}%) |",
+                    "| {} | Witgen Size (bytes) | {} | {} | +{} ({:+.1}%) |",
                     cur.name,
                     bw,
                     cw,
@@ -1716,12 +1721,35 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
                 ));
             } else if cw < bw {
                 improvements.push(format!(
-                    "| {} | Bytecode Size (bytes) | {} | {} | {} ({:.1}%) |",
+                    "| {} | Witgen Size (bytes) | {} | {} | {} ({:.1}%) |",
                     cur.name,
                     bw,
                     cw,
                     cw as i64 - bw as i64,
                     (cw as f64 - bw as f64) / bw as f64 * 100.0
+                ));
+            }
+        }
+
+        // Check AD bytecode size changes
+        if let (Some(ba), Some(ca)) = (base.ad_bytes, cur.ad_bytes) {
+            if ca > ba {
+                warnings.push(format!(
+                    "| {} | AD Size (bytes) | {} | {} | +{} ({:+.1}%) |",
+                    cur.name,
+                    ba,
+                    ca,
+                    ca - ba,
+                    (ca as f64 - ba as f64) / ba as f64 * 100.0
+                ));
+            } else if ca < ba {
+                improvements.push(format!(
+                    "| {} | AD Size (bytes) | {} | {} | {} ({:.1}%) |",
+                    cur.name,
+                    ba,
+                    ca,
+                    ca as i64 - ba as i64,
+                    (ca as f64 - ba as f64) / ba as f64 * 100.0
                 ));
             }
         }
@@ -1811,10 +1839,15 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     println!("\n</details>");
 }
 
+// The table keeps the historical 23-column layout so CI's `--check-regression` can compare
+// against pre-merged-pipeline baselines. The pipeline now produces a single program artifact per
+// backend, so the witgen/AD "Compile" columns mirror the same shared stage
+// (BYTECODE_COMPILE/WASM_COMPILE) and both size columns carry the combined binary size.
+// TODO: Collapse the duplicated columns once baselines have rolled over.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | Bytecode Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|---------------|------------------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|-----------------|-----------------|\n");
+    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
+    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n");
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
@@ -1822,17 +1855,19 @@ fn render_markdown(results: &[TestResult]) -> String {
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
         let binary_sz = r.binary_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
             rows,
             cols,
             binary_sz,
+            binary_sz,
             s("BYTECODE_COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),
             s("WITGEN_NOLEAK"),
+            s("BYTECODE_COMPILE"),
             s("AD_RUN"),
             s("AD_CORRECT"),
             s("AD_NOLEAK"),
@@ -1840,6 +1875,7 @@ fn render_markdown(results: &[TestResult]) -> String {
             s("WITGEN_WASM_RUN"),
             s("WITGEN_WASM_CORRECT"),
             s("WITGEN_WASM_NOLEAK"),
+            s("WASM_COMPILE"),
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),
