@@ -1746,6 +1746,22 @@ impl CastTarget {
             | CastTarget::ArrayToSlice => false,
         }
     }
+
+    /// Whether this cast strips witness wrappers (`ValueOf`, possibly under
+    /// `Map`s). Strips are only emitted for hint chains and unconstrained call
+    /// arguments, both of which are dead by R1CS generation.
+    pub fn is_value_of(&self) -> bool {
+        match self {
+            CastTarget::ValueOf => true,
+            CastTarget::Map(inner) => inner.is_value_of(),
+            CastTarget::Field
+            | CastTarget::U(_)
+            | CastTarget::I(_)
+            | CastTarget::WitnessOf
+            | CastTarget::Nop
+            | CastTarget::ArrayToSlice => false,
+        }
+    }
 }
 
 impl Display for CastTarget {

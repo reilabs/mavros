@@ -667,12 +667,13 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     fn cast(&self, cast_target: &hlssa::CastTarget, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        // Scalar witness strips must be dead (and DCE'd) by R1CS generation.
-        // Other casts, including witness injections and Maps thereof, don't
-        // change the symbolic value.
+        // Witness strips (ValueOf, also under Maps) only feed hint chains and
+        // unconstrained call arguments, so they must be dead (and DCE'd) by
+        // R1CS generation. The remaining casts — witness injections and Maps
+        // thereof included — don't change the symbolic value.
         assert!(
-            !matches!(cast_target, hlssa::CastTarget::ValueOf),
-            "ICE: ValueOf should not reach R1CS gen"
+            !cast_target.is_value_of(),
+            "ICE: witness strip {cast_target} should not reach R1CS gen"
         );
         self.clone()
     }
