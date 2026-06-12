@@ -7,7 +7,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field as _, PrimeField};
+use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
 use itertools::Itertools;
 use tracing::instrument;
 
@@ -129,15 +129,6 @@ pub enum Value {
 impl Value {
     fn array(values: Vec<Value>) -> Self {
         Value::Array(Rc::new(values))
-    }
-
-    fn is_const_one(&self) -> bool {
-        match self {
-            Value::U(_, v) | Value::I(_, v) => *v == 1,
-            Value::Field(f) => *f == Field::ONE,
-            Value::WitnessOf(inner) => inner.is_const_one(),
-            _ => false,
-        }
     }
 
     fn as_field_const(&self) -> Option<Field> {
@@ -1421,7 +1412,7 @@ impl FunctionSignature {
 trait OpInstrumenter {
     fn record_constrain(&mut self);
     fn record_high_degree_mul(&mut self);
-    fn record_lookup(&mut self, target: &LookupTarget<Value>, flag: &Value);
+    fn record_lookup(&mut self, target: &LookupTarget<Value>);
 }
 
 trait FunctionInstrumenter {
@@ -1431,99 +1422,133 @@ trait FunctionInstrumenter {
     fn seal(self: Box<Self>) -> FunctionCost;
 }
 
-#[derive(Debug, Clone)]
+/// Raw circuit-cost events for one symbolic execution of a function, exactly as the executor
+/// saw them. Recording only counts what happened; turning the events into constraint and table
+/// costs is interpretation, done on read by the derivation methods below.
+#[derive(Debug, Clone, Default)]
 struct Instrumenter {
     constrains: usize,
     high_degree_muls: usize,
 
-    /// Original pre-spilling lookup requests, kept for reporting.
+    /// Rangecheck lookup requests by width.
     rangecheck_lookups: HashMap<u8, usize>,
+    /// Spread lookup requests by width.
     spread_lookups: HashMap<u8, usize>,
     array_lookups: usize,
-
-    /// Extra algebraic constraints introduced by lookup spilling.
-    rangecheck_one_constraints: usize,
-    spilled_wide_spread_constraints: usize,
-
-    /// Final table lookup requests after applying the same spilling expansion
-    /// that runs before R1CS generation.
-    final_rangecheck8_lookups: usize,
-    final_spread_lookups: HashMap<u8, usize>,
-    total_table_lookups: usize,
 }
 
-impl Instrumenter {
-    fn new() -> Self {
-        Self {
-            constrains: 0,
-            high_degree_muls: 0,
-            rangecheck_lookups: HashMap::default(),
-            spread_lookups: HashMap::default(),
-            array_lookups: 0,
-            rangecheck_one_constraints: 0,
-            spilled_wide_spread_constraints: 0,
-            final_rangecheck8_lookups: 0,
-            final_spread_lookups: HashMap::default(),
-            total_table_lookups: 0,
-        }
+impl OpInstrumenter for Instrumenter {
+    fn record_constrain(&mut self) {
+        self.constrains += 1;
     }
 
-    fn record_rangecheck_lookup(&mut self, bits: u8, flag: &Value) {
+    fn record_high_degree_mul(&mut self) {
+        self.high_degree_muls += 1;
+    }
+
+    fn record_lookup(&mut self, target: &LookupTarget<Value>) {
+        match target {
+            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits),
+            LookupTarget::DynRangecheck(bound) => {
+                self.record_rangecheck_lookup(dynamic_rangecheck_bits(bound))
+            }
+            LookupTarget::Spread(bits) => {
+                assert!(*bits >= 1, "spread width must be at least 1 bit");
+                *self.spread_lookups.entry(*bits).or_insert(0) += 1;
+            }
+            LookupTarget::Array(_) => self.array_lookups += 1,
+        }
+    }
+}
+
+/// Interpretation of the raw events, mirroring the lookup-spilling expansion that runs before
+/// R1CS generation. Everything here is derived; the struct stores no interpreted state.
+impl Instrumenter {
+    fn record_rangecheck_lookup(&mut self, bits: u8) {
         assert!(bits >= 1, "rangecheck width must be at least 1 bit");
         *self.rangecheck_lookups.entry(bits).or_insert(0) += 1;
-
-        if bits == 1 {
-            self.rangecheck_one_constraints += if flag.is_const_one() { 1 } else { 2 };
-            return;
-        }
-
-        let bits = bits as usize;
-        let final_lookups = if bits == 8 {
-            1
-        } else {
-            let full_bytes = bits / 8;
-            let leftover_bits = bits % 8;
-            full_bytes + if leftover_bits > 0 { 2 } else { 0 }
-        };
-        self.final_rangecheck8_lookups += final_lookups;
-        self.total_table_lookups += final_lookups;
     }
 
-    fn record_spread_lookup(&mut self, bits: u8) {
-        assert!(bits >= 1, "spread width must be at least 1 bit");
-        *self.spread_lookups.entry(bits).or_insert(0) += 1;
+    /// 8-bit rangecheck table lookups after spilling: a w-bit rangecheck (w >= 2) becomes one
+    /// lookup per full byte plus two for a leftover partial byte. 1-bit rangechecks never reach
+    /// the table (see [`Self::rangecheck_one_constraints`]).
+    fn final_rangecheck8_lookups(&self) -> usize {
+        self.rangecheck_lookups
+            .iter()
+            .map(|(&bits, &count)| {
+                let bits = bits as usize;
+                let per_lookup = match bits {
+                    1 => 0,
+                    8 => 1,
+                    _ => bits / 8 + if bits % 8 > 0 { 2 } else { 0 },
+                };
+                per_lookup * count
+            })
+            .sum()
+    }
 
-        if bits >= 16 {
-            assert!(
-                bits <= 128,
-                "wide Spread lookup spilling currently supports widths up to 128 bits, got {bits}"
-            );
-            self.spilled_wide_spread_constraints += 1;
-            let mut offset = 0usize;
-            let bits = bits as usize;
-            while offset < bits {
-                let chunk_bits = (bits - offset).min(8) as u8;
-                self.record_final_spread_lookup(chunk_bits);
-                offset += chunk_bits as usize;
+    /// 1-bit rangechecks spill to the algebraic b*(b-1) = 0. (Guarded checks spend one more
+    /// constraint to gate that, but the estimate doesn't track lookup flags.)
+    fn rangecheck_one_constraints(&self) -> usize {
+        self.rangecheck_lookups.get(&1).copied().unwrap_or(0)
+    }
+
+    /// Spread table lookups after spilling: widths >= 16 are split into chunks of at most
+    /// 8 bits each.
+    fn final_spread_lookups(&self) -> HashMap<u8, usize> {
+        let mut r: HashMap<u8, usize> = HashMap::default();
+        for (&bits, &count) in self.spread_lookups.iter() {
+            if bits >= 16 {
+                assert!(
+                    bits <= 128,
+                    "wide Spread lookup spilling currently supports widths up to 128 bits, got {bits}"
+                );
+                let bits = bits as usize;
+                let mut offset = 0usize;
+                while offset < bits {
+                    let chunk_bits = (bits - offset).min(8) as u8;
+                    *r.entry(chunk_bits).or_insert(0) += count;
+                    offset += chunk_bits as usize;
+                }
+            } else {
+                *r.entry(bits).or_insert(0) += count;
             }
-        } else {
-            self.record_final_spread_lookup(bits);
         }
+        r
     }
 
-    fn record_final_spread_lookup(&mut self, bits: u8) {
-        *self.final_spread_lookups.entry(bits).or_insert(0) += 1;
-        self.total_table_lookups += 1;
+    /// One recombination constraint per wide (>= 16 bit) spread that spilling splits up.
+    fn spilled_wide_spread_constraints(&self) -> usize {
+        self.spread_lookups
+            .iter()
+            .filter(|(bits, _)| **bits >= 16)
+            .map(|(_, count)| *count)
+            .sum()
     }
+
+    fn total_table_lookups(&self) -> usize {
+        self.final_rangecheck8_lookups()
+            + self.final_spread_lookups().values().sum::<usize>()
+            + self.array_lookups
+    }
+
+    fn uses_rangecheck_table(&self) -> bool {
+        self.rangecheck_lookups.keys().any(|bits| *bits >= 2)
+    }
+
+    // Array table *allocation* is deliberately not costed anywhere below: tables are
+    // circuit-global (allocated once per distinct array, whichever function touches it first),
+    // so a per-function instrumenter has no sound way to attribute that cost. Only the
+    // recurring per-lookup cost is counted.
 
     fn table_allocation_constraints(&self) -> usize {
-        let range_constraints = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
+        let range_constraints = if self.uses_rangecheck_table() {
             (1usize << 8) + 1
         } else {
             0
         };
         let spread_constraints = self
-            .final_spread_lookups
+            .final_spread_lookups()
             .keys()
             .filter(|bits| **bits >= 2)
             .map(|bits| 2 * (1usize << *bits as usize) + 1)
@@ -1532,9 +1557,9 @@ impl Instrumenter {
     }
 
     fn lookup_data_constraints(&self) -> usize {
-        self.final_rangecheck8_lookups
+        self.final_rangecheck8_lookups()
             + self
-                .final_spread_lookups
+                .final_spread_lookups()
                 .values()
                 .map(|count| count * 2)
                 .sum::<usize>()
@@ -1544,8 +1569,8 @@ impl Instrumenter {
     fn recurring_constraints(&self) -> usize {
         self.constrains
             + self.high_degree_muls
-            + self.rangecheck_one_constraints
-            + self.spilled_wide_spread_constraints
+            + self.rangecheck_one_constraints()
+            + self.spilled_wide_spread_constraints()
             + self.lookup_data_constraints()
     }
 
@@ -1554,13 +1579,13 @@ impl Instrumenter {
     }
 
     fn allocated_lookup_table_rows(&self) -> usize {
-        let range_rows = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
+        let range_rows = if self.uses_rangecheck_table() {
             1usize << 8
         } else {
             0
         };
         let spread_rows = self
-            .final_spread_lookups
+            .final_spread_lookups()
             .keys()
             .filter(|bits| **bits >= 2)
             .map(|bits| 1usize << *bits as usize)
@@ -1573,39 +1598,10 @@ impl Instrumenter {
             "constrain={}, high_deg_mul={}, lookups={}, table_rows={}, table_constraints={}",
             self.constrains,
             self.high_degree_muls,
-            self.total_table_lookups,
+            self.total_table_lookups(),
             self.allocated_lookup_table_rows(),
             self.table_allocation_constraints()
         )
-    }
-}
-
-impl OpInstrumenter for Instrumenter {
-    fn record_constrain(&mut self) {
-        self.constrains += 1;
-    }
-
-    fn record_high_degree_mul(&mut self) {
-        self.high_degree_muls += 1;
-    }
-
-    fn record_lookup(&mut self, target: &LookupTarget<Value>, flag: &Value) {
-        match target {
-            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits, flag),
-            LookupTarget::DynRangecheck(bound) => {
-                let bits = dynamic_rangecheck_bits(bound);
-                self.record_rangecheck_lookup(bits, flag);
-            }
-            LookupTarget::Spread(bits) => self.record_spread_lookup(*bits),
-            // Array table *allocation* is deliberately not costed: tables are circuit-global
-            // (allocated once per distinct array, whichever function touches it first), so a
-            // per-function instrumenter has no sound way to attribute that cost. Only the
-            // recurring per-lookup cost is counted.
-            LookupTarget::Array(_) => {
-                self.array_lookups += 1;
-                self.total_table_lookups += 1;
-            }
-        }
     }
 }
 
@@ -1669,7 +1665,7 @@ impl FunctionInstrumenter for DummyInstrumenter {
 impl OpInstrumenter for DummyInstrumenter {
     fn record_constrain(&mut self) {}
     fn record_high_degree_mul(&mut self) {}
-    fn record_lookup(&mut self, _: &LookupTarget<Value>, _: &Value) {}
+    fn record_lookup(&mut self, _: &LookupTarget<Value>) {}
 }
 
 pub struct CostAnalysis {
@@ -1789,15 +1785,14 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         &mut self,
         target: LookupTarget<SpecSplitValue>,
         _args: Vec<SpecSplitValue>,
-        flag: SpecSplitValue,
+        _flag: SpecSplitValue,
     ) {
         let unspecialized_target = target.map(|v| v.unspecialized.clone());
         self.get_unspecialized()
-            .record_lookup(&unspecialized_target, &flag.unspecialized);
+            .record_lookup(&unspecialized_target);
 
         let specialized_target = target.map(|v| v.specialized.clone());
-        self.get_specialized()
-            .record_lookup(&specialized_target, &flag.specialized);
+        self.get_specialized().record_lookup(&specialized_target);
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
@@ -1926,11 +1921,11 @@ impl AggregatedConstraintCost {
             return;
         }
         self.recurring_constraints += cost.recurring_constraints() * calls;
-        for (bits, count) in cost.rangecheck_lookups.iter() {
-            *self.rangecheck_lookups.entry(*bits).or_insert(0) += count * calls;
+        for (&bits, &count) in cost.rangecheck_lookups.iter() {
+            *self.rangecheck_lookups.entry(bits).or_insert(0) += count * calls;
         }
-        for (bits, count) in cost.final_spread_lookups.iter() {
-            *self.final_spread_lookups.entry(*bits).or_insert(0) += count * calls;
+        for (bits, count) in cost.final_spread_lookups() {
+            *self.final_spread_lookups.entry(bits).or_insert(0) += count * calls;
         }
     }
 
@@ -2011,8 +2006,8 @@ impl CostAnalysis {
         } else {
             let instrumenter = FunctionCost {
                 calls: HashMap::default(),
-                raw: Instrumenter::new(),
-                specialized: Instrumenter::new(),
+                raw: Instrumenter::default(),
+                specialized: Instrumenter::default(),
             };
             self.stack.push((sig, Box::new(instrumenter)));
         }
