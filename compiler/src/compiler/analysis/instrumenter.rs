@@ -1257,7 +1257,9 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             Radix::Bytes => Radix::Bytes,
         };
         SpecSplitValue {
-            unspecialized: self.unspecialized.to_radix(&unspec_radix, &endianness, size),
+            unspecialized: self
+                .unspecialized
+                .to_radix(&unspec_radix, &endianness, size),
             specialized: self.specialized.to_radix(&spec_radix, &endianness, size),
         }
     }
