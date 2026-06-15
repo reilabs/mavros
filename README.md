@@ -28,10 +28,10 @@ your shell. Then run `mavros compile`.
 
 This will produce the following two files inside the project's `target/` directory:
 
-| File                | Contents                                                                          |
-| ------------------- | --------------------------------------------------------------------------------- |
-| `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points   |
-| `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                       |
+| File                | Contents                                                                        |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points |
+| `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                     |
 
 For advanced usage and the CLI options, run `mavros --help`. To output the witness generation binary
 for WASM-capable platforms, please see the [WASM output](./docs/CONTRIBUTING.md#WASM%20Output)
