@@ -2,17 +2,18 @@
 //! perform detailed bookkeeping of type information whenever transforming the IR.
 
 use core::panic;
-use std::collections::HashMap;
-
 use tracing::{Level, instrument};
 
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    ssa::{
-        FunctionId, ValueId,
-        hlssa::{
-            CallTarget, CastTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
-            OpCode, Type, TypeExpr,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
+        ssa::{
+            FunctionId, ValueId,
+            hlssa::{
+                CallTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
+                TypeExpr,
+            },
         },
     },
 };
@@ -23,6 +24,7 @@ pub fn const_value_type(value: &Constant) -> Type {
         Constant::I(size, _) => Type::i(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
+        Constant::Blob(blob) => Type::blob(blob.elem_type.clone(), blob.len()),
     }
 }
 
@@ -35,6 +37,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
         TypeExpr::Tuple(fields) => {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
+        TypeExpr::Blob(..) => t,
         TypeExpr::Ref(_) | TypeExpr::Function => Type::witness_of(t),
     }
 }
@@ -72,7 +75,7 @@ impl Types {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis) -> TypeInfo {
         let mut type_info = TypeInfo {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
         };
 
         let function_types = ssa
@@ -453,6 +456,22 @@ impl Types {
                 function_info.values.insert(*r, top_tp.of(t.clone()));
                 Ok(())
             }
+            OpCode::MkSeqOfBlob {
+                result: r,
+                element_type,
+                blob,
+            } => {
+                let len = match function_info.values.get(blob) {
+                    Some(Type {
+                        expr: TypeExpr::Blob(_, len),
+                    }) => *len,
+                    other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
+                };
+                function_info
+                    .values
+                    .insert(*r, element_type.clone().array_of(len));
+                Ok(())
+            }
             OpCode::MkRepeated {
                 result: r,
                 element: _,
@@ -473,35 +492,7 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
-                let result_type = match target {
-                    CastTarget::Field => {
-                        if value_type.is_witness_of() {
-                            Type::witness_of(Type::field())
-                        } else {
-                            Type::field()
-                        }
-                    }
-                    CastTarget::U(size) => {
-                        if value_type.is_witness_of() {
-                            Type::witness_of(Type::u(*size))
-                        } else {
-                            Type::u(*size)
-                        }
-                    }
-                    CastTarget::I(size) => {
-                        if value_type.is_witness_of() {
-                            Type::witness_of(Type::i(*size))
-                        } else {
-                            Type::i(*size)
-                        }
-                    }
-                    CastTarget::Nop => value_type.clone(),
-                    CastTarget::ArrayToSlice => match &value_type.expr {
-                        TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
-                        _ => panic!("ArrayToSlice cast on non-array type"),
-                    },
-                    CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
-                };
+                let result_type = target.result_type(value_type);
 
                 function_info.values.insert(*result, result_type);
                 Ok(())
@@ -561,18 +552,6 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
                 function_info.values.insert(*result, value_type.clone());
-                Ok(())
-            }
-            OpCode::ValueOf { result, value } => {
-                let value_type = function_info
-                    .values
-                    .get(value)
-                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                let inner = match &value_type.expr {
-                    TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
-                    _ => panic!("ICE: ValueOf applied to non-WitnessOf type: {}", value_type),
-                };
-                function_info.values.insert(*result, inner);
                 Ok(())
             }
             OpCode::ToBits {
@@ -660,6 +639,21 @@ impl Types {
                 })?;
                 let element_type = tuple_type.get_tuple_element(*idx);
                 function_info.values.insert(*result, element_type);
+                Ok(())
+            }
+            OpCode::TupleRefProj {
+                result,
+                tuple_ref,
+                idx,
+            } => {
+                let tuple_ref_type = function_info.values.get(tuple_ref).ok_or_else(|| {
+                    format!(
+                        "Tuple reference value {:?} not found in type assignments",
+                        tuple_ref
+                    )
+                })?;
+                let element_type = tuple_ref_type.get_pointed().get_tuple_element(*idx);
+                function_info.values.insert(*result, element_type.ref_of());
                 Ok(())
             }
             OpCode::MkTuple {

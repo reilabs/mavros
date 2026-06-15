@@ -61,6 +61,9 @@ suspicious = { level = "allow", priority = -1 }
 cast_slice_from_raw_parts = "deny"
 clone_on_copy = "deny"
 crosspointer_transmute = "deny"
+# Bans std's randomly-seeded hash collections (see clippy.toml): iteration order leaks into
+# emitted identifiers, breaking deterministic compilation. Use crate::collections instead.
+disallowed_types = "deny"
 drop_non_drop = "deny"
 expect_fun_call = "deny"
 for_kv_map = "deny"

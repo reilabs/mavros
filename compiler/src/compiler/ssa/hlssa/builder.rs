@@ -252,7 +252,11 @@ pub trait HLEmitter {
 
     fn value_of(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::ValueOf { result: r, value });
+        self.emit(OpCode::Cast {
+            result: r,
+            value,
+            target: CastTarget::ValueOf,
+        });
         r
     }
 
@@ -309,6 +313,16 @@ pub trait HLEmitter {
         r
     }
 
+    fn tuple_ref_proj(&mut self, tuple_ref: ValueId, idx: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::TupleRefProj {
+            result: r,
+            tuple_ref,
+            idx,
+        });
+        r
+    }
+
     fn mk_tuple(&mut self, elems: Vec<ValueId>, element_types: Vec<Type>) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::MkTuple {
@@ -331,6 +345,16 @@ pub trait HLEmitter {
             elems,
             seq_type,
             elem_type,
+        });
+        r
+    }
+
+    fn mk_seq_of_blob(&mut self, element_type: Type, blob: ValueId) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::MkSeqOfBlob {
+            result: r,
+            element_type,
+            blob,
         });
         r
     }
@@ -661,7 +685,7 @@ impl HLBlockEmitter<'_> {
                     .collect();
                 self.mk_tuple(elems, element_types.clone())
             }
-            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function => {
+            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
                 panic!("cannot build a default value for type {}", typ)
             }
         }

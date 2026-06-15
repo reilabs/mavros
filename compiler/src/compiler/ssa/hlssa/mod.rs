@@ -78,6 +78,11 @@ pub enum OpCode {
         seq_type: SequenceTargetType,
         elem_type: Type,
     },
+    MkSeqOfBlob {
+        result: ValueId,
+        element_type: Type,
+        blob: ValueId,
+    },
     MkRepeated {
         result: ValueId,
         element: ValueId,
@@ -160,10 +165,6 @@ pub enum OpCode {
         kind: RefCountOp,
         value: ValueId,
     },
-    ValueOf {
-        result: ValueId,
-        value: ValueId,
-    },
     WriteWitness {
         result: Option<ValueId>,
         value: ValueId,
@@ -213,6 +214,11 @@ pub enum OpCode {
     TupleProj {
         result: ValueId,
         tuple: ValueId,
+        idx: usize,
+    },
+    TupleRefProj {
+        result: ValueId,
+        tuple_ref: ValueId,
         idx: usize,
     },
     MkTuple {
@@ -527,6 +533,19 @@ impl Instruction for OpCode {
                     typ
                 )
             }
+            OpCode::MkSeqOfBlob {
+                result,
+                element_type: typ,
+                blob,
+            } => {
+                format!(
+                    "v{}{} = mk_seq_of_blob(v{}) of {}",
+                    result.0,
+                    annotate_value(*result),
+                    blob.0,
+                    typ
+                )
+            }
             OpCode::MkRepeated {
                 result,
                 element,
@@ -589,14 +608,6 @@ impl Instruction for OpCode {
             }
             OpCode::Not { result, value } => {
                 format!("v{}{} = ~v{}", result.0, annotate_value(*result), value.0)
-            }
-            OpCode::ValueOf { result, value } => {
-                format!(
-                    "v{}{} = value_of v{}",
-                    result.0,
-                    annotate_value(*result),
-                    value.0
-                )
             }
             OpCode::ToBits {
                 result,
@@ -679,6 +690,19 @@ impl Instruction for OpCode {
                     result.0,
                     annotate_value(*result),
                     tuple.0,
+                    idx
+                )
+            }
+            OpCode::TupleRefProj {
+                result,
+                tuple_ref,
+                idx,
+            } => {
+                format!(
+                    "v{}{} = ref_proj(v{}, {})",
+                    result.0,
+                    annotate_value(*result),
+                    tuple_ref.0,
                     idx
                 )
             }
@@ -863,6 +887,7 @@ impl Instruction for OpCode {
                 seq_type: _,
                 elem_type: _,
             } => inputs.iter().collect::<Vec<_>>().into_iter(),
+            Self::MkSeqOfBlob { blob, .. } => vec![blob].into_iter(),
             Self::MkRepeated {
                 result: _,
                 element,
@@ -879,10 +904,6 @@ impl Instruction for OpCode {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -937,6 +958,11 @@ impl Instruction for OpCode {
                 result: _,
                 tuple,
                 idx: _,
+            }
+            | Self::TupleRefProj {
+                result: _,
+                tuple_ref: tuple,
+                idx: _,
             } => vec![tuple].into_iter(),
             OpCode::MkTuple {
                 result: _,
@@ -969,6 +995,7 @@ impl Instruction for OpCode {
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
+            | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
@@ -977,6 +1004,7 @@ impl Instruction for OpCode {
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
+            | Self::TupleRefProj { result: r, .. }
             | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
             Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
@@ -991,9 +1019,7 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. }
-            | Self::ValueOf { result: r, .. }
-            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1025,6 +1051,7 @@ impl Instruction for OpCode {
             | Self::SliceLen { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
+            | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
@@ -1033,6 +1060,7 @@ impl Instruction for OpCode {
             | Self::MulConst { result: r, .. }
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
+            | Self::TupleRefProj { result: r, .. }
             | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
             Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter_mut().collect::<Vec<_>>();
@@ -1047,9 +1075,7 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. }
-            | Self::ValueOf { result: r, .. }
-            | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1188,6 +1214,7 @@ impl Instruction for OpCode {
                 seq_type: _,
                 elem_type: _,
             } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
+            Self::MkSeqOfBlob { blob, .. } => vec![blob].into_iter(),
             Self::MkRepeated {
                 result: _,
                 element,
@@ -1209,10 +1236,6 @@ impl Instruction for OpCode {
             | Self::AssertR1C { a: b, b: c, c: d }
             | Self::Constrain { a: b, b: c, c: d } => vec![b, c, d].into_iter(),
             Self::Not {
-                result: _,
-                value: v,
-            }
-            | Self::ValueOf {
                 result: _,
                 value: v,
             } => vec![v].into_iter(),
@@ -1266,6 +1289,11 @@ impl Instruction for OpCode {
             Self::TupleProj {
                 result: _,
                 tuple,
+                idx: _,
+            }
+            | Self::TupleRefProj {
+                result: _,
+                tuple_ref: tuple,
                 idx: _,
             } => vec![tuple].into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
@@ -1416,6 +1444,9 @@ impl Instruction for OpCode {
                 ret_vec.extend(inputs);
                 ret_vec.into_iter()
             }
+            Self::MkSeqOfBlob {
+                result: r, blob, ..
+            } => vec![r, blob].into_iter(),
             Self::MkRepeated {
                 result: r,
                 element,
@@ -1430,10 +1461,6 @@ impl Instruction for OpCode {
                 if_f: d,
             } => vec![a, b, c, d].into_iter(),
             Self::Not {
-                result: r,
-                value: v,
-            }
-            | Self::ValueOf {
                 result: r,
                 value: v,
             }
@@ -1482,6 +1509,11 @@ impl Instruction for OpCode {
             Self::TupleProj {
                 result: r,
                 tuple: t,
+                idx: _,
+            }
+            | Self::TupleRefProj {
+                result: r,
+                tuple_ref: t,
                 idx: _,
             } => vec![r, t].into_iter(),
             OpCode::MkTuple {
@@ -1585,14 +1617,151 @@ impl Display for SequenceTargetType {
 // CAST TARGET
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CastTarget {
     Field,
     U(usize),
     I(usize),
     WitnessOf,
+    /// Strips one `WitnessOf` wrapper.
+    ValueOf,
     Nop,
     ArrayToSlice,
+    /// Applies the inner cast to every element of an array or slice.
+    /// Lowered to an explicit loop late, by `LowerMapCasts`; witness-only maps
+    /// never reach codegen in the witgen pipeline (`StripWitnessOf` erases them).
+    Map(Box<CastTarget>),
+}
+
+impl CastTarget {
+    /// The cast target injecting witness wrappers to convert a value of type
+    /// `src` into type `tgt`, or `None` when no conversion is needed (equal
+    /// types, or types differing only in ways that share a runtime
+    /// representation).
+    ///
+    /// Panics on conversions casts cannot express — in particular on
+    /// witness *strips* (`WitnessOf(X) → X`): silently erasing witness-ness at
+    /// a typed-slot boundary would drop the constraint connection, so such a
+    /// request always indicates a witness-inference inconsistency. Strips are
+    /// only legal for unconstrained call arguments, via [`Self::strip_conversion`].
+    pub fn conversion(src: &Type, tgt: &Type) -> Option<CastTarget> {
+        Self::conversion_impl(src, tgt, false)
+    }
+
+    /// The cast target stripping witness wrappers to convert a value of type
+    /// `src` into type `tgt` (for unconstrained call arguments), or `None`
+    /// when the types already match.
+    pub fn strip_conversion(src: &Type, tgt: &Type) -> Option<CastTarget> {
+        Self::conversion_impl(src, tgt, true)
+    }
+
+    fn conversion_impl(src: &Type, tgt: &Type, strip: bool) -> Option<CastTarget> {
+        if src == tgt {
+            return None;
+        }
+        match (&src.expr, &tgt.expr) {
+            (TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::WitnessOf(_))
+                if !strip =>
+            {
+                Some(CastTarget::WitnessOf)
+            }
+            (TypeExpr::WitnessOf(inner), TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
+                if strip && inner.as_ref() == tgt =>
+            {
+                Some(CastTarget::ValueOf)
+            }
+            // Same runtime representation on both sides.
+            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) if !strip => None,
+            (TypeExpr::Ref(_), TypeExpr::Ref(_)) if !strip => None,
+            (TypeExpr::Array(s, n), TypeExpr::Array(t, m)) => {
+                assert_eq!(
+                    n, m,
+                    "array size mismatch in cast conversion: {src} -> {tgt}"
+                );
+                Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
+            }
+            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
+                Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
+            }
+            _ => panic!(
+                "no cast target converts {:?} -> {:?} (strip: {})",
+                src, tgt, strip
+            ),
+        }
+    }
+
+    /// The type a cast with this target produces for an input of `value_type`.
+    pub fn result_type(&self, value_type: &Type) -> Type {
+        match self {
+            CastTarget::Field => {
+                if value_type.is_witness_of() {
+                    Type::witness_of(Type::field())
+                } else {
+                    Type::field()
+                }
+            }
+            CastTarget::U(size) => {
+                if value_type.is_witness_of() {
+                    Type::witness_of(Type::u(*size))
+                } else {
+                    Type::u(*size)
+                }
+            }
+            CastTarget::I(size) => {
+                if value_type.is_witness_of() {
+                    Type::witness_of(Type::i(*size))
+                } else {
+                    Type::i(*size)
+                }
+            }
+            CastTarget::Nop => value_type.clone(),
+            CastTarget::ArrayToSlice => match &value_type.expr {
+                TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
+                _ => panic!("ArrayToSlice cast on non-array type"),
+            },
+            CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
+            CastTarget::ValueOf => match &value_type.expr {
+                TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
+                _ => panic!("ValueOf cast on non-WitnessOf type {:?}", value_type),
+            },
+            CastTarget::Map(inner) => match &value_type.expr {
+                TypeExpr::Array(elem, len) => inner.result_type(elem).array_of(*len),
+                TypeExpr::Slice(elem) => inner.result_type(elem).slice_of(),
+                _ => panic!("Map cast on non-sequence type {:?}", value_type),
+            },
+        }
+    }
+
+    /// Whether this cast only changes the witness representation of a value
+    /// (injects or strips `WitnessOf` wrappers, possibly elementwise). After
+    /// stripping `WitnessOf` from all types such casts are identities.
+    pub fn is_witness_repr_only(&self) -> bool {
+        match self {
+            CastTarget::WitnessOf | CastTarget::ValueOf => true,
+            CastTarget::Map(inner) => inner.is_witness_repr_only(),
+            CastTarget::Field
+            | CastTarget::U(_)
+            | CastTarget::I(_)
+            | CastTarget::Nop
+            | CastTarget::ArrayToSlice => false,
+        }
+    }
+
+    /// Whether this cast strips witness wrappers (`ValueOf`, possibly under
+    /// `Map`s). Strips are only emitted for hint chains and unconstrained call
+    /// arguments, both of which are dead by R1CS generation.
+    pub fn is_value_of(&self) -> bool {
+        match self {
+            CastTarget::ValueOf => true,
+            CastTarget::Map(inner) => inner.is_value_of(),
+            CastTarget::Field
+            | CastTarget::U(_)
+            | CastTarget::I(_)
+            | CastTarget::WitnessOf
+            | CastTarget::Nop
+            | CastTarget::ArrayToSlice => false,
+        }
+    }
 }
 
 impl Display for CastTarget {
@@ -1602,8 +1771,10 @@ impl Display for CastTarget {
             CastTarget::U(size) => write!(f, "u{}", size),
             CastTarget::I(size) => write!(f, "i{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
+            CastTarget::ValueOf => write!(f, "ValueOf"),
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
+            CastTarget::Map(inner) => write!(f, "Map({})", inner),
         }
     }
 }
@@ -1638,6 +1809,31 @@ pub enum SliceOpDir {
 // CONSTANTS
 // ================================================================================================
 
+/// A compile-time-only sequence of constants used for long constant data.
+/// Blobs are homogeneous: every element has type `elem_type`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Blob {
+    pub elem_type: Type,
+    pub elements: Vec<Constant>,
+}
+
+impl Blob {
+    pub fn new(elem_type: Type, elements: Vec<Constant>) -> Self {
+        Self {
+            elem_type,
+            elements,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+}
+
 /// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
@@ -1645,6 +1841,7 @@ pub enum Constant {
     I(usize, u128),
     Field(ark_bn254::Fr),
     FnPtr(FunctionId),
+    Blob(Blob),
 }
 
 // REFERENCE COUNTING OPS
@@ -1678,6 +1875,18 @@ pub enum LookupTarget<V> {
     DynRangecheck(V),
     Array(V),
     Spread(u8),
+}
+
+impl<V> LookupTarget<V> {
+    /// Map the value payload (dynamic rangecheck bound or array operand), keeping the target kind.
+    pub fn map<U>(&self, mut f: impl FnMut(&V) -> U) -> LookupTarget<U> {
+        match self {
+            LookupTarget::Rangecheck(bits) => LookupTarget::Rangecheck(*bits),
+            LookupTarget::DynRangecheck(bound) => LookupTarget::DynRangecheck(f(bound)),
+            LookupTarget::Array(array) => LookupTarget::Array(f(array)),
+            LookupTarget::Spread(bits) => LookupTarget::Spread(*bits),
+        }
+    }
 }
 
 // RADIX

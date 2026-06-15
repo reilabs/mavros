@@ -11,10 +11,17 @@ use nargo::{
 };
 use nargo_toml::PackageSelection::All;
 use noirc_driver::stdlib_paths_with_source;
-use noirc_frontend::hir::ParsedFiles;
+use noirc_frontend::{
+    ast::{
+        BlockExpression, CallExpression, Expression, ExpressionKind, FunctionKind, Ident,
+        NoirFunction, Path as AstPath, PathKind, PathSegment, Pattern, Statement, StatementKind,
+    },
+    hir::ParsedFiles,
+    parser::{ItemKind, ParsedModule},
+    token::FunctionAttributeKind,
+};
 
-use crate::error::Error;
-use crate::lowlevel_replacement::REPLACEMENT_CRATES;
+use crate::{collections::HashSet, error::Error};
 
 pub struct Project {
     project_root: PathBuf,
@@ -31,15 +38,136 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         "std/mavros.nr",
         include_str!("../../mavros_stdlib/mavros.nr"),
     ),
+    (
+        "std/mavros/replacements.nr",
+        include_str!("../../mavros_stdlib/replacements.nr"),
+    ),
+    (
+        "std/mavros/replacements/blake3.nr",
+        include_str!("../../mavros_stdlib/replacements/blake3.nr"),
+    ),
+    (
+        "std/mavros/replacements/poseidon2_permutation.nr",
+        include_str!("../../mavros_stdlib/replacements/poseidon2_permutation.nr"),
+    ),
+    (
+        "std/mavros/replacements/sha256_compression.nr",
+        include_str!("../../mavros_stdlib/replacements/sha256_compression.nr"),
+    ),
 ];
 
-fn add_stdlib_replacements(file_manager: &mut FileManager) {
-    for crate_def in REPLACEMENT_CRATES {
-        file_manager.add_file_with_source_canonical_path(
-            Path::new(crate_def.file_name),
-            crate_def.source.to_string(),
+/// Foreign stdlib functions that mavros replaces with pure-Noir implementations from
+/// `std::mavros::replacements`. The replacement for `#[foreign(name)]` is the function
+/// `std::mavros::replacements::<name>::<name>`.
+///
+/// These would be impractical to implement directly in SSA; they play the role of builtins in
+/// upstream Noir. After parsing, each `#[foreign(name)]` shim has its attribute dropped and its
+/// empty body rewritten to call the replacement, so the rest of the frontend treats it as an
+/// ordinary function: type checking, generic instantiation and the constrained/unconstrained
+/// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
+const FOREIGN_REPLACEMENTS: &[&str] = &["blake3", "poseidon2_permutation", "sha256_compression"];
+
+/// Rewrite all registered `#[foreign]` shims in the parsed files to call their replacements.
+fn replace_foreign_functions(parsed_files: &mut ParsedFiles) {
+    let mut replaced: HashSet<&'static str> = HashSet::default();
+    for (module, _) in parsed_files.values_mut() {
+        replace_foreign_functions_in_module(module, &mut replaced);
+    }
+    for foreign_name in FOREIGN_REPLACEMENTS {
+        assert!(
+            replaced.contains(foreign_name),
+            "foreign function '{foreign_name}' not found in the parsed sources"
         );
     }
+}
+
+fn replace_foreign_functions_in_module(
+    module: &mut ParsedModule,
+    replaced: &mut HashSet<&'static str>,
+) {
+    for item in &mut module.items {
+        match &mut item.kind {
+            ItemKind::Function(function) => replace_foreign_function(function, replaced),
+            ItemKind::Submodules(submodule) => {
+                replace_foreign_functions_in_module(&mut submodule.contents, replaced);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<&'static str>) {
+    let Some((attribute, _)) = &function.def.attributes.function else {
+        return;
+    };
+    let FunctionAttributeKind::Foreign(attribute_name) = &attribute.kind else {
+        return;
+    };
+    let Some(foreign_name) = FOREIGN_REPLACEMENTS
+        .iter()
+        .find(|name| *name == attribute_name)
+    else {
+        return;
+    };
+
+    let location = function.def.location;
+    let variable = |path: AstPath| Expression {
+        kind: ExpressionKind::Variable(path),
+        location,
+    };
+
+    // The shim's parameters are passed through to the replacement verbatim.
+    let arguments = function
+        .def
+        .parameters
+        .iter()
+        .map(|param| {
+            let Pattern::Identifier(ident) = &param.pattern else {
+                panic!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
+            };
+            variable(AstPath::plain(
+                vec![PathSegment {
+                    ident: ident.clone(),
+                    generics: None,
+                    location,
+                }],
+                location,
+            ))
+        })
+        .collect();
+
+    let segments = ["mavros", "replacements", foreign_name, foreign_name]
+        .iter()
+        .map(|segment| PathSegment {
+            ident: Ident::new(segment.to_string(), location),
+            generics: None,
+            location,
+        })
+        .collect();
+    let func = variable(AstPath {
+        segments,
+        kind: PathKind::Crate,
+        location,
+        kind_location: location,
+    });
+
+    let call = Expression {
+        kind: ExpressionKind::Call(Box::new(CallExpression {
+            func: Box::new(func),
+            arguments,
+            is_macro_call: false,
+        })),
+        location,
+    };
+    function.def.body = BlockExpression {
+        statements: vec![Statement {
+            kind: StatementKind::Expression(call),
+            location,
+        }],
+    };
+    function.def.attributes.function = None;
+    function.kind = FunctionKind::Normal;
+    replaced.insert(foreign_name);
 }
 
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
@@ -59,10 +187,12 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
         file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
     }
 
-    // 3. Add workspace files and lowlevel replacements
+    // 3. Add workspace files
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
-    add_stdlib_replacements(&mut file_manager);
-    let parsed_files = nargo::parse_all(&file_manager);
+    let mut parsed_files = nargo::parse_all(&file_manager);
+
+    // 4. Rewrite replaced foreign functions to call their pure-Noir implementations
+    replace_foreign_functions(&mut parsed_files);
     (file_manager, parsed_files)
 }
 

@@ -1,0 +1,6 @@
+[package]
+name = "tuple_ref_proj"
+type = "bin"
+authors = [""]
+
+[dependencies]

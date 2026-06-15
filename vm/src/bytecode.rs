@@ -1070,6 +1070,23 @@ mod def {
     }
 
     #[opcode]
+    fn array_alloc_from_frame(
+        #[out] res: *mut BoxedValue,
+        stride: usize,
+        meta: BoxedLayout,
+        count: usize,
+        source: FramePosition,
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let array = BoxedValue::alloc(meta, vm);
+        unsafe {
+            frame.write_to(array.data(), source.0 as isize, count * stride);
+            *res = array;
+        }
+    }
+
+    #[opcode]
     fn array_alloc_repeated(
         #[out] res: *mut BoxedValue,
         stride: usize,
@@ -1170,6 +1187,28 @@ mod def {
         let src = array.array_idx(index as usize, stride);
         unsafe {
             ptr::copy_nonoverlapping(src, res, stride);
+        }
+    }
+
+    /// Read an element out of a blob: a raw sequence of `len` elements of
+    /// `stride` cells each, stored inline in the frame starting at `source`.
+    #[opcode]
+    fn blob_get(
+        #[out] res: *mut u64,
+        source: FramePosition,
+        #[frame] index: u64,
+        stride: usize,
+        len: usize,
+        frame: Frame,
+    ) {
+        assert!(
+            (index as usize) < len,
+            "blob_get: index {} out of bounds for blob of length {}",
+            index,
+            len
+        );
+        unsafe {
+            frame.write_to(res, (source.0 + (index as usize) * stride) as isize, stride);
         }
     }
 
@@ -1397,6 +1436,27 @@ mod def {
                     0
                 };
                 *r.array_idx((count - i - 1) as usize, 1) = byte_val;
+            }
+            *res = r;
+        }
+    }
+
+    #[opcode]
+    fn to_bytes_le(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
+        let val = ark_ff::PrimeField::into_bigint(val);
+        let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
+        unsafe {
+            for i in 0..count {
+                // Each limb in val.0 is a u64 (8 bytes), little-endian limb order.
+                let byte_idx = i as usize;
+                let limb_idx = byte_idx / 8;
+                let byte_in_limb = byte_idx % 8;
+                let byte_val = if limb_idx < val.0.len() {
+                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xFF
+                } else {
+                    0
+                };
+                *r.array_idx(i as usize, 1) = byte_val;
             }
             *res = r;
         }

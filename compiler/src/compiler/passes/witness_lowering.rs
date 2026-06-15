@@ -1,18 +1,20 @@
 //! Lowers witness operations such that there are no more implicit mixed pure / witness operations
 //! and so that every value entering an R1CS cosntraint has been explicitly cast to `WitnessOf`.
 
-use std::collections::HashMap;
-
-use crate::compiler::{
-    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
-    ssa::{
-        BlockId, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, DMatrix, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::ValueReplacements,
+        ssa::{
+            BlockId, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, DMatrix, HLSSA, OpCode, Type, TypeExpr,
+                builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+            },
         },
+        util::ice_non_elided_tuple,
     },
 };
 
@@ -90,15 +92,10 @@ impl WitnessLowering {
                         OpCode::Cast {
                             result: r,
                             value: v,
-                            target,
+                            ref target,
                         } => {
                             let v_type = type_info.get_value_type(v);
-                            if v_type.is_witness_of()
-                                && matches!(
-                                    target,
-                                    crate::compiler::ssa::hlssa::CastTarget::WitnessOf
-                                )
-                            {
+                            if v_type.is_witness_of() && matches!(target, CastTarget::WitnessOf) {
                                 // Already WitnessOf — don't double-wrap
                                 replacements.insert(r, v);
                             } else {
@@ -131,6 +128,18 @@ impl WitnessLowering {
                                 elems: new_vs,
                                 seq_type: s,
                                 elem_type: new_elem_type,
+                            });
+                        }
+                        OpCode::MkSeqOfBlob {
+                            result: r,
+                            element_type: tp,
+                            blob,
+                        } => {
+                            let new_elem_type = self.witness_lowering_in_type(&tp);
+                            emitter.emit(OpCode::MkSeqOfBlob {
+                                result: r,
+                                element_type: new_elem_type,
+                                blob,
                             });
                         }
                         OpCode::MkRepeated {
@@ -431,28 +440,14 @@ impl WitnessLowering {
                         | OpCode::ReadGlobal { .. }
                         | OpCode::InitGlobal { .. }
                         | OpCode::DropGlobal { .. }
-                        | OpCode::TupleProj { .. }
                         | OpCode::Todo { .. }
-                        | OpCode::ValueOf { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);
                         }
-                        OpCode::MkTuple {
-                            result,
-                            elems,
-                            element_types,
-                        } => {
-                            let new_element_types = element_types
-                                .iter()
-                                .map(|tp| self.witness_lowering_in_type(tp))
-                                .collect();
-                            emitter.emit(OpCode::MkTuple {
-                                result,
-                                elems,
-                                element_types: new_element_types,
-                            });
-                        }
+                        OpCode::MkTuple { .. }
+                        | OpCode::TupleProj { .. }
+                        | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
                     };
                 }
 
@@ -482,9 +477,9 @@ impl WitnessLowering {
     }
 
     /// Emit instructions to convert a value from `source_type` to `target_type`.
-    /// For scalars (Field/U), emits a CastToWitnessOf instruction inline.
-    /// For arrays, generates a loop that converts each element, which splits the
-    /// current block and creates new blocks.
+    /// Scalar witness injections become a single `WitnessOf` cast; arrays and
+    /// slices become one composite `Map` cast, lowered to an explicit loop by
+    /// `LowerMapCasts` right after this pass.
     fn emit_value_conversion(
         &self,
         value: ValueId,
@@ -497,122 +492,9 @@ impl WitnessLowering {
             return value;
         }
 
-        match (&source_type.expr, &target_type.expr) {
-            (TypeExpr::Field, TypeExpr::WitnessOf(_))
-            | (TypeExpr::U(_), TypeExpr::WitnessOf(_))
-            | (TypeExpr::I(_), TypeExpr::WitnessOf(_)) => emitter.cast_to_witness_of(value),
-            (TypeExpr::Array(src_inner, src_size), TypeExpr::Array(tgt_inner, tgt_size)) => {
-                assert_eq!(
-                    src_size, tgt_size,
-                    "Array size mismatch in witness_lowering conversion"
-                );
-                self.emit_array_conversion_loop(
-                    value,
-                    src_inner,
-                    tgt_inner,
-                    *src_size,
-                    source_type,
-                    target_type,
-                    emitter,
-                )
-            }
-            (TypeExpr::Tuple(src_fields), TypeExpr::Tuple(tgt_fields)) => {
-                assert_eq!(
-                    src_fields.len(),
-                    tgt_fields.len(),
-                    "Tuple field count mismatch in witness_lowering conversion"
-                );
-                let mut converted_elems = vec![];
-                for (i, (src_ft, tgt_ft)) in src_fields.iter().zip(tgt_fields.iter()).enumerate() {
-                    let proj = emitter.tuple_proj(value, i);
-                    let converted = self.emit_value_conversion(proj, src_ft, tgt_ft, emitter);
-                    converted_elems.push(converted);
-                }
-                emitter.mk_tuple(converted_elems, tgt_fields.clone())
-            }
-            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) => {
-                // Both source and target are WitnessOf — same runtime representation.
-                value
-            }
-            (TypeExpr::Ref(_), TypeExpr::Ref(_)) => {
-                // Ref types pass through — same runtime representation (pointer).
-                value
-            }
-            _ => panic!(
-                "witness_lowering value conversion not supported: {:?} -> {:?}",
-                source_type, target_type
-            ),
-        }
-    }
-
-    fn emit_array_conversion_loop(
-        &self,
-        source_array: ValueId,
-        src_elem_type: &Type,
-        tgt_elem_type: &Type,
-        array_len: usize,
-        _source_array_type: &Type,
-        target_array_type: &Type,
-        emitter: &mut HLBlockEmitter<'_>,
-    ) -> ValueId {
-        let initial_dst =
-            self.create_dummy_array(tgt_elem_type, array_len, target_array_type, emitter);
-
-        let results = emitter.build_counted_loop(
-            array_len,
-            vec![(initial_dst, target_array_type.clone())],
-            |emitter, i_val, accs| {
-                let dst_val = accs[0];
-                let elem = emitter.array_get(source_array, i_val);
-                let converted =
-                    self.emit_value_conversion(elem, src_elem_type, tgt_elem_type, emitter);
-                let new_dst = emitter.array_set(dst_val, i_val, converted);
-                vec![new_dst]
-            },
-        );
-
-        results[0]
-    }
-
-    /// Create a dummy array of the given target type, properly laid out in memory.
-    fn create_dummy_array(
-        &self,
-        elem_type: &Type,
-        array_len: usize,
-        _array_type: &Type,
-        b: &mut impl HLEmitter,
-    ) -> ValueId {
-        if array_len == 0 {
-            return b.mk_seq(Vec::new(), SequenceTargetType::Array(0), elem_type.clone());
-        }
-        let dummy_elem = self.create_dummy_value(elem_type, b);
-        b.mk_repeated(
-            dummy_elem,
-            SequenceTargetType::Array(array_len),
-            array_len,
-            elem_type.clone(),
-        )
-    }
-
-    /// Create a single dummy value of the given target type.
-    fn create_dummy_value(&self, target_type: &Type, b: &mut impl HLEmitter) -> ValueId {
-        match &target_type.expr {
-            TypeExpr::WitnessOf(_) => {
-                let dummy_field = b.field_const(ark_bn254::Fr::from(0u64));
-                b.cast_to_witness_of(dummy_field)
-            }
-            TypeExpr::Array(inner, size) => self.create_dummy_array(inner, *size, target_type, b),
-            TypeExpr::Tuple(fields) => {
-                let mut dummy_elems = vec![];
-                for field_type in fields.iter() {
-                    dummy_elems.push(self.create_dummy_value(field_type, b));
-                }
-                b.mk_tuple(dummy_elems, fields.clone())
-            }
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
-                b.field_const(ark_bn254::Fr::from(0u64))
-            }
-            _ => panic!("create_dummy_value: unsupported type {:?}", target_type),
+        match CastTarget::conversion(&converted_source, target_type) {
+            None => value,
+            Some(target) => emitter.cast_to(target, value),
         }
     }
 
@@ -661,13 +543,8 @@ impl WitnessLowering {
             TypeExpr::Ref(inner) => self.witness_lowering_in_type(inner).ref_of(),
             TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),
-            TypeExpr::Tuple(elements) => {
-                let boxed_elements = elements
-                    .iter()
-                    .map(|elem| self.witness_lowering_in_type(elem))
-                    .collect();
-                Type::tuple_of(boxed_elements)
-            }
+            TypeExpr::Blob(..) => tp.clone(),
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
     }
 }

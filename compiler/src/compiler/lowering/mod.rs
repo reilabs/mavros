@@ -6,22 +6,22 @@
 mod expression_converter;
 mod type_converter;
 
-use std::collections::{HashMap, HashSet};
-
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
 };
 
-use crate::compiler::ssa::{
-    FunctionId,
-    hlssa::{
-        HLFunction, HLSSA,
-        builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::ssa::{
+        FunctionId,
+        hlssa::{
+            HLFunction, HLSSA,
+            builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+        },
     },
 };
 
 use expression_converter::ExpressionConverter;
-pub use expression_converter::LowLevelReplacement;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
@@ -43,20 +43,16 @@ pub struct SSAConverter {
 
     /// Utility for converting between types.
     type_converter: TypeConverter,
-
-    /// Maps a given low-level function name to its replacement
-    lowlevel_replacements: HashMap<String, LowLevelReplacement>,
 }
 
 impl SSAConverter {
-    pub fn new(lowlevel_replacements: HashMap<String, LowLevelReplacement>) -> Self {
+    pub fn new() -> Self {
         Self {
-            constrained_mapper: HashMap::new(),
-            unconstrained_mapper: HashMap::new(),
-            natively_unconstrained: HashSet::new(),
-            global_slots: HashMap::new(),
+            constrained_mapper: HashMap::default(),
+            unconstrained_mapper: HashMap::default(),
+            natively_unconstrained: HashSet::default(),
+            global_slots: HashMap::default(),
             type_converter: TypeConverter::new(),
-            lowlevel_replacements,
         }
     }
 
@@ -202,15 +198,18 @@ impl SSAConverter {
 
         // Topological sort: process globals in dependency order.
         // Build adjacency: each global depends on other globals referenced in its initializer.
-        let all_ids: Vec<GlobalId> = program.globals.keys().copied().collect();
-        let mut visited = std::collections::HashSet::new();
-        let mut in_stack = std::collections::HashSet::new();
+        // `Program.globals` is a `BTreeMap`, so key order is already deterministic; the sort
+        // makes slot assignment robust even if that container ever changes.
+        let mut all_ids: Vec<GlobalId> = program.globals.keys().copied().collect();
+        all_ids.sort();
+        let mut visited = crate::collections::HashSet::default();
+        let mut in_stack = crate::collections::HashSet::default();
 
         fn topo_visit(
             gid: GlobalId,
             program: &Program,
-            visited: &mut std::collections::HashSet<GlobalId>,
-            in_stack: &mut std::collections::HashSet<GlobalId>,
+            visited: &mut crate::collections::HashSet<GlobalId>,
+            in_stack: &mut crate::collections::HashSet<GlobalId>,
             ordered: &mut Vec<GlobalId>,
         ) {
             if visited.contains(&gid) {
@@ -258,7 +257,6 @@ impl SSAConverter {
                 &self.natively_unconstrained,
                 false,
                 &self.global_slots,
-                &self.lowlevel_replacements,
                 entry,
             );
 
@@ -324,7 +322,6 @@ impl SSAConverter {
             &self.natively_unconstrained,
             in_unconstrained,
             &self.global_slots,
-            &self.lowlevel_replacements,
             entry_block,
         );
 
@@ -355,11 +352,8 @@ impl SSAConverter {
 
 impl HLSSA {
     /// Create SSA directly from a monomorphized program.
-    pub fn from_program(
-        program: &Program,
-        lowlevel_replacements: HashMap<String, LowLevelReplacement>,
-    ) -> (HLSSA, bool) {
-        let mut converter = SSAConverter::new(lowlevel_replacements);
+    pub fn from_program(program: &Program) -> (HLSSA, bool) {
+        let mut converter = SSAConverter::new();
         converter.convert_program(program)
     }
 }

@@ -1,16 +1,18 @@
 //! Computes the set of SSA values that are live-in and live-out for each block in the SSA using the
 //! conventional, block-based approach.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-
 use itertools::Itertools;
+use std::collections::VecDeque;
 use tracing::{Level, instrument, trace};
 
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{HLFunction, HLSSA},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{HLFunction, HLSSA},
+        },
     },
 };
 
@@ -47,7 +49,7 @@ impl LivenessAnalysis {
     #[instrument(skip_all, name = "LivenessAnalysis::run")]
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis) -> Liveness {
         let mut result = Liveness {
-            function_liveness: HashMap::new(),
+            function_liveness: HashMap::default(),
         };
 
         for (function_id, function) in ssa.iter_functions() {
@@ -63,12 +65,12 @@ impl LivenessAnalysis {
 
     #[instrument(skip_all, level = Level::TRACE, name = "LivenessAnalysis::run_function", fields(function = function.get_name()))]
     fn run_function(&self, function: &HLFunction, cfg: &CFG) -> FunctionLiveness {
-        let mut gens = HashMap::<BlockId, HashSet<ValueId>>::new();
-        let mut kills = HashMap::<BlockId, HashSet<ValueId>>::new();
+        let mut gens = HashMap::<BlockId, HashSet<ValueId>>::default();
+        let mut kills = HashMap::<BlockId, HashSet<ValueId>>::default();
 
         for (block_id, block) in function.get_blocks() {
-            let mut k = HashSet::new();
-            let mut g = HashSet::new();
+            let mut k = HashSet::default();
+            let mut g = HashSet::default();
             match block.get_terminator().unwrap() {
                 Terminator::Return(vs) => {
                     for v in vs {
@@ -103,7 +105,7 @@ impl LivenessAnalysis {
             kills.insert(*block_id, k);
         }
 
-        let mut result = HashMap::<BlockId, BlockLiveness>::new();
+        let mut result = HashMap::<BlockId, BlockLiveness>::default();
         let mut queue = VecDeque::new();
 
         for ret in cfg.get_return_blocks() {
@@ -113,27 +115,27 @@ impl LivenessAnalysis {
         while let Some(block_id) = queue.pop_front() {
             let visited = result.contains_key(&block_id);
             result.entry(block_id).or_insert(BlockLiveness {
-                live_in: HashSet::new(),
-                live_out: HashSet::new(),
+                live_in: HashSet::default(),
+                live_out: HashSet::default(),
             });
             let original_live_in = &result.get(&block_id).unwrap().live_in;
 
-            let mut new_live_out: HashSet<ValueId> = HashSet::new();
+            let mut new_live_out: HashSet<ValueId> = HashSet::default();
 
             for block_id in cfg.get_successors(block_id) {
                 new_live_out.extend(
                     &result
                         .get(&block_id)
                         .unwrap_or(&BlockLiveness {
-                            live_in: HashSet::new(),
-                            live_out: HashSet::new(),
+                            live_in: HashSet::default(),
+                            live_out: HashSet::default(),
                         })
                         .live_in,
                 );
             }
 
             let mut new_live_in = new_live_out.clone();
-            new_live_in.extend(gens.get(&block_id).unwrap_or(&HashSet::new()));
+            new_live_in.extend(gens.get(&block_id).unwrap_or(&HashSet::default()));
             let kills = kills.get(&block_id).unwrap();
             new_live_in.retain(|v| !kills.contains(v));
 

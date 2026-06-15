@@ -1,24 +1,25 @@
 //! Determines the smallest closed interval over which any numeric value in the SSA can range,
 //! uniformly across all integer types.
 
-use std::collections::HashMap;
-
 use ark_ff::PrimeField;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, Zero};
 use tracing::{Level, instrument};
 
-use crate::compiler::{
-    Field,
-    analysis::{
-        flow_analysis::{CFG, FlowAnalysis},
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore},
-    ssa::{
-        BlockId, FunctionId, Instruction, Terminator, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        Field,
+        analysis::{
+            flow_analysis::{CFG, FlowAnalysis},
+            types::{FunctionTypeInfo, TypeInfo},
+        },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore},
+        ssa::{
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+            },
         },
     },
 };
@@ -382,7 +383,7 @@ fn compute_constant_bounds(ssa: &HLSSA) -> HashMap<ValueId, IntInterval> {
                     IntInterval::singleton(signed_const_to_bigint(*bits, *encoded))
                 }
                 Constant::Field(f) => IntInterval::singleton(field_to_bigint(f)),
-                Constant::FnPtr(_) => IntInterval::top(),
+                Constant::FnPtr(_) | Constant::Blob(_) => IntInterval::top(),
             };
             (*vid, r)
         })
@@ -433,7 +434,7 @@ impl ValueRangeAnalysis {
     #[instrument(skip_all, name = "ValueRangeAnalysis::run")]
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, types: &TypeInfo) -> ValueRanges {
         let mut result = ValueRanges {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
         };
 
         // Constants are module-level singletons; pre-compute their bounds once.
@@ -585,8 +586,10 @@ impl ValueRangeAnalysis {
                             IntInterval::signed_full(*n)
                         }
                     }
-                    CastTarget::Nop | CastTarget::WitnessOf => in_r,
-                    CastTarget::ArrayToSlice => IntInterval::top(),
+                    // ValueOf strips the WitnessOf wrapper: payload unchanged.
+                    CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
+                    // Sequence-level casts carry no scalar range.
+                    CastTarget::ArrayToSlice | CastTarget::Map(_) => IntInterval::top(),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }
@@ -630,11 +633,6 @@ impl ValueRangeAnalysis {
                 result_type,
             } => {
                 Self::overwrite(bounds, *result, IntInterval::for_type(result_type), changed);
-            }
-
-            OpCode::ValueOf { result, value } => {
-                let in_r = get(bounds, *value);
-                Self::overwrite(bounds, *result, cap_to_type(*result, in_r), changed);
             }
 
             OpCode::Cmp { result, .. } => {

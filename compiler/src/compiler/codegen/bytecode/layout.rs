@@ -1,8 +1,7 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
-use std::collections::HashMap;
-
 use crate::{
+    collections::HashMap,
     compiler::{
         codegen::constants,
         ssa::{
@@ -11,6 +10,7 @@ use crate::{
                 HLSSA, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr,
             },
         },
+        util::ice_non_elided_tuple,
     },
     vm::{self, bytecode},
 };
@@ -25,7 +25,7 @@ impl FrameLayouter {
     pub fn new() -> Self {
         Self {
             next_free: 2,
-            variables: HashMap::new(),
+            variables: HashMap::default(),
         }
     }
 
@@ -52,6 +52,13 @@ impl FrameLayouter {
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += bytecode::FELT_LIMBS;
+        bytecode::FramePosition(r)
+    }
+
+    pub fn alloc_long_data(&mut self, value: ValueId, cells: usize) -> bytecode::FramePosition {
+        self.variables.insert(value, self.next_free);
+        let r = self.next_free;
+        self.next_free += cells;
         bytecode::FramePosition(r)
     }
 
@@ -86,8 +93,10 @@ impl FrameLayouter {
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
             TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Tuple(_) => constants::POINTER_SIZE_CELLS,
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
+            // Blobs are stored by value, inline in the frame.
+            TypeExpr::Blob(ref elem, n) => n * self.type_size(elem),
             _ => todo!(),
         }
     }
@@ -122,7 +131,7 @@ impl StructLayoutInterner {
     pub fn new() -> Self {
         Self {
             table: Vec::new(),
-            index: HashMap::new(),
+            index: HashMap::default(),
         }
     }
 

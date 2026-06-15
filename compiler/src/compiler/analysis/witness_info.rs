@@ -1,7 +1,11 @@
 use itertools::Itertools;
 
-use crate::compiler::ssa::{BlockId, FunctionId, SSAAnotator, ValueId};
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
+
+use crate::{
+    collections::HashMap,
+    compiler::ssa::{BlockId, FunctionId, SSAAnotator, ValueId},
+};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub enum WitnessType {
@@ -48,7 +52,6 @@ pub enum WitnessShape {
     Scalar(WitnessInfo),
     Array(WitnessInfo, Box<WitnessShape>),
     Ref(WitnessInfo, Box<WitnessShape>),
-    Tuple(WitnessInfo, Vec<WitnessShape>),
 }
 
 impl Display for WitnessShape {
@@ -60,13 +63,6 @@ impl Display for WitnessShape {
             }
             WitnessShape::Ref(info, inner) => {
                 write!(f, "[*{info} of {inner}]")
-            }
-            WitnessShape::Tuple(info, children) => {
-                write!(
-                    f,
-                    "({info} of <{}>)",
-                    children.iter().map(|child| child.to_string()).join(", ")
-                )
             }
         }
     }
@@ -85,14 +81,6 @@ impl WitnessShape {
             (WitnessShape::Ref(t1, inner1), WitnessShape::Ref(t2, inner2)) => {
                 WitnessShape::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
             }
-            (WitnessShape::Tuple(t1, children1), WitnessShape::Tuple(t2, children2)) => {
-                let children_join = children1
-                    .iter()
-                    .zip(children2.iter())
-                    .map(|(c1, c2)| c1.join(c2))
-                    .collect();
-                WitnessShape::Tuple(t1.join(*t2), children_join)
-            }
             _ => panic!(
                 "Cannot join different witness types: {:?} vs {:?}",
                 self, other
@@ -105,7 +93,16 @@ impl WitnessShape {
             WitnessShape::Scalar(info) => *info,
             WitnessShape::Array(info, _) => *info,
             WitnessShape::Ref(info, _) => *info,
-            WitnessShape::Tuple(info, _) => *info,
+        }
+    }
+
+    /// Whether any level of this shape is witness-typed.
+    pub fn contains_witness(&self) -> bool {
+        match self {
+            WitnessShape::Scalar(info) => info.is_witness(),
+            WitnessShape::Array(info, inner) | WitnessShape::Ref(info, inner) => {
+                info.is_witness() || inner.contains_witness()
+            }
         }
     }
 
@@ -114,40 +111,6 @@ impl WitnessShape {
             WitnessShape::Array(_, inner) => Some(*inner.clone()),
             WitnessShape::Ref(_, inner) => Some(*inner.clone()),
             WitnessShape::Scalar(_) => None,
-            WitnessShape::Tuple(_, _) => {
-                panic!("Error: child_witness_type shouldn't be called for Tuple values")
-            }
-        }
-    }
-
-    pub fn with_toplevel_info(&self, toplevel: WitnessInfo) -> WitnessShape {
-        match self {
-            WitnessShape::Scalar(_) => WitnessShape::Scalar(toplevel),
-            WitnessShape::Array(_, inner) => WitnessShape::Array(toplevel, inner.clone()),
-            WitnessShape::Ref(_, inner) => WitnessShape::Ref(toplevel, inner.clone()),
-            WitnessShape::Tuple(_, inner) => WitnessShape::Tuple(toplevel, inner.clone()),
-        }
-    }
-
-    /// Push witness info into the leaves of composites (arrays, tuples)
-    /// instead of wrapping at the top level. For scalars and refs this
-    /// is equivalent to `with_toplevel_info`. For arrays and tuples, the
-    /// info is pushed recursively into children, keeping the top-level
-    /// info unchanged.
-    pub fn with_witness_in_leaves(&self, info: WitnessInfo) -> WitnessShape {
-        match self {
-            WitnessShape::Scalar(existing) => WitnessShape::Scalar(existing.join(info)),
-            WitnessShape::Array(top, inner) => {
-                WitnessShape::Array(*top, Box::new(inner.with_witness_in_leaves(info)))
-            }
-            WitnessShape::Ref(_, _) => self.with_toplevel_info(self.toplevel_info().join(info)),
-            WitnessShape::Tuple(top, children) => WitnessShape::Tuple(
-                *top,
-                children
-                    .iter()
-                    .map(|child| child.with_witness_in_leaves(info))
-                    .collect(),
-            ),
         }
     }
 }
@@ -162,12 +125,13 @@ pub struct FunctionWitnessType {
 }
 
 impl FunctionWitnessType {
-    pub fn get_value_witness_type(&self, value_id: ValueId) -> &WitnessShape {
-        self.value_witness_types.get(&value_id).unwrap()
-    }
-
-    pub fn get_block_witness(&self, block_id: BlockId) -> &WitnessInfo {
-        self.block_cfg_witness.get(&block_id).unwrap()
+    /// The inferred shape of `value_id`, if one was recorded.
+    ///
+    /// Only block parameters and instruction results are recorded; constants are not (they are
+    /// always all-Pure). Callers looking up arbitrary operands must treat `None` as Pure rather
+    /// than unwrapping (see `get_witness_or_pure` in `untaint_control_flow`).
+    pub fn try_get_value_witness_type(&self, value_id: ValueId) -> Option<&WitnessShape> {
+        self.value_witness_types.get(&value_id)
     }
 }
 

@@ -1,15 +1,17 @@
 use std::{
     any::{Any, TypeId},
-    collections::HashMap,
     fmt::Debug,
     fs,
     hash::Hash,
     path::PathBuf,
 };
 
-use crate::compiler::ssa::{
-    DefaultSSAAnnotator, Instruction, SSA, SSAType,
-    hlssa::{Constant, OpCode, Type},
+use crate::{
+    collections::HashMap,
+    compiler::ssa::{
+        DefaultSSAAnnotator, Instruction, SSA, SSAType,
+        hlssa::{Constant, OpCode, Type},
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -112,8 +114,8 @@ pub struct AnalysisStore {
 impl AnalysisStore {
     pub fn new() -> Self {
         Self {
-            data: HashMap::new(),
-            deps: HashMap::new(),
+            data: HashMap::default(),
+            deps: HashMap::default(),
         }
     }
 
@@ -199,12 +201,12 @@ pub trait Pass<
 
 fn topo_sort(roots: Vec<AnalysisId>, store: &AnalysisStore) -> Vec<AnalysisId> {
     let mut result = Vec::new();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::collections::HashSet::default();
 
     fn visit(
         id: AnalysisId,
         store: &AnalysisStore,
-        visited: &mut std::collections::HashSet<TypeId>,
+        visited: &mut crate::collections::HashSet<TypeId>,
         result: &mut Vec<AnalysisId>,
     ) {
         if store.contains_type(id.type_id) || !visited.insert(id.type_id) {
@@ -290,6 +292,33 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         self.output_debug_info(ssa, pass_index, pass.name());
         pass.run(ssa, &self.analyses);
         self.analyses.apply_preserved(&pass.preserves());
+        self.output_pass_ssa_snapshot(ssa, pass_index, pass.name());
+    }
+
+    /// When `MAVROS_DUMP_PASS_SSA` names a directory, write the SSA text after every pass to
+    /// `<dir>/<phase>_<index>_<pass>.txt`. Diffing two such runs bisects exactly which pass
+    /// introduced a divergence (used by determinism debugging; cheap no-op when unset).
+    fn output_pass_ssa_snapshot(&self, ssa: &SSA<Op, Ty, C>, pass_index: usize, pass_name: &str) {
+        let Ok(dir) = std::env::var("MAVROS_DUMP_PASS_SSA") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        fs::create_dir_all(&dir).unwrap();
+        // The fresh-value counter is part of the snapshot: a pass can mint values that die
+        // before the dump, and a counter divergence here surfaces as a text divergence only
+        // in some later pass.
+        fs::write(
+            dir.join(format!(
+                "{}_{:03}_{}.txt",
+                self.phase_label, pass_index, pass_name
+            )),
+            format!(
+                "next_value_id: {}\n{}",
+                ssa.value_num_bound(),
+                ssa.to_string(&DefaultSSAAnnotator)
+            ),
+        )
+        .unwrap();
     }
 
     fn output_debug_info(&mut self, ssa: &SSA<Op, Ty, C>, pass_index: usize, pass_name: &str) {

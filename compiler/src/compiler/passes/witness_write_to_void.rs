@@ -1,6 +1,9 @@
 //! This pass is intended to be the first step of the witness generation phase, and converts every
 //! witness write into a side-effect-only sink, with witnesses now flowing as plain values in the
 //! CFG.
+//!
+//! Witness-representation casts (`ValueOf`, `WitnessOf`, and `Map`s thereof at any depth) are NOT
+//! handled here: the `StripWitnessOf` pass that follows aliases all of them away.
 
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
@@ -45,48 +48,25 @@ impl WitnessWriteToVoid {
                             }
                             *r = None;
                         }
-                        OpCode::ValueOf {
-                            result: r,
-                            value: v,
-                        } => {
-                            replacements.insert(*r, *v);
-                        }
-                        OpCode::Guard { inner, .. } => match inner.as_mut() {
-                            OpCode::WriteWitness {
+                        OpCode::Guard { inner, .. } => {
+                            if let OpCode::WriteWitness {
                                 result: r,
                                 value: b,
                                 ..
-                            } => {
+                            } = inner.as_mut()
+                            {
                                 if let Some(r) = r {
                                     replacements.insert(*r, *b);
                                 }
                                 *r = None;
                             }
-                            OpCode::ValueOf {
-                                result: r,
-                                value: v,
-                            } => {
-                                replacements.insert(*r, *v);
-                            }
-                            _ => {}
-                        },
+                        }
                         _ => {}
                     }
                 }
             }
 
             for (_, block) in function.get_blocks_mut() {
-                // Remove ValueOf instructions and Guard-wrapped ValueOf (identity in witgen pipeline)
-                let old_instructions = block.take_instructions();
-                let new_instructions = old_instructions
-                    .into_iter()
-                    .filter(|instr| {
-                        !matches!(instr, OpCode::ValueOf { .. })
-                            && !matches!(instr, OpCode::Guard { inner, .. } if matches!(inner.as_ref(), OpCode::ValueOf { .. }))
-                    })
-                    .collect();
-                block.put_instructions(new_instructions);
-
                 for instruction in block.get_instructions_mut() {
                     replacements.replace_instruction(instruction);
                 }

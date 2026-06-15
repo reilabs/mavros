@@ -5,29 +5,30 @@
 //! in defunctionalization wherever needed. In some cases, we can call the specialized version
 //! directly instead.
 
-use std::collections::{HashMap, HashSet};
-
 use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
 use tracing::{info, instrument};
 
-use crate::compiler::{
-    Field,
-    analysis::{
-        instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
-        symbolic_executor::{self, SymbolicExecutor},
-        types::TypeInfo,
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        BlockId, FunctionId, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
-            TypeExpr,
-            builder::{HLEmitter, HLFunctionBuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        Field,
+        analysis::{
+            instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
+            symbolic_executor::{self, SymbolicExecutor},
+            types::TypeInfo,
         },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            BlockId, FunctionId, ValueId,
+            hlssa::{
+                BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
+                HLSSA, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp,
+                SequenceTargetType, Type, TypeExpr,
+                builder::{HLEmitter, HLFunctionBuilder},
+            },
+        },
+        util::{spread_bits, unspread_bits},
     },
-    util::{spread_bits, unspread_bits},
 };
 
 fn bit_mask(width: usize) -> Option<u128> {
@@ -50,8 +51,27 @@ enum ConstVal {
     I(usize, u128),
     Field(Field),
     Array(Vec<ValueId>),
-    Tuple(Vec<ValueId>),
+    Blob(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
+}
+
+fn const_val_as_field(value: &ConstVal) -> Option<Field> {
+    match value {
+        ConstVal::U(_, v) | ConstVal::I(_, v) => Some(Field::from(*v)),
+        ConstVal::Field(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// The operands of an `a * b = c` constraint as field constants, if all three are known.
+fn r1c_consts(
+    ctx: &SpecializationState<'_>,
+    a: &Val,
+    b: &Val,
+    c: &Val,
+) -> Option<(Field, Field, Field)> {
+    let field_const = |v: &Val| ctx.const_vals.get(&v.0).and_then(const_val_as_field);
+    Some((field_const(a)?, field_const(b)?, field_const(c)?))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -201,12 +221,19 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *b,
             (BinaryArithOpKind::Add, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *self,
 
+            (BinaryArithOpKind::Add, _, _) => Self(ctx.add(self.0, b.0)),
+            (BinaryArithOpKind::Sub, _, _) => Self(ctx.sub(self.0, b.0)),
+            (BinaryArithOpKind::Mul, _, _) => Self(ctx.mul(self.0, b.0)),
+            (BinaryArithOpKind::Div, _, _) => Self(ctx.div(self.0, b.0)),
+
             (BinaryArithOpKind::Mod, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val % b_val;
                 let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
                 Self(res_v)
             }
+            (BinaryArithOpKind::Mod, _, _) => Self(ctx.modulo(self.0, b.0)),
+
             (BinaryArithOpKind::And, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val & b_val;
                 let res_v = ctx.u_const(s, res);
@@ -309,15 +336,22 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn assert_r1c(_a: &Self, _b: &Self, _c: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+        match r1c_consts(ctx, a, b, c) {
+            Some((a, b, c)) => assert_eq!(a * b, c),
+            None => ctx.emit(OpCode::AssertR1C {
+                a: a.0,
+                b: b.0,
+                c: c.0,
+            }),
+        }
     }
 
     fn array_get(&self, index: &Self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let index_const = ctx.const_vals.get(&index.0).cloned();
         match (a_const, index_const) {
-            (Some(ConstVal::Array(a)), Some(ConstVal::U(_, index))) => {
+            (Some(ConstVal::Array(a) | ConstVal::Blob(a)), Some(ConstVal::U(_, index))) => {
                 let res = a[index as usize];
                 Self(res)
             }
@@ -343,17 +377,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Self(res)
             }
             (a, i) => panic!("Not yet implemented {:?}", (a, i)),
-        }
-    }
-
-    fn tuple_get(&self, index: usize, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
-        let a_const = ctx.const_vals.get(&self.0);
-        match a_const {
-            Some(ConstVal::Tuple(a)) => {
-                let res = a[index];
-                Self(res)
-            }
-            _ => panic!("Not yet implemented {:?}", a_const),
         }
     }
 
@@ -453,6 +476,10 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                     Self(res_v)
                 }
                 CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => *self,
+                CastTarget::ValueOf | CastTarget::Map(_) => {
+                    let res = ctx.cast_to(cast_target.clone(), self.0);
+                    Self(res)
+                }
             },
             Some(ConstVal::Field(f)) => match cast_target {
                 CastTarget::U(s) | CastTarget::I(s) => {
@@ -466,20 +493,27 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 | CastTarget::Nop
                 | CastTarget::ArrayToSlice
                 | CastTarget::WitnessOf => *self,
+                CastTarget::ValueOf | CastTarget::Map(_) => {
+                    let res = ctx.cast_to(cast_target.clone(), self.0);
+                    Self(res)
+                }
             },
             None => {
-                let res = ctx.cast_to(*cast_target, self.0);
+                let res = ctx.cast_to(cast_target.clone(), self.0);
                 Self(res)
             }
             _ => {
-                let res = ctx.cast_to(*cast_target, self.0);
+                let res = ctx.cast_to(cast_target.clone(), self.0);
                 Self(res)
             }
         }
     }
 
-    fn constrain(_a: &Self, _b: &Self, _c: &Self, _ctx: &mut SpecializationState) {
-        todo!()
+    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+        match r1c_consts(ctx, a, b, c) {
+            Some((a, b, c)) => assert_eq!(a * b, c),
+            None => HLEmitter::constrain(ctx, a.0, b.0, c.0),
+        }
     }
 
     fn to_bits(
@@ -530,6 +564,50 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
+    fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut SpecializationState) -> Self {
+        fn constant_for(ctx: &SpecializationState<'_>, value: ValueId, typ: &Type) -> Constant {
+            match ctx
+                .const_vals
+                .get(&value)
+                .unwrap_or_else(|| panic!("Blob element v{} is not a constant", value.0))
+            {
+                ConstVal::U(bits, value) => Constant::U(*bits, *value),
+                ConstVal::I(bits, value) => Constant::I(*bits, *value),
+                ConstVal::Field(value) => Constant::Field(*value),
+                ConstVal::Blob(elements) => {
+                    let inner = typ.get_array_element();
+                    Constant::Blob(Blob::new(
+                        inner.clone(),
+                        elements
+                            .iter()
+                            .map(|element| constant_for(ctx, *element, &inner))
+                            .collect(),
+                    ))
+                }
+                other => panic!(
+                    "Blob element v{} is not a scalar/blob constant: {:?}",
+                    value.0, other
+                ),
+            }
+        }
+
+        let element_ids = elements.iter().map(|v| v.0).collect::<Vec<_>>();
+        let constants = element_ids
+            .iter()
+            .map(|element| constant_for(ctx, *element, &elem_type))
+            .collect();
+        let val = ctx.emit_constant(Constant::Blob(Blob::new(elem_type, constants)));
+        ctx.const_vals.insert(val, ConstVal::Blob(element_ids));
+        Self(val)
+    }
+
+    fn expect_blob(&self, ctx: &mut SpecializationState) -> Vec<Self> {
+        match ctx.const_vals.get(&self.0) {
+            Some(ConstVal::Blob(elements)) => elements.iter().copied().map(Self).collect(),
+            other => panic!("Expected blob, got {:?}", other),
+        }
+    }
+
     fn mk_array(
         a: Vec<Self>,
         ctx: &mut SpecializationState,
@@ -539,13 +617,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let a = a.into_iter().map(|v| v.0).collect::<Vec<_>>();
         let val = ctx.mk_seq(a.clone(), seq_type, elem_type.clone());
         ctx.const_vals.insert(val, ConstVal::Array(a));
-        Self(val)
-    }
-
-    fn mk_tuple(elems: Vec<Self>, ctx: &mut SpecializationState, elem_types: &[Type]) -> Self {
-        let a = elems.into_iter().map(|v| v.0).collect::<Vec<_>>();
-        let val = ctx.mk_tuple(a.clone(), elem_types.to_vec());
-        ctx.const_vals.insert(val, ConstVal::Tuple(a));
         Self(val)
     }
 
@@ -593,17 +664,30 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn write_witness(&self, _tp: Option<&Type>, _ctx: &mut SpecializationState) -> Self {
-        todo!()
+    fn write_witness(&self, tp: Option<&Type>, ctx: &mut SpecializationState) -> Self {
+        if ctx.const_vals.contains_key(&self.0) {
+            return *self;
+        }
+        match tp {
+            Some(_) => Self(HLEmitter::write_witness(ctx, self.0)),
+            None => {
+                ctx.emit(OpCode::WriteWitness {
+                    result: None,
+                    value: self.0,
+                    pinned: false,
+                });
+                *self
+            }
+        }
     }
 
-    fn fresh_witness(_result_type: &Type, _ctx: &mut SpecializationState) -> Self {
-        todo!()
-    }
-
-    fn value_of(&self, ctx: &mut SpecializationState) -> Self {
-        let res = HLEmitter::value_of(ctx, self.0);
-        Self(res)
+    fn fresh_witness(result_type: &Type, ctx: &mut SpecializationState) -> Self {
+        let result = ctx.fresh_value();
+        ctx.emit(OpCode::FreshWitness {
+            result,
+            result_type: result_type.clone(),
+        });
+        Self(result)
     }
 
     fn mem_op(&self, kind: RefCountOp, ctx: &mut SpecializationState) {
@@ -727,6 +811,22 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
 
+    fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
+        self.emit(OpCode::Lookup {
+            target: target.map(|v| v.0),
+            args: args.into_iter().map(|arg| arg.0).collect(),
+            flag: flag.0,
+        });
+    }
+
+    fn dlookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
+        self.emit(OpCode::DLookup {
+            target: target.map(|v| v.0),
+            args: args.into_iter().map(|arg| arg.0).collect(),
+            flag: flag.0,
+        });
+    }
+
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Val> {
         todo!("Todo opcode: {}", payload);
     }
@@ -755,7 +855,7 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
         // Build a mapping from old ValueIds to new ValueIds
         let orig_inputs: Vec<_> = inner.get_inputs().cloned().collect();
         let orig_results: Vec<_> = inner.get_results().cloned().collect();
-        let mut id_map: HashMap<ValueId, ValueId> = HashMap::new();
+        let mut id_map: HashMap<ValueId, ValueId> = HashMap::default();
         for (orig, new_val) in orig_inputs.iter().zip(inputs.iter()) {
             id_map.insert(*orig, new_val.0);
         }
@@ -791,8 +891,8 @@ impl Pass for Specializer {
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let summary = store.get::<Summary>();
-        let mut speculative_ids: HashSet<FunctionId> = HashSet::new();
-        let mut accepted_ids: HashSet<FunctionId> = HashSet::new();
+        let mut speculative_ids: HashSet<FunctionId> = HashSet::default();
+        let mut accepted_ids: HashSet<FunctionId> = HashSet::default();
 
         for (sig, summary) in summary.functions.iter() {
             if summary.specialization_total_savings > 0 {
@@ -873,7 +973,7 @@ impl Specializer {
         // (still `&mut ssa` here) so the constants for `Field`/`U`/`I` signature params are
         // interned eagerly.
         let mut call_params: Vec<Val> = vec![];
-        let mut const_vals: HashMap<ValueId, ConstVal> = HashMap::new();
+        let mut const_vals: HashMap<ValueId, ConstVal> = HashMap::default();
         for (param, sig) in original_param_types
             .iter()
             .zip(signature.get_params().iter())
@@ -885,6 +985,10 @@ impl Specializer {
                 }
                 ValueSignature::Array(_) => {
                     info!("TODO: Aborting specialization on an array value");
+                    return;
+                }
+                ValueSignature::Blob(_) => {
+                    info!("TODO: Aborting specialization on a blob value");
                     return;
                 }
                 ValueSignature::Unknown(_)
@@ -908,10 +1012,6 @@ impl Specializer {
                     let val = ssa.add_const(Constant::I(*bits_size, *value));
                     call_params.push(Val(val));
                     const_vals.insert(val, ConstVal::I(*bits_size, *value));
-                }
-                ValueSignature::Tuple(_) => {
-                    info!("TODO: Aborting specialization on a tuple value");
-                    return;
                 }
             }
         }
@@ -1005,10 +1105,19 @@ impl Specializer {
             for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
                 match psig {
                     ValueSignature::PointerTo(_) => {
-                        todo!();
+                        unreachable!(
+                            "ICE: pointer specializations are rejected before dispatcher generation"
+                        );
                     }
                     ValueSignature::Array(_) => {
-                        todo!();
+                        unreachable!(
+                            "ICE: array specializations are rejected before dispatcher generation"
+                        );
+                    }
+                    ValueSignature::Blob(_) => {
+                        unreachable!(
+                            "ICE: blob specializations are rejected before dispatcher generation"
+                        );
                     }
                     ValueSignature::Unknown(_)
                     | ValueSignature::UnknownSlice
@@ -1029,9 +1138,6 @@ impl Specializer {
                         let cst = entry.i_const(*bits_size, *value);
                         let is_eq = entry.eq(*pval, cst);
                         cond = entry.and(cond, is_eq);
-                    }
-                    ValueSignature::Tuple(_) => {
-                        todo!();
                     }
                 }
             }

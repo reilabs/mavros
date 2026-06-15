@@ -9,16 +9,17 @@
 //!    params, dispatches to the right call, and then merges into a single return.
 //! 3. Rewrites the original call site to use this dispatch function.
 
-use std::collections::{HashMap, HashSet};
-
-use crate::compiler::{
-    pass_manager::{AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
-    ssa::{
-        BlockId, FunctionId, Terminator, ValueId,
-        hlssa::{
-            CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLEmitter, HLSSABuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        pass_manager::{AnalysisStore, Pass},
+        passes::fix_double_jumps::ValueReplacements,
+        ssa::{
+            BlockId, FunctionId, Terminator, ValueId,
+            hlssa::{
+                CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
+                builder::{HLEmitter, HLSSABuilder},
+            },
         },
     },
 };
@@ -60,7 +61,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 2: For each dynamic call site, build a dispatch function
     // with exactly the reachable targets
-    let mut call_site_dispatch: HashMap<(FunctionId, ValueId), FunctionId> = HashMap::new();
+    let mut call_site_dispatch: HashMap<(FunctionId, ValueId), FunctionId> = HashMap::default();
     let mut dispatch_counter = 0u32;
 
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
@@ -117,7 +118,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     // FnPtr `ValueId` to its canonical U-typed `ValueId`, and remove the FnPtr entries. The
     // remap is applied globally in phase 3d below, after `Call::Dynamic` rewriting in 3b has
     // run on the still-original operands.
-    let fnptr_entries: Vec<(ValueId, FunctionId)> = ssa
+    let mut fnptr_entries: Vec<(ValueId, FunctionId)> = ssa
         .const_snapshot()
         .iter()
         .filter_map(|(vid, cv)| match cv.as_ref() {
@@ -125,6 +126,9 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             _ => None,
         })
         .collect();
+    // Sort so the canonical-constant interning order (and thus the assigned ValueIds) does not
+    // depend on the snapshot's iteration order.
+    fnptr_entries.sort_by_key(|(vid, _)| vid.0);
     let mut fnptr_remap = ValueReplacements::new();
     for (fnptr_vid, fn_id) in &fnptr_entries {
         let canon = ssa.add_const(Constant::U(32, fn_id.0 as u128));
@@ -244,7 +248,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 ///   - Static call return edges (callee returns → caller results)
 ///   - Dynamic call return edges (resolved target returns → caller results)
 fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
-    let mut reaching: ReachingFns = HashMap::new();
+    let mut reaching: ReachingFns = HashMap::default();
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
     // Check if a type contains Function anywhere (for alias-aware propagation)
@@ -255,13 +259,17 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                 contains_function(inner)
             }
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => false,
+            TypeExpr::Field
+            | TypeExpr::U(_)
+            | TypeExpr::I(_)
+            | TypeExpr::WitnessOf(_)
+            | TypeExpr::Blob(..) => false,
         }
     }
 
     // Pre-compute which values are Refs containing Functions (need bidirectional propagation)
     // These come from: Alloc results, block parameters with Ref<...Function...> type
-    let mut is_ref_with_fn: HashSet<(FunctionId, ValueId)> = HashSet::new();
+    let mut is_ref_with_fn: HashSet<(FunctionId, ValueId)> = HashSet::default();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         // Check Alloc instructions
@@ -306,7 +314,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     }
 
     // Pre-compute return values per function
-    let mut return_values: HashMap<FunctionId, Vec<ValueId>> = HashMap::new();
+    let mut return_values: HashMap<FunctionId, Vec<ValueId>> = HashMap::default();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
@@ -338,7 +346,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     }
 
     // Track fn_ptrs stored in global slots (keyed by global offset)
-    let mut global_slots: HashMap<usize, HashSet<FunctionId>> = HashMap::new();
+    let mut global_slots: HashMap<usize, HashSet<FunctionId>> = HashMap::default();
 
     // Fixpoint: propagate reaching sets through edges
     // Backward propagation only happens when source is_ref_with_fn (pointer aliasing)
@@ -465,7 +473,12 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
                             }
                         }
-                        OpCode::TupleProj { result, tuple, .. } => {
+                        OpCode::TupleProj { result, tuple, .. }
+                        | OpCode::TupleRefProj {
+                            result,
+                            tuple_ref: tuple,
+                            ..
+                        } => {
                             changed |= propagate(&mut reaching, (fid, *tuple), (fid, *result));
                             if is_ref_with_fn.contains(&(fid, *result)) {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *tuple));
@@ -633,7 +646,11 @@ fn replace_function_type(typ: &mut Type) {
                 replace_function_type(elem);
             }
         }
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {}
+        TypeExpr::Field
+        | TypeExpr::U(_)
+        | TypeExpr::I(_)
+        | TypeExpr::WitnessOf(_)
+        | TypeExpr::Blob(..) => {}
     }
 }
 
@@ -641,6 +658,7 @@ fn replace_function_type(typ: &mut Type) {
 fn replace_function_types_in_instruction(instr: &mut OpCode) {
     match instr {
         OpCode::MkSeq { elem_type, .. } => replace_function_type(elem_type),
+        OpCode::MkSeqOfBlob { element_type, .. } => replace_function_type(element_type),
         OpCode::MkRepeated { elem_type, .. } => replace_function_type(elem_type),
         OpCode::Alloc { elem_type, .. } => replace_function_type(elem_type),
         OpCode::MkTuple { element_types, .. } => {

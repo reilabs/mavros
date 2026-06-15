@@ -1,0 +1,6 @@
+[package]
+name = "unconstrained_cross_block"
+type = "bin"
+authors = [""]
+
+[dependencies]

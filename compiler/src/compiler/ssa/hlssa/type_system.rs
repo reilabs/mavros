@@ -5,7 +5,7 @@ use crate::compiler::ssa::SSAType;
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Field,
     U(usize),
@@ -16,9 +16,10 @@ pub enum TypeExpr {
     Ref(Box<Type>),
     Tuple(Vec<Type>),
     Function,
+    Blob(Box<Type>, usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     pub expr: TypeExpr,
 }
@@ -43,6 +44,7 @@ impl Display for Type {
                     .join(", ")
             ),
             TypeExpr::Function => write!(f, "Function"),
+            TypeExpr::Blob(inner, len) => write!(f, "Blob<{}; {}>", inner, len),
         }
     }
 }
@@ -82,6 +84,12 @@ impl Type {
         }
     }
 
+    pub fn blob(elem: Type, len: usize) -> Self {
+        Type {
+            expr: TypeExpr::Blob(Box::new(elem), len),
+        }
+    }
+
     pub fn array_of(self, size: usize) -> Self {
         Type {
             expr: TypeExpr::Array(Box::new(self), size),
@@ -116,6 +124,17 @@ impl Type {
         );
         Type {
             expr: TypeExpr::WitnessOf(Box::new(inner)),
+        }
+    }
+
+    /// Wrap `inner` in WitnessOf unless it already is witnessed — the idempotent variant of
+    /// [`Self::witness_of`], used where a level *inherits* witness-ness from its container and an
+    /// already-witnessed inner must not be wrapped twice (witness-of-witness collapses).
+    pub fn witness_of_collapsed(inner: Type) -> Self {
+        if inner.is_witness_of() {
+            inner
+        } else {
+            Type::witness_of(inner)
         }
     }
 
@@ -180,6 +199,10 @@ impl Type {
         matches!(self.expr, TypeExpr::Function)
     }
 
+    pub fn is_blob(&self) -> bool {
+        matches!(self.expr, TypeExpr::Blob(..))
+    }
+
     pub fn has_eq(&self) -> bool {
         matches!(self.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
     }
@@ -194,14 +217,15 @@ impl Type {
 
     // --- Accessors ---
 
+    /// Element type of an array/slice/blob. An element read out of a witnessed
+    /// container is itself witnessed; an already-witnessed element is never
+    /// wrapped twice (witness-of-witness collapses to witness).
     pub fn get_array_element(&self) -> Self {
         match &self.expr {
             TypeExpr::Array(inner, _) => *inner.clone(),
             TypeExpr::Slice(inner) => *inner.clone(),
-            TypeExpr::WitnessOf(inner) => {
-                let elem = inner.get_array_element();
-                Type::witness_of(elem)
-            }
+            TypeExpr::Blob(inner, _) => *inner.clone(),
+            TypeExpr::WitnessOf(inner) => Type::witness_of_collapsed(inner.get_array_element()),
             _ => panic!("Type is not an array: {}", self),
         }
     }
@@ -213,24 +237,27 @@ impl Type {
         }
     }
 
+    /// Member type of a tuple. A member of a witnessed tuple is itself
+    /// witnessed; an already-witnessed member is never wrapped twice.
     pub fn get_tuple_element(&self, index: usize) -> Self {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements[index].clone(),
             TypeExpr::WitnessOf(inner) => {
-                let elem = inner.get_tuple_element(index);
-                Type::witness_of(elem)
+                Type::witness_of_collapsed(inner.get_tuple_element(index))
             }
             _ => panic!("Type is not a tuple: {}", self),
         }
     }
 
+    /// All member types of a tuple, witnessed if the tuple itself is (see
+    /// [`Self::get_tuple_element`]).
     pub fn get_tuple_elements(&self) -> Vec<Self> {
         match &self.expr {
             TypeExpr::Tuple(elements) => elements.clone(),
             TypeExpr::WitnessOf(inner) => inner
                 .get_tuple_elements()
                 .into_iter()
-                .map(Type::witness_of)
+                .map(Type::witness_of_collapsed)
                 .collect(),
             _ => panic!("Type is not a tuple: {}", self),
         }
@@ -276,6 +303,19 @@ impl Type {
             TypeExpr::WitnessOf(inner) => *inner.clone(),
             _ => self.clone(),
         }
+    }
+
+    /// Strip every top-level WitnessOf wrapper, by reference — the borrow-returning sibling of
+    /// [`Self::strip_witness`] for callers that only inspect the underlying structure.
+    ///
+    /// With the no-nested-wrapper invariant enforced by [`Self::witness_of`] the loop runs at
+    /// most once, but stacked wrappers are tolerated anyway.
+    pub fn peel_witness(&self) -> &Type {
+        let mut t = self;
+        while let TypeExpr::WitnessOf(inner) = &t.expr {
+            t = inner;
+        }
+        t
     }
 
     /// Recursively strip all WitnessOf wrappers at every level.
@@ -329,6 +369,7 @@ impl Type {
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => x == y, // invariant
             (TypeExpr::Function, TypeExpr::Function) => true,
+            (TypeExpr::Blob(x, n), TypeExpr::Blob(y, m)) => n == m && x == y,
             _ => false,
         }
     }
@@ -388,6 +429,11 @@ impl Type {
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => Type::join(x, y).ref_of(),
             (TypeExpr::Function, TypeExpr::Function) => Type::function(),
+            (TypeExpr::Blob(x, n), TypeExpr::Blob(y, m)) => {
+                assert_eq!(n, m, "Cannot join Blob({}) and Blob({})", n, m);
+                assert_eq!(x, y, "Cannot join blobs with different element types");
+                Type::blob(*x.clone(), *n)
+            }
             _ => panic!("Cannot join types {} and {}", a, b),
         }
     }
@@ -435,6 +481,7 @@ impl Type {
             TypeExpr::U(_) => false,
             TypeExpr::I(_) => false,
             TypeExpr::Function => false,
+            TypeExpr::Blob(inner, _) => inner.contains_ptrs(),
             TypeExpr::Tuple(elements) => elements.iter().any(|e| e.contains_ptrs()),
         }
     }
@@ -447,6 +494,8 @@ impl Type {
                 inner_types.iter().map(|t| t.calculate_type_size()).sum()
             }
             TypeExpr::Function => 1,
+            // Blobs are by-value sequences, not pointers to heap data.
+            TypeExpr::Blob(inner, n) => inner.calculate_type_size() * n,
             TypeExpr::U(_) => 1,
             TypeExpr::I(_) => 1,
             TypeExpr::WitnessOf(_) => 1, // pointer-sized (witness tape reference)
@@ -645,6 +694,37 @@ mod tests {
     fn witness_of_double_wrap_panics() {
         let wf = Type::witness_of(Type::field());
         let _wwf = Type::witness_of(wf);
+    }
+
+    // --- element access through a witnessed container ---
+
+    #[test]
+    fn get_array_element_of_witnessed_container_wraps_once() {
+        let t = Type::witness_of(Type::field().array_of(3));
+        assert_eq!(t.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    #[test]
+    fn get_array_element_of_witnessed_container_with_witness_elems_no_double_wrap() {
+        let t = Type::witness_of(Type::witness_of(Type::field()).array_of(3));
+        assert_eq!(t.get_array_element(), Type::witness_of(Type::field()));
+    }
+
+    #[test]
+    fn get_tuple_element_of_witnessed_tuple_wraps_once() {
+        let t = Type::witness_of(Type::tuple_of(vec![
+            Type::witness_of(Type::field()),
+            Type::field(),
+        ]));
+        assert_eq!(t.get_tuple_element(0), Type::witness_of(Type::field()));
+        assert_eq!(t.get_tuple_element(1), Type::witness_of(Type::field()));
+        assert_eq!(
+            t.get_tuple_elements(),
+            vec![
+                Type::witness_of(Type::field()),
+                Type::witness_of(Type::field())
+            ]
+        );
     }
 
     // --- join properties ---

@@ -1,24 +1,26 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
-use std::collections::HashMap;
-
 use num_traits::{One, Zero};
 
-use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        types::{FunctionTypeInfo, Types, const_value_type},
-        value_definitions::{FunctionValueDefinitions, ValueDefinition},
-    },
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
-    ssa::{
-        FunctionId, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
-            builder::{HLFunctionBuilder, HLSSABuilder},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            types::{FunctionTypeInfo, Types, const_value_type},
+            value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        ssa::{
+            FunctionId, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
+                builder::{HLFunctionBuilder, HLSSABuilder},
+            },
+        },
+        util::bit_mask,
     },
 };
 
@@ -113,7 +115,7 @@ impl Simplifier {
         let mut aliases = ValueReplacements::new();
         let mut changed = false;
 
-        let mut new_blocks = HashMap::new();
+        let mut new_blocks = HashMap::default();
         for (bid, mut block) in fb.function.take_blocks().into_iter() {
             let mut new_instructions = Vec::new();
             for instruction in block.take_instructions().into_iter() {
@@ -144,9 +146,9 @@ impl Simplifier {
         }
         fb.function.put_blocks(new_blocks);
 
-        // Apply aliases globally. Block iteration order is non-deterministic, so a block processed
-        // before its predecessor sees stale operands; sweep here to fix references the in-walk
-        // substitution missed.
+        // Apply aliases globally. Block iteration order is arbitrary (deterministic, but not a
+        // CFG order), so a block processed before its predecessor sees stale operands; sweep here
+        // to fix references the in-walk substitution missed.
         aliases.apply_to_function(fb.function, ReplaceScope::Inputs);
 
         changed
@@ -372,6 +374,25 @@ impl Simplifier {
                         });
                     }
                 }
+                // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
+                // value IS what ValueOf strips back to). Sound by witgen
+                // semantics.
+                if matches!(target, CastTarget::ValueOf)
+                    && let Some(ValueDefinition::Instruction(
+                        _,
+                        _,
+                        OpCode::WriteWitness {
+                            result: _,
+                            value: hint,
+                            pinned: _,
+                        },
+                    )) = defs.get_definition(*value)
+                {
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *hint,
+                    });
+                }
                 None
             }
             OpCode::Not { result, value } => {
@@ -426,36 +447,6 @@ impl Simplifier {
                 lhs,
                 rhs,
             } if *lhs == *rhs => materialize_one(types, *result, fb),
-            OpCode::ValueOf { result, value } => {
-                // ValueOf(ValueOf(x)) → ValueOf(x)
-                if let Some(ValueDefinition::Instruction(_, _, OpCode::ValueOf { .. })) =
-                    defs.get_definition(*value)
-                {
-                    return Some(Rewrite::Alias {
-                        result: *result,
-                        target: *value,
-                    });
-                }
-                // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
-                // value IS what ValueOf strips back to). Sound by witgen
-                // semantics.
-                if let Some(ValueDefinition::Instruction(
-                    _,
-                    _,
-                    OpCode::WriteWitness {
-                        result: _,
-                        value: hint,
-                        pinned: _,
-                    },
-                )) = defs.get_definition(*value)
-                {
-                    return Some(Rewrite::Alias {
-                        result: *result,
-                        target: *hint,
-                    });
-                }
-                None
-            }
             OpCode::WriteWitness {
                 result: Some(result),
                 value,
@@ -467,9 +458,10 @@ impl Simplifier {
                 if let Some(ValueDefinition::Instruction(
                     _,
                     _,
-                    OpCode::ValueOf {
+                    OpCode::Cast {
                         result: _,
                         value: inner,
+                        target: CastTarget::ValueOf,
                     },
                 )) = defs.get_definition(*value)
                 {
@@ -556,16 +548,6 @@ fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
         Some(Constant::U(bits, value) | Constant::I(bits, value)) => *value == bit_mask(*bits),
         _ => false,
-    }
-}
-
-fn bit_mask(bits: usize) -> u128 {
-    if bits == 0 {
-        0
-    } else if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
     }
 }
 

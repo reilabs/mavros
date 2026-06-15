@@ -5,26 +5,33 @@
 //! execution combined with an instrumenter for the circuit cost, and gives the compiler an idea of
 //! how much a function could be shrunk through specialization on concrete inputs.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
 use itertools::Itertools;
 use tracing::instrument;
 
-use crate::compiler::{
-    Field,
-    analysis::{
-        symbolic_executor::{self, SymbolicExecutor},
-        types::TypeInfo,
-    },
-    ssa::{
-        FunctionId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
-            Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        Field,
+        analysis::{
+            symbolic_executor::{self, SymbolicExecutor},
+            types::TypeInfo,
+        },
+        ssa::{
+            FunctionId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget,
+                MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SequenceTargetType, SliceOpDir,
+                Type, TypeExpr,
+            },
+        },
+        util::{
+            bit_mask, decode_signed, encode_signed, ice_non_elided_tuple, spread_bits,
+            unspread_bits,
         },
     },
-    util::{spread_bits, unspread_bits},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,11 +59,11 @@ pub enum ValueSignature {
     I { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
+    Blob(Vec<ValueSignature>),
     PointerTo(Box<ValueSignature>),
     Unknown(ScalarKind),
     UnknownSlice,
     WitnessOf(Box<ValueSignature>),
-    Tuple(Vec<ValueSignature>),
 }
 
 impl ValueSignature {
@@ -66,15 +73,13 @@ impl ValueSignature {
             ValueSignature::I { bits_size, value } => Value::I(*bits_size, *value),
             ValueSignature::Field(field) => Value::Field(*field),
             ValueSignature::Array(vals) => {
-                Value::Array(vals.iter().map(|v| v.to_value()).collect())
+                Value::array(vals.iter().map(|v| v.to_value()).collect())
             }
+            ValueSignature::Blob(vals) => Value::Blob(vals.iter().map(|v| v.to_value()).collect()),
             ValueSignature::PointerTo(val) => Value::Pointer(Rc::new(RefCell::new(val.to_value()))),
             ValueSignature::Unknown(kind) => Value::Unknown(*kind),
             ValueSignature::UnknownSlice => Value::UnknownSlice,
             ValueSignature::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.to_value())),
-            ValueSignature::Tuple(elements) => {
-                Value::Tuple(elements.iter().map(|e| e.to_value()).collect())
-            }
         }
     }
 
@@ -92,18 +97,18 @@ impl ValueSignature {
                     format!("[...]")
                 }
             }
+            ValueSignature::Blob(items) => {
+                if full {
+                    let items = items.iter().map(|v| v.pretty_print(full)).join(", ");
+                    format!("blob[{items}]")
+                } else {
+                    "blob[...]".to_string()
+                }
+            }
             ValueSignature::PointerTo(p) => format!("&({})", p.as_ref().pretty_print(full)),
             ValueSignature::Unknown(_) => "?".to_string(),
             ValueSignature::UnknownSlice => "?slice".to_string(),
             ValueSignature::WitnessOf(inner) => format!("W({})", inner.pretty_print(full)),
-            ValueSignature::Tuple(elements) => {
-                if full {
-                    let elements = elements.iter().map(|e| e.pretty_print(full)).join(", ");
-                    format!("({})", elements)
-                } else {
-                    format!("(...)")
-                }
-            }
         }
     }
 }
@@ -113,45 +118,36 @@ pub enum Value {
     U(usize, u128),
     I(usize, u128),
     Field(Field),
-    Array(Vec<Value>),
+    Array(Rc<Vec<Value>>),
+    Blob(Vec<Value>),
     Pointer(Rc<RefCell<Value>>),
     Unknown(ScalarKind),
     UnknownSlice,
     WitnessOf(Box<Value>),
-    Tuple(Vec<Value>),
 }
 
 impl Value {
-    fn bit_mask(bits: usize) -> u128 {
-        assert!(
-            (1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&bits),
-            "invalid integer width for bit mask: {bits}"
-        );
-        if bits == MAX_SUPPORTED_UNSIGNED_BITS {
-            u128::MAX
-        } else {
-            (1u128 << bits) - 1
+    fn array(values: Vec<Value>) -> Self {
+        Value::Array(Rc::new(values))
+    }
+
+    fn as_field_const(&self) -> Option<Field> {
+        match self {
+            Value::U(_, v) | Value::I(_, v) => Some(Field::from(*v)),
+            Value::Field(f) => Some(*f),
+            Value::WitnessOf(inner) => inner.as_field_const(),
+            _ => None,
         }
     }
 
     /// Interpret a u128 two's-complement value as signed i128 for `bits` width.
     fn to_signed(val: u128, bits: usize) -> i128 {
-        let mask = Self::bit_mask(bits);
-        let val = val & mask;
-        if bits == 128 {
-            return val as i128;
-        }
-        let sign_bit = 1u128 << (bits - 1);
-        if val & sign_bit != 0 {
-            (val | !mask) as i128
-        } else {
-            val as i128
-        }
+        decode_signed(bits, val & bit_mask(bits))
     }
 
     /// Store a signed result back as u128 masked to `bits` width.
     fn from_signed(val: i128, bits: usize) -> u128 {
-        (val as u128) & Self::bit_mask(bits)
+        encode_signed(bits, val)
     }
 
     fn unwrap_witness(&self) -> &Value {
@@ -171,37 +167,35 @@ impl Value {
             }
             TypeExpr::Array(elem, n) => {
                 let elem_unknown = Value::unknown_from_type(elem);
-                Value::Array(vec![elem_unknown; *n])
+                Value::array(vec![elem_unknown; *n])
             }
             TypeExpr::Slice(_) => Value::UnknownSlice,
-            TypeExpr::Tuple(elems) => {
-                Value::Tuple(elems.iter().map(Value::unknown_from_type).collect())
-            }
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(inner) => {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
             TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
+            TypeExpr::Blob(elem, n) => {
+                let elem_unknown = Value::unknown_from_type(elem);
+                Value::Blob(vec![elem_unknown; *n])
+            }
         }
     }
 
-    fn ult_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn ult_op(&self, b: &Value) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::I(_, a), Value::I(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                instrumenter.record_constraints(1);
-                Value::WitnessOf(Box::new(
-                    self.unwrap_witness()
-                        .ult_op(b.unwrap_witness(), instrumenter),
-                ))
+                Value::WitnessOf(Box::new(self.unwrap_witness().ult_op(b.unwrap_witness())))
             }
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
-    fn slt_op(&self, b: &Value, bits: usize, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn slt_op(&self, b: &Value, bits: usize) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) => {
                 let (sa, sb) = (Self::to_signed(*a, bits), Self::to_signed(*b, bits));
@@ -212,31 +206,22 @@ impl Value {
                 Value::U(1, if sa < sb { 1 } else { 0 })
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                instrumenter.record_constraints(1);
-                Value::WitnessOf(Box::new(self.unwrap_witness().slt_op(
-                    b.unwrap_witness(),
-                    bits,
-                    instrumenter,
-                )))
-            }
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
+                self.unwrap_witness().slt_op(b.unwrap_witness(), bits),
+            )),
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
-    fn eq_op(&self, b: &Value, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn eq_op(&self, b: &Value) -> Value {
         match (self, b) {
             (Value::U(_, a), Value::U(_, b)) | (Value::I(_, a), Value::I(_, b)) => {
                 Value::U(1, if a == b { 1 } else { 0 })
             }
             (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
             (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                instrumenter.record_constraints(1);
-                Value::WitnessOf(Box::new(
-                    self.unwrap_witness()
-                        .eq_op(b.unwrap_witness(), instrumenter),
-                ))
+                Value::WitnessOf(Box::new(self.unwrap_witness().eq_op(b.unwrap_witness())))
             }
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
@@ -251,9 +236,7 @@ impl Value {
     ) -> Value {
         match binary_arith_op_kind {
             BinaryArithOpKind::Add => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_add(*b) & Self::bit_mask(*s))
-                }
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_add(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -273,9 +256,7 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             BinaryArithOpKind::Sub => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_sub(*b) & Self::bit_mask(*s))
-                }
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_sub(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -298,9 +279,7 @@ impl Value {
                 (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
                 (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
                 (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
-                (Value::U(s, a), Value::U(_, b)) => {
-                    Value::U(*s, a.wrapping_mul(*b) & Self::bit_mask(*s))
-                }
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_mul(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
                     Self::from_signed(
@@ -309,21 +288,19 @@ impl Value {
                     ),
                 ),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
-                (Value::WitnessOf(a), Value::WitnessOf(b)) => match (a.as_ref(), b.as_ref()) {
-                    (Value::Unknown(_), Value::Unknown(_)) => {
-                        instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(a.binary_arith_op(
-                            b,
-                            binary_arith_op_kind,
-                            instrumenter,
-                        )))
+                (Value::WitnessOf(a), Value::WitnessOf(b)) => {
+                    if matches!(
+                        (a.as_ref(), b.as_ref()),
+                        (Value::Unknown(_), Value::Unknown(_))
+                    ) {
+                        instrumenter.record_high_degree_mul();
                     }
-                    _ => Value::WitnessOf(Box::new(a.binary_arith_op(
+                    Value::WitnessOf(Box::new(a.binary_arith_op(
                         b,
                         binary_arith_op_kind,
                         instrumenter,
-                    ))),
-                },
+                    )))
+                }
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -344,21 +321,10 @@ impl Value {
                     )
                 }
                 (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
-                (_, Value::WitnessOf(b)) => match b.as_ref() {
-                    Value::Unknown(_) => {
-                        instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                            b,
-                            binary_arith_op_kind,
-                            instrumenter,
-                        )))
-                    }
-                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b,
-                        binary_arith_op_kind,
-                        instrumenter,
-                    ))),
-                },
+                (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
+                    self.unwrap_witness()
+                        .binary_arith_op(b, binary_arith_op_kind, instrumenter),
+                )),
                 (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
                     b,
                     binary_arith_op_kind,
@@ -376,21 +342,10 @@ impl Value {
                         Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s),
                     )
                 }
-                (_, Value::WitnessOf(b)) => match b.as_ref() {
-                    Value::Unknown(_) => {
-                        instrumenter.record_constraints(1);
-                        Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                            b,
-                            binary_arith_op_kind,
-                            instrumenter,
-                        )))
-                    }
-                    _ => Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b,
-                        binary_arith_op_kind,
-                        instrumenter,
-                    ))),
-                },
+                (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
+                    self.unwrap_witness()
+                        .binary_arith_op(b, binary_arith_op_kind, instrumenter),
+                )),
                 (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
                     b,
                     binary_arith_op_kind,
@@ -401,7 +356,7 @@ impl Value {
             },
             BinaryArithOpKind::And => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a & b) & Self::bit_mask(*s)),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a & b) & bit_mask(*s)),
                 (Value::Field(_), Value::Field(_)) => todo!(),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -415,7 +370,7 @@ impl Value {
             },
             BinaryArithOpKind::Or => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a | b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a | b) & Self::bit_mask(*s)),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a | b) & bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -428,7 +383,7 @@ impl Value {
             },
             BinaryArithOpKind::Xor => match (self, b) {
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a ^ b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a ^ b) & Self::bit_mask(*s)),
+                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a ^ b) & bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -445,7 +400,7 @@ impl Value {
                     if *b as usize >= *s {
                         0
                     } else {
-                        (a << b) & Self::bit_mask(*s)
+                        (a << b) & bit_mask(*s)
                     },
                 ),
                 (Value::I(s, a), Value::I(_, b)) => {
@@ -455,7 +410,7 @@ impl Value {
                         if shift as usize >= *s {
                             0
                         } else {
-                            (a << shift) & Self::bit_mask(*s)
+                            (a << shift) & bit_mask(*s)
                         },
                     )
                 }
@@ -505,17 +460,17 @@ impl Value {
             Value::Unknown(_) | Value::UnknownSlice => {}
             Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
+                for val in Rc::make_mut(vals).iter_mut() {
+                    val.blind();
+                }
+            }
+            Value::Blob(vals) => {
                 for val in vals {
                     val.blind();
                 }
             }
             Value::Pointer(val) => {
                 val.borrow_mut().blind();
-            }
-            Value::Tuple(vals) => {
-                for val in vals {
-                    val.blind();
-                }
             }
         }
     }
@@ -530,17 +485,17 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Array(vals) => {
+                for val in Rc::make_mut(vals).iter_mut() {
+                    val.forget_concrete();
+                }
+            }
+            Value::Blob(vals) => {
                 for val in vals {
                     val.forget_concrete();
                 }
             }
             Value::Pointer(val) => {
                 val.borrow_mut().forget_concrete();
-            }
-            Value::Tuple(vals) => {
-                for val in vals {
-                    val.forget_concrete();
-                }
             }
         }
     }
@@ -564,82 +519,39 @@ impl Value {
             Value::Array(vals) => {
                 ValueSignature::Array(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
             }
+            Value::Blob(vals) => {
+                ValueSignature::Blob(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
+            }
             Value::Pointer(val) => {
                 ValueSignature::PointerTo(Box::new(val.borrow().make_unspecialized_sig()))
             }
-            Value::Tuple(vals) => {
-                ValueSignature::Tuple(vals.iter().map(|v| v.make_unspecialized_sig()).collect())
-            }
         }
     }
 
-    fn assert_bool(&self, instrumenter: &mut dyn OpInstrumenter) {
-        if self.is_witness() {
-            instrumenter.record_constraints(1);
-        }
-    }
-
-    fn assert_cmp(
-        _kind: CmpKind,
-        a: &Self,
-        b: &Self,
-        _lhs_type: &Type,
-        instrumenter: &mut dyn OpInstrumenter,
-    ) {
-        if a.is_witness() || b.is_witness() {
-            instrumenter.record_constraints(1);
-        }
-    }
-
-    fn rangecheck(&self, max_bits: usize, instrumenter: &mut dyn OpInstrumenter) {
-        if self.is_witness() {
-            instrumenter.record_rangechecks(max_bits as u8, 1);
-        }
-    }
-
-    fn is_witness(&self) -> bool {
-        match self {
-            Value::Unknown(_) => false,
-            Value::WitnessOf(_) => true,
-            _ => false,
-        }
-    }
-
-    fn array_get(&self, index: &Value, tp: &Type, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn array_get(&self, index: &Value, tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         if matches!(self, Value::Unknown(_) | Value::UnknownSlice) {
             return Value::unknown_from_type(tp);
         }
 
-        let arr = self.unwrap_witness();
-
-        match (arr, index) {
-            (Value::Array(vals), Value::U(_, index)) => vals[*index as usize].clone(),
-            (Value::Array(vals), Value::WitnessOf(inner)) => match inner.as_ref() {
-                Value::U(_, index) => vals[*index as usize].clone(),
-                _ => {
-                    instrumenter.record_lookups(vals.len(), 1, 1);
-                    Value::unknown_from_type(tp)
-                }
-            },
-            (Value::Array(vals), Value::Unknown(_)) => {
-                instrumenter.record_lookups(vals.len(), 1, 1);
-                Value::unknown_from_type(tp)
-            }
-            (Value::Unknown(_) | Value::UnknownSlice, _) => Value::unknown_from_type(tp),
+        let values: &[Value] = match self.unwrap_witness() {
+            Value::Array(values) => values,
+            Value::Blob(values) => values,
+            Value::Unknown(_) | Value::UnknownSlice => return Value::unknown_from_type(tp),
             _ => panic!(
                 "Cannot get array element from {:?} with index {:?}",
                 self, index
             ),
-        }
-    }
+        };
 
-    fn tuple_get(&self, index: usize) -> Value {
-        match self {
-            Value::Unknown(_) => Value::Unknown(ScalarKind::Field),
-            Value::WitnessOf(inner) => inner.tuple_get(index),
-            Value::Tuple(vals) => vals[index].clone(),
+        match index {
+            Value::U(_, i) => values[*i as usize].clone(),
+            Value::WitnessOf(inner) => match inner.as_ref() {
+                Value::U(_, i) => values[*i as usize].clone(),
+                _ => Value::unknown_from_type(tp),
+            },
+            Value::Unknown(_) => Value::unknown_from_type(tp),
             _ => panic!(
-                "Cannot get tuple element from {:?} with index {:?}",
+                "Cannot get array element from {:?} with index {:?}",
                 self, index
             ),
         }
@@ -653,24 +565,24 @@ impl Value {
     ) -> Value {
         match (self, index, value) {
             (Value::Array(vals), Value::U(_, index), value) => {
-                let mut new_vals = vals.clone();
+                let mut new_vals = vals.as_ref().clone();
                 new_vals[*index as usize] = value.clone();
-                Value::Array(new_vals)
+                Value::array(new_vals)
             }
             (Value::Array(vals), Value::WitnessOf(inner), value) => match inner.as_ref() {
                 Value::U(_, index) => {
-                    let mut new_vals = vals.clone();
+                    let mut new_vals = vals.as_ref().clone();
                     new_vals[*index as usize] = value.clone();
-                    Value::Array(new_vals)
+                    Value::array(new_vals)
                 }
                 _ => {
                     let new_vals = vals.iter().map(|_| value.clone()).collect();
-                    Value::Array(new_vals)
+                    Value::array(new_vals)
                 }
             },
             (Value::Array(vals), _, value) => {
                 let new_vals = vals.iter().map(|_| value.clone()).collect();
-                Value::Array(new_vals)
+                Value::array(new_vals)
             }
             (Value::UnknownSlice, _, _) => Value::UnknownSlice,
             _ => panic!(
@@ -691,8 +603,8 @@ impl Value {
             Value::WitnessOf(inner) => {
                 Value::WitnessOf(Box::new(inner.bit_range_op(offset, width, _instrumenter)))
             }
-            Value::U(bits, v) => Value::U(*bits, (v >> offset) & Self::bit_mask(width)),
-            Value::I(bits, v) => Value::I(*bits, (v >> offset) & Self::bit_mask(width)),
+            Value::U(bits, v) => Value::U(*bits, (v >> offset) & bit_mask(width)),
+            Value::I(bits, v) => Value::I(*bits, (v >> offset) & bit_mask(width)),
             Value::Field(f) => {
                 let bits = f
                     .into_bigint()
@@ -728,7 +640,7 @@ impl Value {
         }
     }
 
-    fn spread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> Value {
+    fn spread_op(&self) -> Value {
         match self {
             Value::U(bits, v) => {
                 assert!(
@@ -747,12 +659,7 @@ impl Value {
                 Value::I(bits * 2, spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
-            Value::WitnessOf(inner) => {
-                if matches!(inner.as_ref(), Value::Unknown(_)) {
-                    instrumenter.record_lookups(256, 1, 1);
-                }
-                Value::WitnessOf(Box::new(inner.spread_op(instrumenter)))
-            }
+            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op())),
             Value::Unknown(ScalarKind::U(bits)) => {
                 assert!(
                     *bits <= 64,
@@ -774,7 +681,7 @@ impl Value {
         }
     }
 
-    fn unspread_op(&self, instrumenter: &mut dyn OpInstrumenter) -> (Value, Value) {
+    fn unspread_op(&self) -> (Value, Value) {
         match self {
             Value::U(bits, v) => {
                 assert!(
@@ -798,10 +705,7 @@ impl Value {
             }
             Value::Field(_) => panic!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
-                if matches!(inner.as_ref(), Value::Unknown(_)) {
-                    instrumenter.record_constraints(1);
-                }
-                let (odd, even) = inner.unspread_op(instrumenter);
+                let (odd, even) = inner.unspread_op();
                 (
                     Value::WitnessOf(Box::new(odd)),
                     Value::WitnessOf(Box::new(even)),
@@ -845,6 +749,14 @@ impl Value {
     ) -> Value {
         match (self, cast_target) {
             (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
+            (_, CastTarget::ValueOf) => self.unwrap_witness().clone(),
+            (Value::Array(values), CastTarget::Map(inner)) => Value::array(
+                values
+                    .iter()
+                    .map(|v| v.cast_op(inner, _instrumenter))
+                    .collect(),
+            ),
+            (Value::UnknownSlice, CastTarget::Map(_)) => Value::UnknownSlice,
             (Value::Unknown(_), CastTarget::U(s)) => Value::Unknown(ScalarKind::U(*s)),
             (Value::Unknown(_), CastTarget::I(s)) => Value::Unknown(ScalarKind::I(*s)),
             (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
@@ -854,10 +766,10 @@ impl Value {
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
             }
-            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & Self::bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & Self::bit_mask(*s2)),
+            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
+            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
+            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
+            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
             (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
             (Value::I(s, v), CastTarget::Field) => {
                 Value::Field(Field::from(Self::to_signed(*v, *s) as u64))
@@ -867,14 +779,14 @@ impl Value {
                 let bigint = f.into_bigint();
                 Value::U(
                     *s,
-                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s),
+                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
                 )
             }
             (Value::Field(f), CastTarget::I(s)) => {
                 let bigint = f.into_bigint();
                 Value::I(
                     *s,
-                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & Self::bit_mask(*s),
+                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
                 )
             }
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
@@ -883,8 +795,9 @@ impl Value {
     }
 
     fn constrain(a: &Value, b: &Value, c: &Value, instrumenter: &mut dyn OpInstrumenter) {
-        if a.is_witness() || b.is_witness() || c.is_witness() {
-            instrumenter.record_constraints(1);
+        match (a.as_field_const(), b.as_field_const(), c.as_field_const()) {
+            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
+            _ => instrumenter.record_constrain(),
         }
     }
 
@@ -894,8 +807,9 @@ impl Value {
             Value::WitnessOf(inner) => {
                 let result = inner.to_bits(endianness, size);
                 match result {
-                    Value::Array(bits) => Value::Array(
-                        bits.into_iter()
+                    Value::Array(bits) => Value::array(
+                        bits.iter()
+                            .cloned()
                             .map(|b| Value::WitnessOf(Box::new(b)))
                             .collect(),
                     ),
@@ -912,7 +826,7 @@ impl Value {
                 if *endianness == Endianness::Big {
                     r.reverse();
                 }
-                Value::Array(r)
+                Value::array(r)
             }
             Value::Field(f) => {
                 let bigint = f.into_bigint();
@@ -921,7 +835,7 @@ impl Value {
                 if *endianness == Endianness::Big {
                     bits.reverse();
                 }
-                Value::Array(bits)
+                Value::array(bits)
             }
             _ => panic!("Cannot convert {:?} to bits", self),
         }
@@ -932,26 +846,22 @@ impl Value {
         radix: &Radix<Value>,
         _endianness: &crate::compiler::ssa::hlssa::Endianness,
         size: usize,
-        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::WitnessOf(inner) => {
-                let result = inner.to_radix(radix, _endianness, size, instrumenter);
+                let result = inner.to_radix(radix, _endianness, size);
                 match result {
-                    Value::Array(digits) => Value::Array(
+                    Value::Array(digits) => Value::array(
                         digits
-                            .into_iter()
+                            .iter()
+                            .cloned()
                             .map(|d| Value::WitnessOf(Box::new(d)))
                             .collect(),
                     ),
                     _ => unreachable!(),
                 }
             }
-            Value::Unknown(_) => {
-                instrumenter.record_rangechecks(8, size);
-                instrumenter.record_constraints(1);
-                Value::Array(vec![Value::Unknown(ScalarKind::U(8)); size])
-            }
+            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(8)); size]),
             Value::Field(f) => {
                 let radix_val = match radix {
                     Radix::Dyn(Value::U(_, r)) => *r,
@@ -974,7 +884,7 @@ impl Value {
                         carry = cur % radix_val;
                     }
                 }
-                Value::Array(digits)
+                Value::array(digits)
             }
             _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
         }
@@ -984,7 +894,7 @@ impl Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.not_op(_instrumenter))),
-            Value::U(s, v) => Value::U(*s, !v & Self::bit_mask(*s)),
+            Value::U(s, v) => Value::U(*s, !v & bit_mask(*s)),
             _ => panic!("Cannot perform not operation on {:?}", self),
         }
     }
@@ -1005,18 +915,14 @@ impl Value {
         }
     }
 
-    fn assert_r1c(a: &Value, b: &Value, c: &Value, get_unspecialized: &mut dyn OpInstrumenter) {
-        if a.is_witness() || b.is_witness() || c.is_witness() {
-            get_unspecialized.record_constraints(1);
-        }
-    }
+    fn assert_r1c(_a: &Value, _b: &Value, _c: &Value, _instrumenter: &mut dyn OpInstrumenter) {}
 
     fn select(
         &self,
         if_true: &Value,
         if_false: &Value,
         _tp: &Type,
-        instrumenter: &mut dyn OpInstrumenter,
+        _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::U(_, 0) => if_false.clone(),
@@ -1025,9 +931,6 @@ impl Value {
                 Value::U(_, 0) => if_false.clone(),
                 Value::U(_, _) => if_true.clone(),
                 _ => {
-                    if self.is_witness() && (if_true.is_witness() || if_false.is_witness()) {
-                        instrumenter.record_constraints(1);
-                    }
                     let mut result = if_true.clone();
                     result.forget_concrete();
                     result
@@ -1061,16 +964,10 @@ impl SpecSplitValue {
 }
 
 impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
-    fn ult(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        let unspecialized = self
-            .unspecialized
-            .ult_op(&b.unspecialized, instrumenter.get_unspecialized());
-        let specialized = self
-            .specialized
-            .ult_op(&b.specialized, instrumenter.get_specialized());
+    fn ult(&self, b: &SpecSplitValue, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized,
-            specialized,
+            unspecialized: self.unspecialized.ult_op(&b.unspecialized),
+            specialized: self.specialized.ult_op(&b.specialized),
         }
     }
 
@@ -1078,30 +975,18 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         &self,
         b: &SpecSplitValue,
         bits: usize,
-        instrumenter: &mut CostAnalysis,
+        _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
-        let unspecialized =
-            self.unspecialized
-                .slt_op(&b.unspecialized, bits, instrumenter.get_unspecialized());
-        let specialized =
-            self.specialized
-                .slt_op(&b.specialized, bits, instrumenter.get_specialized());
         SpecSplitValue {
-            unspecialized,
-            specialized,
+            unspecialized: self.unspecialized.slt_op(&b.unspecialized, bits),
+            specialized: self.specialized.slt_op(&b.specialized, bits),
         }
     }
 
-    fn eq(&self, b: &SpecSplitValue, instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        let unspecialized = self
-            .unspecialized
-            .eq_op(&b.unspecialized, instrumenter.get_unspecialized());
-        let specialized = self
-            .specialized
-            .eq_op(&b.specialized, instrumenter.get_specialized());
+    fn eq(&self, b: &SpecSplitValue, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized,
-            specialized,
+            unspecialized: self.unspecialized.eq_op(&b.unspecialized),
+            specialized: self.specialized.eq_op(&b.specialized),
         }
     }
 
@@ -1216,23 +1101,8 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             .map(|v| (v.unspecialized, v.specialized))
             .unzip();
         SpecSplitValue {
-            unspecialized: Value::Array(uns),
-            specialized: Value::Array(spec),
-        }
-    }
-
-    fn mk_tuple(
-        values: Vec<SpecSplitValue>,
-        _ctx: &mut CostAnalysis,
-        _elem_types: &[Type],
-    ) -> SpecSplitValue {
-        let (uns, spec) = values
-            .into_iter()
-            .map(|v| (v.unspecialized, v.specialized))
-            .unzip();
-        SpecSplitValue {
-            unspecialized: Value::Tuple(uns),
-            specialized: Value::Tuple(spec),
+            unspecialized: Value::array(uns),
+            specialized: Value::array(spec),
         }
     }
 
@@ -1273,18 +1143,6 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 tp,
                 instrumenter.get_specialized(),
             ),
-        }
-    }
-
-    fn tuple_get(
-        &self,
-        index: usize,
-        _tp: &Type,
-        _instrumenter: &mut CostAnalysis,
-    ) -> SpecSplitValue {
-        SpecSplitValue {
-            unspecialized: self.unspecialized.tuple_get(index),
-            specialized: self.specialized.tuple_get(index),
         }
     }
 
@@ -1352,41 +1210,21 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         );
     }
 
-    fn assert_bool(&self, instrumenter: &mut CostAnalysis) {
-        self.specialized.assert_bool(instrumenter.get_specialized());
-        self.unspecialized
-            .assert_bool(instrumenter.get_unspecialized());
-    }
+    // Witness asserts and rangechecks are lowered to explicit Constrain/Lookup ops before the
+    // cost analysis runs (and those are costed via `record_constrain`/`record_lookup`), so any
+    // op still in these high-level forms carries no cost of its own.
+    fn assert_bool(&self, _instrumenter: &mut CostAnalysis) {}
 
     fn assert_cmp(
-        kind: CmpKind,
-        a: &Self,
-        b: &Self,
-        lhs_type: &Type,
-        instrumenter: &mut CostAnalysis,
+        _kind: CmpKind,
+        _a: &Self,
+        _b: &Self,
+        _lhs_type: &Type,
+        _instrumenter: &mut CostAnalysis,
     ) {
-        Value::assert_cmp(
-            kind,
-            &a.specialized,
-            &b.specialized,
-            lhs_type,
-            instrumenter.get_specialized(),
-        );
-        Value::assert_cmp(
-            kind,
-            &a.unspecialized,
-            &b.unspecialized,
-            lhs_type,
-            instrumenter.get_unspecialized(),
-        );
     }
 
-    fn rangecheck(&self, max_bits: usize, instrumenter: &mut CostAnalysis) {
-        self.unspecialized
-            .rangecheck(max_bits, instrumenter.get_unspecialized());
-        self.specialized
-            .rangecheck(max_bits, instrumenter.get_specialized());
-    }
+    fn rangecheck(&self, _max_bits: usize, _instrumenter: &mut CostAnalysis) {}
 
     fn to_bits(
         &self,
@@ -1407,7 +1245,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         endianness: Endianness,
         size: usize,
         _tp: &Type,
-        instrumenter: &mut CostAnalysis,
+        _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         let spec_radix = match radix {
             Radix::Dyn(v) => Radix::Dyn(v.specialized.clone()),
@@ -1418,18 +1256,10 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             Radix::Bytes => Radix::Bytes,
         };
         SpecSplitValue {
-            unspecialized: self.unspecialized.to_radix(
-                &unspec_radix,
-                &endianness,
-                size,
-                instrumenter.get_unspecialized(),
-            ),
-            specialized: self.specialized.to_radix(
-                &spec_radix,
-                &endianness,
-                size,
-                instrumenter.get_specialized(),
-            ),
+            unspecialized: self
+                .unspecialized
+                .to_radix(&unspec_radix, &endianness, size),
+            specialized: self.specialized.to_radix(&spec_radix, &endianness, size),
         }
     }
 
@@ -1473,6 +1303,38 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
+    fn of_blob(_elem_type: Type, values: Vec<Self>, _ctx: &mut CostAnalysis) -> Self {
+        let (unspecialized, specialized) = values
+            .into_iter()
+            .map(|v| (v.unspecialized, v.specialized))
+            .unzip();
+        Self {
+            unspecialized: Value::Blob(unspecialized),
+            specialized: Value::Blob(specialized),
+        }
+    }
+
+    fn expect_blob(&self, _ctx: &mut CostAnalysis) -> Vec<Self> {
+        match (&self.unspecialized, &self.specialized) {
+            (Value::Blob(unspecialized), Value::Blob(specialized)) => {
+                assert_eq!(unspecialized.len(), specialized.len());
+                unspecialized
+                    .iter()
+                    .cloned()
+                    .zip(specialized.iter().cloned())
+                    .map(|(unspecialized, specialized)| Self {
+                        unspecialized,
+                        specialized,
+                    })
+                    .collect()
+            }
+            _ => panic!(
+                "Expected blob, got unspecialized={:?}, specialized={:?}",
+                self.unspecialized, self.specialized
+            ),
+        }
+    }
+
     fn alloc(_elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
@@ -1495,29 +1357,18 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn value_of(&self, _ctx: &mut CostAnalysis) -> Self {
-        Self {
-            unspecialized: self.unspecialized.unwrap_witness().clone(),
-            specialized: self.specialized.unwrap_witness().clone(),
-        }
-    }
-
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut CostAnalysis) {}
 
-    fn spread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> Self {
+    fn spread(&self, _bits: u8, _instrumenter: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: self
-                .unspecialized
-                .spread_op(instrumenter.get_unspecialized()),
-            specialized: self.specialized.spread_op(instrumenter.get_specialized()),
+            unspecialized: self.unspecialized.spread_op(),
+            specialized: self.specialized.spread_op(),
         }
     }
 
-    fn unspread(&self, _bits: u8, instrumenter: &mut CostAnalysis) -> (Self, Self) {
-        let (unspec_odd, unspec_even) = self
-            .unspecialized
-            .unspread_op(instrumenter.get_unspecialized());
-        let (spec_odd, spec_even) = self.specialized.unspread_op(instrumenter.get_specialized());
+    fn unspread(&self, _bits: u8, _instrumenter: &mut CostAnalysis) -> (Self, Self) {
+        let (unspec_odd, unspec_even) = self.unspecialized.unspread_op();
+        let (spec_odd, spec_even) = self.specialized.unspread_op();
         (
             Self {
                 unspecialized: unspec_odd,
@@ -1560,9 +1411,9 @@ impl FunctionSignature {
 }
 
 trait OpInstrumenter {
-    fn record_constraints(&mut self, number: usize);
-    fn record_rangechecks(&mut self, size: u8, count: usize);
-    fn record_lookups(&mut self, keys: usize, results: usize, count: usize);
+    fn record_constrain(&mut self);
+    fn record_high_degree_mul(&mut self);
+    fn record_lookup(&mut self, target: &LookupTarget<Value>);
 }
 
 trait FunctionInstrumenter {
@@ -1572,35 +1423,201 @@ trait FunctionInstrumenter {
     fn seal(self: Box<Self>) -> FunctionCost;
 }
 
-#[derive(Debug, Clone)]
+/// Raw circuit-cost events for one symbolic execution of a function, exactly as the executor
+/// saw them. Recording only counts what happened; turning the events into constraint and table
+/// costs is interpretation, done on read by the derivation methods below.
+#[derive(Debug, Clone, Default)]
 struct Instrumenter {
-    constraints: usize,
-    rangechecks: HashMap<u8, usize>,
-    lookups: HashMap<(usize, usize), usize>,
+    constrains: usize,
+    high_degree_muls: usize,
+
+    /// Rangecheck lookup requests by width.
+    rangecheck_lookups: HashMap<u8, usize>,
+    /// Spread lookup requests by width.
+    spread_lookups: HashMap<u8, usize>,
+    array_lookups: usize,
 }
 
-impl Instrumenter {
-    fn new() -> Self {
-        Self {
-            constraints: 0,
-            rangechecks: HashMap::new(),
-            lookups: HashMap::new(),
+impl OpInstrumenter for Instrumenter {
+    fn record_constrain(&mut self) {
+        self.constrains += 1;
+    }
+
+    fn record_high_degree_mul(&mut self) {
+        self.high_degree_muls += 1;
+    }
+
+    fn record_lookup(&mut self, target: &LookupTarget<Value>) {
+        match target {
+            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits),
+            LookupTarget::DynRangecheck(bound) => {
+                self.record_rangecheck_lookup(dynamic_rangecheck_bits(bound))
+            }
+            LookupTarget::Spread(bits) => {
+                assert!(*bits >= 1, "spread width must be at least 1 bit");
+                *self.spread_lookups.entry(*bits).or_insert(0) += 1;
+            }
+            LookupTarget::Array(_) => self.array_lookups += 1,
         }
     }
 }
 
-impl OpInstrumenter for Instrumenter {
-    fn record_constraints(&mut self, number: usize) {
-        self.constraints += number;
+/// Interpretation of the raw events, mirroring the lookup-spilling expansion that runs before
+/// R1CS generation. Everything here is derived; the struct stores no interpreted state.
+impl Instrumenter {
+    fn record_rangecheck_lookup(&mut self, bits: u8) {
+        assert!(bits >= 1, "rangecheck width must be at least 1 bit");
+        *self.rangecheck_lookups.entry(bits).or_insert(0) += 1;
     }
 
-    fn record_rangechecks(&mut self, size: u8, count: usize) {
-        *self.rangechecks.entry(size).or_insert(0) += count;
+    /// 8-bit rangecheck table lookups after spilling: a w-bit rangecheck (w >= 2) becomes one
+    /// lookup per full byte plus two for a leftover partial byte. 1-bit rangechecks never reach
+    /// the table (see [`Self::rangecheck_one_constraints`]).
+    fn final_rangecheck8_lookups(&self) -> usize {
+        self.rangecheck_lookups
+            .iter()
+            .map(|(&bits, &count)| {
+                let bits = bits as usize;
+                let per_lookup = match bits {
+                    1 => 0,
+                    8 => 1,
+                    _ => bits / 8 + if bits % 8 > 0 { 2 } else { 0 },
+                };
+                per_lookup * count
+            })
+            .sum()
     }
 
-    fn record_lookups(&mut self, keys: usize, results: usize, count: usize) {
-        *self.lookups.entry((keys, results)).or_insert(0) += count;
+    /// 1-bit rangechecks spill to the algebraic b*(b-1) = 0. (Guarded checks spend one more
+    /// constraint to gate that, but the estimate doesn't track lookup flags.)
+    fn rangecheck_one_constraints(&self) -> usize {
+        self.rangecheck_lookups.get(&1).copied().unwrap_or(0)
     }
+
+    /// Spread table lookups after spilling: widths >= 16 are split into chunks of at most
+    /// 8 bits each.
+    fn final_spread_lookups(&self) -> HashMap<u8, usize> {
+        let mut r: HashMap<u8, usize> = HashMap::default();
+        for (&bits, &count) in self.spread_lookups.iter() {
+            if bits >= 16 {
+                assert!(
+                    bits <= 128,
+                    "wide Spread lookup spilling currently supports widths up to 128 bits, got {bits}"
+                );
+                let bits = bits as usize;
+                let mut offset = 0usize;
+                while offset < bits {
+                    let chunk_bits = (bits - offset).min(8) as u8;
+                    *r.entry(chunk_bits).or_insert(0) += count;
+                    offset += chunk_bits as usize;
+                }
+            } else {
+                *r.entry(bits).or_insert(0) += count;
+            }
+        }
+        r
+    }
+
+    /// One recombination constraint per wide (>= 16 bit) spread that spilling splits up.
+    fn spilled_wide_spread_constraints(&self) -> usize {
+        self.spread_lookups
+            .iter()
+            .filter(|(bits, _)| **bits >= 16)
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    fn total_table_lookups(&self) -> usize {
+        self.final_rangecheck8_lookups()
+            + self.final_spread_lookups().values().sum::<usize>()
+            + self.array_lookups
+    }
+
+    fn uses_rangecheck_table(&self) -> bool {
+        self.rangecheck_lookups.keys().any(|bits| *bits >= 2)
+    }
+
+    // Array table *allocation* is deliberately not costed anywhere below: tables are
+    // circuit-global (allocated once per distinct array, whichever function touches it first),
+    // so a per-function instrumenter has no sound way to attribute that cost. Only the
+    // recurring per-lookup cost is counted.
+
+    fn table_allocation_constraints(&self) -> usize {
+        let range_constraints = if self.uses_rangecheck_table() {
+            (1usize << 8) + 1
+        } else {
+            0
+        };
+        let spread_constraints = self
+            .final_spread_lookups()
+            .keys()
+            .filter(|bits| **bits >= 2)
+            .map(|bits| 2 * (1usize << *bits as usize) + 1)
+            .sum::<usize>();
+        range_constraints + spread_constraints
+    }
+
+    fn lookup_data_constraints(&self) -> usize {
+        self.final_rangecheck8_lookups()
+            + self
+                .final_spread_lookups()
+                .values()
+                .map(|count| count * 2)
+                .sum::<usize>()
+            + self.array_lookups * 2
+    }
+
+    fn recurring_constraints(&self) -> usize {
+        self.constrains
+            + self.high_degree_muls
+            + self.rangecheck_one_constraints()
+            + self.spilled_wide_spread_constraints()
+            + self.lookup_data_constraints()
+    }
+
+    fn total_constraints(&self) -> usize {
+        self.recurring_constraints() + self.table_allocation_constraints()
+    }
+
+    fn allocated_lookup_table_rows(&self) -> usize {
+        let range_rows = if self.uses_rangecheck_table() {
+            1usize << 8
+        } else {
+            0
+        };
+        let spread_rows = self
+            .final_spread_lookups()
+            .keys()
+            .filter(|bits| **bits >= 2)
+            .map(|bits| 1usize << *bits as usize)
+            .sum::<usize>();
+        range_rows + spread_rows
+    }
+
+    fn detail_line(&self) -> String {
+        format!(
+            "constrain={}, high_deg_mul={}, lookups={}, table_rows={}, table_constraints={}",
+            self.constrains,
+            self.high_degree_muls,
+            self.total_table_lookups(),
+            self.allocated_lookup_table_rows(),
+            self.table_allocation_constraints()
+        )
+    }
+}
+
+fn dynamic_rangecheck_bits(bound: &Value) -> u8 {
+    let bound = match bound {
+        Value::U(_, v) | Value::I(_, v) => *v,
+        Value::Field(f) => {
+            let bigint = f.into_bigint();
+            bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)
+        }
+        Value::WitnessOf(inner) => return dynamic_rangecheck_bits(inner),
+        other => panic!("dynamic rangecheck bound must be constant, got {:?}", other),
+    };
+    assert_eq!(bound, 256, "TODO: support dynamic rangecheck bound {bound}");
+    8
 }
 
 #[derive(Debug, Clone)]
@@ -1647,9 +1664,9 @@ impl FunctionInstrumenter for DummyInstrumenter {
 }
 
 impl OpInstrumenter for DummyInstrumenter {
-    fn record_constraints(&mut self, _: usize) {}
-    fn record_rangechecks(&mut self, _: u8, _: usize) {}
-    fn record_lookups(&mut self, _: usize, _: usize, _: usize) {}
+    fn record_constrain(&mut self) {}
+    fn record_high_degree_mul(&mut self) {}
+    fn record_lookup(&mut self, _: &LookupTarget<Value>) {}
 }
 
 pub struct CostAnalysis {
@@ -1675,11 +1692,9 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                     TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
                     TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
                     TypeExpr::Array(elem, size) => {
-                        Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
+                        Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                     }
-                    TypeExpr::Tuple(elems) => {
-                        Value::Tuple(elems.iter().map(unknown_value).collect())
-                    }
+                    TypeExpr::Tuple(_) => ice_non_elided_tuple(),
                     TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
                     TypeExpr::Ref(inner) => {
                         Value::Pointer(Rc::new(RefCell::new(unknown_value(inner))))
@@ -1767,6 +1782,20 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
     }
 
+    fn lookup(
+        &mut self,
+        target: LookupTarget<SpecSplitValue>,
+        _args: Vec<SpecSplitValue>,
+        _flag: SpecSplitValue,
+    ) {
+        let unspecialized_target = target.map(|v| v.unspecialized.clone());
+        self.get_unspecialized()
+            .record_lookup(&unspecialized_target);
+
+        let specialized_target = target.map(|v| v.specialized.clone());
+        self.get_specialized().record_lookup(&specialized_target);
+    }
+
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
         panic!("Todo opcode encountered in CostAnalysis: {}", payload);
     }
@@ -1780,18 +1809,18 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         assert_eq!(dir, SliceOpDir::Back); // TODO
         let new_unspec = match &slice.unspecialized {
             Value::Array(values) => {
-                let mut new_values = values.clone();
+                let mut new_values = values.as_ref().clone();
                 new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
-                Value::Array(new_values)
+                Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
             _ => panic!("Cannot push to {:?}", slice.unspecialized),
         };
         let new_spec = match &slice.specialized {
             Value::Array(values) => {
-                let mut new_values = values.clone();
+                let mut new_values = values.as_ref().clone();
                 new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
-                Value::Array(new_values)
+                Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
             _ => panic!("Cannot push to {:?}", slice.specialized),
@@ -1831,9 +1860,9 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 TypeExpr::Field => Value::Unknown(ScalarKind::Field),
                 TypeExpr::U(s) | TypeExpr::I(s) => Value::Unknown(ScalarKind::U(*s)),
                 TypeExpr::Array(elem, size) => {
-                    Value::Array((0..*size).map(|_| unknown_value(elem)).collect())
+                    Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                 }
-                TypeExpr::Tuple(elems) => Value::Tuple(elems.iter().map(unknown_value).collect()),
+                TypeExpr::Tuple(_) => ice_non_elided_tuple(),
                 TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
                 TypeExpr::Ref(inner) => Value::Pointer(Rc::new(RefCell::new(unknown_value(inner)))),
                 _ => panic!("Unsupported type for unknown value: {:?}", ty),
@@ -1880,14 +1909,59 @@ pub struct Summary {
     pub functions: HashMap<FunctionSignature, SpecializationSummary>,
 }
 
+#[derive(Default)]
+struct AggregatedConstraintCost {
+    recurring_constraints: usize,
+    rangecheck_lookups: HashMap<u8, usize>,
+    final_spread_lookups: HashMap<u8, usize>,
+}
+
+impl AggregatedConstraintCost {
+    fn add(&mut self, cost: &Instrumenter, calls: usize) {
+        if calls == 0 {
+            return;
+        }
+        self.recurring_constraints += cost.recurring_constraints() * calls;
+        for (&bits, &count) in cost.rangecheck_lookups.iter() {
+            *self.rangecheck_lookups.entry(bits).or_insert(0) += count * calls;
+        }
+        for (bits, count) in cost.final_spread_lookups() {
+            *self.final_spread_lookups.entry(bits).or_insert(0) += count * calls;
+        }
+    }
+
+    fn shared_table_constraints(&self) -> usize {
+        let range_constraints = if self.rangecheck_lookups.keys().any(|bits| *bits >= 2) {
+            (1usize << 8) + 1
+        } else {
+            0
+        };
+        let spread_constraints = self
+            .final_spread_lookups
+            .keys()
+            .filter(|bits| **bits >= 2)
+            .map(|bits| 2 * (1usize << *bits as usize) + 1)
+            .sum::<usize>();
+        range_constraints + spread_constraints
+    }
+
+    fn total_constraints(&self) -> usize {
+        self.recurring_constraints + self.shared_table_constraints()
+    }
+}
+
 impl Summary {
     pub fn pretty_print(&self, ssa: &HLSSA) -> String {
         let mut r = String::new();
         r += &format!("Total constraints: {}\n", self.total_constraints);
+        let savings_pct = if self.total_constraints == 0 {
+            0.0
+        } else {
+            self.total_savings_to_make as f64 / self.total_constraints as f64 * 100.0
+        };
         r += &format!(
             "Total savings to make: {} ({:.1}%)\n",
-            self.total_savings_to_make,
-            self.total_savings_to_make as f64 / self.total_constraints as f64 * 100.0
+            self.total_savings_to_make, savings_pct
         );
         for (sig, summary) in self
             .functions
@@ -1932,9 +2006,9 @@ impl CostAnalysis {
             self.stack.push((sig, Box::new(DummyInstrumenter {})));
         } else {
             let instrumenter = FunctionCost {
-                calls: HashMap::new(),
-                raw: Instrumenter::new(),
-                specialized: Instrumenter::new(),
+                calls: HashMap::default(),
+                raw: Instrumenter::default(),
+                specialized: Instrumenter::default(),
             };
             self.stack.push((sig, Box::new(instrumenter)));
         }
@@ -1974,18 +2048,20 @@ impl CostAnalysis {
             for (sig, count) in cost.calls.iter() {
                 r += &format!("    {}: {} times\n", sig.pretty_print(ssa, false), count);
             }
-            r += &format!("  Raw constraints: {}\n", cost.raw.constraints);
+            r += &format!("  Raw constraints: {}\n", cost.raw.total_constraints());
+            r += &format!("  Raw detail: {}\n", cost.raw.detail_line());
             r += &format!(
                 "  Specialized constraints: {}\n",
-                cost.specialized.constraints
+                cost.specialized.total_constraints()
             );
+            r += &format!("  Specialized detail: {}\n", cost.specialized.detail_line());
         }
         r
     }
 
     pub fn summarize(&self) -> Summary {
         let mut r = Summary {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
             total_constraints: 0,
             total_savings_to_make: 0,
         };
@@ -1994,20 +2070,24 @@ impl CostAnalysis {
                 sig.clone(),
                 SpecializationSummary {
                     calls: 0,
-                    raw_constraints: cost.raw.constraints,
-                    specialized_constraints: cost.specialized.constraints,
+                    raw_constraints: cost.raw.recurring_constraints(),
+                    specialized_constraints: cost.specialized.recurring_constraints(),
                     specialization_total_savings: 0,
                 },
             );
         }
         self.walk_call_tree(&mut r, 1, self.entry_point.as_ref().unwrap());
 
-        for (_, summary) in r.functions.iter_mut() {
-            summary.specialization_total_savings =
-                (summary.raw_constraints - summary.specialized_constraints) * summary.calls;
-            r.total_constraints += summary.raw_constraints * summary.calls;
+        let mut aggregate = AggregatedConstraintCost::default();
+        for (sig, summary) in r.functions.iter_mut() {
+            summary.specialization_total_savings = summary
+                .raw_constraints
+                .saturating_sub(summary.specialized_constraints)
+                * summary.calls;
             r.total_savings_to_make += summary.specialization_total_savings;
+            aggregate.add(&self.functions[sig].raw, summary.calls);
         }
+        r.total_constraints = aggregate.total_constraints();
         r
     }
 
@@ -2032,10 +2112,10 @@ impl CostEstimator {
     pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
-            functions: HashMap::new(),
+            functions: HashMap::default(),
             stack: vec![],
             entry_point: Some(main_sig.clone()),
-            cache: HashMap::new(),
+            cache: HashMap::default(),
         };
 
         self.run_fn_from_signature(ssa, type_info, main_sig, &mut costs);
@@ -2078,9 +2158,7 @@ impl CostEstimator {
                 let elem_sig = self.type_to_unknown_sig(elem);
                 ValueSignature::Array(vec![elem_sig; 0])
             }
-            TypeExpr::Tuple(elems) => {
-                ValueSignature::Tuple(elems.iter().map(|e| self.type_to_unknown_sig(e)).collect())
-            }
+            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(inner) => {
                 ValueSignature::PointerTo(Box::new(self.type_to_unknown_sig(inner)))
             }

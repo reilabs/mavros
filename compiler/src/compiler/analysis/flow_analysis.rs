@@ -1,17 +1,21 @@
 //! Computes a robust graph analysis of the program, including a CFG, dominator tree, and general
 //! tools for recovery of structured control flow.
 
-use petgraph::Direction;
-use petgraph::algo::dominators::{self, Dominators};
-use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
-use petgraph::visit::{Bfs, DfsPostOrder, EdgeRef, Walker};
-use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
-use std::fs;
-use std::hash::Hash;
-use std::path::PathBuf;
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::ssa::{BlockId, FunctionId, Instruction, SSA, SSAType, Terminator},
+};
 
-use crate::compiler::ssa::{BlockId, FunctionId, Instruction, SSA, SSAType, Terminator};
+use itertools::Itertools;
+
+use petgraph::{
+    Direction,
+    algo::dominators::{self, Dominators},
+    graph::{DiGraph, EdgeIndex, NodeIndex},
+    visit::{Bfs, DfsPostOrder, EdgeRef, Walker},
+};
+
+use std::{fmt::Debug, fs, hash::Hash, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JumpType {
@@ -36,8 +40,8 @@ impl CFGData {
         let dominators = dominators::simple_fast(&cfg, entry);
         let mut preorder = Vec::new();
         let mut postorder = Vec::new();
-        let mut preorder_map = HashMap::new();
-        let mut postorder_map = HashMap::new();
+        let mut preorder_map = HashMap::default();
+        let mut postorder_map = HashMap::default();
         Self::compute_dominator_traversals(
             entry,
             &dominators,
@@ -67,7 +71,13 @@ impl CFGData {
     ) {
         preorder_map.insert(entry, preorder.len());
         preorder.push(entry);
-        for child in dominators.immediately_dominated_by(entry) {
+
+        // `immediately_dominated_by` iterates petgraph's internal randomly-seeded HashMap, so its
+        // order varies per process. The traversal orders block processing in several passes (and
+        // thus fresh ValueId allocation), so sort by node index to keep compilation deterministic.
+        let mut children: Vec<_> = dominators.immediately_dominated_by(entry).collect();
+        children.sort();
+        for child in children {
             if entry == child {
                 continue;
             }
@@ -101,7 +111,7 @@ impl CFGData {
     }
 
     pub fn get_dominance_frontier(&self, node: NodeIndex<u32>) -> HashSet<NodeIndex<u32>> {
-        let mut result = HashSet::new();
+        let mut result = HashSet::default();
         for candidate in self.cfg.node_indices() {
             if self.dominates(node, candidate) {
                 continue;
@@ -132,8 +142,8 @@ impl CFGBuilder {
         let return_node = cfg.add_node(());
         Self {
             cfg,
-            block_to_node: HashMap::new(),
-            node_to_block: HashMap::new(),
+            block_to_node: HashMap::default(),
+            node_to_block: HashMap::default(),
             entry_node,
             return_node,
         }
@@ -529,8 +539,8 @@ impl CallGraph {
     pub fn new() -> Self {
         CallGraph {
             call_graph: DiGraph::new(),
-            func_to_node: HashMap::new(),
-            node_to_func: HashMap::new(),
+            func_to_node: HashMap::default(),
+            node_to_func: HashMap::default(),
         }
     }
 
@@ -564,6 +574,22 @@ impl CallGraph {
         DfsPostOrder::new(&self.call_graph, self.func_to_node[&main_fn_id])
             .iter(&self.call_graph)
             .filter_map(|node| self.node_to_func.get(&node).cloned())
+    }
+
+    /// The functions that call `callee`, each yielded once.
+    pub fn get_callers(&self, callee: FunctionId) -> impl Iterator<Item = FunctionId> + '_ {
+        self.call_graph
+            .neighbors_directed(self.func_to_node[&callee], Direction::Incoming)
+            .map(|node| self.node_to_func[&node])
+            .unique()
+    }
+
+    /// The functions `caller` calls, each yielded once.
+    pub fn get_callees(&self, caller: FunctionId) -> impl Iterator<Item = FunctionId> + '_ {
+        self.call_graph
+            .neighbors_directed(self.func_to_node[&caller], Direction::Outgoing)
+            .map(|node| self.node_to_func[&node])
+            .unique()
     }
 }
 
@@ -639,7 +665,7 @@ impl FlowAnalysis {
         ssa: &SSA<Op, Ty, C>,
     ) -> Self {
         let mut call_graph = CallGraph::new();
-        let mut function_cfgs = HashMap::new();
+        let mut function_cfgs = HashMap::default();
 
         for (func_id, _) in ssa.iter_functions() {
             call_graph.add_function(*func_id);

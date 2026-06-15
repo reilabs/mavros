@@ -2,15 +2,16 @@
 
 pub mod layout;
 
-use std::collections::HashMap;
-
 use crate::{
+    collections::HashMap,
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, TypeInfo},
         },
-        codegen::bytecode::layout::{FrameLayouter, GlobalFrameLayouter, StructLayoutInterner},
+        codegen::bytecode::layout::{
+            FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+        },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
@@ -19,6 +20,7 @@ use crate::{
                 Type, TypeExpr,
             },
         },
+        util::ice_non_elided_tuple,
     },
     vm::{self, bytecode},
 };
@@ -34,7 +36,8 @@ fn materialize_constants(
     layouter: &mut FrameLayouter,
     emitter: &mut EmitterState,
 ) {
-    let mut referenced: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
+    let mut referenced: crate::collections::HashSet<ValueId> =
+        crate::collections::HashSet::default();
     for (_, block) in function.get_blocks() {
         for instr in block.get_instructions() {
             for vid in instr.get_inputs() {
@@ -67,53 +70,87 @@ fn materialize_constants(
     referenced.sort_by_key(|v| v.0);
 
     for vid in referenced {
-        match constants.get(&vid).expect("vid is in constants").as_ref() {
-            hlssa::Constant::U(size, val) => {
-                let res = layouter.alloc_int(vid, *size);
-                match size {
-                    bits if *bits <= 64 => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res,
-                            val: *val as u64,
-                        });
-                    }
-                    128 => {
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res,
-                            val: *val as u64,
-                        });
-                        emitter.push_op(bytecode::OpCode::MovConst {
-                            res: res.offset(1),
-                            val: (*val >> 64) as u64,
-                        });
-                    }
-                    bits => panic!("unsupported unsigned integer width: {bits}"),
-                }
+        let constant = constants.get(&vid).expect("vid is in constants").as_ref();
+        let res = match constant {
+            hlssa::Constant::U(size, _) => layouter.alloc_int(vid, *size),
+            hlssa::Constant::I(size, _) => layouter.alloc_int(vid, *size),
+            hlssa::Constant::Field(_) => layouter.alloc_field(vid),
+            hlssa::Constant::Blob(_) => {
+                layouter.alloc_long_data(vid, constant_cell_count(constant))
             }
-            hlssa::Constant::I(size, val) => {
-                assert!(
-                    *size <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                let res = layouter.alloc_int(vid, *size);
+            hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+        };
+        spill_constant_to_frame(constant, res, emitter);
+    }
+}
+
+fn constant_cell_count(value: &hlssa::Constant) -> usize {
+    match value {
+        hlssa::Constant::U(bits, _) => int_cell_count(*bits),
+        hlssa::Constant::I(bits, _) => {
+            assert!(
+                *bits <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            1
+        }
+        hlssa::Constant::Field(_) => bytecode::FELT_LIMBS,
+        hlssa::Constant::Blob(blob) => blob.elements.iter().map(constant_cell_count).sum(),
+        hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+    }
+}
+
+fn spill_constant_to_frame(
+    value: &hlssa::Constant,
+    res: bytecode::FramePosition,
+    emitter: &mut EmitterState,
+) {
+    match value {
+        hlssa::Constant::U(size, val) => match size {
+            bits if *bits <= 64 => {
                 emitter.push_op(bytecode::OpCode::MovConst {
                     res,
                     val: *val as u64,
                 });
             }
-            hlssa::Constant::Field(val) => {
-                let start = layouter.alloc_field(vid);
-                for i in 0..bytecode::FELT_LIMBS {
-                    emitter.push_op(bytecode::OpCode::MovConst {
-                        res: start.offset(i as isize),
-                        val: val.0.0[i],
-                    });
-                }
+            128 => {
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res,
+                    val: *val as u64,
+                });
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res: res.offset(1),
+                    val: (*val >> 64) as u64,
+                });
             }
-            hlssa::Constant::FnPtr(_) => {
-                panic!("FnPtr constants not supported in codegen");
+            bits => panic!("unsupported unsigned integer width: {bits}"),
+        },
+        hlssa::Constant::I(size, val) => {
+            assert!(
+                *size <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            emitter.push_op(bytecode::OpCode::MovConst {
+                res,
+                val: *val as u64,
+            });
+        }
+        hlssa::Constant::Field(val) => {
+            for i in 0..bytecode::FELT_LIMBS {
+                emitter.push_op(bytecode::OpCode::MovConst {
+                    res: res.offset(i as isize),
+                    val: val.0.0[i],
+                });
             }
         }
+        hlssa::Constant::Blob(blob) => {
+            let mut offset = 0usize;
+            for element in &blob.elements {
+                spill_constant_to_frame(element, res.offset(offset as isize), emitter);
+                offset += constant_cell_count(element);
+            }
+        }
+        hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
     }
 }
 
@@ -130,7 +167,7 @@ impl CodeGen {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
-        let mut struct_interner = StructLayoutInterner::new();
+        let struct_interner = StructLayoutInterner::new();
         let constants = ssa.const_snapshot();
 
         let function = ssa.get_main();
@@ -139,13 +176,12 @@ impl CodeGen {
             cfg.get_function_cfg(ssa.get_main_id()),
             type_info.get_function(ssa.get_main_id()),
             &global_layouter,
-            &mut struct_interner,
             &constants,
         );
 
         let mut functions = vec![function];
 
-        let mut function_ids = HashMap::new();
+        let mut function_ids = HashMap::default();
         function_ids.insert(ssa.get_main_id(), 0);
 
         let mut cur_fn_begin = functions[0].code.len();
@@ -159,7 +195,6 @@ impl CodeGen {
                 cfg.get_function_cfg(*function_id),
                 type_info.get_function(*function_id),
                 &global_layouter,
-                &mut struct_interner,
                 &constants,
             );
             function_ids.insert(*function_id, cur_fn_begin);
@@ -200,7 +235,6 @@ impl CodeGen {
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
-        struct_interner: &mut StructLayoutInterner,
         constants: &HLSSAConstantsSnapshot,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
@@ -225,7 +259,6 @@ impl CodeGen {
             &mut layouter,
             &mut emitter,
             global_layouter,
-            struct_interner,
         );
 
         for block_id in cfg.get_domination_pre_order() {
@@ -245,7 +278,6 @@ impl CodeGen {
                 &mut layouter,
                 &mut emitter,
                 global_layouter,
-                struct_interner,
             );
         }
 
@@ -348,7 +380,6 @@ impl CodeGen {
         layouter: &mut FrameLayouter,
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
-        struct_interner: &mut StructLayoutInterner,
     ) {
         emitter.enter_block(block_id);
         for instruction in block.get_instructions() {
@@ -767,6 +798,12 @@ impl CodeGen {
                 } => {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
+                    if matches!(tgt, hlssa::CastTarget::Map(_) | hlssa::CastTarget::ValueOf) {
+                        panic!(
+                            "ICE: {} cast should have been lowered before bytecode codegen",
+                            tgt
+                        );
+                    }
                     if matches!(tgt, hlssa::CastTarget::WitnessOf) {
                         // PureToWitnessRef reads a Field (4 u64s) from the frame.
                         // If the source is not Field-sized, cast to Field first.
@@ -954,32 +991,31 @@ impl CodeGen {
                     index: idx,
                 } => {
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    emitter.push_op(bytecode::OpCode::ArrayGet {
-                        res,
-                        array: layouter.get_value(*arr),
-                        index: layouter.get_value(*idx),
-                        stride: layouter
-                            .type_size(&type_info.get_value_type(*arr).get_array_element()),
-                    });
+                    let arr_type = type_info.get_value_type(*arr);
+                    match &arr_type.expr {
+                        // Blobs live inline in the frame, not behind a boxed
+                        // pointer, so element reads are frame-relative.
+                        TypeExpr::Blob(elem, len) => {
+                            emitter.push_op(bytecode::OpCode::BlobGet {
+                                res,
+                                source: layouter.get_value(*arr),
+                                index: layouter.get_value(*idx),
+                                stride: layouter.type_size(elem),
+                                len: *len,
+                            });
+                        }
+                        _ => {
+                            emitter.push_op(bytecode::OpCode::ArrayGet {
+                                res,
+                                array: layouter.get_value(*arr),
+                                index: layouter.get_value(*idx),
+                                stride: layouter.type_size(&arr_type.get_array_element()),
+                            });
+                        }
+                    }
                 }
-                hlssa::OpCode::TupleProj {
-                    result: r,
-                    tuple: t,
-                    idx,
-                } => {
-                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    let tuple_elems = type_info.get_value_type(*t).get_tuple_elements();
-                    let field_offset: usize = tuple_elems[..*idx]
-                        .iter()
-                        .map(|elem_type| layouter.type_size(elem_type))
-                        .sum();
-                    let field_size = layouter.type_size(&tuple_elems[*idx]);
-                    emitter.push_op(bytecode::OpCode::TupleProj {
-                        res,
-                        tuple: layouter.get_value(*t),
-                        field_offset,
-                        field_size,
-                    });
+                hlssa::OpCode::TupleProj { .. } | hlssa::OpCode::TupleRefProj { .. } => {
+                    ice_non_elided_tuple()
                 }
                 hlssa::OpCode::ArraySet {
                     result: r,
@@ -1039,6 +1075,30 @@ impl CodeGen {
                         items: args,
                     });
                 }
+                hlssa::OpCode::MkSeqOfBlob {
+                    result: r,
+                    element_type: eltype,
+                    blob,
+                } => {
+                    assert!(
+                        !eltype.is_heap_allocated(),
+                        "MkSeqOfBlob only supports scalar element types"
+                    );
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let stride = layouter.type_size(eltype);
+                    let len = match &type_info.get_value_type(*r).expr {
+                        TypeExpr::Array(_, len) => *len,
+                        other => panic!("MkSeqOfBlob result must be an array, got {:?}", other),
+                    };
+                    let blob_start = layouter.get_value(*blob);
+                    emitter.push_op(bytecode::OpCode::ArrayAllocFromFrame {
+                        res,
+                        stride,
+                        meta: vm::array::BoxedLayout::array(len * stride, false),
+                        count: len,
+                        source: blob_start,
+                    });
+                }
                 hlssa::OpCode::MkRepeated {
                     result: r,
                     element,
@@ -1058,32 +1118,7 @@ impl CodeGen {
                         item,
                     });
                 }
-                hlssa::OpCode::MkTuple {
-                    result,
-                    elems,
-                    element_types,
-                } => {
-                    let res = layouter.alloc_value(*result, &type_info.get_value_type(*result));
-                    let fields = elems
-                        .iter()
-                        .map(|a| layouter.get_value(*a))
-                        .collect::<Vec<_>>();
-                    let field_layout: Vec<(u32, bool)> = element_types
-                        .iter()
-                        .map(|elem_type| {
-                            (
-                                layouter.type_size(elem_type) as u32,
-                                elem_type.is_heap_allocated(),
-                            )
-                        })
-                        .collect();
-                    let idx = struct_interner.intern(field_layout);
-                    emitter.push_op(bytecode::OpCode::TupleAlloc {
-                        res,
-                        meta: vm::array::BoxedLayout::new_struct(idx),
-                        fields,
-                    });
-                }
+                hlssa::OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                 hlssa::OpCode::Call {
                     results: r,
                     function: hlssa::CallTarget::Static(fnid),
@@ -1255,7 +1290,7 @@ impl CodeGen {
                     result: r,
                     value: v,
                     radix: Radix::Bytes,
-                    endianness: Endianness::Big,
+                    endianness,
                     count: c,
                 } => {
                     assert!(
@@ -1263,11 +1298,19 @@ impl CodeGen {
                         "TODO: Implement toRadix for U-values"
                     );
                     assert!(*c <= 32, "ToRadix byte count must be <= 32");
-                    emitter.push_op(bytecode::OpCode::ToBytesBe {
-                        val: layouter.get_value(*v),
-                        count: *c as u64,
-                        res: layouter.alloc_value(*r, &type_info.get_value_type(*r)),
-                    })
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    match endianness {
+                        Endianness::Big => emitter.push_op(bytecode::OpCode::ToBytesBe {
+                            val: layouter.get_value(*v),
+                            count: *c as u64,
+                            res,
+                        }),
+                        Endianness::Little => emitter.push_op(bytecode::OpCode::ToBytesLe {
+                            val: layouter.get_value(*v),
+                            count: *c as u64,
+                            res,
+                        }),
+                    }
                 }
                 hlssa::OpCode::ToRadix {
                     result: _,
@@ -1622,8 +1665,8 @@ impl EmitterState {
     fn new() -> Self {
         Self {
             code: Vec::new(),
-            block_entrances: HashMap::new(),
-            block_exits: HashMap::new(),
+            block_entrances: HashMap::default(),
+            block_exits: HashMap::default(),
         }
     }
 

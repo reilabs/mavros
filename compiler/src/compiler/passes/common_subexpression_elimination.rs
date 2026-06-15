@@ -3,21 +3,21 @@
 //! Does not float expressions across branches or otherwise move them outside the block in which
 //! they appear (#172).
 
-use std::collections::{HashMap, HashSet};
-
-use crate::compiler::{
-    analysis::flow_analysis::{CFG, FlowAnalysis},
-    ssa::{
-        BlockId, SSAConstantsSnapshot, ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-            LookupTarget, OpCode, Radix,
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::flow_analysis::{CFG, FlowAnalysis},
+        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        passes::fix_double_jumps::ValueReplacements,
+        ssa::{
+            BlockId, SSAConstantsSnapshot, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
+                LookupTarget, OpCode, Radix,
+            },
         },
+        util::ice_non_elided_tuple,
     },
-};
-use crate::compiler::{
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -44,12 +44,10 @@ enum ExprNode {
     BitRange { value: ExprId, offset: usize, width: usize },
     Select { condition: ExprId, then: ExprId, otherwise: ExprId },
     ArrayGet { array: ExprId, index: ExprId },
-    TupleGet { tuple: ExprId, index: ExprId },
     Not(ExprId),
     ReadGlobal(u64),
     Cast { value: ExprId, target: CastTarget },
     SExt { value: ExprId, from_bits: usize, to_bits: usize },
-    ValueOf(ExprId),
     BytesOf { value: ExprId, endianness: Endianness, count: usize },
     BitsOf { value: ExprId, endianness: Endianness, count: usize },
     Witness(ExprId),
@@ -243,10 +241,6 @@ impl ExprInterner {
         self.intern(ExprNode::ArrayGet { array, index })
     }
 
-    fn tuple_get(&mut self, tuple: ExprId, index: ExprId) -> ExprId {
-        self.intern(ExprNode::TupleGet { tuple, index })
-    }
-
     fn select(&mut self, condition: ExprId, then: ExprId, otherwise: ExprId) -> ExprId {
         self.intern(ExprNode::Select {
             condition,
@@ -273,10 +267,6 @@ impl ExprInterner {
             from_bits,
             to_bits,
         })
-    }
-
-    fn value_of(&mut self, value: ExprId) -> ExprId {
-        self.intern(ExprNode::ValueOf(value))
     }
 
     fn bytes_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
@@ -389,7 +379,7 @@ impl CSE {
 
             // Side-effect dedup: same dominance grouping as the value loop,
             // but duplicates are dropped rather than redirected.
-            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::new();
+            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::default();
             for (_, occurrences) in assertions {
                 if occurrences.len() <= 1 {
                     continue;
@@ -477,19 +467,19 @@ impl CSE {
         HashMap<Assertion, Vec<(BlockId, usize)>>,
     ) {
         let mut interner = ExprInterner::default();
-        let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::new();
-        let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::new();
+        let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::default();
+        let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::default();
 
         // Seed the value->expr map with the SSA's constants so they can be referenced as operands.
         // They are not recorded into `result`: the constant store already dedups them, so CSE must
         // not try to dedup the constants themselves.
-        let mut exprs: HashMap<ValueId, ExprId> = HashMap::new();
+        let mut exprs: HashMap<ValueId, ExprId> = HashMap::default();
         for (vid, cv) in constants {
             let id = match cv.as_ref() {
                 Constant::U(bits, value) => interner.uconst(*bits, *value),
                 Constant::I(bits, value) => interner.iconst(*bits, *value),
                 Constant::Field(value) => interner.fconst(*value),
-                Constant::FnPtr(_) => continue,
+                Constant::FnPtr(_) | Constant::Blob(_) => continue,
             };
             exprs.insert(*vid, id);
         }
@@ -827,7 +817,7 @@ impl CSE {
                         target,
                     } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr = interner.cast(value_expr, *target);
+                        let result_expr = interner.cast(value_expr, target.clone());
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -862,18 +852,6 @@ impl CSE {
                     } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
                         let result_expr = interner.bit_range(value_expr, *offset, *width);
-                        record_expr(
-                            &mut exprs,
-                            &mut result,
-                            block_id,
-                            instruction_idx,
-                            *r,
-                            result_expr,
-                        );
-                    }
-                    OpCode::ValueOf { result: r, value } => {
-                        let value_expr = get_expr(&exprs, &mut interner, value);
-                        let result_expr = interner.value_of(value_expr);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -1016,8 +994,8 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::MkSeqOfBlob { .. }
                     | OpCode::MkRepeated { .. }
-                    | OpCode::MkTuple { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }
@@ -1045,23 +1023,9 @@ impl CSE {
                             result_expr,
                         );
                     }
-                    OpCode::TupleProj {
-                        result: r,
-                        tuple,
-                        idx,
-                    } => {
-                        let tuple_expr = get_expr(&exprs, &mut interner, tuple);
-                        let index_expr = interner.uconst(64, *idx as u128);
-                        let result_expr = interner.tuple_get(tuple_expr, index_expr);
-                        record_expr(
-                            &mut exprs,
-                            &mut result,
-                            block_id,
-                            instruction_idx,
-                            *r,
-                            result_expr,
-                        );
-                    }
+                    OpCode::TupleProj { .. }
+                    | OpCode::TupleRefProj { .. }
+                    | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }

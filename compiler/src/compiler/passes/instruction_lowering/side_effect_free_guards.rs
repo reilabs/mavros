@@ -1,5 +1,6 @@
 //! Removes guards around side-effect-free operations that are safe to execute unconditionally.
 
+use crate::compiler::util::ice_non_elided_tuple;
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::hlssa::{
@@ -67,17 +68,14 @@ impl LowerSideEffectFreeGuards {
             | OpCode::BitRange { .. }
             | OpCode::Not { .. }
             | OpCode::MkSeq { .. }
+            | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
-            | OpCode::MkTuple { .. }
-            | OpCode::TupleProj { .. }
             | OpCode::Alloc { .. }
             | OpCode::Load { .. }
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
             | OpCode::Select { .. }
             | OpCode::ToBits { .. }
-            | OpCode::ToRadix { .. }
-            | OpCode::ValueOf { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::FreshWitness { .. }
             | OpCode::NextDCoeff { .. }
@@ -89,6 +87,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. }
             | OpCode::Todo { .. } => true,
+            OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             OpCode::Store { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }
@@ -101,6 +100,9 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. }
             | OpCode::Rangecheck { .. } => false,
+            OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
+                ice_non_elided_tuple()
+            }
             OpCode::Guard { .. } => panic!("nested Guard not expected"),
         }
     }

@@ -1,15 +1,16 @@
 //! The driver API for the compilation pipeline.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use ark_ff::AdditiveGroup as _;
-use noirc_frontend::debug::DebugInstrumenter;
-use noirc_frontend::monomorphization::Monomorphizer;
-use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
+use noirc_frontend::{
+    debug::DebugInstrumenter,
+    monomorphization::{Monomorphizer, debug_types::DebugTypeTracker},
+};
 use tracing::info;
 
 use crate::{
@@ -17,13 +18,14 @@ use crate::{
     compiler::{
         Field,
         analysis::{
-            flow_analysis::FlowAnalysis, types::Types, witness_type_inference::WitnessTypeInference,
+            flow_analysis::FlowAnalysis, types::Types,
+            witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
             bytecode::CodeGen,
             hlssa_to_r1cs::{R1CGen, R1CS},
+            llssa_to_llvm::WasmCompileOpts,
         },
-        lowering::LowLevelReplacement,
         pass_manager::PassManager,
         passes::{
             common_subexpression_elimination::CSE,
@@ -31,9 +33,11 @@ use crate::{
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
+            elide_tuples::ElideTuples,
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lower_guards::LowerGuards,
+            lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
@@ -41,17 +45,16 @@ use crate::{
             remove_unreachable_functions::RemoveUnreachableFunctions,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
+            sparse_conditional_constant_propagation::SCCP,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
+            trivial_phi_elimination::TrivialPhiElimination,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
         ssa::{DefaultSSAAnnotator, hlssa::HLSSA},
         untaint_control_flow::UntaintControlFlow,
-    },
-    lowlevel_replacement::{
-        REPLACEMENT_CRATES, add_lowlevel_replacements, prepare_replacement_crate,
     },
 };
 
@@ -124,38 +127,12 @@ impl Driver {
         )
         .map_err(Error::NoirCompilerError)?;
 
-        let mut prepared_replacements = Vec::new();
-        for replacement in REPLACEMENT_CRATES {
-            let functions = prepare_replacement_crate(&mut context, crate_id, replacement)?;
-            prepared_replacements.push((replacement, functions));
-        }
-
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer =
             Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
         monomorphizer.compile_main(main).unwrap();
-
-        // Queue blackbox replacements RIGHT AFTER `compile_main`, before
-        // draining the queue. At this point `in_unconstrained_function` is
-        // whatever `compile_main` set for `main` (false for `fn main`), which
-        // is what we need: each `pub fn` substitute gets monomorphized as
-        // constrained even when the user code only reaches the blackbox
-        // through an unconstrained path (e.g. `if is_unconstrained()`).
-        // mavros' SSA gen then produces both SSA variants for each one and the
-        // active `function_mapper` dispatches per call site. Unused
-        // replacements get DCE'd later.
-        let mut lowlevel_replacements: HashMap<String, LowLevelReplacement> = HashMap::new();
-        for (replacement, functions) in &prepared_replacements {
-            add_lowlevel_replacements(
-                replacement,
-                functions,
-                &mut monomorphizer,
-                &mut lowlevel_replacements,
-            );
-        }
-
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
 
@@ -167,7 +144,7 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program, lowlevel_replacements);
+        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program);
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 
@@ -191,6 +168,14 @@ impl Driver {
             vec![
                 Box::new(Defunctionalize::new()),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
+                // Eliminate all tuple types immediately after the entry point is prepared, so every
+                // subsequent pass operates on tuple-free IR.
+                Box::new(ElideTuples::new()),
+                // Fold constants and prune statically-decided branches (e.g. monomorphized
+                // generic dispatch) BEFORE pruning functions: calls in never-taken branches must
+                // not keep their callees alive into witness type inference and untaint CF, which
+                // can ICE on semantically-dead code they would otherwise have to type.
+                Box::new(SCCP::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
@@ -217,6 +202,10 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Mem2Reg::new()),
+                // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
+                // an aggregate threaded through control flow that is mostly trivial phis (the same
+                // value from every predecessor); collapse them before they reach WTI and codegen.
+                Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
@@ -232,8 +221,8 @@ impl Driver {
             );
         }
 
-        let mut witness_inference = WitnessTypeInference::new();
-        witness_inference.run(&mut ssa, &flow_analysis).unwrap();
+        let mut witness_inference = WitnessTaintInference::new();
+        witness_inference.run(&mut ssa, &flow_analysis);
 
         fs::write(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
@@ -265,6 +254,9 @@ impl Driver {
                 Box::new(InstructionLowering::pure_guards()),
                 Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
+                // Fold pure constants and prune constant-condition branches before the cleanup
+                // rounds, so Simplifier/CSE/DCE work on the reduced CFG.
+                Box::new(SCCP::new()),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
                 // matches. Each Simplifier internally iterates to fixed point
@@ -282,10 +274,6 @@ impl Driver {
                 Box::new(FixDoubleJumps::new()),
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(Specializer::new(5.0)),
-                Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
@@ -294,6 +282,13 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Simplifier::new()),
+                Box::new(CSE::pre_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(Specializer::new(5.0)),
+                // Specialization exposes fresh constants (folded call arguments and branch
+                // conditions); propagate them before the post-specialization cleanup.
+                Box::new(SCCP::new()),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
@@ -401,6 +396,13 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                // Cleanup before lowering Map casts: dead hint computations
+                // (e.g. strip-maps feeding unconstrained calls) are easy to
+                // delete while still single instructions, but not once they
+                // are expanded into loops with block-parameter cycles.
+                Box::new(CSE::post_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
@@ -461,11 +463,10 @@ impl Driver {
         &mut self,
         emit_llvm: bool,
         r1cs: &R1CS,
-        wasm_config: Option<std::path::PathBuf>,
+        wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         self.prepare_base_witgen_ssa();
@@ -513,9 +514,9 @@ impl Driver {
             None
         };
 
-        if let Some(wasm_path) = wasm_config {
+        if let Some((wasm_path, wasm_opts)) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
-            codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+            codegen.compile_to_wasm(&wasm_path, wasm_opts);
             info!(message = %"WASM object generated", path = %wasm_path.display());
             self.write_wasm_metadata(&wasm_path, r1cs)?;
         }
@@ -528,10 +529,10 @@ impl Driver {
         &mut self,
         wasm_path: std::path::PathBuf,
         r1cs: &R1CS,
+        wasm_opts: WasmCompileOpts,
     ) -> Result<(), Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
-        use inkwell::OptimizationLevel;
         use inkwell::context::Context;
 
         // Prepare AD SSA: same pass pipeline as compile_ad()
@@ -541,6 +542,13 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
+                // Cleanup before lowering Map casts: dead hint computations
+                // (e.g. strip-maps feeding unconstrained calls) are easy to
+                // delete while still single instructions, but not once they
+                // are expanded into loops with block-parameter cycles.
+                Box::new(CSE::post_r1c()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
@@ -585,7 +593,7 @@ impl Driver {
         codegen.compile(&llssa, &ll_flow_analysis);
 
         codegen.write_ir(&wasm_path.with_extension("ll"));
-        codegen.compile_to_wasm(&wasm_path, OptimizationLevel::Aggressive);
+        codegen.compile_to_wasm(&wasm_path, wasm_opts);
         info!(message = %"AD WASM object generated", path = %wasm_path.display());
         self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
 
