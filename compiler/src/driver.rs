@@ -131,7 +131,7 @@ impl Driver {
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer =
-            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
+            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, None, false);
         monomorphizer.compile_main(main).unwrap();
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
