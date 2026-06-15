@@ -13,6 +13,7 @@ use crate::{
             flow_analysis::{self, FlowAnalysis},
             types::{FunctionTypeInfo, TypeInfo},
         },
+        codegen::CodeGenOptions,
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
@@ -457,30 +458,30 @@ pub fn lower_with_layout(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> LLSSA {
-    lower_with_layout_and_constraint_checks(
+    lower_with_layout_with_options(
         hlssa,
         flow_analysis,
         type_info,
         witness_layout,
         constraints_layout,
-        false,
+        CodeGenOptions::default(),
     )
 }
 
-pub fn lower_with_layout_and_constraint_checks(
+pub fn lower_with_layout_with_options(
     hlssa: &HLSSA,
     flow_analysis: &FlowAnalysis,
     type_info: &TypeInfo,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    check_constraints: bool,
+    options: CodeGenOptions,
 ) -> LLSSA {
     lower_inner(
         hlssa,
         flow_analysis,
         type_info,
         Some((witness_layout, constraints_layout)),
-        check_constraints,
+        options,
     )
 }
 
@@ -489,7 +490,7 @@ fn lower_inner(
     flow_analysis: &FlowAnalysis,
     type_info: &TypeInfo,
     layout: Option<(WitnessLayout, ConstraintsLayout)>,
-    check_constraints: bool,
+    options: CodeGenOptions,
 ) -> LLSSA {
     let main_id = hlssa.get_main_id();
     let main_name = hlssa.get_main().get_name().to_string();
@@ -534,7 +535,7 @@ fn lower_inner(
             &mut lookup_fns,
             &hlssa_global_types,
             &constants,
-            check_constraints,
+            options,
         );
 
         llssa.put_function(ll_fn_id, ll_func);
@@ -692,7 +693,7 @@ fn lower_function(
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
     constants: &HLSSAConstantsSnapshot,
-    check_constraints: bool,
+    options: CodeGenOptions,
 ) -> LLFunction {
     let mut ll_func = LLFunction::empty(function.get_name().to_string());
     let mut val_map: HashMap<ValueId, ValueId> = HashMap::default();
@@ -752,7 +753,7 @@ fn lower_function(
                 ad_fns,
                 lookup_fns,
                 hlssa_global_types,
-                check_constraints,
+                options,
             );
         }
 
@@ -801,7 +802,7 @@ fn lower_instruction(
     ad_fns: &mut AdFunctions,
     lookup_fns: &mut LookupFunctions,
     hlssa_global_types: &[HLType],
-    check_constraints: bool,
+    options: CodeGenOptions,
 ) {
     use crate::compiler::ssa::hlssa::{
         CallTarget, CastTarget, OpCode, Radix, RefCountOp, SequenceTargetType,
@@ -926,7 +927,7 @@ fn lower_instruction(
             let ll_a = val_map[a];
             let ll_b = val_map[b];
             let ll_c = val_map[c];
-            if check_constraints {
+            if options.check_constraints {
                 let product = e.field_arith(FieldArithOp::Mul, ll_a, ll_b);
                 let eq = e.field_eq(product, ll_c);
                 assert(e, eq);
@@ -4336,7 +4337,7 @@ mod tests {
 
         let flow = FlowAnalysis::run(&hlssa);
         let types = Types::new().run(&hlssa, &flow);
-        let llssa = lower_inner(&hlssa, &flow, &types, None, false);
+        let llssa = lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
         let dump = llssa.to_string(&DefaultSSAAnnotator);
 
         assert!(

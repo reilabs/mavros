@@ -22,6 +22,7 @@ use crate::{
             witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
+            CodeGenOptions,
             bytecode::CodeGen,
             hlssa_to_r1cs::{R1CGen, R1CS},
             llssa_to_llvm::WasmCompileOpts,
@@ -374,12 +375,12 @@ impl Driver {
     }
 
     pub fn compile_witgen(&mut self) -> Result<Vec<u64>, Error> {
-        self.compile_witgen_with_constraint_checks(false)
+        self.compile_witgen_with_options(CodeGenOptions::default())
     }
 
-    pub fn compile_witgen_with_constraint_checks(
+    pub fn compile_witgen_with_options(
         &mut self,
-        check_constraints: bool,
+        options: CodeGenOptions,
     ) -> Result<Vec<u64>, Error> {
         self.prepare_base_witgen_ssa();
         let ssa = self.base_witgen_ssa.as_ref().unwrap();
@@ -387,11 +388,7 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
 
-        let codegen = if check_constraints {
-            CodeGen::with_constraint_checks()
-        } else {
-            CodeGen::new()
-        };
+        let codegen = CodeGen::new(options);
         let program = codegen.run(ssa, &flow_analysis, &type_info);
         fs::write(
             self.get_debug_output_dir().join("witgen_bytecode.txt"),
@@ -431,7 +428,7 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow_analysis);
 
-        let codegen = CodeGen::new();
+        let codegen = CodeGen::new(CodeGenOptions::default());
         let program = codegen.run(&ssa, &flow_analysis, &type_info);
         fs::write(
             self.get_debug_output_dir().join("ad_bytecode.txt"),
@@ -482,15 +479,20 @@ impl Driver {
         r1cs: &R1CS,
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
     ) -> Result<Option<String>, Error> {
-        self.compile_llvm_targets_with_constraint_checks(emit_llvm, r1cs, wasm_config, false)
+        self.compile_llvm_targets_with_options(
+            emit_llvm,
+            r1cs,
+            wasm_config,
+            CodeGenOptions::default(),
+        )
     }
 
-    pub fn compile_llvm_targets_with_constraint_checks(
+    pub fn compile_llvm_targets_with_options(
         &mut self,
         emit_llvm: bool,
         r1cs: &R1CS,
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
-        check_constraints: bool,
+        options: CodeGenOptions,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
@@ -511,13 +513,13 @@ impl Driver {
         .unwrap();
 
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower_with_layout_and_constraint_checks(
+        let llssa = hlssa_to_llssa::lower_with_layout_with_options(
             ssa,
             &flow_analysis,
             &type_info,
             r1cs.witness_layout,
             r1cs.constraints_layout,
-            check_constraints,
+            options,
         );
 
         // Dump LLSSA after lowering

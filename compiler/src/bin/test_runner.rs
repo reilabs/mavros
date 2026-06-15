@@ -16,7 +16,7 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::codegen::{hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
+    compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::Driver,
     vm::{bytecode::TableInfo, interpreter},
     wasm_runtime,
@@ -130,6 +130,10 @@ fn emit(line: &str) {
 /// feeds proving, and a program whose witgen is expected to trap is never
 /// proven. WASM paths still run as compile/runtime sanity checks.
 fn run_single(root: PathBuf, expect_failure: bool) {
+    let checking_codegen = CodeGenOptions {
+        check_constraints: true,
+    };
+
     // 1. Compile
     emit("START:COMPILED");
     let driver = (|| {
@@ -170,7 +174,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     // 3. Compile witgen  (depends on R1CS)
     let witgen_binary = r1cs.as_ref().and_then(|_| {
         emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen_with_constraint_checks(true) {
+        match driver.compile_witgen_with_options(checking_codegen) {
             Ok(b) => {
                 let bytes = b.len() * 8;
                 emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
@@ -308,11 +312,11 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_llvm_targets_with_constraint_checks(
+        match driver.compile_llvm_targets_with_options(
             false,
             r1cs,
             Some((wasm_path.clone(), wasm_opts)),
-            true,
+            checking_codegen,
         ) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
