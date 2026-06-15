@@ -468,9 +468,20 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 );
             }
         }
-        OpCode::Alloc { .. } => {
-            // The ref handle is Pure; the pointee is the result's own Deref subtree, populated by
-            // the stores/loads through its aliases. No edges here.
+        OpCode::Alloc { result, value, .. } => {
+            // The ref handle itself is Pure but the allocation carries an
+            // initial value that is written into the cell.
+            let pointee = match &builder.value_type(*result).peel_witness().expr {
+                TypeExpr::Ref(inner) => &**inner,
+                other => panic!("ICE: Alloc result of a non-ref type {other:?}"),
+            };
+            let slot = builder.value_position(*result).child(Descent::Deref);
+            builder.copy_levels(slot.clone(), builder.value_position(*value), pointee);
+
+            for path in leaf_paths(pointee) {
+                let written = slot.extend(&path);
+                builder.add_cf_taint_to(&written, branch_conditions);
+            }
         }
         OpCode::Store { ptr, value } => {
             // A store writes the pointee: covariant at the written value levels (`*ptr ≥ value`,
@@ -665,6 +676,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         OpCode::ArraySet { .. }
         | OpCode::SlicePush { .. }
         | OpCode::Store { .. }
+        | OpCode::Alloc { .. }
         | OpCode::InitGlobal { .. } => true,
         OpCode::Guard { inner, .. } => writes_under_witness_cf(inner),
         OpCode::Cmp { .. }
@@ -683,7 +695,6 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::MkSeqOfBlob { .. }
         | OpCode::ToBits { .. }
         | OpCode::ToRadix { .. }
-        | OpCode::Alloc { .. }
         | OpCode::Load { .. }
         | OpCode::WriteWitness { .. }
         | OpCode::Call { .. }

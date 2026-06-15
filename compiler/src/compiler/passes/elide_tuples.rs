@@ -334,13 +334,19 @@ fn lower_instruction(
             }
         }
 
-        OpCode::Alloc { result, elem_type } => {
+        OpCode::Alloc {
+            result,
+            elem_type,
+            value,
+        } => {
             let leaves = leaf_types(elem_type);
             let results = components(value_map, *result);
-            for (leaf, r) in leaves.into_iter().zip(results) {
+            let values = components(value_map, *value);
+            for ((leaf, r), v) in leaves.into_iter().zip(results).zip(values) {
                 out.push(OpCode::Alloc {
                     result: r,
                     elem_type: leaf,
+                    value: v,
                 });
             }
         }

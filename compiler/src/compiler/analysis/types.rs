@@ -249,6 +249,7 @@ impl Types {
             OpCode::Alloc {
                 result,
                 elem_type: typ,
+                value: _,
             } => {
                 function_info.values.insert(*result, typ.clone().ref_of());
                 Ok(())

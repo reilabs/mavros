@@ -107,6 +107,7 @@ impl UntaintControlFlow {
                     OpCode::Alloc {
                         result: r,
                         elem_type: l,
+                        value,
                     } => {
                         let r_wt = function_wt
                             .try_get_value_witness_type(r)
@@ -116,6 +117,7 @@ impl UntaintControlFlow {
                         OpCode::Alloc {
                             result: r,
                             elem_type: child_typ,
+                            value,
                         }
                     }
                     OpCode::FreshWitness { .. } => instruction,

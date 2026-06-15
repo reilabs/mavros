@@ -1579,12 +1579,22 @@ impl CodeGen {
                         size: global_layouter.get_size(global_idx),
                     });
                 }
-                hlssa::OpCode::Alloc { result, elem_type } => {
+                hlssa::OpCode::Alloc {
+                    result,
+                    elem_type,
+                    value,
+                } => {
                     let res = layouter.alloc_ptr(*result);
                     let elem_size = layouter.type_size(elem_type);
                     let elem_rc = elem_type.is_heap_allocated();
                     let meta = vm::array::BoxedLayout::ref_cell(elem_size, elem_rc);
                     emitter.push_op(bytecode::OpCode::RefAlloc { res, meta });
+                    emitter.push_op(bytecode::OpCode::RefStore {
+                        cell: layouter.get_value(*result),
+                        source: layouter.get_value(*value),
+                        stride: elem_size,
+                        elem_rc: 0,
+                    });
                 }
                 hlssa::OpCode::Store { ptr, value } => {
                     let ptr_type = type_info.get_value_type(*ptr);
