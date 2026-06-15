@@ -156,17 +156,22 @@ fn run_single(root: PathBuf) {
     };
 
     // 3. Compile bytecode: a single binary with both the witgen and AD entry
-    //    points (depends on R1CS)
+    //    points (depends on R1CS). The pipeline produces one artifact, but we
+    //    emit the historical WITGEN_COMPILE/AD_COMPILE stage pair (mirrored) so
+    //    CI's `--check-regression` keeps comparing against pre-merge baselines.
     let program_binary = r1cs.as_ref().and_then(|_| {
-        emit("START:BYTECODE_COMPILE");
+        emit("START:WITGEN_COMPILE");
+        emit("START:AD_COMPILE");
         match driver.compile_bytecode() {
             Ok(b) => {
                 let bytes = b.len() * 8;
-                emit(&format!("END:BYTECODE_COMPILE:ok:{bytes}"));
+                emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
+                emit(&format!("END:AD_COMPILE:ok:{bytes}"));
                 Some(b)
             }
             Err(_) => {
-                emit("END:BYTECODE_COMPILE:fail");
+                emit("END:WITGEN_COMPILE:fail");
+                emit("END:AD_COMPILE:fail");
                 None
             }
         }
@@ -175,7 +180,7 @@ fn run_single(root: PathBuf) {
     // Load inputs (needed for witgen run)
     let ordered_params = load_inputs(&root.join("Prover.toml"), &driver);
 
-    // 5. Run witgen  (depends on BYTECODE_COMPILE)
+    // 5. Run witgen  (depends on WITGEN_COMPILE)
     let had_binary = program_binary.is_some();
     let witgen_result = program_binary.as_ref().and_then(|binary| {
         emit("START:WITGEN_RUN");
@@ -218,7 +223,7 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 8. Run AD  (depends on BYTECODE_COMPILE, independent of witgen)
+    // 8. Run AD  (depends on AD_COMPILE, independent of witgen)
     let ad_result = program_binary.as_ref().and_then(|binary| {
         emit("START:AD_RUN");
         let r1cs = r1cs.as_ref().unwrap();
@@ -259,15 +264,19 @@ fn run_single(root: PathBuf) {
     }
 
     // 11. Compile WASM: a single module exporting both the witgen and AD entry
-    //     points (depends on R1CS)
+    //     points (depends on R1CS). As with bytecode, we emit the historical
+    //     WITGEN_WASM_COMPILE/AD_WASM_COMPILE stage pair (mirrored) for CI
+    //     regression compatibility.
     let wasm_path = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:WASM_COMPILE");
+        emit("START:WITGEN_WASM_COMPILE");
+        emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("program.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
         match driver.compile_llvm_targets(false, r1cs, Some((wasm_path.clone(), wasm_opts))) {
             Ok(_) if wasm_path.exists() => {
-                emit("END:WASM_COMPILE:ok");
+                emit("END:WITGEN_WASM_COMPILE:ok");
+                emit("END:AD_WASM_COMPILE:ok");
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -275,18 +284,20 @@ fn run_single(root: PathBuf) {
                     "WASM compile succeeded but output file not found at {:?}",
                     wasm_path
                 );
-                emit("END:WASM_COMPILE:fail");
+                emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:AD_WASM_COMPILE:fail");
                 None
             }
             Err(e) => {
                 eprintln!("WASM compile error: {:?}", e);
-                emit("END:WASM_COMPILE:fail");
+                emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:AD_WASM_COMPILE:fail");
                 None
             }
         }
     });
 
-    // 12. Run WASM  (depends on WASM_COMPILE)
+    // 12. Run WASM  (depends on WITGEN_WASM_COMPILE)
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
@@ -332,7 +343,7 @@ fn run_single(root: PathBuf) {
         });
     }
 
-    // 15. AD WASM Run  (depends on WASM_COMPILE; same module, AD entry point)
+    // 15. AD WASM Run  (depends on AD_WASM_COMPILE; same module, AD entry point)
     let ad_wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
@@ -965,17 +976,19 @@ fn run_ad_wasm(
 const STEP_KEYS: &[&str] = &[
     "COMPILED",
     "R1CS",
-    "BYTECODE_COMPILE",
+    "WITGEN_COMPILE",
     "WITGEN_RUN",
     "WITGEN_CORRECT",
     "WITGEN_NOLEAK",
+    "AD_COMPILE",
     "AD_RUN",
     "AD_CORRECT",
     "AD_NOLEAK",
-    "WASM_COMPILE",
+    "WITGEN_WASM_COMPILE",
     "WITGEN_WASM_RUN",
     "WITGEN_WASM_CORRECT",
     "WITGEN_WASM_NOLEAK",
+    "AD_WASM_COMPILE",
     "AD_WASM_RUN",
     "AD_WASM_CORRECT",
     "AD_WASM_NOLEAK",
@@ -1207,7 +1220,7 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
                     rows = parts[3].parse().ok();
                     cols = parts[4].parse().ok();
                 }
-                if *key == "BYTECODE_COMPILE" && parts.len() >= 4 {
+                if *key == "WITGEN_COMPILE" && parts.len() >= 4 {
                     binary_bytes = parts[3].parse().ok();
                 }
             }
@@ -1841,8 +1854,8 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
 // The table keeps the historical 23-column layout so CI's `--check-regression` can compare
 // against pre-merged-pipeline baselines. The pipeline now produces a single program artifact per
-// backend, so the witgen/AD "Compile" columns mirror the same shared stage
-// (BYTECODE_COMPILE/WASM_COMPILE) and both size columns carry the combined binary size.
+// backend, so the witgen/AD "Compile" columns mirror the same shared compile stage and both size
+// columns carry the combined binary size.
 // TODO: Collapse the duplicated columns once baselines have rolled over.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
@@ -1863,19 +1876,19 @@ fn render_markdown(results: &[TestResult]) -> String {
             cols,
             binary_sz,
             binary_sz,
-            s("BYTECODE_COMPILE"),
+            s("WITGEN_COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),
             s("WITGEN_NOLEAK"),
-            s("BYTECODE_COMPILE"),
+            s("AD_COMPILE"),
             s("AD_RUN"),
             s("AD_CORRECT"),
             s("AD_NOLEAK"),
-            s("WASM_COMPILE"),
+            s("WITGEN_WASM_COMPILE"),
             s("WITGEN_WASM_RUN"),
             s("WITGEN_WASM_CORRECT"),
             s("WITGEN_WASM_NOLEAK"),
-            s("WASM_COMPILE"),
+            s("AD_WASM_COMPILE"),
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),
