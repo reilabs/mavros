@@ -82,8 +82,11 @@ pub fn run_witgen_phase2(
     )
 }
 
-pub fn compile_witgen(driver: &mut Driver) -> Result<Vec<u64>, Error> {
-    Ok(driver.compile_witgen()?)
+pub fn compile_witgen(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_witgen(options)?)
 }
 
 pub fn compile_ad(driver: &Driver) -> Result<Vec<u64>, Error> {

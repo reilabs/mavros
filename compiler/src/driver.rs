@@ -374,14 +374,7 @@ impl Driver {
         Ok(r1cs)
     }
 
-    pub fn compile_witgen(&mut self) -> Result<Vec<u64>, Error> {
-        self.compile_witgen_with_options(CodeGenOptions::default())
-    }
-
-    pub fn compile_witgen_with_options(
-        &mut self,
-        options: CodeGenOptions,
-    ) -> Result<Vec<u64>, Error> {
+    pub fn compile_witgen(&mut self, options: CodeGenOptions) -> Result<Vec<u64>, Error> {
         self.prepare_base_witgen_ssa();
         let ssa = self.base_witgen_ssa.as_ref().unwrap();
 
@@ -478,20 +471,6 @@ impl Driver {
         emit_llvm: bool,
         r1cs: &R1CS,
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
-    ) -> Result<Option<String>, Error> {
-        self.compile_llvm_targets_with_options(
-            emit_llvm,
-            r1cs,
-            wasm_config,
-            CodeGenOptions::default(),
-        )
-    }
-
-    pub fn compile_llvm_targets_with_options(
-        &mut self,
-        emit_llvm: bool,
-        r1cs: &R1CS,
-        wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
         options: CodeGenOptions,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
@@ -513,7 +492,7 @@ impl Driver {
         .unwrap();
 
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower_with_layout_with_options(
+        let llssa = hlssa_to_llssa::lower_with_layout(
             ssa,
             &flow_analysis,
             &type_info,
@@ -606,6 +585,7 @@ impl Driver {
             &type_info,
             r1cs.witness_layout,
             r1cs.constraints_layout,
+            CodeGenOptions::default(),
         );
 
         // Dump LLSSA after lowering

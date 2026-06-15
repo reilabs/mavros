@@ -174,7 +174,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     // 3. Compile witgen  (depends on R1CS)
     let witgen_binary = r1cs.as_ref().and_then(|_| {
         emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen_with_options(checking_codegen) {
+        match driver.compile_witgen(checking_codegen) {
             Ok(b) => {
                 let bytes = b.len() * 8;
                 emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
@@ -312,7 +312,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_llvm_targets_with_options(
+        match driver.compile_llvm_targets(
             false,
             r1cs,
             Some((wasm_path.clone(), wasm_opts)),

@@ -457,23 +457,6 @@ pub fn lower_with_layout(
     type_info: &TypeInfo,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-) -> LLSSA {
-    lower_with_layout_with_options(
-        hlssa,
-        flow_analysis,
-        type_info,
-        witness_layout,
-        constraints_layout,
-        CodeGenOptions::default(),
-    )
-}
-
-pub fn lower_with_layout_with_options(
-    hlssa: &HLSSA,
-    flow_analysis: &FlowAnalysis,
-    type_info: &TypeInfo,
-    witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
     options: CodeGenOptions,
 ) -> LLSSA {
     lower_inner(
