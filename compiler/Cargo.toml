@@ -3,12 +3,6 @@ name = "mavros-compiler"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-# Forwarded to the VM so the interpreter verifies each emitted constraint and
-# traps on violation. The test runner is built with this enabled so that
-# execution_failure tests fail during witness generation.
-check-constraints = ["mavros-vm/check-constraints"]
-
 [dependencies]
 # The Mavros crates that the compiler depends on
 mavros-artifacts.workspace = true

@@ -8,12 +8,6 @@ edition.workspace = true
 # tail-call-recursive dispatch. This makes debug builds (where the tail-call
 # optimizer is not reliably applied) work without overflowing the stack.
 branching-interpreter = []
-# When enabled, the `r1c` opcode verifies that each emitted constraint
-# satisfies a * b = c and traps on violation. This lets the interpreter detect
-# failing programs (e.g. a violated `assert`) during witness generation
-# instead of silently emitting an unsatisfiable constraint system.
-check-constraints = []
-
 [dependencies]
 # Dependencies within the Mavros project
 mavros-artifacts.workspace = true

@@ -374,13 +374,24 @@ impl Driver {
     }
 
     pub fn compile_witgen(&mut self) -> Result<Vec<u64>, Error> {
+        self.compile_witgen_with_constraint_checks(false)
+    }
+
+    pub fn compile_witgen_with_constraint_checks(
+        &mut self,
+        check_constraints: bool,
+    ) -> Result<Vec<u64>, Error> {
         self.prepare_base_witgen_ssa();
         let ssa = self.base_witgen_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
 
-        let codegen = CodeGen::new();
+        let codegen = if check_constraints {
+            CodeGen::with_constraint_checks()
+        } else {
+            CodeGen::new()
+        };
         let program = codegen.run(ssa, &flow_analysis, &type_info);
         fs::write(
             self.get_debug_output_dir().join("witgen_bytecode.txt"),
@@ -471,6 +482,16 @@ impl Driver {
         r1cs: &R1CS,
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
     ) -> Result<Option<String>, Error> {
+        self.compile_llvm_targets_with_constraint_checks(emit_llvm, r1cs, wasm_config, false)
+    }
+
+    pub fn compile_llvm_targets_with_constraint_checks(
+        &mut self,
+        emit_llvm: bool,
+        r1cs: &R1CS,
+        wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
+        check_constraints: bool,
+    ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::context::Context;
@@ -490,12 +511,13 @@ impl Driver {
         .unwrap();
 
         // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower_with_layout(
+        let llssa = hlssa_to_llssa::lower_with_layout_and_constraint_checks(
             ssa,
             &flow_analysis,
             &type_info,
             r1cs.witness_layout,
             r1cs.constraints_layout,
+            check_constraints,
         );
 
         // Dump LLSSA after lowering

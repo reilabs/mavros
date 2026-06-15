@@ -235,8 +235,7 @@ pub struct WitgenResult {
     pub instrumenter: AllocationInstrumenter,
 }
 
-/// The program executed a trap: a failed assertion, a failed rangecheck, or
-/// (with the `check-constraints` feature) a violated constraint.
+/// The program executed a trap: a failed assertion or rangecheck.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrapError;
 

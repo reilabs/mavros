@@ -126,9 +126,9 @@ fn emit(line: &str) {
 
 /// Runs every pipeline step for one test directory, emitting START/END
 /// markers for the parent to parse. With `expect_failure` (execution_failure /
-/// execution_panic tests) the AD pipeline is skipped entirely: AD output only
+/// execution_panic tests) the native AD pipeline is skipped: AD output only
 /// feeds proving, and a program whose witgen is expected to trap is never
-/// proven, so its AD columns are reported as N/A by the parent.
+/// proven. WASM paths still run as compile/runtime sanity checks.
 fn run_single(root: PathBuf, expect_failure: bool) {
     // 1. Compile
     emit("START:COMPILED");
@@ -170,7 +170,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     // 3. Compile witgen  (depends on R1CS)
     let witgen_binary = r1cs.as_ref().and_then(|_| {
         emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen() {
+        match driver.compile_witgen_with_constraint_checks(true) {
             Ok(b) => {
                 let bytes = b.len() * 8;
                 emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
@@ -308,7 +308,12 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_llvm_targets(false, r1cs, Some((wasm_path.clone(), wasm_opts))) {
+        match driver.compile_llvm_targets_with_constraint_checks(
+            false,
+            r1cs,
+            Some((wasm_path.clone(), wasm_opts)),
+            true,
+        ) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -375,33 +380,32 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 14. AD WASM Compile  (depends on R1CS; skipped for expected-failure tests)
-    let ad_wasm_path: Option<std::path::PathBuf> =
-        r1cs.as_ref().filter(|_| !expect_failure).and_then(|r1cs| {
-            emit("START:AD_WASM_COMPILE");
-            let tmpdir = tempfile::tempdir().ok()?;
-            let wasm_path = tmpdir.keep().join("ad.wasm");
-            let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-            match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
-                Ok(_) if wasm_path.exists() => {
-                    emit("END:AD_WASM_COMPILE:ok");
-                    Some(wasm_path)
-                }
-                Ok(_) => {
-                    eprintln!(
-                        "AD WASM compile succeeded but output file not found at {:?}",
-                        wasm_path
-                    );
-                    emit("END:AD_WASM_COMPILE:fail");
-                    None
-                }
-                Err(e) => {
-                    eprintln!("AD WASM compile error: {:?}", e);
-                    emit("END:AD_WASM_COMPILE:fail");
-                    None
-                }
+    // 14. AD WASM Compile  (depends on R1CS)
+    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
+        emit("START:AD_WASM_COMPILE");
+        let tmpdir = tempfile::tempdir().ok()?;
+        let wasm_path = tmpdir.keep().join("ad.wasm");
+        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
+            Ok(_) if wasm_path.exists() => {
+                emit("END:AD_WASM_COMPILE:ok");
+                Some(wasm_path)
             }
-        });
+            Ok(_) => {
+                eprintln!(
+                    "AD WASM compile succeeded but output file not found at {:?}",
+                    wasm_path
+                );
+                emit("END:AD_WASM_COMPILE:fail");
+                None
+            }
+            Err(e) => {
+                eprintln!("AD WASM compile error: {:?}", e);
+                emit("END:AD_WASM_COMPILE:fail");
+                None
+            }
+        }
+    });
 
     // 15. AD WASM Run  (depends on AD_WASM_COMPILE)
     let ad_wasm_result = ad_wasm_path.as_ref().and_then(|wasm_path| {
@@ -1635,9 +1639,10 @@ fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectat
                 Status::Pass => Status::Fail,
                 Status::Skip | Status::NotApplicable => raw_status,
             },
-            // Correctness/leak checks need a witness, and the AD pipeline only
-            // feeds proving; neither is meaningful for a program whose witgen
-            // is expected to trap. The child skips the AD steps entirely.
+            // Correctness/leak checks need a witness, and the native AD
+            // pipeline only feeds proving; neither is meaningful for a program
+            // whose witgen is expected to trap. WASM AD still runs as a
+            // compile/runtime sanity check and uses raw status.
             "WITGEN_CORRECT"
             | "WITGEN_NOLEAK"
             | "WITGEN_WASM_CORRECT"
@@ -1645,11 +1650,7 @@ fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectat
             | "AD_COMPILE"
             | "AD_RUN"
             | "AD_CORRECT"
-            | "AD_NOLEAK"
-            | "AD_WASM_COMPILE"
-            | "AD_WASM_RUN"
-            | "AD_WASM_CORRECT"
-            | "AD_WASM_NOLEAK" => Status::NotApplicable,
+            | "AD_NOLEAK" => Status::NotApplicable,
             _ => raw_status,
         },
     }
@@ -2067,9 +2068,10 @@ mod tests {
     }
 
     #[test]
-    fn execution_failure_reports_ad_steps_as_not_applicable() {
-        // The child skips the AD pipeline for expected-failure tests, so no
-        // AD START/END markers are emitted; the columns must read N/A, not ➖.
+    fn execution_failure_reports_native_ad_steps_as_not_applicable() {
+        // The child skips the native AD pipeline for expected-failure tests, so
+        // no native AD START/END markers are emitted; those columns must read
+        // N/A, not ➖.
         let result = parse_child_output(
             "exec_fail",
             TestExpectation::ExecutionFailure,
@@ -2081,18 +2083,32 @@ mod tests {
             ]),
         );
 
-        for key in [
-            "AD_COMPILE",
-            "AD_RUN",
-            "AD_CORRECT",
-            "AD_NOLEAK",
-            "AD_WASM_COMPILE",
-            "AD_WASM_RUN",
-            "AD_WASM_CORRECT",
-            "AD_WASM_NOLEAK",
-        ] {
+        for key in ["AD_COMPILE", "AD_RUN", "AD_CORRECT", "AD_NOLEAK"] {
             assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
         }
+    }
+
+    #[test]
+    fn execution_failure_uses_raw_ad_wasm_statuses() {
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:AD_WASM_COMPILE",
+                "END:AD_WASM_COMPILE:ok",
+                "START:AD_WASM_RUN",
+                "END:AD_WASM_RUN:ok",
+                "START:AD_WASM_CORRECT",
+                "END:AD_WASM_CORRECT:ok",
+                "START:AD_WASM_NOLEAK",
+                "END:AD_WASM_NOLEAK:ok",
+            ]),
+        );
+
+        assert_eq!(result.steps["AD_WASM_COMPILE"], Status::Pass);
+        assert_eq!(result.steps["AD_WASM_RUN"], Status::Pass);
+        assert_eq!(result.steps["AD_WASM_CORRECT"], Status::Pass);
+        assert_eq!(result.steps["AD_WASM_NOLEAK"], Status::Pass);
     }
 
     #[test]

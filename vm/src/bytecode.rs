@@ -667,11 +667,6 @@ mod def {
         #[frame] b: Field,
         #[frame] c: Field,
     ) -> (*const u64, Frame) {
-        #[cfg(feature = "check-constraints")]
-        if a * b != c {
-            return trap(pc, frame, vm);
-        }
-
         unsafe {
             *vm.data.as_forward.out_a = a;
             *vm.data.as_forward.out_b = b;
