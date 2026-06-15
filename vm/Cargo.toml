@@ -8,7 +8,6 @@ edition.workspace = true
 # tail-call-recursive dispatch. This makes debug builds (where the tail-call
 # optimizer is not reliably applied) work without overflowing the stack.
 branching-interpreter = []
-
 [dependencies]
 # Dependencies within the Mavros project
 mavros-artifacts.workspace = true
