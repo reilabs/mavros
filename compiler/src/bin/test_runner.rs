@@ -1294,13 +1294,19 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         }
     }
 
+    // When the program is cleanly rejected at R1CS, no later stage runs at all. For an
+    // expected-failure test that rejection *is* the success, so the stages it preempts must be
+    // reported N/A rather than ➖ Skip — otherwise the success-rate denominator (which counts
+    // every non-N/A cell) would count them against an otherwise fully-handled test.
+    let r1cs_rejected = rejected.contains_key("R1CS");
+
     let steps = STEP_KEYS
         .iter()
         .map(|&key| {
             let raw_status = raw_step_status(key, &started, &ended, &rejected);
             (
                 key.to_string(),
-                expected_step_status(key, raw_status, expectation),
+                expected_step_status(key, raw_status, expectation, r1cs_rejected),
             )
         })
         .collect();
@@ -1607,7 +1613,12 @@ fn raw_step_status(
     }
 }
 
-fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
+fn expected_step_status(
+    key: &str,
+    raw_status: Status,
+    expectation: TestExpectation,
+    r1cs_rejected: bool,
+) -> Status {
     match expectation {
         // A program that is supposed to execute must not be rejected as unsatisfiable; if it
         // was, that is a real failure. Every other stage uses its raw status unchanged.
@@ -1615,6 +1626,13 @@ fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectat
             Status::Rejected => Status::Fail,
             other => other,
         },
+        // A clean R1CS rejection is the expected failure for these tests, and it preempts every
+        // later stage. Those preempted stages are not applicable (the program was correctly
+        // rejected before reaching them) — mark them N/A so they neither read as failures nor
+        // dilute the success rate. `COMPILED` and `R1CS` themselves keep their real statuses.
+        TestExpectation::ExecutionFailure if r1cs_rejected && key != "COMPILED" && key != "R1CS" => {
+            Status::NotApplicable
+        }
         TestExpectation::ExecutionFailure => match key {
             // A statically-unsatisfiable program (an assertion or range/equality constraint
             // that folds to a failing constant) is now rejected cleanly during R1CS
@@ -2106,8 +2124,9 @@ mod tests {
     #[test]
     fn execution_failure_passes_when_r1cs_rejects_program() {
         // A statically-unsatisfiable program is rejected during R1CS generation. The clean
-        // rejection is the expected failure, so R1CS reads ✅ and the witgen stages it skips
-        // stay neutral rather than being treated as failures.
+        // rejection is the expected failure, so R1CS reads ✅. Every later stage is preempted
+        // by that rejection and must read N/A — not ➖ Skip — so it neither counts as a failure
+        // nor dilutes the success rate (whose denominator counts every non-N/A cell).
         let result = parse_child_output(
             "exec_fail",
             TestExpectation::ExecutionFailure,
@@ -2121,8 +2140,18 @@ mod tests {
 
         assert_eq!(result.steps["COMPILED"], Status::Pass);
         assert_eq!(result.steps["R1CS"], Status::Pass);
-        assert_eq!(result.steps["WITGEN_RUN"], Status::Skip);
-        assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Skip);
+        for key in [
+            "WITGEN_COMPILE",
+            "WITGEN_RUN",
+            "WITGEN_CORRECT",
+            "WITGEN_NOLEAK",
+            "WITGEN_WASM_COMPILE",
+            "WITGEN_WASM_RUN",
+            "AD_WASM_COMPILE",
+            "AD_WASM_RUN",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
     }
 
     #[test]
