@@ -738,10 +738,9 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             let __prof_ret = { #return_call };
             #[cfg(feature = "vm-profile")]
             {
-                use core::sync::atomic::Ordering::Relaxed;
                 let __prof_elapsed = read_cycles().wrapping_sub(__prof_start);
-                OPCODE_PROFILE[#prof_idx].0.fetch_add(1, Relaxed);
-                OPCODE_PROFILE[#prof_idx].1.fetch_add(__prof_elapsed, Relaxed);
+                vm.opcode_profile[#prof_idx].0 += 1;
+                vm.opcode_profile[#prof_idx].1 += __prof_elapsed;
             }
             __prof_ret
         }
@@ -887,20 +886,11 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
     let opcode_name_strs = codes.iter().map(|code| code.name.clone());
 
     quote! {
-        /// Per-opcode profiling counters: `(invocation_count, accumulated_cycles)`.
-        /// Indexed by opcode discriminant; populated by the generated handlers
-        /// when the `vm-profile` feature is enabled.
-        #[cfg(feature = "vm-profile")]
-        pub static OPCODE_PROFILE: [(
-            core::sync::atomic::AtomicU64,
-            core::sync::atomic::AtomicU64,
-        ); #dsp_size] = [const {
-            (
-                core::sync::atomic::AtomicU64::new(0),
-                core::sync::atomic::AtomicU64::new(0),
-            )
-        }; #dsp_size];
+        /// The number of distinct opcodes — i.e. the size of the dispatch table
+        /// and of the VM's per-opcode profiling buffer.
+        pub const NUM_OPCODES: usize = #dsp_size;
 
+        /// Opcode names indexed by discriminant. Used by the profiling report.
         #[cfg(feature = "vm-profile")]
         pub static OPCODE_NAMES: [&str; #dsp_size] = [ #(#opcode_name_strs),* ];
 
