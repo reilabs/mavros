@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn block_emitter_emit_accepts_located_instruction() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let loc = test_location();
 
         {
@@ -480,7 +480,7 @@ mod tests {
             });
         }
 
-        let entry = ssa.get_main().get_entry();
+        let entry = ssa.get_unique_entrypoint().get_entry();
         assert_eq!(entry.get_instruction_source_location(0), Some(&loc));
     }
 

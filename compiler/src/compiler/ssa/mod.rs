@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     fn block_instructions_default_to_no_source_location() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let entry = ssa.get_main_mut().get_entry_mut();
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
         entry.push_instruction(OpCode::Not {
             result: ValueId(0),
@@ -1242,7 +1242,7 @@ mod tests {
     fn block_can_store_source_location_for_instruction() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let location = test_location();
-        let entry = ssa.get_main_mut().get_entry_mut();
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
         entry.push_instruction_with_source_location(
             OpCode::Not {
@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn plain_instruction_replacement_clears_source_locations() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let entry = ssa.get_main_mut().get_entry_mut();
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
         entry.push_instruction_with_source_location(
             OpCode::Not {
@@ -1282,7 +1282,7 @@ mod tests {
     fn located_instruction_replacement_preserves_source_locations() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let location = test_location();
-        let entry = ssa.get_main_mut().get_entry_mut();
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
         entry.push_located_instruction(LocatedInstruction::with_source_location(
             OpCode::Not {
